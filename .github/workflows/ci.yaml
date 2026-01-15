@@ -126,7 +126,6 @@ jobs:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest
     needs: [test-functional]
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
