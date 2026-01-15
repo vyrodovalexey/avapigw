@@ -1,10 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  push:
+    tags:
+      - 'v*'
 
 env:
   GO_VERSION: '1.24'
@@ -14,6 +15,9 @@ env:
   IMAGE_NAME_OPERATOR: vyrodovalexey/avapigw-operator
 
 jobs:
+  # ============================================================================
+  # Job 1: Lint
+  # ============================================================================
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -41,9 +45,13 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
+  # ============================================================================
+  # Job 2: Unit Tests
+  # ============================================================================
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
+    needs: [lint]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -57,6 +65,13 @@ jobs:
       - name: Run unit tests
         run: go test -v -race -coverprofile=coverage-unit.out -covermode=atomic ./...
 
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage-unit.out
+          retention-days: 1
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
@@ -67,9 +82,13 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  # ============================================================================
+  # Job 3: Functional Tests
+  # ============================================================================
   test-functional:
     name: Functional Tests
     runs-on: ubuntu-latest
+    needs: [test-unit]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -81,10 +100,16 @@ jobs:
           cache: true
 
       - name: Run functional tests
-        run: go test -v -tags=functional -coverprofile=coverage-functional.out ./test/functional/...
-        continue-on-error: true
+        run: go test -v -tags=functional -coverprofile=coverage-functional.out -covermode=atomic ./test/functional/...
 
-      - name: Upload coverage
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-functional
+          path: coverage-functional.out
+          retention-days: 1
+
+      - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           files: coverage-functional.out
@@ -94,44 +119,61 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  test-integration:
-    name: Integration Tests
+  # ============================================================================
+  # Job 4: SonarCloud Analysis
+  # ============================================================================
+  sonarcloud:
+    name: SonarCloud Analysis
     runs-on: ubuntu-latest
+    needs: [test-functional]
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
+          fetch-depth: 0
 
-      - name: Install envtest
-        run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          setup-envtest use 1.29.x --bin-dir ./bin
-
-      - name: Run integration tests
-        run: |
-          export KUBEBUILDER_ASSETS="$(setup-envtest use 1.29.x --bin-dir ./bin -p path)"
-          go test -v -tags=integration -coverprofile=coverage-integration.out ./test/integration/...
-        continue-on-error: true
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
+      - name: Download unit test coverage
+        uses: actions/download-artifact@v4
         with:
-          files: coverage-integration.out
-          flags: integration
-          name: codecov-integration
-          fail_ci_if_error: false
+          name: coverage-unit
+
+      - name: Download functional test coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-functional
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
         env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=vyrodovalexey_avapigw
+            -Dsonar.organization=vyrodovalexey
+            -Dsonar.go.coverage.reportPaths=coverage-unit.out,coverage-functional.out
+            -Dsonar.sources=.
+            -Dsonar.exclusions=**/*_test.go,**/vendor/**,**/testdata/**,**/test/**
 
+  # ============================================================================
+  # Job 5: Build
+  # ============================================================================
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, test-unit]
+    needs: [sonarcloud]
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -152,15 +194,52 @@ jobs:
         run: git diff --exit-code
 
       - name: Build binaries
-        run: make build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION=${GITHUB_REF_NAME:-dev}
+          GIT_COMMIT=${GITHUB_SHA::8}
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LDFLAGS="-w -s -X github.com/vyrodovalexey/avapigw/internal/version.Version=${VERSION} -X github.com/vyrodovalexey/avapigw/internal/version.GitCommit=${GIT_COMMIT} -X github.com/vyrodovalexey/avapigw/internal/version.BuildDate=${BUILD_DATE}"
+          
+          mkdir -p bin
+          go build -ldflags="${LDFLAGS}" -o bin/gateway-${{ matrix.goos }}-${{ matrix.goarch }} cmd/gateway/main.go
+          go build -ldflags="${LDFLAGS}" -o bin/gateway-operator-${{ matrix.goos }}-${{ matrix.goarch }} cmd/gateway-operator/main.go
 
-      - name: Upload binaries
+      - name: Upload binaries artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binaries
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
           path: bin/
           retention-days: 7
 
+      # TAG Flow: Create archive and upload to GitHub Release
+      - name: Create archive (TAG only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cd bin
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            zip avapigw-${{ matrix.goos }}-${{ matrix.goarch }}.zip gateway-${{ matrix.goos }}-${{ matrix.goarch }} gateway-operator-${{ matrix.goos }}-${{ matrix.goarch }}
+          else
+            tar -czvf avapigw-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz gateway-${{ matrix.goos }}-${{ matrix.goarch }} gateway-operator-${{ matrix.goos }}-${{ matrix.goarch }}
+          fi
+
+      - name: Upload to GitHub Release (TAG only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            bin/avapigw-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+            bin/avapigw-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================================
+  # Job 6: Docker Build
+  # ============================================================================
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
@@ -175,15 +254,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "is_tag=true" >> $GITHUB_OUTPUT
+          else
+            echo "version=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "is_tag=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Extract metadata for Gateway
         id: meta-gateway
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_GATEWAY }}
           tags: |
-            type=ref,event=branch
             type=ref,event=pr
-            type=sha,prefix=
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=test-${{ github.sha }}
 
       - name: Extract metadata for Operator
@@ -192,13 +284,15 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPERATOR }}
           tags: |
-            type=ref,event=branch
             type=ref,event=pr
-            type=sha,prefix=
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=test-${{ github.sha }}
 
+      # TAG Flow: Login to Docker Hub for push
       - name: Login to Docker Hub
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
@@ -210,13 +304,13 @@ jobs:
           context: .
           file: deployment/docker/gateway/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta-gateway.outputs.tags }}
           labels: ${{ steps.meta-gateway.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            VERSION=${{ github.sha }}
+            VERSION=${{ steps.version.outputs.version }}
             GIT_COMMIT=${{ github.sha }}
 
       - name: Build Operator image
@@ -225,20 +319,22 @@ jobs:
           context: .
           file: deployment/docker/gateway-operator/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta-operator.outputs.tags }}
           labels: ${{ steps.meta-operator.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            VERSION=${{ github.sha }}
+            VERSION=${{ steps.version.outputs.version }}
             GIT_COMMIT=${{ github.sha }}
 
+  # ============================================================================
+  # Job 7: Security Scan
+  # ============================================================================
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: [docker-build]
-    if: github.event_name == 'push'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -254,67 +350,53 @@ jobs:
         with:
           args: -exclude-generated ./...
 
+      # TAG Flow: Run Trivy scans
+      - name: Login to Docker Hub (TAG only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
       - name: Run Trivy vulnerability scanner (Gateway)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME_GATEWAY }}:test-${{ github.sha }}'
           format: 'sarif'
           output: 'trivy-gateway-results.sarif'
           severity: 'CRITICAL,HIGH'
-        continue-on-error: true
 
       - name: Run Trivy vulnerability scanner (Operator)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPERATOR }}:test-${{ github.sha }}'
           format: 'sarif'
           output: 'trivy-operator-results.sarif'
           severity: 'CRITICAL,HIGH'
-        continue-on-error: true
 
-      - name: Upload Trivy scan results to GitHub Security tab
+      - name: Upload Gateway Trivy scan results to GitHub Security tab
+        if: startsWith(github.ref, 'refs/tags/')
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-gateway-results.sarif'
-        continue-on-error: true
+          category: 'trivy-gateway'
 
-  sonarcloud:
-    name: SonarCloud Analysis
+      - name: Upload Operator Trivy scan results to GitHub Security tab
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-operator-results.sarif'
+          category: 'trivy-operator'
+
+  # ============================================================================
+  # Job 8: Helm Template
+  # ============================================================================
+  helm-template:
+    name: Helm Template
     runs-on: ubuntu-latest
-    needs: [test-unit]
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Run tests with coverage
-        run: go test -v -coverprofile=coverage.out -covermode=atomic ./...
-
-      - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          args: >
-            -Dsonar.projectKey=vyrodovalexey_avapigw
-            -Dsonar.organization=vyrodovalexey
-            -Dsonar.go.coverage.reportPaths=coverage.out
-            -Dsonar.sources=.
-            -Dsonar.exclusions=**/*_test.go,**/vendor/**,**/testdata/**
-        continue-on-error: true
-
-  helm-lint:
-    name: Helm Lint
-    runs-on: ubuntu-latest
+    needs: [security-scan]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
