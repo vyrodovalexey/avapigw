@@ -1,0 +1,297 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+
+env:
+  GO_VERSION: '1.24'
+  REGISTRY: docker.io
+  IMAGE_NAME_GATEWAY: vyrodovalexey/avapigw-gateway
+  IMAGE_NAME_OPERATOR: vyrodovalexey/avapigw-operator
+
+jobs:
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev-${{ github.sha }}")
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
+      - name: Run tests
+        run: go test -v -race ./...
+
+      - name: Build binaries
+        run: make build
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata for Gateway
+        id: meta-gateway
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_GATEWAY }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+
+      - name: Extract metadata for Operator
+        id: meta-operator
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPERATOR }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+
+      - name: Build and push Gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/docker/gateway/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-gateway.outputs.tags }}
+          labels: ${{ steps.meta-gateway.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+
+      - name: Build and push Operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/docker/gateway-operator/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-operator.outputs.tags }}
+          labels: ${{ steps.meta-operator.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+
+  helm-package:
+    name: Package Helm Chart
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+
+      - name: Update Chart version
+        run: |
+          VERSION=${{ needs.build-and-push.outputs.version }}
+          # Remove 'v' prefix if present
+          VERSION=${VERSION#v}
+          sed -i "s/^version:.*/version: ${VERSION}/" deployment/helm/avapigw/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" deployment/helm/avapigw/Chart.yaml
+
+      - name: Lint Helm chart
+        run: helm lint deployment/helm/avapigw
+
+      - name: Package Helm chart
+        run: |
+          mkdir -p ./charts
+          helm package deployment/helm/avapigw --destination ./charts
+
+      - name: Upload Helm chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: ./charts/*.tgz
+          retention-days: 30
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-and-push, helm-package]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Helm chart
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: ./charts
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${CURRENT_TAG})
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${CURRENT_TAG})
+          fi
+          
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## Docker Images
+            
+            - Gateway: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME_GATEWAY }}:${{ github.ref_name }}`
+            - Operator: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPERATOR }}:${{ github.ref_name }}`
+            
+            ## Installation
+            
+            ### Using Helm
+            ```bash
+            helm upgrade --install avapigw ./avapigw-*.tgz \
+              --namespace avapigw-system \
+              --create-namespace
+            ```
+            
+            ### Using Docker
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_GATEWAY }}:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_OPERATOR }}:${{ github.ref_name }}
+            ```
+            
+            ## Changes
+            
+            ${{ steps.changelog.outputs.changelog }}
+          files: |
+            ./charts/*.tgz
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.29.0'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > ~/.kube/config
+        if: ${{ secrets.STAGING_KUBECONFIG != '' }}
+
+      - name: Deploy to staging
+        run: |
+          VERSION=${{ needs.build-and-push.outputs.version }}
+          helm upgrade --install avapigw deployment/helm/avapigw \
+            --namespace avapigw-staging \
+            --create-namespace \
+            --set operator.image.tag=${VERSION} \
+            --set gateway.image.tag=${VERSION} \
+            --wait --timeout 10m
+        if: ${{ secrets.STAGING_KUBECONFIG != '' }}
+        continue-on-error: true
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, create-release]
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.29.0'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.PRODUCTION_KUBECONFIG }}" | base64 -d > ~/.kube/config
+        if: ${{ secrets.PRODUCTION_KUBECONFIG != '' }}
+
+      - name: Deploy to production
+        run: |
+          VERSION=${{ needs.build-and-push.outputs.version }}
+          helm upgrade --install avapigw deployment/helm/avapigw \
+            --namespace avapigw-system \
+            --create-namespace \
+            --set operator.image.tag=${VERSION} \
+            --set gateway.image.tag=${VERSION} \
+            --wait --timeout 10m
+        if: ${{ secrets.PRODUCTION_KUBECONFIG != '' }}
+        continue-on-error: true

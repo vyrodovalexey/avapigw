@@ -1,0 +1,19 @@
+{{- if .Values.vault.enabled }}
+# Vault Kubernetes Auth Configuration
+# This ConfigMap contains the Vault configuration for the gateway
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "avapigw.fullname" . }}-vault-config
+  namespace: {{ include "avapigw.namespace" . }}
+  labels:
+    {{- include "avapigw.labels" . | nindent 4 }}
+data:
+  VAULT_ADDR: {{ .Values.vault.address | quote }}
+  VAULT_ROLE: {{ .Values.vault.role | quote }}
+  VAULT_AUTH_PATH: {{ .Values.vault.authPath | quote }}
+  {{- if .Values.vault.namespace }}
+  VAULT_NAMESPACE: {{ .Values.vault.namespace | quote }}
+  {{- end }}
+  VAULT_SKIP_VERIFY: {{ .Values.vault.tls.skipVerify | quote }}
+{{- end }}

@@ -1,0 +1,37 @@
+{{- if and .Values.operator.enabled .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "avapigw.fullname" . }}-validating-webhook-configuration
+  labels:
+    {{- include "avapigw.labels" . | nindent 4 }}
+webhooks:
+  {{- $webhookService := include "avapigw.webhook.serviceName" . }}
+  {{- $namespace := include "avapigw.namespace" . }}
+  {{- $failurePolicy := .Values.webhook.failurePolicy }}
+  {{- $timeoutSeconds := .Values.webhook.timeoutSeconds }}
+  {{- range $resource := list "authpolicy" "backend" "gateway" "grpcroute" "httproute" "ratelimitpolicy" "tcproute" "tlsconfig" "tlsroute" "vaultsecret" }}
+  - name: v{{ $resource }}.kb.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ $webhookService }}
+        namespace: {{ $namespace }}
+        path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-{{ $resource }}
+    failurePolicy: {{ $failurePolicy }}
+    rules:
+      - apiGroups:
+          - avapigw.vyrodovalexey.github.com
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+          - DELETE
+        resources:
+          - {{ $resource }}{{ if eq $resource "authpolicy" }}ies{{ else if eq $resource "ratelimitpolicy" }}ies{{ else }}s{{ end }}
+    sideEffects: None
+    timeoutSeconds: {{ $timeoutSeconds }}
+  {{- end }}
+{{- end }}

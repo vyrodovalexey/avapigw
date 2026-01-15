@@ -1,0 +1,422 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-authpolicy
+  failurePolicy: Fail
+  name: mauthpolicy.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - authpolicies
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-backend
+  failurePolicy: Fail
+  name: mbackend.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - backends
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-gateway
+  failurePolicy: Fail
+  name: mgateway.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - gateways
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-grpcroute
+  failurePolicy: Fail
+  name: mgrpcroute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - grpcroutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-httproute
+  failurePolicy: Fail
+  name: mhttproute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - httproutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-ratelimitpolicy
+  failurePolicy: Fail
+  name: mratelimitpolicy.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - ratelimitpolicies
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-tcproute
+  failurePolicy: Fail
+  name: mtcproute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - tcproutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsconfig
+  failurePolicy: Fail
+  name: mtlsconfig.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - tlsconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsroute
+  failurePolicy: Fail
+  name: mtlsroute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - tlsroutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-avapigw-vyrodovalexey-github-com-v1alpha1-vaultsecret
+  failurePolicy: Fail
+  name: mvaultsecret.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vaultsecrets
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-authpolicy
+  failurePolicy: Fail
+  name: vauthpolicy.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - authpolicies
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-backend
+  failurePolicy: Fail
+  name: vbackend.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - backends
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-gateway
+  failurePolicy: Fail
+  name: vgateway.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - gateways
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-grpcroute
+  failurePolicy: Fail
+  name: vgrpcroute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - grpcroutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-httproute
+  failurePolicy: Fail
+  name: vhttproute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - httproutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-ratelimitpolicy
+  failurePolicy: Fail
+  name: vratelimitpolicy.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - ratelimitpolicies
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-tcproute
+  failurePolicy: Fail
+  name: vtcproute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - tcproutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsconfig
+  failurePolicy: Fail
+  name: vtlsconfig.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - tlsconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsroute
+  failurePolicy: Fail
+  name: vtlsroute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - tlsroutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-avapigw-vyrodovalexey-github-com-v1alpha1-vaultsecret
+  failurePolicy: Fail
+  name: vvaultsecret.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.vyrodovalexey.github.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    - DELETE
+    resources:
+    - vaultsecrets
+  sideEffects: None
