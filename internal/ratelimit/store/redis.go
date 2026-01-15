@@ -254,10 +254,10 @@ type decorrelatedJitterBackoff struct {
 }
 
 // newDecorrelatedJitterBackoff creates a new decorrelated jitter backoff.
-func newDecorrelatedJitterBackoff(initial, max time.Duration) *decorrelatedJitterBackoff {
+func newDecorrelatedJitterBackoff(initial, maxDuration time.Duration) *decorrelatedJitterBackoff {
 	return &decorrelatedJitterBackoff{
 		initial: initial,
-		max:     max,
+		max:     maxDuration,
 		current: initial,
 	}
 }
@@ -270,7 +270,7 @@ func (b *decorrelatedJitterBackoff) next(attempt int) time.Duration {
 		return b.current
 	}
 
-	// sleep = min(cap, random_between(base, sleep * 3))
+	// Decorrelated jitter formula: sleep = min(cap, random_between(base, sleep * 3))
 	minBackoff := float64(b.initial)
 	maxBackoff := float64(b.current) * 3
 

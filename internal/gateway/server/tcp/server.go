@@ -159,7 +159,8 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.config.TLS != nil {
 		listener, err = tls.Listen("tcp", addr, s.config.TLS)
 	} else {
-		listener, err = net.Listen("tcp", addr)
+		lc := &net.ListenConfig{}
+		listener, err = lc.Listen(context.Background(), "tcp", addr)
 	}
 
 	if err != nil {
@@ -375,7 +376,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		s.logger.Debug("context cancelled before handling connection",
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
 		)
-		conn.Close()
+		_ = conn.Close() // Ignore error on cleanup
 		return
 	default:
 	}
@@ -387,11 +388,11 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
 			zap.Error(err),
 		)
-		conn.Close()
+		_ = conn.Close() // Ignore error on cleanup
 		return
 	}
 	defer s.connections.Remove(tracked.ID)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }() // Ignore error on cleanup
 
 	s.logger.Debug("handling connection",
 		zap.String("id", tracked.ID),
@@ -409,7 +410,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			s.logger.Debug("context cancelled, closing connection",
 				zap.String("id", tracked.ID),
 			)
-			conn.Close()
+			_ = conn.Close() // Ignore error on cleanup
 		case <-done:
 			// Handler completed normally
 		}

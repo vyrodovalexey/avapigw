@@ -231,7 +231,8 @@ func (v *Validator) ValidateWithClaims(ctx context.Context, tokenString string, 
 }
 
 // parseToken parses a JWT token into its components.
-func (v *Validator) parseToken(tokenString string) (map[string]interface{}, map[string]interface{}, []byte, error) {
+// Returns header claims, payload claims, signature bytes, and any error.
+func (v *Validator) parseToken(tokenString string) (header map[string]interface{}, payload map[string]interface{}, signature []byte, err error) {
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
 		return nil, nil, nil, ErrMalformedToken
@@ -243,8 +244,7 @@ func (v *Validator) parseToken(tokenString string) (map[string]interface{}, map[
 		return nil, nil, nil, fmt.Errorf("%w: invalid header encoding", ErrMalformedToken)
 	}
 
-	var header map[string]interface{}
-	if err := json.Unmarshal(headerBytes, &header); err != nil {
+	if err = json.Unmarshal(headerBytes, &header); err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: invalid header JSON", ErrMalformedToken)
 	}
 
@@ -254,13 +254,12 @@ func (v *Validator) parseToken(tokenString string) (map[string]interface{}, map[
 		return nil, nil, nil, fmt.Errorf("%w: invalid payload encoding", ErrMalformedToken)
 	}
 
-	var payload map[string]interface{}
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+	if err = json.Unmarshal(payloadBytes, &payload); err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: invalid payload JSON", ErrMalformedToken)
 	}
 
 	// Decode signature
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	signature, err = base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: invalid signature encoding", ErrMalformedToken)
 	}

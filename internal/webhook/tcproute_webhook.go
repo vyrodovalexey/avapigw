@@ -19,6 +19,12 @@ import (
 
 var tcproutelog = logf.Log.WithName("tcproute-webhook")
 
+// Backend reference kinds for TCPRoute validation.
+const (
+	tcpRouteBackendKindService = "Service"
+	tcpRouteBackendKindBackend = "Backend"
+)
+
 // TCPRouteWebhook implements admission webhooks for TCPRoute
 type TCPRouteWebhook struct {
 	Client             client.Client
@@ -204,7 +210,7 @@ func (w *TCPRouteWebhook) validateBackendRefs(ctx context.Context, route *avapig
 				namespace = *backendRef.Namespace
 			}
 
-			kind := "Service"
+			kind := tcpRouteBackendKindService
 			if backendRef.Kind != nil {
 				kind = *backendRef.Kind
 			}
@@ -215,11 +221,11 @@ func (w *TCPRouteWebhook) validateBackendRefs(ctx context.Context, route *avapig
 			}
 
 			switch {
-			case group == "" && kind == "Service":
+			case group == "" && kind == tcpRouteBackendKindService:
 				if err := w.ReferenceValidator.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
 					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
 				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
+			case group == avapigwv1alpha1.GroupVersion.Group && kind == tcpRouteBackendKindBackend:
 				if err := w.ReferenceValidator.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
 					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
 				}

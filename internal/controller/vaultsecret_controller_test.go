@@ -401,7 +401,7 @@ func TestVaultSecretReconciler_ValidateVaultConnection_MissingAddress(t *testing
 
 	err := reconciler.validateVaultConnection(context.Background(), vaultSecret)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "Vault address is required")
+	assert.Contains(t, err.Error(), "vault address is required")
 }
 
 func TestVaultSecretReconciler_ValidateVaultConnection_NoAuthMethod(t *testing.T) {
@@ -455,7 +455,7 @@ func TestVaultSecretReconciler_ValidateVaultConnection_KubernetesAuth_MissingRol
 
 	err := reconciler.validateVaultConnection(context.Background(), vaultSecret)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "Kubernetes auth role is required")
+	assert.Contains(t, err.Error(), "kubernetes auth role is required")
 }
 
 func TestVaultSecretReconciler_ValidateVaultConnection_TokenAuth_SecretNotFound(t *testing.T) {

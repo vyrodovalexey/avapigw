@@ -263,7 +263,7 @@ func (m *CertificateManager) watchLoop(stopCh <-chan struct{}) {
 		case <-stopCh:
 			m.logger.Info("certificate file watching stopped")
 			if m.watcher != nil {
-				m.watcher.Close()
+				_ = m.watcher.Close() // Ignore error on cleanup
 			}
 			return
 		case event, ok := <-m.watcher.Events:
@@ -339,7 +339,8 @@ func (m *CertificateManager) TLSConfigWithClientAuth(clientCAs *x509.CertPool, a
 
 // LoadClientCAs loads client CA certificates from a file.
 func LoadClientCAs(caFile string) (*x509.CertPool, error) {
-	caCert, err := os.ReadFile(caFile)
+	// G304: caFile comes from trusted configuration (TLS settings)
+	caCert, err := os.ReadFile(filepath.Clean(caFile))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read CA file: %w", err)
 	}

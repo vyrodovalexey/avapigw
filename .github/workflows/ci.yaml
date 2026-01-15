@@ -228,7 +228,7 @@ jobs:
 
       - name: Upload to GitHub Release (TAG only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             bin/avapigw-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz

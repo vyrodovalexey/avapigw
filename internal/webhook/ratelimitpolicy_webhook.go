@@ -161,13 +161,10 @@ func (w *RateLimitPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.RateLimi
 		}
 
 		// Validate algorithm-specific configuration
-		if rule.Algorithm != nil {
-			switch *rule.Algorithm {
-			case avapigwv1alpha1.RateLimitAlgorithmTokenBucket:
-				if rule.TokenBucket != nil {
-					if rule.TokenBucket.Tokens < 1 {
-						errs.Add(fmt.Sprintf("spec.rules[%d].tokenBucket.tokens", i), "tokens must be at least 1")
-					}
+		if rule.Algorithm != nil && *rule.Algorithm == avapigwv1alpha1.RateLimitAlgorithmTokenBucket {
+			if rule.TokenBucket != nil {
+				if rule.TokenBucket.Tokens < 1 {
+					errs.Add(fmt.Sprintf("spec.rules[%d].tokenBucket.tokens", i), "tokens must be at least 1")
 				}
 			}
 		}
@@ -208,10 +205,8 @@ func (w *RateLimitPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.RateLimi
 		if policy.Spec.Storage.Type == avapigwv1alpha1.RateLimitStorageRedis {
 			if policy.Spec.Storage.Redis == nil {
 				errs.Add("spec.storage.redis", "redis configuration is required for Redis storage type")
-			} else {
-				if policy.Spec.Storage.Redis.Address == "" {
-					errs.Add("spec.storage.redis.address", "address is required")
-				}
+			} else if policy.Spec.Storage.Redis.Address == "" {
+				errs.Add("spec.storage.redis.address", "address is required")
 			}
 		}
 	}

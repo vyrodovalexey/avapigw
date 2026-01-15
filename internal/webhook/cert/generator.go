@@ -127,7 +127,8 @@ func (g *Generator) Generate() (*CertificateBundle, error) {
 }
 
 // GenerateCA generates a self-signed CA certificate and private key.
-func (g *Generator) GenerateCA() ([]byte, []byte, error) {
+// Returns the CA certificate PEM, CA private key PEM, and any error.
+func (g *Generator) GenerateCA() (caCertPEM []byte, caKeyPEM []byte, err error) {
 	// Generate private key
 	privateKey, err := rsa.GenerateKey(rand.Reader, g.config.KeySize)
 	if err != nil {
@@ -177,8 +178,8 @@ func (g *Generator) GenerateCA() ([]byte, []byte, error) {
 }
 
 // GenerateServerCert generates a server certificate signed by the CA.
-// Returns the certificate, key, expiration time, and any error.
-func (g *Generator) GenerateServerCert(caCertPEM, caKeyPEM []byte) ([]byte, []byte, time.Time, error) {
+// Returns the server certificate PEM, server private key PEM, expiration time, and any error.
+func (g *Generator) GenerateServerCert(caCertPEM, caKeyPEM []byte) (serverCertPEM []byte, serverKeyPEM []byte, expiresAt time.Time, err error) {
 	// Parse CA certificate
 	caCert, err := ParseCertificate(caCertPEM)
 	if err != nil {
@@ -207,7 +208,7 @@ func (g *Generator) GenerateServerCert(caCertPEM, caKeyPEM []byte) ([]byte, []by
 	dnsNames := g.buildDNSNames()
 
 	now := time.Now()
-	expiresAt := now.Add(g.config.Validity)
+	expiresAt = now.Add(g.config.Validity)
 
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,

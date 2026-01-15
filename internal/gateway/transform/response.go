@@ -71,7 +71,7 @@ func (t *ResponseTransformer) transformBody(resp *http.Response) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close() // Ignore error on close after successful read
 
 	// Apply transformations
 	for _, transformer := range t.bodyTransformer.transformers {

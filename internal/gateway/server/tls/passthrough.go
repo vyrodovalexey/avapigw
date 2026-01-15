@@ -57,7 +57,8 @@ func NewPassthroughProxyWithConfig(manager *backend.Manager, logger *zap.Logger,
 		bufferSize:     bufferSize,
 		bufferPool: &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, bufferSize)
+				buf := make([]byte, bufferSize)
+				return &buf
 			},
 		},
 	}
@@ -161,13 +162,13 @@ func (p *PassthroughProxy) bidirectionalCopy(ctx context.Context, conn1, conn2 n
 	select {
 	case <-ctx.Done():
 		// Context cancelled, close both connections to unblock copy goroutines
-		conn1.Close()
-		conn2.Close()
+		_ = conn1.Close() // Ignore error on cleanup
+		_ = conn2.Close() // Ignore error on cleanup
 		firstErr = ctx.Err()
 	case firstErr = <-errCh:
 		// One direction completed, close both connections to signal the other
-		conn1.Close()
-		conn2.Close()
+		_ = conn1.Close() // Ignore error on cleanup
+		_ = conn2.Close() // Ignore error on cleanup
 	}
 
 	// Cancel the copy context to signal any remaining goroutines
@@ -179,23 +180,12 @@ func (p *PassthroughProxy) bidirectionalCopy(ctx context.Context, conn1, conn2 n
 	return firstErr
 }
 
-// copyWithBuffer copies data from src to dst using a pooled buffer.
-func (p *PassthroughProxy) copyWithBuffer(dst, src net.Conn) error {
-	buf := p.bufferPool.Get().([]byte)
-	defer p.bufferPool.Put(buf)
-
-	_, err := io.CopyBuffer(dst, src, buf)
-	if err != nil && !isClosedConnError(err) {
-		return err
-	}
-	return nil
-}
-
 // copyWithBufferAndContext copies data from src to dst using a pooled buffer,
 // respecting context cancellation.
 func (p *PassthroughProxy) copyWithBufferAndContext(ctx context.Context, dst, src net.Conn) error {
-	buf := p.bufferPool.Get().([]byte)
-	defer p.bufferPool.Put(buf)
+	bufPtr := p.bufferPool.Get().(*[]byte)
+	defer p.bufferPool.Put(bufPtr)
+	buf := *bufPtr
 
 	for {
 		// Check context before each read
@@ -311,13 +301,13 @@ func (p *PassthroughProxy) bidirectionalCopyWithTimeout(ctx context.Context, con
 	select {
 	case <-ctx.Done():
 		// Context cancelled, close both connections to unblock copy goroutines
-		conn1.Close()
-		conn2.Close()
+		_ = conn1.Close() // Ignore error on cleanup
+		_ = conn2.Close() // Ignore error on cleanup
 		firstErr = ctx.Err()
 	case firstErr = <-errCh:
 		// One direction completed, close both connections to signal the other
-		conn1.Close()
-		conn2.Close()
+		_ = conn1.Close() // Ignore error on cleanup
+		_ = conn2.Close() // Ignore error on cleanup
 	}
 
 	// Cancel the copy context to signal any remaining goroutines
@@ -329,15 +319,11 @@ func (p *PassthroughProxy) bidirectionalCopyWithTimeout(ctx context.Context, con
 	return firstErr
 }
 
-// copyWithTimeout copies data with idle timeout support.
-func (p *PassthroughProxy) copyWithTimeout(dst, src net.Conn, idleTimeout time.Duration) error {
-	return p.copyWithTimeoutAndContext(context.Background(), dst, src, idleTimeout)
-}
-
 // copyWithTimeoutAndContext copies data with idle timeout support and context cancellation.
 func (p *PassthroughProxy) copyWithTimeoutAndContext(ctx context.Context, dst, src net.Conn, idleTimeout time.Duration) error {
-	buf := p.bufferPool.Get().([]byte)
-	defer p.bufferPool.Put(buf)
+	bufPtr := p.bufferPool.Get().(*[]byte)
+	defer p.bufferPool.Put(bufPtr)
+	buf := *bufPtr
 
 	// Use a shorter check interval to respond to context cancellation quickly
 	checkInterval := idleTimeout

@@ -103,7 +103,8 @@ func LoadTLSConfig(config *TLSConfig) (*tls.Config, error) {
 		return nil, nil
 	}
 
-	tlsConfig := &tls.Config{
+	// G402: MinVersion is configurable by the user, defaults are set below if not specified
+	tlsConfig := &tls.Config{ //nolint:gosec // MinVersion is user-configurable with safe defaults
 		MinVersion: config.MinVersion,
 		MaxVersion: config.MaxVersion,
 	}

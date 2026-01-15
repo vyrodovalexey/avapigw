@@ -584,56 +584,6 @@ func TestProxy_CopyWithTimeoutAndContext(t *testing.T) {
 	})
 }
 
-func TestProxy_copyWithBuffer(t *testing.T) {
-	logger := zap.NewNop()
-	manager := backend.NewManager(logger)
-	proxy := NewProxy(manager, logger)
-
-	t.Run("copies data using buffer pool", func(t *testing.T) {
-		srcClient, srcServer := net.Pipe()
-		dstClient, dstServer := net.Pipe()
-		defer srcClient.Close()
-		defer srcServer.Close()
-		defer dstClient.Close()
-		defer dstServer.Close()
-
-		// Start copy
-		go func() {
-			proxy.copyWithBuffer(dstServer, srcServer)
-		}()
-
-		// Write data
-		go func() {
-			srcClient.Write([]byte("buffered data"))
-			srcClient.Close()
-		}()
-
-		// Read data
-		buf := make([]byte, 20)
-		dstClient.SetReadDeadline(time.Now().Add(time.Second))
-		n, err := dstClient.Read(buf)
-		require.NoError(t, err)
-		assert.Equal(t, "buffered data", string(buf[:n]))
-	})
-
-	t.Run("handles closed connection", func(t *testing.T) {
-		srcClient, srcServer := net.Pipe()
-		dstClient, dstServer := net.Pipe()
-		defer dstClient.Close()
-		defer dstServer.Close()
-
-		// Close source immediately
-		srcClient.Close()
-		srcServer.Close()
-
-		err := proxy.copyWithBuffer(dstServer, srcServer)
-		// Closed connection may return nil or a closed pipe error depending on timing
-		if err != nil {
-			assert.Contains(t, err.Error(), "closed pipe")
-		}
-	})
-}
-
 func TestIsClosedError(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -686,14 +636,16 @@ func TestProxy_BufferPool(t *testing.T) {
 	t.Run("buffer pool returns correct size buffers", func(t *testing.T) {
 		proxy := NewProxyWithConfig(manager, logger, &ProxyConfig{BufferSize: 16 * 1024})
 
-		buf := proxy.bufferPool.Get().([]byte)
+		bufPtr := proxy.bufferPool.Get().(*[]byte)
+		buf := *bufPtr
 		assert.Len(t, buf, 16*1024)
 
 		// Return to pool
-		proxy.bufferPool.Put(buf)
+		proxy.bufferPool.Put(bufPtr)
 
 		// Get again - should be same size
-		buf2 := proxy.bufferPool.Get().([]byte)
+		bufPtr2 := proxy.bufferPool.Get().(*[]byte)
+		buf2 := *bufPtr2
 		assert.Len(t, buf2, 16*1024)
 	})
 
@@ -705,10 +657,11 @@ func TestProxy_BufferPool(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				buf := proxy.bufferPool.Get().([]byte)
+				bufPtr := proxy.bufferPool.Get().(*[]byte)
+				_ = *bufPtr // Use the buffer
 				// Simulate some work
 				time.Sleep(time.Millisecond)
-				proxy.bufferPool.Put(buf)
+				proxy.bufferPool.Put(bufPtr)
 			}()
 		}
 

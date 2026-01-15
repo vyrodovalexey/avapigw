@@ -95,16 +95,16 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
-	resourceKey := req.NamespacedName.String()
+	resourceKey := req.String()
 
 	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
 		duration := time.Since(start).Seconds()
-		result := "success"
+		result := MetricResultSuccess
 		if reconcileErr != nil {
-			result = "error"
+			result = MetricResultError
 		}
 		tcpRouteReconcileDuration.WithLabelValues(result).Observe(duration)
 		tcpRouteReconcileTotal.WithLabelValues(result).Inc()
@@ -246,7 +246,7 @@ func (r *TCPRouteReconciler) reconcileTCPRoute(ctx context.Context, tcpRoute *av
 // validateParentRefs validates parent references and returns parent statuses
 func (r *TCPRouteReconciler) validateParentRefs(ctx context.Context, tcpRoute *avapigwv1alpha1.TCPRoute) ([]avapigwv1alpha1.RouteParentStatus, error) {
 	logger := log.FromContext(ctx)
-	var parentStatuses []avapigwv1alpha1.RouteParentStatus
+	parentStatuses := make([]avapigwv1alpha1.RouteParentStatus, 0, len(tcpRoute.Spec.ParentRefs))
 
 	for _, parentRef := range tcpRoute.Spec.ParentRefs {
 		parentStatus := avapigwv1alpha1.RouteParentStatus{
@@ -319,7 +319,7 @@ func (r *TCPRouteReconciler) validateParentRefs(ctx context.Context, tcpRoute *a
 }
 
 // validateListenerMatch validates that the route matches a listener on the gateway
-func (r *TCPRouteReconciler) validateListenerMatch(gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (bool, string) {
+func (r *TCPRouteReconciler) validateListenerMatch(gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (matches bool, reason string) {
 	// If a specific section (listener) is specified, validate it
 	if parentRef.SectionName != nil {
 		listenerName := *parentRef.SectionName
@@ -364,7 +364,7 @@ func (r *TCPRouteReconciler) validateBackendRefs(ctx context.Context, tcpRoute *
 				namespace = *backendRef.Namespace
 			}
 
-			kind := "Service"
+			kind := BackendKindService
 			if backendRef.Kind != nil {
 				kind = *backendRef.Kind
 			}
@@ -376,7 +376,7 @@ func (r *TCPRouteReconciler) validateBackendRefs(ctx context.Context, tcpRoute *
 
 			// Check based on kind
 			switch {
-			case group == "" && kind == "Service":
+			case group == "" && kind == BackendKindService:
 				// Kubernetes Service
 				svc := &corev1.Service{}
 				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, svc); err != nil {
@@ -388,7 +388,7 @@ func (r *TCPRouteReconciler) validateBackendRefs(ctx context.Context, tcpRoute *
 					}
 					return fmt.Errorf("failed to get Service %s/%s: %w", namespace, backendRef.Name, err)
 				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
+			case group == avapigwv1alpha1.GroupVersion.Group && kind == BackendKindBackend:
 				// Custom Backend resource
 				backend := &avapigwv1alpha1.Backend{}
 				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, backend); err != nil {
@@ -472,11 +472,11 @@ func (r *TCPRouteReconciler) findTCPRoutesForBackend(ctx context.Context, obj cl
 				if backendRef.Namespace != nil {
 					namespace = *backendRef.Namespace
 				}
-				kind := "Service"
+				kind := BackendKindService
 				if backendRef.Kind != nil {
 					kind = *backendRef.Kind
 				}
-				if kind == "Backend" && namespace == backend.Namespace && backendRef.Name == backend.Name {
+				if kind == BackendKindBackend && namespace == backend.Namespace && backendRef.Name == backend.Name {
 					requests = append(requests, reconcile.Request{
 						NamespacedName: client.ObjectKey{
 							Namespace: route.Namespace,

@@ -230,20 +230,3 @@ func StreamClientRetryInterceptorWithConfig(config RetryConfig) grpc.StreamClien
 		return nil, lastErr
 	}
 }
-
-// retryableServerStream wraps a server stream with retry tracking.
-type retryableServerStream struct {
-	grpc.ServerStream
-	method string
-	logger *zap.Logger
-}
-
-// RecvMsg implements grpc.ServerStream.
-func (s *retryableServerStream) RecvMsg(m interface{}) error {
-	return s.ServerStream.RecvMsg(m)
-}
-
-// SendMsg implements grpc.ServerStream.
-func (s *retryableServerStream) SendMsg(m interface{}) error {
-	return s.ServerStream.SendMsg(m)
-}

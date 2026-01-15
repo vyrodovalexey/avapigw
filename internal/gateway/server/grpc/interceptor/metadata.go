@@ -114,7 +114,7 @@ func UnaryResponseMetadataInterceptor(config *ResponseMetadataConfig) grpc.Unary
 			for key, value := range config.Headers {
 				md.Set(strings.ToLower(key), value)
 			}
-			grpc.SendHeader(ctx, md)
+			_ = grpc.SendHeader(ctx, md) // Explicitly ignore error as headers may already be sent
 		}
 
 		// Process request
@@ -126,7 +126,7 @@ func UnaryResponseMetadataInterceptor(config *ResponseMetadataConfig) grpc.Unary
 			for key, value := range config.Trailers {
 				md.Set(strings.ToLower(key), value)
 			}
-			grpc.SetTrailer(ctx, md)
+			_ = grpc.SetTrailer(ctx, md) // Explicitly ignore error as trailers are best-effort
 		}
 
 		return resp, err
@@ -146,7 +146,7 @@ func StreamResponseMetadataInterceptor(config *ResponseMetadataConfig) grpc.Stre
 			for key, value := range config.Headers {
 				md.Set(strings.ToLower(key), value)
 			}
-			ss.SendHeader(md)
+			_ = ss.SendHeader(md) // Explicitly ignore error as headers may already be sent
 		}
 
 		// Wrap stream to set trailers

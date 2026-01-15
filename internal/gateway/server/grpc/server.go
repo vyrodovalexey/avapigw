@@ -171,7 +171,8 @@ func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
 
 	// Create listener
-	listener, err := net.Listen("tcp", addr)
+	lc := &net.ListenConfig{}
+	listener, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)

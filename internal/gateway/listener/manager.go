@@ -14,6 +14,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// TLS mode constants
+const (
+	tlsModePassthrough = "Passthrough"
+)
+
 // Manager manages multiple listeners for the gateway.
 type Manager struct {
 	listeners map[string]*Listener
@@ -266,15 +271,17 @@ func (m *Manager) startListener(l *Listener) error {
 	if l.TLS != nil {
 		l.listener, err = tls.Listen("tcp", addr, l.TLS)
 	} else {
-		l.listener, err = net.Listen("tcp", addr)
+		lc := &net.ListenConfig{}
+		l.listener, err = lc.Listen(context.Background(), "tcp", addr)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to create listener on %s: %w", addr, err)
 	}
 
-	// Create HTTP server
+	// Create HTTP server with ReadHeaderTimeout to prevent Slowloris attacks
 	server := &http.Server{
-		Handler: l.handler,
+		Handler:           l.handler,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 	l.Server = server
 
@@ -428,7 +435,7 @@ func (m *Manager) AddTLSListener(config TLSListenerConfig) error {
 	}
 
 	protocol := "TLS"
-	if config.Mode == "Passthrough" {
+	if config.Mode == tlsModePassthrough {
 		protocol = "TLS-Passthrough"
 	}
 
@@ -439,7 +446,7 @@ func (m *Manager) AddTLSListener(config TLSListenerConfig) error {
 	}
 
 	// Configure TLS if provided and mode is Terminate
-	if config.TLS != nil && config.Mode != "Passthrough" {
+	if config.TLS != nil && config.Mode != tlsModePassthrough {
 		tlsConfig, err := LoadTLSConfig(config.TLS)
 		if err != nil {
 			return fmt.Errorf("failed to load TLS config for TLS listener %s: %w", config.Name, err)
@@ -481,7 +488,8 @@ func (m *Manager) startTCPListener(l *Listener) error {
 	if l.TLS != nil {
 		l.listener, err = tls.Listen("tcp", addr, l.TLS)
 	} else {
-		l.listener, err = net.Listen("tcp", addr)
+		lc := &net.ListenConfig{}
+		l.listener, err = lc.Listen(context.Background(), "tcp", addr)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to create TCP listener on %s: %w", addr, err)
@@ -506,16 +514,18 @@ func (m *Manager) startTLSListener(l *Listener, mode string) error {
 	}
 
 	addr := fmt.Sprintf(":%d", l.Port)
+	lc := &net.ListenConfig{}
 
 	var err error
-	if mode == "Passthrough" {
+	switch {
+	case mode == tlsModePassthrough:
 		// For passthrough, use raw TCP listener
-		l.listener, err = net.Listen("tcp", addr)
-	} else if l.TLS != nil {
+		l.listener, err = lc.Listen(context.Background(), "tcp", addr)
+	case l.TLS != nil:
 		// For termination, use TLS listener
 		l.listener, err = tls.Listen("tcp", addr, l.TLS)
-	} else {
-		l.listener, err = net.Listen("tcp", addr)
+	default:
+		l.listener, err = lc.Listen(context.Background(), "tcp", addr)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to create TLS listener on %s: %w", addr, err)

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -410,17 +409,19 @@ func TestPassthroughProxy_BufferPool(t *testing.T) {
 	manager := backend.NewManager(logger)
 	proxy := NewPassthroughProxy(manager, logger)
 
-	// Get buffer from pool
-	buf := proxy.bufferPool.Get().([]byte)
-	require.NotNil(t, buf)
+	// Get buffer from pool (now stores *[]byte)
+	bufPtr := proxy.bufferPool.Get().(*[]byte)
+	require.NotNil(t, bufPtr)
+	buf := *bufPtr
 	assert.Len(t, buf, proxy.bufferSize)
 
 	// Put buffer back
-	proxy.bufferPool.Put(buf)
+	proxy.bufferPool.Put(bufPtr)
 
 	// Get buffer again - should be the same or a new one
-	buf2 := proxy.bufferPool.Get().([]byte)
-	require.NotNil(t, buf2)
+	bufPtr2 := proxy.bufferPool.Get().(*[]byte)
+	require.NotNil(t, bufPtr2)
+	buf2 := *bufPtr2
 	assert.Len(t, buf2, proxy.bufferSize)
 }
 
@@ -693,110 +694,4 @@ func TestPassthroughProxy_Proxy_Success(t *testing.T) {
 
 	// Clean up
 	_ = manager.RemoveBackend("test-backend")
-}
-
-func TestPassthroughProxy_CopyWithBuffer(t *testing.T) {
-	logger := zap.NewNop()
-	manager := backend.NewManager(logger)
-	proxy := NewPassthroughProxy(manager, logger)
-
-	// Create pipes for testing
-	srcClient, srcServer := net.Pipe()
-	dstClient, dstServer := net.Pipe()
-	defer srcClient.Close()
-	defer srcServer.Close()
-	defer dstClient.Close()
-	defer dstServer.Close()
-
-	testData := []byte("test data for copy")
-
-	// Write data to source
-	go func() {
-		_, _ = srcClient.Write(testData)
-		srcClient.Close()
-	}()
-
-	// Read from destination
-	var readData []byte
-	var readWg sync.WaitGroup
-	readWg.Add(1)
-	go func() {
-		defer readWg.Done()
-		buf := make([]byte, 1024)
-		n, _ := dstClient.Read(buf)
-		if n > 0 {
-			readData = buf[:n]
-		}
-	}()
-
-	// Copy with buffer
-	err := proxy.copyWithBuffer(dstServer, srcServer)
-	dstServer.Close()
-
-	readWg.Wait()
-
-	// Should complete without error (or with EOF)
-	if err != nil {
-		assert.True(t, isClosedConnError(err))
-	}
-	assert.Equal(t, testData, readData)
-}
-
-func TestPassthroughProxy_CopyWithTimeout(t *testing.T) {
-	logger := zap.NewNop()
-	manager := backend.NewManager(logger)
-	proxy := NewPassthroughProxy(manager, logger)
-
-	// Create pipes for testing
-	srcClient, srcServer := net.Pipe()
-	dstClient, dstServer := net.Pipe()
-	defer srcClient.Close()
-	defer srcServer.Close()
-	defer dstClient.Close()
-	defer dstServer.Close()
-
-	testData := []byte("test data for copy with timeout")
-
-	// Write data to source
-	go func() {
-		_, _ = srcClient.Write(testData)
-		srcClient.Close()
-	}()
-
-	// Read from destination
-	var readData []byte
-	var readWg sync.WaitGroup
-	readWg.Add(1)
-	go func() {
-		defer readWg.Done()
-		buf := make([]byte, 1024)
-		n, _ := dstClient.Read(buf)
-		if n > 0 {
-			readData = buf[:n]
-		}
-	}()
-
-	// Copy with timeout
-	err := proxy.copyWithTimeout(dstServer, srcServer, 5*time.Second)
-	dstServer.Close()
-
-	readWg.Wait()
-
-	// Should complete without error (or with EOF, timeout, or closed pipe)
-	if err != nil {
-		isExpectedError := isClosedConnError(err) || errors.Is(err, context.DeadlineExceeded)
-		if !isExpectedError {
-			// Check if it's a network timeout error
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				isExpectedError = true
-			}
-		}
-		// Also accept io.ErrClosedPipe and related pipe errors
-		if !isExpectedError && (errors.Is(err, io.ErrClosedPipe) || strings.Contains(err.Error(), "closed pipe")) {
-			isExpectedError = true
-		}
-		assert.True(t, isExpectedError, "unexpected error: %v", err)
-	}
-	assert.Equal(t, testData, readData)
 }

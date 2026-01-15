@@ -99,16 +99,16 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
-	resourceKey := req.NamespacedName.String()
+	resourceKey := req.String()
 
 	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
 		duration := time.Since(start).Seconds()
-		result := "success"
+		result := MetricResultSuccess
 		if reconcileErr != nil {
-			result = "error"
+			result = MetricResultError
 		}
 		httpRouteReconcileDuration.WithLabelValues(result).Observe(duration)
 		httpRouteReconcileTotal.WithLabelValues(result).Inc()
@@ -262,7 +262,7 @@ func (r *HTTPRouteReconciler) reconcileHTTPRoute(ctx context.Context, httpRoute 
 // validateParentRefs validates parent references and returns parent statuses
 func (r *HTTPRouteReconciler) validateParentRefs(ctx context.Context, httpRoute *avapigwv1alpha1.HTTPRoute) ([]avapigwv1alpha1.RouteParentStatus, error) {
 	logger := log.FromContext(ctx)
-	var parentStatuses []avapigwv1alpha1.RouteParentStatus
+	parentStatuses := make([]avapigwv1alpha1.RouteParentStatus, 0, len(httpRoute.Spec.ParentRefs))
 
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
 		parentStatus := avapigwv1alpha1.RouteParentStatus{
@@ -335,7 +335,7 @@ func (r *HTTPRouteReconciler) validateParentRefs(ctx context.Context, httpRoute 
 }
 
 // validateListenerMatch validates that the route matches a listener on the gateway
-func (r *HTTPRouteReconciler) validateListenerMatch(httpRoute *avapigwv1alpha1.HTTPRoute, gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (bool, string) {
+func (r *HTTPRouteReconciler) validateListenerMatch(httpRoute *avapigwv1alpha1.HTTPRoute, gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (matches bool, reason string) {
 	// If a specific section (listener) is specified, validate it
 	if parentRef.SectionName != nil {
 		listenerName := *parentRef.SectionName
@@ -398,10 +398,10 @@ func (r *HTTPRouteReconciler) hostnameMatch(routeHost, listenerHost string) bool
 	}
 
 	// Wildcard matching
-	if len(listenerHost) > 0 && listenerHost[0] == '*' {
+	if listenerHost != "" && listenerHost[0] == '*' {
 		// Listener has wildcard, e.g., *.example.com
 		suffix := listenerHost[1:] // .example.com
-		if len(routeHost) > 0 && routeHost[0] == '*' {
+		if routeHost != "" && routeHost[0] == '*' {
 			// Both have wildcards
 			return routeHost[1:] == suffix
 		}
@@ -411,7 +411,7 @@ func (r *HTTPRouteReconciler) hostnameMatch(routeHost, listenerHost string) bool
 		}
 	}
 
-	if len(routeHost) > 0 && routeHost[0] == '*' {
+	if routeHost != "" && routeHost[0] == '*' {
 		// Route has wildcard, e.g., *.example.com
 		suffix := routeHost[1:] // .example.com
 		// Listener is specific, check if it matches the wildcard
@@ -434,7 +434,7 @@ func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, httpRoute
 				namespace = *backendRef.Namespace
 			}
 
-			kind := "Service"
+			kind := BackendKindService
 			if backendRef.Kind != nil {
 				kind = *backendRef.Kind
 			}
@@ -446,7 +446,7 @@ func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, httpRoute
 
 			// Check based on kind
 			switch {
-			case group == "" && kind == "Service":
+			case group == "" && kind == BackendKindService:
 				// Kubernetes Service
 				svc := &corev1.Service{}
 				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, svc); err != nil {
@@ -458,7 +458,7 @@ func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, httpRoute
 					}
 					return fmt.Errorf("failed to get Service %s/%s: %w", namespace, backendRef.Name, err)
 				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
+			case group == avapigwv1alpha1.GroupVersion.Group && kind == BackendKindBackend:
 				// Custom Backend resource
 				backend := &avapigwv1alpha1.Backend{}
 				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, backend); err != nil {
@@ -498,15 +498,15 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Uses field indexers for efficient filtered lookups
 func (r *HTTPRouteReconciler) findHTTPRoutesForGateway(ctx context.Context, obj client.Object) []reconcile.Request {
 	gateway := obj.(*avapigwv1alpha1.Gateway)
-	var requests []reconcile.Request
 
 	// Use field index for efficient lookup
 	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
 	var httpRoutes avapigwv1alpha1.HTTPRouteList
 	if err := r.List(ctx, &httpRoutes, client.MatchingFields{HTTPRouteGatewayIndexField: gatewayKey}); err != nil {
-		return requests
+		return nil
 	}
 
+	requests := make([]reconcile.Request, 0, len(httpRoutes.Items))
 	for _, route := range httpRoutes.Items {
 		requests = append(requests, reconcile.Request{
 			NamespacedName: client.ObjectKey{
@@ -523,15 +523,15 @@ func (r *HTTPRouteReconciler) findHTTPRoutesForGateway(ctx context.Context, obj 
 // Uses field indexers for efficient filtered lookups
 func (r *HTTPRouteReconciler) findHTTPRoutesForBackend(ctx context.Context, obj client.Object) []reconcile.Request {
 	backend := obj.(*avapigwv1alpha1.Backend)
-	var requests []reconcile.Request
 
 	// Use field index for efficient lookup
 	backendKey := BackendIndexKey(backend.Namespace, backend.Name)
 	var httpRoutes avapigwv1alpha1.HTTPRouteList
 	if err := r.List(ctx, &httpRoutes, client.MatchingFields{HTTPRouteBackendIndexField: backendKey}); err != nil {
-		return requests
+		return nil
 	}
 
+	requests := make([]reconcile.Request, 0, len(httpRoutes.Items))
 	for _, route := range httpRoutes.Items {
 		requests = append(requests, reconcile.Request{
 			NamespacedName: client.ObjectKey{

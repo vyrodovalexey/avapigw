@@ -304,7 +304,7 @@ func LinearBackoff(initial, increment, maxWait time.Duration) BackoffFunc {
 // Formula: sleep = min(cap, random_between(base, sleep * 3))
 func DecorrelatedJitterBackoff(minWait, maxWait time.Duration) BackoffFunc {
 	var mu sync.Mutex
-	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
+	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // weak random is acceptable for jitter timing
 	current := minWait
 
 	return func(attempt int) time.Duration {
@@ -316,7 +316,7 @@ func DecorrelatedJitterBackoff(minWait, maxWait time.Duration) BackoffFunc {
 			return current
 		}
 
-		// sleep = min(cap, random_between(base, sleep * 3))
+		// Calculate backoff using decorrelated jitter formula
 		minBackoff := float64(minWait)
 		maxBackoff := float64(current) * 3
 
@@ -336,7 +336,7 @@ func DecorrelatedJitterBackoff(minWait, maxWait time.Duration) BackoffFunc {
 // This provides the best distribution for preventing thundering herd.
 func FullJitterBackoff(minWait, maxWait time.Duration) BackoffFunc {
 	var mu sync.Mutex
-	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
+	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // weak random is acceptable for jitter timing
 
 	return func(attempt int) time.Duration {
 		mu.Lock()
@@ -369,7 +369,7 @@ func FullJitterBackoff(minWait, maxWait time.Duration) BackoffFunc {
 // This provides a balance between full jitter and no jitter.
 func EqualJitterBackoff(minWait, maxWait time.Duration) BackoffFunc {
 	var mu sync.Mutex
-	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec
+	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // weak random is acceptable for jitter timing
 
 	return func(attempt int) time.Duration {
 		mu.Lock()

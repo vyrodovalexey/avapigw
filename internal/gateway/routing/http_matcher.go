@@ -39,7 +39,8 @@ func NewExactPathMatcher(path string) *ExactPathMatcher {
 }
 
 // Match checks if the path matches exactly.
-func (m *ExactPathMatcher) Match(path string) (bool, map[string]string) {
+// Returns whether the path matches and any captured parameters (always nil for exact matching).
+func (m *ExactPathMatcher) Match(path string) (matched bool, params map[string]string) {
 	return path == m.path, nil
 }
 
@@ -59,7 +60,8 @@ func NewPrefixPathMatcher(prefix string) *PrefixPathMatcher {
 }
 
 // Match checks if the path starts with the prefix.
-func (m *PrefixPathMatcher) Match(path string) (bool, map[string]string) {
+// Returns whether the path matches and any captured parameters (always nil for prefix matching).
+func (m *PrefixPathMatcher) Match(path string) (matched bool, params map[string]string) {
 	if !strings.HasPrefix(path, m.prefix) {
 		return false, nil
 	}
@@ -102,7 +104,8 @@ func NewRegexPathMatcher(pattern string) (*RegexPathMatcher, error) {
 }
 
 // Match checks if the path matches the regex.
-func (m *RegexPathMatcher) Match(path string) (bool, map[string]string) {
+// Returns whether the path matches and any captured named groups from the regex.
+func (m *RegexPathMatcher) Match(path string) (matched bool, params map[string]string) {
 	matches := m.regex.FindStringSubmatch(path)
 	if matches == nil {
 		return false, nil
@@ -135,7 +138,7 @@ func NewSimpleMethodMatcher(method string) *SimpleMethodMatcher {
 
 // Match checks if the method matches.
 func (m *SimpleMethodMatcher) Match(method string) bool {
-	return strings.ToUpper(method) == m.method
+	return strings.EqualFold(method, m.method)
 }
 
 // MultiMethodMatcher matches multiple HTTP methods.

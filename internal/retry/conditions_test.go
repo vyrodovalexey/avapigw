@@ -443,7 +443,7 @@ func TestNetworkErrorCondition_ShouldRetry(t *testing.T) {
 			name:       "temporary net.Error",
 			err:        &mockNetError{timeout: false, temporary: true, msg: "temporary"},
 			statusCode: 0,
-			want:       true,
+			want:       false, // Temporary() is deprecated since Go 1.18, only timeout errors are retried
 		},
 		{
 			name:       "timeout and temporary net.Error",
@@ -473,7 +473,7 @@ func TestNetworkErrorCondition_ShouldRetry(t *testing.T) {
 			name:       "net.OpError with temporary",
 			err:        mockOpErrorWithTemporary(),
 			statusCode: 0,
-			want:       true,
+			want:       false, // Temporary() is deprecated since Go 1.18, only timeout errors are retried
 		},
 		{
 			name:       "url.Error with timeout",
@@ -485,7 +485,7 @@ func TestNetworkErrorCondition_ShouldRetry(t *testing.T) {
 			name:       "url.Error with temporary",
 			err:        mockURLError(false, true),
 			statusCode: 0,
-			want:       true,
+			want:       false, // Temporary() is deprecated since Go 1.18, only timeout errors are retried
 		},
 		{
 			name:       "url.Error non-timeout non-temporary",

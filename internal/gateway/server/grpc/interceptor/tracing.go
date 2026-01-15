@@ -223,7 +223,7 @@ func (c metadataCarrier) Keys() []string {
 
 // extractService extracts the service name from the full method.
 func extractService(fullMethod string) string {
-	if len(fullMethod) == 0 {
+	if fullMethod == "" {
 		return ""
 	}
 	if fullMethod[0] == '/' {
@@ -239,7 +239,7 @@ func extractService(fullMethod string) string {
 
 // extractMethod extracts the method name from the full method.
 func extractMethod(fullMethod string) string {
-	if len(fullMethod) == 0 {
+	if fullMethod == "" {
 		return ""
 	}
 	for i := len(fullMethod) - 1; i >= 0; i-- {

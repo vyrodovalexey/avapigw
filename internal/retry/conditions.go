@@ -18,11 +18,11 @@ type StatusCodeCondition struct {
 
 // RetryOnStatusCodes creates a condition that retries on specific HTTP status codes.
 func RetryOnStatusCodes(statusCodes ...int) *StatusCodeCondition {
-	codes := make(map[int]bool)
+	codeMap := make(map[int]bool)
 	for _, code := range statusCodes {
-		codes[code] = true
+		codeMap[code] = true
 	}
-	return &StatusCodeCondition{codes: codes}
+	return &StatusCodeCondition{codes: codeMap}
 }
 
 // ShouldRetry implements RetryCondition.
@@ -97,7 +97,9 @@ func (c *NetworkErrorCondition) ShouldRetry(err error, statusCode int) bool {
 	// Check for common network errors
 	var netErr net.Error
 	if errors.As(err, &netErr) {
-		return netErr.Timeout() || netErr.Temporary()
+		// Note: netErr.Temporary() is deprecated since Go 1.18
+		// We only check for timeout errors now
+		return netErr.Timeout()
 	}
 
 	// Check for specific error types

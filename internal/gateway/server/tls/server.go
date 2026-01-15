@@ -209,7 +209,8 @@ func (s *Server) Start(ctx context.Context) error {
 		listener, err = tls.Listen("tcp", addr, tlsConfig)
 	} else {
 		// For passthrough, create a raw TCP listener
-		listener, err = net.Listen("tcp", addr)
+		lc := &net.ListenConfig{}
+		listener, err = lc.Listen(context.Background(), "tcp", addr)
 	}
 
 	if err != nil {
@@ -402,7 +403,7 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	// Close certificate manager
 	if s.certManager != nil {
-		s.certManager.Close()
+		_ = s.certManager.Close() // Ignore error on cleanup
 	}
 
 	s.mu.Lock()
@@ -430,7 +431,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 		s.logger.Debug("context cancelled before handling connection",
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
 		)
-		conn.Close()
+		_ = conn.Close() // Ignore error on cleanup
 		return
 	default:
 	}
@@ -442,11 +443,11 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
 			zap.Error(err),
 		)
-		conn.Close()
+		_ = conn.Close() // Ignore error on cleanup
 		return
 	}
 	defer s.connections.Remove(tracked.ID)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }() // Ignore error on cleanup
 
 	// Set up a goroutine to close the connection when context is cancelled
 	// This ensures the connection is closed promptly on shutdown
@@ -459,7 +460,7 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			s.logger.Debug("context cancelled, closing connection",
 				zap.String("id", tracked.ID),
 			)
-			conn.Close()
+			_ = conn.Close() // Ignore error on cleanup
 		case <-done:
 			// Handler completed normally
 		}
@@ -615,26 +616,18 @@ func (s *Server) handleTerminateConnection(ctx context.Context, conn net.Conn, t
 	}
 
 	// Complete the TLS handshake with context awareness
-	// Create a channel to signal handshake completion
-	handshakeDone := make(chan error, 1)
-	go func() {
-		handshakeDone <- tlsConn.Handshake()
-	}()
-
-	select {
-	case <-ctx.Done():
-		s.logger.Debug("context cancelled during TLS handshake",
-			zap.String("id", tracked.ID),
-		)
-		return
-	case err := <-handshakeDone:
-		if err != nil {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		if ctx.Err() != nil {
+			s.logger.Debug("context cancelled during TLS handshake",
+				zap.String("id", tracked.ID),
+			)
+		} else {
 			s.logger.Debug("TLS handshake failed",
 				zap.String("id", tracked.ID),
 				zap.Error(err),
 			)
-			return
 		}
+		return
 	}
 
 	// Get the SNI from the connection state
@@ -682,7 +675,8 @@ func (s *Server) handleTerminateConnection(ctx context.Context, conn net.Conn, t
 
 // buildTLSConfig builds the TLS configuration for termination mode.
 func (s *Server) buildTLSConfig() *tls.Config {
-	config := &tls.Config{
+	// G402: MinVersion is configurable by the user for flexibility
+	config := &tls.Config{ //nolint:gosec // MinVersion is user-configurable
 		GetCertificate: s.certManager.GetCertificate,
 		MinVersion:     s.config.MinVersion,
 		MaxVersion:     s.config.MaxVersion,

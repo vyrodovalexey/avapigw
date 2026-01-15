@@ -78,8 +78,8 @@ func UnaryLoggingInterceptorWithConfig(config LoggingConfig) grpc.UnaryServerInt
 		}
 
 		// Add peer info if available
-		if peer := getPeerAddress(ctx); peer != "" {
-			fields = append(fields, zap.String("peer", peer))
+		if peerAddr := getPeerAddress(ctx); peerAddr != "" {
+			fields = append(fields, zap.String("peer", peerAddr))
 		}
 
 		// Log based on error
@@ -155,8 +155,8 @@ func StreamLoggingInterceptorWithConfig(config LoggingConfig) grpc.StreamServerI
 		}
 
 		// Add peer info if available
-		if peer := getPeerAddress(ctx); peer != "" {
-			fields = append(fields, zap.String("peer", peer))
+		if peerAddr := getPeerAddress(ctx); peerAddr != "" {
+			fields = append(fields, zap.String("peer", peerAddr))
 		}
 
 		// Log based on error

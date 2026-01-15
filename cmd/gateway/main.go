@@ -95,7 +95,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync() // Explicitly ignore error as we're shutting down
+	}()
 
 	logger.Info("starting API Gateway",
 		zap.Int("httpPort", cfg.HTTPPort),
@@ -120,7 +122,8 @@ func main() {
 	backendMgr := backend.NewManager(logger)
 	if err := backendMgr.Start(ctx); err != nil {
 		logger.Error("failed to start backend manager", zap.Error(err))
-		os.Exit(1)
+		cancel()   // Ensure context cleanup before exit
+		os.Exit(1) //nolint:gocritic // exitAfterDefer: cancel() called explicitly above
 	}
 
 	// Create health handler with configurable timeouts
@@ -233,7 +236,7 @@ func main() {
 			Port:                 cfg.GRPCPort,
 			MaxRecvMsgSize:       cfg.GRPCMaxRecvMsgSize,
 			MaxSendMsgSize:       cfg.GRPCMaxSendMsgSize,
-			MaxConcurrentStreams: uint32(cfg.GRPCMaxConcurrentStreams),
+			MaxConcurrentStreams: safeIntToUint32(cfg.GRPCMaxConcurrentStreams),
 			EnableReflection:     cfg.GRPCEnableReflection,
 			EnableHealthCheck:    cfg.GRPCEnableHealthCheck,
 		}, backendMgr, logger)
@@ -486,6 +489,17 @@ func setupGRPCInterceptors(server *grpcserver.Server, cfg *config.Config, logger
 		server.AddUnaryInterceptor(interceptor.UnaryTracingInterceptor())
 		server.AddStreamInterceptor(interceptor.StreamTracingInterceptor())
 	}
+}
+
+// safeIntToUint32 safely converts an int to uint32, clamping to max uint32 if needed.
+func safeIntToUint32(v int) uint32 {
+	if v < 0 {
+		return 0
+	}
+	if v > int(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(v)
 }
 
 // startMetricsServer starts the metrics server on a separate port.

@@ -56,15 +56,6 @@ var (
 		},
 		[]string{"webhook_type", "status"},
 	)
-
-	// certSecretOperationsTotal counts secret operations.
-	certSecretOperationsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "webhook_cert_secret_operations_total",
-			Help: "Total number of certificate secret operations",
-		},
-		[]string{"operation", "status"},
-	)
 )
 
 const (
@@ -73,10 +64,6 @@ const (
 
 	webhookTypeValidating = "validating"
 	webhookTypeMutating   = "mutating"
-
-	operationCreate = "create"
-	operationUpdate = "update"
-	operationRead   = "read"
 )
 
 // recordCertGeneration records a certificate generation.
@@ -153,24 +140,9 @@ func recordMutatingWebhookInjection(success bool) {
 	recordInjection(webhookTypeMutating, success)
 }
 
-// recordSecretOperation records a secret operation.
-func recordSecretOperation(operation string, success bool) {
-	defer recoverFromPanic()
-	if certSecretOperationsTotal == nil {
-		return
-	}
-
-	status := statusSuccess
-	if !success {
-		status = statusError
-	}
-	certSecretOperationsTotal.WithLabelValues(operation, status).Inc()
-}
-
 // recoverFromPanic recovers from any panic in metrics recording.
 func recoverFromPanic() {
-	if r := recover(); r != nil {
-		// Silently recover from any panic in metrics recording
-		// This ensures metrics issues don't crash the application
-	}
+	// Silently recover from any panic in metrics recording
+	// This ensures metrics issues don't crash the application
+	_ = recover()
 }

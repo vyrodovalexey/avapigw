@@ -789,7 +789,7 @@ func (l *ListenerConfig) Validate() error {
 	}
 
 	// TLS configuration is required for HTTPS and TLS protocols
-	if (strings.ToUpper(l.Protocol) == "HTTPS" || strings.ToUpper(l.Protocol) == "TLS" || strings.ToUpper(l.Protocol) == "GRPCS") && l.TLS == nil {
+	if (strings.EqualFold(l.Protocol, "HTTPS") || strings.EqualFold(l.Protocol, "TLS") || strings.EqualFold(l.Protocol, "GRPCS")) && l.TLS == nil {
 		return fmt.Errorf("TLS configuration is required for %s protocol", l.Protocol)
 	}
 

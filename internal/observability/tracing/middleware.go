@@ -142,11 +142,12 @@ func HTTPMiddlewareWithConfig(config *HTTPMiddlewareConfig) func(http.Handler) h
 			)
 
 			// Set span status based on HTTP status code
-			if wrapped.statusCode >= 500 {
+			switch {
+			case wrapped.statusCode >= 500:
 				span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
-			} else if wrapped.statusCode >= 400 {
+			case wrapped.statusCode >= 400:
 				span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
-			} else {
+			default:
 				span.SetStatus(codes.Ok, "")
 			}
 		})
@@ -242,11 +243,12 @@ func GinMiddlewareWithConfig(config *HTTPMiddlewareConfig) gin.HandlerFunc {
 
 		// Set span status based on HTTP status code
 		statusCode := c.Writer.Status()
-		if statusCode >= 500 {
+		switch {
+		case statusCode >= 500:
 			span.SetStatus(codes.Error, http.StatusText(statusCode))
-		} else if statusCode >= 400 {
+		case statusCode >= 400:
 			span.SetStatus(codes.Error, http.StatusText(statusCode))
-		} else {
+		default:
 			span.SetStatus(codes.Ok, "")
 		}
 	}
@@ -518,7 +520,8 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 }
 
 // parseFullMethod parses a gRPC full method name into service and method.
-func parseFullMethod(fullMethod string) (string, string) {
+// Returns the service name and method name.
+func parseFullMethod(fullMethod string) (service string, method string) {
 	// Full method format: /package.service/method
 	parts := strings.Split(strings.TrimPrefix(fullMethod, "/"), "/")
 	if len(parts) != 2 {

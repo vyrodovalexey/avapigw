@@ -113,7 +113,7 @@ func TestExtractGatewayRefs(t *testing.T) {
 			name:           "empty parent refs",
 			routeNamespace: "default",
 			parentRefs:     []avapigwv1alpha1.ParentRef{},
-			want:           nil,
+			want:           []string{},
 		},
 		{
 			name:           "single parent ref without namespace",

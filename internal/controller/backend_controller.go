@@ -97,16 +97,16 @@ func (r *BackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
-	resourceKey := req.NamespacedName.String()
+	resourceKey := req.String()
 
 	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
 		duration := time.Since(start).Seconds()
-		result := "success"
+		result := MetricResultSuccess
 		if reconcileErr != nil {
-			result = "error"
+			result = MetricResultError
 		}
 		backendReconcileDuration.WithLabelValues(result).Observe(duration)
 		backendReconcileTotal.WithLabelValues(result).Inc()
@@ -250,7 +250,7 @@ func (r *BackendReconciler) reconcileBackend(ctx context.Context, backend *avapi
 
 	// Update endpoint statuses
 	backend.Status.Endpoints = endpoints
-	backend.Status.TotalEndpoints = int32(len(endpoints))
+	backend.Status.TotalEndpoints = safeIntToInt32(len(endpoints))
 
 	// Count healthy endpoints
 	healthyCount := int32(0)
@@ -262,19 +262,20 @@ func (r *BackendReconciler) reconcileBackend(ctx context.Context, backend *avapi
 	backend.Status.HealthyEndpoints = healthyCount
 
 	// Set conditions based on endpoint health
-	if backend.Status.TotalEndpoints == 0 {
+	switch {
+	case backend.Status.TotalEndpoints == 0:
 		r.setCondition(backend, avapigwv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 			string(avapigwv1alpha1.ReasonNotReady), "No endpoints available")
 		backend.Status.Phase = avapigwv1alpha1.PhaseStatusError
-	} else if backend.Status.HealthyEndpoints == 0 {
+	case backend.Status.HealthyEndpoints == 0:
 		r.setCondition(backend, avapigwv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 			string(avapigwv1alpha1.ReasonDegraded), "No healthy endpoints")
 		backend.Status.Phase = avapigwv1alpha1.PhaseStatusDegraded
-	} else if backend.Status.HealthyEndpoints < backend.Status.TotalEndpoints {
+	case backend.Status.HealthyEndpoints < backend.Status.TotalEndpoints:
 		r.setCondition(backend, avapigwv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
 			string(avapigwv1alpha1.ReasonDegraded), fmt.Sprintf("%d/%d endpoints healthy", healthyCount, backend.Status.TotalEndpoints))
 		backend.Status.Phase = avapigwv1alpha1.PhaseStatusDegraded
-	} else {
+	default:
 		r.setCondition(backend, avapigwv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
 			string(avapigwv1alpha1.ReasonReady), "All endpoints healthy")
 		backend.Status.Phase = avapigwv1alpha1.PhaseStatusReady

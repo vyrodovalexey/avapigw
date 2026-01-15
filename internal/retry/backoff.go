@@ -28,13 +28,13 @@ type ExponentialBackoff struct {
 }
 
 // NewExponentialBackoff creates a new exponential backoff.
-func NewExponentialBackoff(initial, max time.Duration, factor, jitter float64) *ExponentialBackoff {
+func NewExponentialBackoff(initial, maxDuration time.Duration, factor, jitter float64) *ExponentialBackoff {
 	return &ExponentialBackoff{
 		initial: initial,
-		max:     max,
+		max:     maxDuration,
 		factor:  factor,
 		jitter:  jitter,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
 	}
 }
 
@@ -104,11 +104,11 @@ type LinearBackoff struct {
 }
 
 // NewLinearBackoff creates a new linear backoff.
-func NewLinearBackoff(initial, increment, max time.Duration) *LinearBackoff {
+func NewLinearBackoff(initial, increment, maxDuration time.Duration) *LinearBackoff {
 	return &LinearBackoff{
 		initial:   initial,
 		increment: increment,
-		max:       max,
+		max:       maxDuration,
 	}
 }
 
@@ -139,10 +139,10 @@ type FibonacciBackoff struct {
 }
 
 // NewFibonacciBackoff creates a new Fibonacci backoff.
-func NewFibonacciBackoff(initial, max time.Duration) *FibonacciBackoff {
+func NewFibonacciBackoff(initial, maxDuration time.Duration) *FibonacciBackoff {
 	return &FibonacciBackoff{
 		initial: initial,
-		max:     max,
+		max:     maxDuration,
 	}
 }
 
@@ -195,11 +195,11 @@ type DecorrelatedJitterBackoff struct {
 }
 
 // NewDecorrelatedJitterBackoff creates a new decorrelated jitter backoff.
-func NewDecorrelatedJitterBackoff(initial, max time.Duration) *DecorrelatedJitterBackoff {
+func NewDecorrelatedJitterBackoff(initial, maxDuration time.Duration) *DecorrelatedJitterBackoff {
 	return &DecorrelatedJitterBackoff{
 		initial: initial,
-		max:     max,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		max:     maxDuration,
+		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
 		current: initial,
 	}
 }
@@ -214,7 +214,7 @@ func (b *DecorrelatedJitterBackoff) Next(attempt int) time.Duration {
 		return b.current
 	}
 
-	// sleep = min(cap, random_between(base, sleep * 3))
+	// Decorrelated jitter formula: sleep = min(cap, random_between(base, sleep * 3))
 	minBackoff := float64(b.initial)
 	maxBackoff := float64(b.current) * 3
 
@@ -355,11 +355,11 @@ type FullJitterBackoff struct {
 }
 
 // NewFullJitterBackoff creates a new full jitter backoff.
-func NewFullJitterBackoff(initial, max time.Duration) *FullJitterBackoff {
+func NewFullJitterBackoff(initial, maxDuration time.Duration) *FullJitterBackoff {
 	return &FullJitterBackoff{
 		initial: initial,
-		max:     max,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+		max:     maxDuration,
+		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
 	}
 }
 
@@ -401,11 +401,11 @@ type EqualJitterBackoff struct {
 }
 
 // NewEqualJitterBackoff creates a new equal jitter backoff.
-func NewEqualJitterBackoff(initial, max time.Duration) *EqualJitterBackoff {
+func NewEqualJitterBackoff(initial, maxDuration time.Duration) *EqualJitterBackoff {
 	return &EqualJitterBackoff{
 		initial: initial,
-		max:     max,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
+		max:     maxDuration,
+		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
 	}
 }
 

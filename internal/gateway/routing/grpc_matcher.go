@@ -6,6 +6,11 @@ import (
 	"sync"
 )
 
+// Match type constants
+const (
+	matchTypeRegularExpression = "RegularExpression"
+)
+
 // GRPCRouteMatcher performs gRPC route matching.
 type GRPCRouteMatcher struct {
 	routes []*CompiledGRPCRoute
@@ -244,7 +249,7 @@ func compileGRPCRule(config *GRPCRuleConfig, index int) (*CompiledGRPCRule, erro
 
 	// Compile service matcher
 	switch config.MatchType {
-	case "RegularExpression":
+	case matchTypeRegularExpression:
 		matcher, err := NewGRPCRegexServiceMatcher(config.Service)
 		if err != nil {
 			return nil, err
@@ -256,7 +261,7 @@ func compileGRPCRule(config *GRPCRuleConfig, index int) (*CompiledGRPCRule, erro
 
 	// Compile method matcher
 	switch config.MatchType {
-	case "RegularExpression":
+	case matchTypeRegularExpression:
 		matcher, err := NewGRPCRegexMethodMatcher(config.Method)
 		if err != nil {
 			return nil, err
@@ -272,7 +277,7 @@ func compileGRPCRule(config *GRPCRuleConfig, index int) (*CompiledGRPCRule, erro
 		var err error
 
 		switch header.MatchType {
-		case "RegularExpression":
+		case matchTypeRegularExpression:
 			matcher, err = NewGRPCRegexHeaderMatcher(header.Name, header.Value)
 			if err != nil {
 				return nil, err

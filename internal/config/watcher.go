@@ -53,7 +53,6 @@ type ConfigWatcher struct {
 
 	mu           sync.RWMutex
 	lastConfig   *LocalConfig
-	lastModTime  time.Time
 	running      bool
 	stopCh       chan struct{}
 	reloadCh     chan struct{}
@@ -146,7 +145,7 @@ func (w *ConfigWatcher) Start(ctx context.Context) error {
 	// and rename it, which doesn't trigger a WRITE event on the original file
 	dir := filepath.Dir(w.path)
 	if err := watcher.Add(dir); err != nil {
-		watcher.Close()
+		_ = watcher.Close() // Ignore error on cleanup
 		w.mu.Lock()
 		w.running = false
 		w.mu.Unlock()

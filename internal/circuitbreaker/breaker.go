@@ -72,7 +72,7 @@ func NewCircuitBreaker(name string, config *Config, logger *zap.Logger) *Circuit
 	if config == nil {
 		config = DefaultConfig()
 	}
-	config.Validate()
+	_ = config.Validate() // Explicitly ignore error as we use defaults for invalid config
 
 	if logger == nil {
 		logger = zap.NewNop()

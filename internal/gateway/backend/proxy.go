@@ -197,7 +197,7 @@ func (p *Proxy) ProxyWithRetry(w http.ResponseWriter, r *http.Request, backend *
 		if err != nil {
 			return fmt.Errorf("failed to read request body: %w", err)
 		}
-		r.Body.Close()
+		_ = r.Body.Close() // Ignore error on close after successful read
 	}
 
 	for attempt := 0; attempt <= p.config.MaxRetries; attempt++ {

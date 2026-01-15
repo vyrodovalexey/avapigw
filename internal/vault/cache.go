@@ -539,7 +539,7 @@ func (c *VaultClientCache) Set(key string, client *Client, address string) {
 		// Close old client if address changed
 		if existing.Address != address {
 			if existing.Client != nil {
-				existing.Client.Close()
+				_ = existing.Client.Close() // Ignore error on cleanup
 			}
 			RecordVaultClientCacheEviction()
 		}
@@ -610,7 +610,7 @@ func (c *VaultClientCache) Clear() {
 	// Close all clients
 	for _, entry := range c.entries {
 		if entry.Client != nil {
-			entry.Client.Close()
+			_ = entry.Client.Close() // Ignore error on cleanup
 		}
 	}
 
@@ -737,7 +737,7 @@ func (c *VaultClientCache) removeEntryLocked(key string) {
 
 	// Close the client
 	if entry.Client != nil {
-		entry.Client.Close()
+		_ = entry.Client.Close() // Ignore error on cleanup
 	}
 
 	// Remove from LRU list

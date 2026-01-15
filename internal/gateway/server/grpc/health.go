@@ -41,9 +41,9 @@ func (s *HealthServer) Check(ctx context.Context, req *healthpb.HealthCheckReque
 	}
 
 	// Check static status
-	if status, ok := s.status[service]; ok {
+	if servingStatus, ok := s.status[service]; ok {
 		return &healthpb.HealthCheckResponse{
-			Status: status,
+			Status: servingStatus,
 		}, nil
 	}
 
@@ -89,10 +89,10 @@ func (s *HealthServer) Watch(req *healthpb.HealthCheckRequest, stream healthpb.H
 }
 
 // SetServingStatus sets the serving status for a service.
-func (s *HealthServer) SetServingStatus(service string, status healthpb.HealthCheckResponse_ServingStatus) {
+func (s *HealthServer) SetServingStatus(service string, servingStatus healthpb.HealthCheckResponse_ServingStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.status[service] = status
+	s.status[service] = servingStatus
 }
 
 // SetCheck sets a dynamic check function for a service.

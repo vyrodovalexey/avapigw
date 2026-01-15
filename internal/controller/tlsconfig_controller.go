@@ -85,7 +85,7 @@ func (r *TLSConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Track reconciliation metrics
 	start := time.Now()
-	var reconcileResult string = "success"
+	var reconcileResult = "success"
 	defer func() {
 		duration := time.Since(start).Seconds()
 		tlsConfigReconcileDuration.WithLabelValues(reconcileResult).Observe(duration)
@@ -101,7 +101,7 @@ func (r *TLSConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			logger.Info("TLSConfig not found, ignoring")
 			return ctrl.Result{}, nil
 		}
-		reconcileResult = "error"
+		reconcileResult = MetricResultError
 		logger.Error(err, "Failed to get TLSConfig")
 		return ctrl.Result{}, err
 	}
@@ -115,7 +115,7 @@ func (r *TLSConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !controllerutil.ContainsFinalizer(tlsConfig, tlsConfigFinalizer) {
 		controllerutil.AddFinalizer(tlsConfig, tlsConfigFinalizer)
 		if err := r.Update(ctx, tlsConfig); err != nil {
-			reconcileResult = "error"
+			reconcileResult = MetricResultError
 			logger.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -124,7 +124,7 @@ func (r *TLSConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Reconcile the TLSConfig
 	if err := r.reconcileTLSConfig(ctx, tlsConfig); err != nil {
-		reconcileResult = "error"
+		reconcileResult = MetricResultError
 		logger.Error(err, "Failed to reconcile TLSConfig")
 		r.Recorder.Event(tlsConfig, corev1.EventTypeWarning, "ReconcileError", err.Error())
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
@@ -142,6 +142,8 @@ func (r *TLSConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // handleDeletion handles TLSConfig deletion
+//
+//nolint:unparam // result kept for API consistency with other controllers
 func (r *TLSConfigReconciler) handleDeletion(ctx context.Context, tlsConfig *avapigwv1alpha1.TLSConfig) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -188,7 +190,7 @@ func (r *TLSConfigReconciler) reconcileTLSConfig(ctx context.Context, tlsConfig 
 	// Check certificate expiration
 	if certInfo.NotAfter != nil {
 		now := time.Now()
-		expiresIn := certInfo.NotAfter.Time.Sub(now)
+		expiresIn := certInfo.NotAfter.Sub(now)
 
 		// Default renew before is 30 days
 		renewBefore := 30 * 24 * time.Hour
@@ -198,18 +200,19 @@ func (r *TLSConfigReconciler) reconcileTLSConfig(ctx context.Context, tlsConfig 
 			}
 		}
 
-		if expiresIn <= 0 {
+		switch {
+		case expiresIn <= 0:
 			r.setCondition(tlsConfig, avapigwv1alpha1.ConditionTypeReady, metav1.ConditionFalse,
 				string(avapigwv1alpha1.ReasonError), "Certificate has expired")
 			tlsConfig.Status.Phase = avapigwv1alpha1.PhaseStatusError
 			r.Recorder.Event(tlsConfig, corev1.EventTypeWarning, "CertificateExpired", "Certificate has expired")
-		} else if expiresIn <= renewBefore {
+		case expiresIn <= renewBefore:
 			r.setCondition(tlsConfig, avapigwv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
 				string(avapigwv1alpha1.ReasonDegraded), fmt.Sprintf("Certificate expires in %s", expiresIn.Round(time.Hour)))
 			tlsConfig.Status.Phase = avapigwv1alpha1.PhaseStatusDegraded
 			r.Recorder.Event(tlsConfig, corev1.EventTypeWarning, "CertificateExpiringSoon",
 				fmt.Sprintf("Certificate expires in %s", expiresIn.Round(time.Hour)))
-		} else {
+		default:
 			r.setCondition(tlsConfig, avapigwv1alpha1.ConditionTypeReady, metav1.ConditionTrue,
 				string(avapigwv1alpha1.ReasonReady), "Certificate is valid")
 			tlsConfig.Status.Phase = avapigwv1alpha1.PhaseStatusReady
@@ -333,7 +336,7 @@ func (r *TLSConfigReconciler) loadCertificateFromVault(ctx context.Context, tlsC
 		return r.parseCertificate(certData)
 	}
 
-	return nil, fmt.Errorf("Vault certificate source requires VaultSecretRef")
+	return nil, fmt.Errorf("vault certificate source requires VaultSecretRef")
 }
 
 // parseCertificate parses a PEM-encoded certificate and extracts information
@@ -371,6 +374,8 @@ func (r *TLSConfigReconciler) parseCertificate(certData []byte) (*avapigwv1alpha
 }
 
 // setCondition sets a condition on the TLSConfig status
+//
+//nolint:unparam // conditionType kept for API consistency with other controllers
 func (r *TLSConfigReconciler) setCondition(tlsConfig *avapigwv1alpha1.TLSConfig, conditionType avapigwv1alpha1.ConditionType, status metav1.ConditionStatus, reason, message string) {
 	tlsConfig.Status.SetCondition(conditionType, status, reason, message)
 }

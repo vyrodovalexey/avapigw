@@ -303,9 +303,6 @@ func (t *FailureTracker) Clear() {
 // Jitter Calculation
 // ============================================================================
 
-// jitterRandMu protects the jitter random number generator.
-var jitterRandMu sync.Mutex
-
 // addJitter adds random jitter to an interval.
 // Jitter is calculated as a percentage of the interval, applied as +/- half the jitter.
 func addJitter(interval time.Duration, jitterPercent int) time.Duration {

@@ -83,7 +83,7 @@ func (r *AuthPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Track reconciliation metrics
 	start := time.Now()
-	var reconcileResult string = "success"
+	var reconcileResult = "success"
 	defer func() {
 		duration := time.Since(start).Seconds()
 		authPolicyReconcileDuration.WithLabelValues(reconcileResult).Observe(duration)
@@ -99,7 +99,7 @@ func (r *AuthPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			logger.Info("AuthPolicy not found, ignoring")
 			return ctrl.Result{}, nil
 		}
-		reconcileResult = "error"
+		reconcileResult = MetricResultError
 		logger.Error(err, "Failed to get AuthPolicy")
 		return ctrl.Result{}, err
 	}
@@ -113,7 +113,7 @@ func (r *AuthPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !controllerutil.ContainsFinalizer(policy, authPolicyFinalizer) {
 		controllerutil.AddFinalizer(policy, authPolicyFinalizer)
 		if err := r.Update(ctx, policy); err != nil {
-			reconcileResult = "error"
+			reconcileResult = MetricResultError
 			logger.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -122,7 +122,7 @@ func (r *AuthPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Reconcile the AuthPolicy
 	if err := r.reconcileAuthPolicy(ctx, policy); err != nil {
-		reconcileResult = "error"
+		reconcileResult = MetricResultError
 		logger.Error(err, "Failed to reconcile AuthPolicy")
 		r.Recorder.Event(policy, corev1.EventTypeWarning, "ReconcileError", err.Error())
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
@@ -132,6 +132,8 @@ func (r *AuthPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 // handleDeletion handles AuthPolicy deletion
+//
+//nolint:unparam // result kept for API consistency with other controllers
 func (r *AuthPolicyReconciler) handleDeletion(ctx context.Context, policy *avapigwv1alpha1.AuthPolicy) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -261,7 +263,7 @@ func (r *AuthPolicyReconciler) validateAuthenticationConfig(ctx context.Context,
 	// Validate Basic Auth configuration
 	if auth.Basic != nil && auth.Basic.Enabled != nil && *auth.Basic.Enabled {
 		if err := r.validateBasicAuthConfig(ctx, policy, auth.Basic); err != nil {
-			return fmt.Errorf("Basic Auth configuration error: %w", err)
+			return fmt.Errorf("basic auth configuration error: %w", err)
 		}
 	}
 
@@ -354,7 +356,7 @@ func (r *AuthPolicyReconciler) validateBasicAuthConfig(ctx context.Context, poli
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: basic.SecretRef.Name}, secret); err != nil {
 		if errors.IsNotFound(err) {
-			return fmt.Errorf("Basic Auth secret %s/%s not found", namespace, basic.SecretRef.Name)
+			return fmt.Errorf("basic auth secret %s/%s not found", namespace, basic.SecretRef.Name)
 		}
 		return fmt.Errorf("failed to get Basic Auth secret %s/%s: %w", namespace, basic.SecretRef.Name, err)
 	}

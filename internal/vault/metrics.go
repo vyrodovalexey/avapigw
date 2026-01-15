@@ -152,10 +152,9 @@ const (
 // Includes nil checks and panic recovery for safety.
 func RecordRequest(operation string, duration time.Duration, success bool) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-			// This ensures metrics issues don't crash the application
-		}
+		// Silently recover from any panic in metrics recording
+		// This ensures metrics issues don't crash the application
+		_ = recover()
 	}()
 
 	if vaultRequestsTotal == nil || vaultRequestDuration == nil {
@@ -174,9 +173,8 @@ func RecordRequest(operation string, duration time.Duration, success bool) {
 // Includes nil checks and panic recovery for safety.
 func RecordAuthentication(method string, success bool) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultAuthenticationsTotal == nil {
@@ -194,9 +192,8 @@ func RecordAuthentication(method string, success bool) {
 // Includes nil checks and panic recovery for safety.
 func UpdateSecretsWatched(count int) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultSecretsWatched == nil {
@@ -210,9 +207,8 @@ func UpdateSecretsWatched(count int) {
 // Includes nil checks and panic recovery for safety.
 func RecordSecretRefresh(path string, success bool) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultSecretRefreshTotal == nil {
@@ -230,9 +226,8 @@ func RecordSecretRefresh(path string, success bool) {
 // Includes nil checks and panic recovery for safety.
 func RecordCacheHit() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultCacheHits == nil {
@@ -246,9 +241,8 @@ func RecordCacheHit() {
 // Includes nil checks and panic recovery for safety.
 func RecordCacheMiss() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultCacheMisses == nil {
@@ -262,9 +256,8 @@ func RecordCacheMiss() {
 // Includes nil checks and panic recovery for safety.
 func UpdateTokenExpiry(expiry time.Time) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultTokenExpiryTime == nil {
@@ -282,9 +275,8 @@ func UpdateTokenExpiry(expiry time.Time) {
 // Includes nil checks and panic recovery for safety.
 func RecordRetry(operation string, attempt int) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultRetryTotal == nil {
@@ -298,9 +290,8 @@ func RecordRetry(operation string, attempt int) {
 // Includes nil checks and panic recovery for safety.
 func RecordConnectionError() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultConnectionErrors == nil {
@@ -314,9 +305,8 @@ func RecordConnectionError() {
 // Includes nil checks and panic recovery for safety.
 func UpdateCacheSize(size int) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultCacheSize == nil {
@@ -330,9 +320,8 @@ func UpdateCacheSize(size int) {
 // Includes nil checks and panic recovery for safety.
 func RecordCacheEviction() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultCacheEvictions == nil {
@@ -346,9 +335,8 @@ func RecordCacheEviction() {
 // Includes nil checks and panic recovery for safety.
 func UpdateVaultClientCacheSize(size int) {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultClientCacheSize == nil {
@@ -362,9 +350,8 @@ func UpdateVaultClientCacheSize(size int) {
 // Includes nil checks and panic recovery for safety.
 func RecordVaultClientCacheHit() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultClientCacheHits == nil {
@@ -378,9 +365,8 @@ func RecordVaultClientCacheHit() {
 // Includes nil checks and panic recovery for safety.
 func RecordVaultClientCacheMiss() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultClientCacheMisses == nil {
@@ -394,9 +380,8 @@ func RecordVaultClientCacheMiss() {
 // Includes nil checks and panic recovery for safety.
 func RecordVaultClientCacheEviction() {
 	defer func() {
-		if r := recover(); r != nil {
-			// Silently recover from any panic in metrics recording
-		}
+		// Silently recover from any panic in metrics recording
+		_ = recover()
 	}()
 
 	if vaultClientCacheEvictions == nil {

@@ -260,7 +260,8 @@ func main() {
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
+		cancel()   // Ensure context cleanup before exit
+		os.Exit(1) //nolint:gocritic // exitAfterDefer: cancel() called explicitly above
 	}
 
 	// Stop certificate manager on normal exit

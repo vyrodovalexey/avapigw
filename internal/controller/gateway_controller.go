@@ -102,16 +102,16 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
-	resourceKey := req.NamespacedName.String()
+	resourceKey := req.String()
 
 	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
 		duration := time.Since(start).Seconds()
-		result := "success"
+		result := MetricResultSuccess
 		if reconcileErr != nil {
-			result = "error"
+			result = MetricResultError
 		}
 		gatewayReconcileDuration.WithLabelValues(result).Observe(duration)
 		gatewayReconcileTotal.WithLabelValues(result).Inc()
@@ -295,7 +295,7 @@ func (r *GatewayReconciler) reconcileGateway(ctx context.Context, gateway *avapi
 		string(avapigwv1alpha1.ReasonProgrammed), "Gateway listeners configured")
 
 	gateway.Status.Phase = avapigwv1alpha1.PhaseStatusReady
-	gateway.Status.ListenersCount = int32(len(gateway.Spec.Listeners))
+	gateway.Status.ListenersCount = safeIntToInt32(len(gateway.Spec.Listeners))
 
 	// Update status
 	if err := r.updateStatus(ctx, gateway); err != nil {
@@ -343,8 +343,10 @@ func (r *GatewayReconciler) validateTLSConfigs(ctx context.Context, gateway *ava
 	return nil
 }
 
-// updateListenerStatuses updates the status of each listener
-func (r *GatewayReconciler) updateListenerStatuses(ctx context.Context, gateway *avapigwv1alpha1.Gateway) error {
+// updateListenerStatuses updates the status of each listener.
+// Note: Currently always returns nil, but error return is kept for API stability
+// and potential future validation logic.
+func (r *GatewayReconciler) updateListenerStatuses(ctx context.Context, gateway *avapigwv1alpha1.Gateway) error { //nolint:unparam // error return kept for API stability and future validation logic
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Updating listener statuses", "listenerCount", len(gateway.Spec.Listeners))
 
@@ -518,11 +520,7 @@ func (r *GatewayReconciler) updateAddresses(gateway *avapigwv1alpha1.Gateway) {
 	addresses := make([]avapigwv1alpha1.GatewayStatusAddress, 0, len(gateway.Spec.Addresses))
 
 	for _, addr := range gateway.Spec.Addresses {
-		statusAddr := avapigwv1alpha1.GatewayStatusAddress{
-			Type:  addr.Type,
-			Value: addr.Value,
-		}
-		addresses = append(addresses, statusAddr)
+		addresses = append(addresses, avapigwv1alpha1.GatewayStatusAddress(addr))
 	}
 
 	gateway.Status.Addresses = addresses
@@ -625,7 +623,6 @@ func (r *GatewayReconciler) findGatewaysForTLSConfig(ctx context.Context, obj cl
 
 // findGatewaysForRoute finds gateways that a route references
 func (r *GatewayReconciler) findGatewaysForRoute(ctx context.Context, obj client.Object) []reconcile.Request {
-	var requests []reconcile.Request
 	var parentRefs []avapigwv1alpha1.ParentRef
 
 	switch route := obj.(type) {
@@ -638,9 +635,10 @@ func (r *GatewayReconciler) findGatewaysForRoute(ctx context.Context, obj client
 	case *avapigwv1alpha1.TLSRoute:
 		parentRefs = route.Spec.ParentRefs
 	default:
-		return requests
+		return nil
 	}
 
+	requests := make([]reconcile.Request, 0, len(parentRefs))
 	for _, parentRef := range parentRefs {
 		namespace := obj.GetNamespace()
 		if parentRef.Namespace != nil {

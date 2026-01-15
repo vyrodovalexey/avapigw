@@ -304,19 +304,21 @@ func (r *Rotator) RotateIfNeeded(ctx context.Context) (bool, error) {
 // WriteCertificatesToDir writes certificates to the certificate directory.
 func (r *Rotator) WriteCertificatesToDir(bundle *CertificateBundle) error {
 	// Ensure directory exists
-	if err := os.MkdirAll(r.config.CertDir, 0755); err != nil {
+	// G301: Certificate directory needs to be accessible by the webhook server process
+	if err := os.MkdirAll(r.config.CertDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create certificate directory: %w", err)
 	}
 
 	// Write server certificate
 	certPath := filepath.Join(r.config.CertDir, CertFileName)
-	if err := os.WriteFile(certPath, bundle.ServerCert, 0644); err != nil {
+	// G306: Certificate files need to be readable by the webhook server
+	if err := os.WriteFile(certPath, bundle.ServerCert, 0o600); err != nil {
 		return fmt.Errorf("failed to write server certificate: %w", err)
 	}
 
 	// Write server private key
 	keyPath := filepath.Join(r.config.CertDir, KeyFileName)
-	if err := os.WriteFile(keyPath, bundle.ServerKey, 0600); err != nil {
+	if err := os.WriteFile(keyPath, bundle.ServerKey, 0o600); err != nil {
 		return fmt.Errorf("failed to write server private key: %w", err)
 	}
 

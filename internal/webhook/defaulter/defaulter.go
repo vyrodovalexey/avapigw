@@ -5,6 +5,12 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Default kind constants
+const (
+	kindGateway = "Gateway"
+	kindService = "Service"
+)
+
 // Defaulter interface for all CRD defaulters
 type Defaulter interface {
 	// Default applies default values to the object
@@ -87,7 +93,7 @@ func (d *HTTPRouteDefaulter) Default(route *avapigwv1alpha1.HTTPRoute) {
 			parentRef.Group = &group
 		}
 		if parentRef.Kind == nil {
-			kind := "Gateway"
+			kind := kindGateway
 			parentRef.Kind = &kind
 		}
 	}
@@ -122,7 +128,7 @@ func (d *HTTPRouteDefaulter) Default(route *avapigwv1alpha1.HTTPRoute) {
 				backendRef.Group = &group
 			}
 			if backendRef.Kind == nil {
-				kind := "Service"
+				kind := kindService
 				backendRef.Kind = &kind
 			}
 			if backendRef.Weight == nil {
@@ -151,7 +157,7 @@ func (d *GRPCRouteDefaulter) Default(route *avapigwv1alpha1.GRPCRoute) {
 			parentRef.Group = &group
 		}
 		if parentRef.Kind == nil {
-			kind := "Gateway"
+			kind := kindGateway
 			parentRef.Kind = &kind
 		}
 	}
@@ -196,7 +202,7 @@ func (d *GRPCRouteDefaulter) Default(route *avapigwv1alpha1.GRPCRoute) {
 				backendRef.Group = &group
 			}
 			if backendRef.Kind == nil {
-				kind := "Service"
+				kind := kindService
 				backendRef.Kind = &kind
 			}
 			if backendRef.Weight == nil {
@@ -225,7 +231,7 @@ func (d *TCPRouteDefaulter) Default(route *avapigwv1alpha1.TCPRoute) {
 			parentRef.Group = &group
 		}
 		if parentRef.Kind == nil {
-			kind := "Gateway"
+			kind := kindGateway
 			parentRef.Kind = &kind
 		}
 	}
@@ -252,7 +258,7 @@ func (d *TCPRouteDefaulter) Default(route *avapigwv1alpha1.TCPRoute) {
 				backendRef.Group = &group
 			}
 			if backendRef.Kind == nil {
-				kind := "Service"
+				kind := kindService
 				backendRef.Kind = &kind
 			}
 			if backendRef.Weight == nil {
@@ -281,7 +287,7 @@ func (d *TLSRouteDefaulter) Default(route *avapigwv1alpha1.TLSRoute) {
 			parentRef.Group = &group
 		}
 		if parentRef.Kind == nil {
-			kind := "Gateway"
+			kind := kindGateway
 			parentRef.Kind = &kind
 		}
 	}
@@ -298,7 +304,7 @@ func (d *TLSRouteDefaulter) Default(route *avapigwv1alpha1.TLSRoute) {
 				backendRef.Group = &group
 			}
 			if backendRef.Kind == nil {
-				kind := "Service"
+				kind := kindService
 				backendRef.Kind = &kind
 			}
 			if backendRef.Weight == nil {

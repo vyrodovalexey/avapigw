@@ -141,7 +141,8 @@ func NewLogger(config *Config) (*Logger, error) {
 	case "stderr":
 		output = zapcore.AddSync(os.Stderr)
 	default:
-		file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		// G302: Log files need to be readable for log aggregation tools, 0o644 is intentional
+		file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // log files need broader read permissions
 		if err != nil {
 			return nil, err
 		}

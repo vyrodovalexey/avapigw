@@ -105,6 +105,7 @@ func (l *TokenBucketLimiter) startCleanupLoop() {
 
 // Stop stops the background cleanup goroutine.
 // Should be called when the limiter is no longer needed to prevent goroutine leaks.
+//
 // Deprecated: Use Close() instead for io.Closer compatibility.
 func (l *TokenBucketLimiter) Stop() {
 	_ = l.Close()

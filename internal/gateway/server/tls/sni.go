@@ -18,17 +18,20 @@ type SNIResult struct {
 
 // ExtractSNI extracts the SNI (Server Name Indication) from a TLS ClientHello message.
 // It returns the server name and the raw ClientHello bytes that were read.
-func ExtractSNI(conn net.Conn) (string, []byte, error) {
+func ExtractSNI(conn net.Conn) (serverName string, clientHello []byte, err error) {
 	return ExtractSNIWithTimeout(conn, 5*time.Second)
 }
 
 // ExtractSNIWithTimeout extracts SNI with a custom timeout.
-func ExtractSNIWithTimeout(conn net.Conn, timeout time.Duration) (string, []byte, error) {
+// Returns the server name, raw ClientHello bytes, and any error.
+func ExtractSNIWithTimeout(conn net.Conn, timeout time.Duration) (serverName string, clientHello []byte, err error) {
 	// Set read deadline
 	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return "", nil, fmt.Errorf("failed to set read deadline: %w", err)
 	}
-	defer conn.SetReadDeadline(time.Time{}) // Clear deadline
+	defer func() {
+		_ = conn.SetReadDeadline(time.Time{}) // Clear deadline, ignore error
+	}()
 
 	// Read the TLS record header (5 bytes)
 	header := make([]byte, 5)
@@ -37,8 +40,13 @@ func ExtractSNIWithTimeout(conn net.Conn, timeout time.Duration) (string, []byte
 	}
 
 	// Validate TLS record type (should be Handshake = 22)
-	if header[0] != 22 {
-		return "", header, fmt.Errorf("not a TLS handshake record: type=%d", header[0])
+	// G602: header is guaranteed to be 5 bytes from io.ReadFull above
+	if len(header) < 1 || header[0] != 22 {
+		recordType := byte(0)
+		if len(header) > 0 {
+			recordType = header[0]
+		}
+		return "", header, fmt.Errorf("not a TLS handshake record: type=%d", recordType)
 	}
 
 	// Get the record length
@@ -54,10 +62,12 @@ func ExtractSNIWithTimeout(conn net.Conn, timeout time.Duration) (string, []byte
 	}
 
 	// Combine header and handshake for the full ClientHello
-	clientHello := append(header, handshake...)
+	clientHello = make([]byte, 0, len(header)+len(handshake))
+	clientHello = append(clientHello, header...)
+	clientHello = append(clientHello, handshake...)
 
 	// Parse the ClientHello to extract SNI
-	serverName, err := parseClientHello(handshake)
+	serverName, err = parseClientHello(handshake)
 	if err != nil {
 		return "", clientHello, err
 	}
@@ -67,12 +77,14 @@ func ExtractSNIWithTimeout(conn net.Conn, timeout time.Duration) (string, []byte
 
 // PeekClientHello reads the ClientHello without consuming it by using a buffered reader.
 // This is useful when you need to inspect the ClientHello but still pass it to the TLS stack.
-func PeekClientHello(conn net.Conn) (string, []byte, error) {
+// Returns the server name, raw ClientHello bytes, and any error.
+func PeekClientHello(conn net.Conn) (serverName string, clientHello []byte, err error) {
 	return PeekClientHelloWithTimeout(conn, 5*time.Second)
 }
 
 // PeekClientHelloWithTimeout peeks at the ClientHello with a custom timeout.
-func PeekClientHelloWithTimeout(conn net.Conn, timeout time.Duration) (string, []byte, error) {
+// Returns the server name, raw ClientHello bytes, and any error.
+func PeekClientHelloWithTimeout(conn net.Conn, timeout time.Duration) (serverName string, clientHello []byte, err error) {
 	// For peeking, we need to use a buffered connection
 	// Since we can't truly "peek" on a raw net.Conn, we read and return the data
 	// The caller is responsible for prepending this data when forwarding

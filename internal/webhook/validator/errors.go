@@ -43,7 +43,7 @@ func (e *ValidationErrors) Error() string {
 		return e.Errors[0].Error()
 	}
 
-	var msgs []string
+	msgs := make([]string, 0, len(e.Errors))
 	for _, err := range e.Errors {
 		msgs = append(msgs, err.Error())
 	}

@@ -289,7 +289,7 @@ func (m *TLSRouteMatcher) Compile(routes []*TLSRoute) error {
 		}
 
 		for _, hostname := range route.Hostnames {
-			if len(hostname) > 0 && hostname[0] == '*' {
+			if hostname != "" && hostname[0] == '*' {
 				// Wildcard hostname
 				wr := &wildcardTLSRoute{
 					pattern: hostname,
@@ -323,7 +323,7 @@ func (m *TLSRouteMatcher) AddRoute(route *TLSRoute) error {
 	}
 
 	for _, hostname := range route.Hostnames {
-		if len(hostname) > 0 && hostname[0] == '*' {
+		if hostname != "" && hostname[0] == '*' {
 			wr := &wildcardTLSRoute{
 				pattern: hostname,
 				matcher: NewHostnameMatcher(hostname),

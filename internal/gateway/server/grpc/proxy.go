@@ -125,11 +125,11 @@ func (p *Proxy) GetConnection(ctx context.Context, backendRef *BackendRef) (*grp
 		),
 	}
 
-	// Dial the backend
+	// Create the gRPC client connection
 	target := endpoint.FullAddress()
-	conn, err := grpc.DialContext(ctx, target, opts...)
+	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial backend %s: %w", target, err)
+		return nil, fmt.Errorf("failed to create client for backend %s: %w", target, err)
 	}
 
 	p.connections[key] = conn
@@ -338,7 +338,7 @@ func (p *Proxy) Close() error {
 // parseFullMethod parses the full method name into service and method.
 // Full method format: /package.Service/Method
 func parseFullMethod(fullMethod string) (service, method string) {
-	if len(fullMethod) == 0 {
+	if fullMethod == "" {
 		return "", ""
 	}
 

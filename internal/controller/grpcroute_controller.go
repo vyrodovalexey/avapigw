@@ -95,16 +95,16 @@ func (r *GRPCRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
-	resourceKey := req.NamespacedName.String()
+	resourceKey := req.String()
 
 	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
 		duration := time.Since(start).Seconds()
-		result := "success"
+		result := MetricResultSuccess
 		if reconcileErr != nil {
-			result = "error"
+			result = MetricResultError
 		}
 		grpcRouteReconcileDuration.WithLabelValues(result).Observe(duration)
 		grpcRouteReconcileTotal.WithLabelValues(result).Inc()
@@ -246,7 +246,7 @@ func (r *GRPCRouteReconciler) reconcileGRPCRoute(ctx context.Context, grpcRoute 
 // validateParentRefs validates parent references and returns parent statuses
 func (r *GRPCRouteReconciler) validateParentRefs(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) ([]avapigwv1alpha1.RouteParentStatus, error) {
 	logger := log.FromContext(ctx)
-	var parentStatuses []avapigwv1alpha1.RouteParentStatus
+	parentStatuses := make([]avapigwv1alpha1.RouteParentStatus, 0, len(grpcRoute.Spec.ParentRefs))
 
 	for _, parentRef := range grpcRoute.Spec.ParentRefs {
 		parentStatus := avapigwv1alpha1.RouteParentStatus{
@@ -319,7 +319,7 @@ func (r *GRPCRouteReconciler) validateParentRefs(ctx context.Context, grpcRoute 
 }
 
 // validateListenerMatch validates that the route matches a listener on the gateway
-func (r *GRPCRouteReconciler) validateListenerMatch(grpcRoute *avapigwv1alpha1.GRPCRoute, gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (bool, string) {
+func (r *GRPCRouteReconciler) validateListenerMatch(grpcRoute *avapigwv1alpha1.GRPCRoute, gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (matches bool, reason string) {
 	// If a specific section (listener) is specified, validate it
 	if parentRef.SectionName != nil {
 		listenerName := *parentRef.SectionName
@@ -382,9 +382,9 @@ func (r *GRPCRouteReconciler) hostnameMatch(routeHost, listenerHost string) bool
 	}
 
 	// Wildcard matching
-	if len(listenerHost) > 0 && listenerHost[0] == '*' {
+	if listenerHost != "" && listenerHost[0] == '*' {
 		suffix := listenerHost[1:]
-		if len(routeHost) > 0 && routeHost[0] == '*' {
+		if routeHost != "" && routeHost[0] == '*' {
 			return routeHost[1:] == suffix
 		}
 		if len(routeHost) > len(suffix) {
@@ -392,7 +392,7 @@ func (r *GRPCRouteReconciler) hostnameMatch(routeHost, listenerHost string) bool
 		}
 	}
 
-	if len(routeHost) > 0 && routeHost[0] == '*' {
+	if routeHost != "" && routeHost[0] == '*' {
 		suffix := routeHost[1:]
 		if len(listenerHost) > len(suffix) {
 			return listenerHost[len(listenerHost)-len(suffix):] == suffix
@@ -413,7 +413,7 @@ func (r *GRPCRouteReconciler) validateBackendRefs(ctx context.Context, grpcRoute
 				namespace = *backendRef.Namespace
 			}
 
-			kind := "Service"
+			kind := BackendKindService
 			if backendRef.Kind != nil {
 				kind = *backendRef.Kind
 			}
@@ -425,7 +425,7 @@ func (r *GRPCRouteReconciler) validateBackendRefs(ctx context.Context, grpcRoute
 
 			// Check based on kind
 			switch {
-			case group == "" && kind == "Service":
+			case group == "" && kind == BackendKindService:
 				// Kubernetes Service
 				svc := &corev1.Service{}
 				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, svc); err != nil {
@@ -437,7 +437,7 @@ func (r *GRPCRouteReconciler) validateBackendRefs(ctx context.Context, grpcRoute
 					}
 					return fmt.Errorf("failed to get Service %s/%s: %w", namespace, backendRef.Name, err)
 				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
+			case group == avapigwv1alpha1.GroupVersion.Group && kind == BackendKindBackend:
 				// Custom Backend resource
 				backend := &avapigwv1alpha1.Backend{}
 				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, backend); err != nil {

@@ -20,6 +20,12 @@ import (
 
 var httproutelog = logf.Log.WithName("httproute-webhook")
 
+// Backend reference kinds for HTTPRoute validation.
+const (
+	httpRouteBackendKindService = "Service"
+	httpRouteBackendKindBackend = "Backend"
+)
+
 // HTTPRouteWebhook implements admission webhooks for HTTPRoute
 type HTTPRouteWebhook struct {
 	Client             client.Client
@@ -246,7 +252,7 @@ func validateDuration(duration string) error {
 	}
 
 	// Simple validation for duration format (e.g., "30s", "5m", "1h")
-	durationRegex := regexp.MustCompile(`^([0-9]+)(ms|s|m|h)$`)
+	durationRegex := regexp.MustCompile(`^(\d+)(ms|s|m|h)$`)
 	if !durationRegex.MatchString(duration) {
 		return fmt.Errorf("invalid duration format: %s (expected format like '30s', '5m', '1h')", duration)
 	}
@@ -321,7 +327,7 @@ func (w *HTTPRouteWebhook) validateBackendRefs(ctx context.Context, route *avapi
 				namespace = *backendRef.Namespace
 			}
 
-			kind := "Service"
+			kind := httpRouteBackendKindService
 			if backendRef.Kind != nil {
 				kind = *backendRef.Kind
 			}
@@ -332,11 +338,11 @@ func (w *HTTPRouteWebhook) validateBackendRefs(ctx context.Context, route *avapi
 			}
 
 			switch {
-			case group == "" && kind == "Service":
+			case group == "" && kind == httpRouteBackendKindService:
 				if err := w.ReferenceValidator.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
 					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
 				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
+			case group == avapigwv1alpha1.GroupVersion.Group && kind == httpRouteBackendKindBackend:
 				if err := w.ReferenceValidator.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
 					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
 				}

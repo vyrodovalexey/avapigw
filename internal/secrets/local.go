@@ -175,7 +175,8 @@ func (p *LocalProvider) readSecretFromDirectory(dirPath, name string) (*Secret, 
 		keyName := entry.Name()
 		filePath := filepath.Join(dirPath, keyName)
 
-		content, err := os.ReadFile(filePath)
+		// G304: filePath is constructed from trusted dirPath and validated entry name
+		content, err := os.ReadFile(filepath.Clean(filePath))
 		if err != nil {
 			p.logger.Warn("Failed to read key file",
 				zap.String("file", filePath),
@@ -207,7 +208,8 @@ func (p *LocalProvider) readSecretFromDirectory(dirPath, name string) (*Secret, 
 
 // readSecretFromYAML reads a secret from a YAML file
 func (p *LocalProvider) readSecretFromYAML(filePath, name string) (*Secret, error) {
-	content, err := os.ReadFile(filePath)
+	// G304: filePath comes from trusted configuration (secret paths)
+	content, err := os.ReadFile(filepath.Clean(filePath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read YAML file: %w", err)
 	}
@@ -252,7 +254,8 @@ func (p *LocalProvider) readSecretFromYAML(filePath, name string) (*Secret, erro
 
 // readSecretFromJSON reads a secret from a JSON file
 func (p *LocalProvider) readSecretFromJSON(filePath, name string) (*Secret, error) {
-	content, err := os.ReadFile(filePath)
+	// G304: filePath comes from trusted configuration (secret paths)
+	content, err := os.ReadFile(filepath.Clean(filePath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read JSON file: %w", err)
 	}
@@ -401,7 +404,7 @@ func (p *LocalProvider) WriteSecret(ctx context.Context, path string, data map[s
 
 	// Ensure parent directory exists
 	parentDir := filepath.Dir(filePath)
-	if err := os.MkdirAll(parentDir, 0750); err != nil {
+	if err := os.MkdirAll(parentDir, 0o750); err != nil {
 		p.logger.Error("Failed to create parent directory",
 			zap.String("path", parentDir),
 			zap.Error(err),
@@ -411,7 +414,7 @@ func (p *LocalProvider) WriteSecret(ctx context.Context, path string, data map[s
 	}
 
 	// Write file with restricted permissions
-	if err := os.WriteFile(filePath, yamlContent, 0600); err != nil {
+	if err := os.WriteFile(filePath, yamlContent, 0o600); err != nil {
 		p.logger.Error("Failed to write secret file",
 			zap.String("path", filePath),
 			zap.Error(err),

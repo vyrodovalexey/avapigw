@@ -1,6 +1,7 @@
 package cert
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -117,7 +118,7 @@ func (i *Injector) injectIntoValidatingWebhook(ctx context.Context, name string)
 	updated := false
 	for idx := range webhook.Webhooks {
 		if webhook.Webhooks[idx].ClientConfig.CABundle == nil ||
-			string(webhook.Webhooks[idx].ClientConfig.CABundle) != string(i.caBundle) {
+			!bytes.Equal(webhook.Webhooks[idx].ClientConfig.CABundle, i.caBundle) {
 			webhook.Webhooks[idx].ClientConfig.CABundle = i.caBundle
 			updated = true
 		}
@@ -199,7 +200,7 @@ func (i *Injector) injectIntoMutatingWebhook(ctx context.Context, name string) e
 	updated := false
 	for idx := range webhook.Webhooks {
 		if webhook.Webhooks[idx].ClientConfig.CABundle == nil ||
-			string(webhook.Webhooks[idx].ClientConfig.CABundle) != string(i.caBundle) {
+			!bytes.Equal(webhook.Webhooks[idx].ClientConfig.CABundle, i.caBundle) {
 			webhook.Webhooks[idx].ClientConfig.CABundle = i.caBundle
 			updated = true
 		}

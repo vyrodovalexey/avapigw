@@ -115,15 +115,11 @@ func (p *GRPCProxy) GetConnection(ctx context.Context, backend *Backend) (*grpc.
 	// Build dial options
 	opts := p.buildDialOptions()
 
-	// Create context with timeout
-	dialCtx, cancel := context.WithTimeout(ctx, p.config.DialTimeout)
-	defer cancel()
-
-	// Dial the backend
+	// Create the gRPC client connection
 	target := endpoint.FullAddress()
-	conn, err := grpc.DialContext(dialCtx, target, opts...)
+	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial backend %s: %w", target, err)
+		return nil, fmt.Errorf("failed to create client for backend %s: %w", target, err)
 	}
 
 	p.connections[key] = conn

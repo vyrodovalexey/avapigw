@@ -12,6 +12,12 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Backend reference kind constants
+const (
+	refKindService = "Service"
+	refKindBackend = "Backend"
+)
+
 // ReferenceValidator provides methods for validating cross-resource references
 type ReferenceValidator struct {
 	Client client.Client
@@ -184,7 +190,7 @@ func (r *ReferenceValidator) ValidateBackendRefs(ctx context.Context, backendRef
 			namespace = *backendRef.Namespace
 		}
 
-		kind := "Service"
+		kind := refKindService
 		if backendRef.Kind != nil {
 			kind = *backendRef.Kind
 		}
@@ -195,11 +201,11 @@ func (r *ReferenceValidator) ValidateBackendRefs(ctx context.Context, backendRef
 		}
 
 		switch {
-		case group == "" && kind == "Service":
+		case group == "" && kind == refKindService:
 			if err := r.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
 				errs.Add(fmt.Sprintf("spec.backendRefs[%d]", i), err.Error())
 			}
-		case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
+		case group == avapigwv1alpha1.GroupVersion.Group && kind == refKindBackend:
 			if err := r.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
 				errs.Add(fmt.Sprintf("spec.backendRefs[%d]", i), err.Error())
 			}
@@ -384,11 +390,11 @@ func (r *ReferenceValidator) CheckBackendHasReferences(ctx context.Context, back
 				if backendRef.Namespace != nil {
 					ns = *backendRef.Namespace
 				}
-				kind := "Service"
+				kind := refKindService
 				if backendRef.Kind != nil {
 					kind = *backendRef.Kind
 				}
-				if kind == "Backend" && ns == backendNamespace && backendRef.Name == backendName {
+				if kind == refKindBackend && ns == backendNamespace && backendRef.Name == backendName {
 					return true, nil
 				}
 			}

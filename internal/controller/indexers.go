@@ -72,7 +72,7 @@ func SetupIndexers(ctx context.Context, mgr manager.Manager) error {
 // extractGatewayRefs extracts gateway references from parent refs.
 // Returns a list of "namespace/name" strings for indexing.
 func extractGatewayRefs(routeNamespace string, parentRefs []avapigwv1alpha1.ParentRef) []string {
-	var refs []string
+	refs := make([]string, 0, len(parentRefs))
 	for _, parentRef := range parentRefs {
 		namespace := routeNamespace
 		if parentRef.Namespace != nil {

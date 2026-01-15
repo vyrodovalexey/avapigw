@@ -135,9 +135,6 @@ type RedisRateLimiter struct {
 	healthy         atomic.Bool
 	stopHealthCheck chan struct{}
 	healthCheckOnce sync.Once
-
-	// Cleanup for fallback limiter
-	mu sync.RWMutex
 }
 
 // NewRedisRateLimiter creates a new Redis-based rate limiter.
@@ -507,10 +504,4 @@ func (r *RedisRateLimiter) GetCircuitBreakerStats() circuitbreaker.Stats {
 // ResetCircuitBreaker resets the circuit breaker to closed state.
 func (r *RedisRateLimiter) ResetCircuitBreaker() {
 	r.circuitBreaker.Reset()
-}
-
-// recordRedisOperation records metrics for a Redis operation.
-func recordRedisOperation(operation, status string, duration time.Duration, algorithm Algorithm) {
-	redisRateLimitOperationsTotal.WithLabelValues(operation, status).Inc()
-	redisRateLimitOperationDuration.WithLabelValues(operation, string(algorithm)).Observe(duration.Seconds())
 }

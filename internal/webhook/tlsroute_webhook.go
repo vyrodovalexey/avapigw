@@ -17,6 +17,12 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/webhook/validator"
 )
 
+// Backend reference kind constants for TLSRoute webhook
+const (
+	tlsRouteBackendKindService = "Service"
+	tlsRouteBackendKindBackend = "Backend"
+)
+
 var tlsroutelog = logf.Log.WithName("tlsroute-webhook")
 
 // TLSRouteWebhook implements admission webhooks for TLSRoute
@@ -202,7 +208,7 @@ func (w *TLSRouteWebhook) validateBackendRefs(ctx context.Context, route *avapig
 				namespace = *backendRef.Namespace
 			}
 
-			kind := "Service"
+			kind := tlsRouteBackendKindService
 			if backendRef.Kind != nil {
 				kind = *backendRef.Kind
 			}
@@ -213,11 +219,11 @@ func (w *TLSRouteWebhook) validateBackendRefs(ctx context.Context, route *avapig
 			}
 
 			switch {
-			case group == "" && kind == "Service":
+			case group == "" && kind == tlsRouteBackendKindService:
 				if err := w.ReferenceValidator.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
 					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
 				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
+			case group == avapigwv1alpha1.GroupVersion.Group && kind == tlsRouteBackendKindBackend:
 				if err := w.ReferenceValidator.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
 					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
 				}

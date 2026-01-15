@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -179,7 +180,7 @@ func NewResourceFromRequest(r *http.Request) *Resource {
 	// Parse host and port
 	if h, p, err := net.SplitHostPort(r.Host); err == nil {
 		host = h
-		if pn, err := net.LookupPort("tcp", p); err == nil {
+		if pn, err := strconv.Atoi(p); err == nil {
 			port = pn
 		}
 	}
@@ -724,30 +725,31 @@ func (a *RBACAuthorizer) Authorize(ctx context.Context, subject *Subject, resour
 
 	// Evaluate rules in priority order
 	for _, rule := range rules {
-		if rule.Matches(subject, resource) {
-			decision := &Decision{
-				Allowed: rule.Action == ActionAllow,
-				Reason:  string(rule.Action),
-				Rule:    rule.Name,
-			}
-
-			// Record metrics
-			decisionStr := "deny"
-			if decision.Allowed {
-				decisionStr = "allow"
-			}
-			authzDecisionTotal.WithLabelValues(decisionStr, rule.Name).Inc()
-			authzDecisionDuration.WithLabelValues(decisionStr).Observe(time.Since(start).Seconds())
-
-			a.logger.Debug("authorization decision",
-				zap.Bool("allowed", decision.Allowed),
-				zap.String("rule", rule.Name),
-				zap.String("path", resource.Path),
-				zap.String("method", resource.Method),
-			)
-
-			return decision, nil
+		if !rule.Matches(subject, resource) {
+			continue
 		}
+		decision := &Decision{
+			Allowed: rule.Action == ActionAllow,
+			Reason:  string(rule.Action),
+			Rule:    rule.Name,
+		}
+
+		// Record metrics
+		decisionStr := "deny"
+		if decision.Allowed {
+			decisionStr = "allow"
+		}
+		authzDecisionTotal.WithLabelValues(decisionStr, rule.Name).Inc()
+		authzDecisionDuration.WithLabelValues(decisionStr).Observe(time.Since(start).Seconds())
+
+		a.logger.Debug("authorization decision",
+			zap.Bool("allowed", decision.Allowed),
+			zap.String("rule", rule.Name),
+			zap.String("path", resource.Path),
+			zap.String("method", resource.Method),
+		)
+
+		return decision, nil
 	}
 
 	// No matching rule, use default action

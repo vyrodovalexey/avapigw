@@ -86,7 +86,8 @@ var jitterRand = rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec 
 var jitterMu sync.Mutex
 
 const (
-	vaultSecretFinalizer = "avapigw.vyrodovalexey.github.com/vaultsecret-finalizer"
+	// G101: This is a finalizer name, not a credential
+	vaultSecretFinalizer = "avapigw.vyrodovalexey.github.com/vaultsecret-finalizer" //nolint:gosec // finalizer name, not a credential
 )
 
 // VaultSecretReconciler reconciles a VaultSecret object
@@ -187,7 +188,7 @@ func (r *VaultSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
-	resourceKey := req.NamespacedName.String()
+	resourceKey := req.String()
 
 	// Check if Vault is enabled - skip reconciliation gracefully if not
 	if !r.VaultEnabled && r.SecretsProviderType != "vault" {
@@ -222,9 +223,9 @@ func (r *VaultSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	var reconcileErr *ReconcileError
 	defer func() {
 		duration := time.Since(start).Seconds()
-		result := "success"
+		result := MetricResultSuccess
 		if reconcileErr != nil {
-			result = "error"
+			result = MetricResultError
 		}
 		vaultSecretReconcileDuration.WithLabelValues(result).Observe(duration)
 		vaultSecretReconcileTotal.WithLabelValues(result).Inc()
@@ -508,7 +509,7 @@ func (r *VaultSecretReconciler) validateVaultConnection(ctx context.Context, vau
 
 	// Validate address
 	if conn.Address == "" {
-		return fmt.Errorf("Vault address is required")
+		return fmt.Errorf("vault address is required")
 	}
 
 	// Validate authentication configuration
@@ -520,7 +521,7 @@ func (r *VaultSecretReconciler) validateVaultConnection(ctx context.Context, vau
 	// Validate Kubernetes auth
 	if auth.Kubernetes != nil {
 		if auth.Kubernetes.Role == "" {
-			return fmt.Errorf("Kubernetes auth role is required")
+			return fmt.Errorf("kubernetes auth role is required")
 		}
 	}
 
@@ -1064,6 +1065,8 @@ func (r *VaultSecretReconciler) calculateNextRefresh(vaultSecret *avapigwv1alpha
 }
 
 // setCondition sets a condition on the VaultSecret status
+//
+//nolint:unparam // conditionType kept for API consistency with other controllers
 func (r *VaultSecretReconciler) setCondition(vaultSecret *avapigwv1alpha1.VaultSecret, conditionType avapigwv1alpha1.ConditionType, status metav1.ConditionStatus, reason, message string) {
 	vaultSecret.Status.SetCondition(conditionType, status, reason, message)
 }

@@ -172,7 +172,7 @@ func (c *JWKSCache) GetKeys() ([]JSONWebKey, error) {
 func (c *JWKSCache) Refresh(ctx context.Context) error {
 	c.logger.Debug("refreshing JWKS", zap.String("url", c.url))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}

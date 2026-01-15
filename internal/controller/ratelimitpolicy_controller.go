@@ -83,7 +83,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Track reconciliation metrics
 	start := time.Now()
-	var reconcileResult string = "success"
+	var reconcileResult = "success"
 	defer func() {
 		duration := time.Since(start).Seconds()
 		rateLimitPolicyReconcileDuration.WithLabelValues(reconcileResult).Observe(duration)
@@ -99,7 +99,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			logger.Info("RateLimitPolicy not found, ignoring")
 			return ctrl.Result{}, nil
 		}
-		reconcileResult = "error"
+		reconcileResult = MetricResultError
 		logger.Error(err, "Failed to get RateLimitPolicy")
 		return ctrl.Result{}, err
 	}
@@ -113,7 +113,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if !controllerutil.ContainsFinalizer(policy, rateLimitPolicyFinalizer) {
 		controllerutil.AddFinalizer(policy, rateLimitPolicyFinalizer)
 		if err := r.Update(ctx, policy); err != nil {
-			reconcileResult = "error"
+			reconcileResult = MetricResultError
 			logger.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -122,7 +122,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Reconcile the RateLimitPolicy
 	if err := r.reconcileRateLimitPolicy(ctx, policy); err != nil {
-		reconcileResult = "error"
+		reconcileResult = MetricResultError
 		logger.Error(err, "Failed to reconcile RateLimitPolicy")
 		r.Recorder.Event(policy, corev1.EventTypeWarning, "ReconcileError", err.Error())
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
@@ -132,6 +132,8 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // handleDeletion handles RateLimitPolicy deletion
+//
+//nolint:unparam // result kept for API consistency with other controllers
 func (r *RateLimitPolicyReconciler) handleDeletion(ctx context.Context, policy *avapigwv1alpha1.RateLimitPolicy) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -243,14 +245,14 @@ func (r *RateLimitPolicyReconciler) validateTargetRef(ctx context.Context, polic
 // validateRedisConfig validates Redis storage configuration
 func (r *RateLimitPolicyReconciler) validateRedisConfig(ctx context.Context, policy *avapigwv1alpha1.RateLimitPolicy) error {
 	if policy.Spec.Storage == nil || policy.Spec.Storage.Redis == nil {
-		return fmt.Errorf("Redis configuration is required when storage type is Redis")
+		return fmt.Errorf("redis configuration is required when storage type is redis")
 	}
 
 	redis := policy.Spec.Storage.Redis
 
 	// Validate address
 	if redis.Address == "" {
-		return fmt.Errorf("Redis address is required")
+		return fmt.Errorf("redis address is required")
 	}
 
 	// Validate secret reference if provided
@@ -263,7 +265,7 @@ func (r *RateLimitPolicyReconciler) validateRedisConfig(ctx context.Context, pol
 		secret := &corev1.Secret{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: redis.SecretRef.Name}, secret); err != nil {
 			if errors.IsNotFound(err) {
-				return fmt.Errorf("Redis secret %s/%s not found", namespace, redis.SecretRef.Name)
+				return fmt.Errorf("redis secret %s/%s not found", namespace, redis.SecretRef.Name)
 			}
 			return fmt.Errorf("failed to get Redis secret %s/%s: %w", namespace, redis.SecretRef.Name, err)
 		}
@@ -279,7 +281,7 @@ func (r *RateLimitPolicyReconciler) validateRedisConfig(ctx context.Context, pol
 		secret := &corev1.Secret{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: redis.TLS.CACertRef.Name}, secret); err != nil {
 			if errors.IsNotFound(err) {
-				return fmt.Errorf("Redis TLS CA cert secret %s/%s not found", namespace, redis.TLS.CACertRef.Name)
+				return fmt.Errorf("redis TLS CA cert secret %s/%s not found", namespace, redis.TLS.CACertRef.Name)
 			}
 			return fmt.Errorf("failed to get Redis TLS CA cert secret %s/%s: %w", namespace, redis.TLS.CACertRef.Name, err)
 		}

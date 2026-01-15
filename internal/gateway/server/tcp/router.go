@@ -128,24 +128,25 @@ func (r *Router) UpdateRoute(route *TCPRoute) error {
 	defer r.mu.Unlock()
 
 	for i, existing := range r.routes {
-		if existing.Name == route.Name {
-			// Set default timeouts if not specified
-			if route.IdleTimeout == 0 {
-				route.IdleTimeout = 5 * time.Minute
-			}
-			if route.ConnectTimeout == 0 {
-				route.ConnectTimeout = 30 * time.Second
-			}
-
-			r.routes[i] = route
-			r.sortRoutes()
-
-			r.logger.Info("TCP route updated",
-				zap.String("name", route.Name),
-				zap.Int("backends", len(route.BackendRefs)),
-			)
-			return nil
+		if existing.Name != route.Name {
+			continue
 		}
+		// Set default timeouts if not specified
+		if route.IdleTimeout == 0 {
+			route.IdleTimeout = 5 * time.Minute
+		}
+		if route.ConnectTimeout == 0 {
+			route.ConnectTimeout = 30 * time.Second
+		}
+
+		r.routes[i] = route
+		r.sortRoutes()
+
+		r.logger.Info("TCP route updated",
+			zap.String("name", route.Name),
+			zap.Int("backends", len(route.BackendRefs)),
+		)
+		return nil
 	}
 
 	return fmt.Errorf("route %s not found", route.Name)

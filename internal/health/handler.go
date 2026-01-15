@@ -19,6 +19,10 @@ const (
 
 	// DefaultLivenessProbeTimeout is the default timeout for liveness/health probes.
 	DefaultLivenessProbeTimeout = 10 * time.Second
+
+	// Health status values
+	statusOK    = "ok"
+	statusError = "error"
 )
 
 // HandlerConfig holds configuration for the health handler.
@@ -172,7 +176,7 @@ func (h *Handler) RemoveCheck(name string) {
 func (h *Handler) LivenessHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status":    "ok",
+			"status":    statusOK,
 			"timestamp": time.Now().UTC(),
 		})
 	}
@@ -189,7 +193,7 @@ func (h *Handler) ReadinessHandler() gin.HandlerFunc {
 		status := h.runChecks(ctx)
 
 		statusCode := http.StatusOK
-		if status.Status != "ok" {
+		if status.Status != statusOK {
 			statusCode = http.StatusServiceUnavailable
 		}
 
@@ -208,7 +212,7 @@ func (h *Handler) HealthHandler() gin.HandlerFunc {
 		status.Uptime = time.Since(h.startTime).String()
 
 		statusCode := http.StatusOK
-		if status.Status != "ok" {
+		if status.Status != statusOK {
 			statusCode = http.StatusServiceUnavailable
 		}
 
@@ -224,7 +228,7 @@ func (h *Handler) runChecks(ctx context.Context) *HealthStatus {
 	h.mu.RUnlock()
 
 	status := &HealthStatus{
-		Status:    "ok",
+		Status:    statusOK,
 		Timestamp: time.Now().UTC(),
 		Checks:    make(map[string]*CheckResult),
 	}
@@ -246,17 +250,17 @@ func (h *Handler) runChecks(ctx context.Context) *HealthStatus {
 			duration := time.Since(start)
 
 			result := &CheckResult{
-				Status:    "ok",
+				Status:    statusOK,
 				Duration:  duration.String(),
 				Timestamp: time.Now().UTC(),
 			}
 
 			if err != nil {
-				result.Status = "error"
+				result.Status = statusError
 				result.Error = err.Error()
 
 				mu.Lock()
-				status.Status = "error"
+				status.Status = statusError
 				mu.Unlock()
 
 				h.logger.Warn("health check failed",
@@ -287,7 +291,7 @@ func (h *Handler) HTTPHandler() http.Handler {
 		status.Uptime = time.Since(h.startTime).String()
 
 		statusCode := http.StatusOK
-		if status.Status != "ok" {
+		if status.Status != statusOK {
 			statusCode = http.StatusServiceUnavailable
 		}
 
@@ -305,7 +309,7 @@ func (h *Handler) LivenessHTTPHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":    "ok",
+			"status":    statusOK,
 			"timestamp": time.Now().UTC(),
 		}); err != nil {
 			h.logger.Error("failed to write liveness response", zap.Error(err))
@@ -323,7 +327,7 @@ func (h *Handler) ReadinessHTTPHandler() http.Handler {
 		status := h.runChecks(ctx)
 
 		statusCode := http.StatusOK
-		if status.Status != "ok" {
+		if status.Status != statusOK {
 			statusCode = http.StatusServiceUnavailable
 		}
 

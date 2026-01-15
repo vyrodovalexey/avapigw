@@ -190,12 +190,13 @@ func (w *AuthPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.AuthPolicy) e
 							"secretRef is required for Secret validation type")
 					}
 				case avapigwv1alpha1.APIKeyValidationExternal:
-					if apiKey.Validation.External == nil {
+					switch {
+					case apiKey.Validation.External == nil:
 						errs.Add("spec.authentication.apiKey.validation.external",
 							"external configuration is required for External validation type")
-					} else if apiKey.Validation.External.URL == "" {
+					case apiKey.Validation.External.URL == "":
 						errs.Add("spec.authentication.apiKey.validation.external.url", "URL is required")
-					} else {
+					default:
 						if _, err := url.Parse(apiKey.Validation.External.URL); err != nil {
 							errs.Add("spec.authentication.apiKey.validation.external.url",
 								fmt.Sprintf("invalid URL format: %v", err))

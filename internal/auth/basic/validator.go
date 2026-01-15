@@ -26,6 +26,9 @@ var (
 	ErrUserDisabled       = errors.New("user is disabled")
 )
 
+// Default realm for basic authentication.
+const defaultRealm = "Restricted"
+
 // Metrics for basic auth validation.
 var (
 	basicAuthValidationTotal = promauto.NewCounterVec(
@@ -267,7 +270,7 @@ func NewValidator(store Store, realm string, logger *zap.Logger) *Validator {
 		logger = zap.NewNop()
 	}
 	if realm == "" {
-		realm = "Restricted"
+		realm = defaultRealm
 	}
 
 	return &Validator{
@@ -283,7 +286,7 @@ func NewValidatorWithConfig(config *ValidatorConfig) *Validator {
 		config.Logger = zap.NewNop()
 	}
 	if config.Realm == "" {
-		config.Realm = "Restricted"
+		config.Realm = defaultRealm
 	}
 
 	return &Validator{
@@ -425,7 +428,7 @@ type SimpleValidator struct {
 // NewSimpleValidator creates a new simple validator.
 func NewSimpleValidator(credentials map[string]string, realm string) *SimpleValidator {
 	if realm == "" {
-		realm = "Restricted"
+		realm = defaultRealm
 	}
 
 	// Hash all passwords
@@ -447,7 +450,7 @@ func NewSimpleValidator(credentials map[string]string, realm string) *SimpleVali
 // NewSimpleValidatorWithHashes creates a new simple validator with pre-hashed passwords.
 func NewSimpleValidatorWithHashes(credentials map[string]string, realm string) *SimpleValidator {
 	if realm == "" {
-		realm = "Restricted"
+		realm = defaultRealm
 	}
 
 	return &SimpleValidator{
@@ -499,7 +502,7 @@ type PlaintextValidator struct {
 // NewPlaintextValidator creates a new plaintext validator (for testing only).
 func NewPlaintextValidator(credentials map[string]string, realm string) *PlaintextValidator {
 	if realm == "" {
-		realm = "Restricted"
+		realm = defaultRealm
 	}
 
 	return &PlaintextValidator{

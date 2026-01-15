@@ -238,7 +238,7 @@ func (hc *HealthChecker) httpCheck(endpoint *Endpoint) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(hc.config.Timeout)*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return false, err
 	}
@@ -260,7 +260,13 @@ func (hc *HealthChecker) httpCheck(endpoint *Endpoint) (bool, error) {
 func (hc *HealthChecker) tcpCheck(endpoint *Endpoint) (bool, error) {
 	addr := endpoint.FullAddress()
 
-	conn, err := net.DialTimeout("tcp", addr, time.Duration(hc.config.Timeout)*time.Second)
+	dialer := &net.Dialer{
+		Timeout: time.Duration(hc.config.Timeout) * time.Second,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(hc.config.Timeout)*time.Second)
+	defer cancel()
+
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return false, err
 	}

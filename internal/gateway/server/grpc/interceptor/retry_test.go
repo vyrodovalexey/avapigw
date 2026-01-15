@@ -378,34 +378,6 @@ func TestRetryConfig(t *testing.T) {
 	})
 }
 
-// TestRetryableServerStream tests the retryableServerStream wrapper
-func TestRetryableServerStream(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	baseStream := &mockServerStreamWithMessages{
-		mockServerStream: mockServerStream{ctx: ctx},
-		recvMessages:     []interface{}{"msg1"},
-	}
-
-	wrappedStream := &retryableServerStream{
-		ServerStream: baseStream,
-		method:       "/test.Service/Method",
-		logger:       zap.NewNop(),
-	}
-
-	t.Run("RecvMsg delegates to underlying stream", func(t *testing.T) {
-		var msg interface{}
-		err := wrappedStream.RecvMsg(&msg)
-		assert.NoError(t, err)
-	})
-
-	t.Run("SendMsg delegates to underlying stream", func(t *testing.T) {
-		err := wrappedStream.SendMsg("msg")
-		assert.NoError(t, err)
-	})
-}
-
 // TestRetryWithBackoff tests retry with backoff timing
 func TestRetryWithBackoff(t *testing.T) {
 	t.Parallel()

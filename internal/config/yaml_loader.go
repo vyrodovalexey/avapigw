@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,7 +31,8 @@ func LoadYAMLConfig(path string) (*LocalConfig, error) {
 	}
 
 	// Read file contents
-	data, err := os.ReadFile(path)
+	// G304: path is validated above via os.Stat and comes from trusted configuration
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -238,10 +240,9 @@ func mergeTLSConfig(base *Config, tlsCfg *ListenerTLSConfig) {
 		base.TLSPassthroughEnabled = true
 	}
 
-	if tlsCfg.CertificateRef != nil {
-		// Certificate references would typically be resolved by the controller
-		// For local config, we might store the reference for later resolution
-	}
+	// Certificate references would typically be resolved by the controller
+	// For local config, we might store the reference for later resolution
+	// Note: tlsCfg.CertificateRef is intentionally not processed here
 }
 
 // LoadAndValidateYAMLConfig loads a YAML config file and validates it.
@@ -275,7 +276,8 @@ func SaveYAMLConfig(cfg *LocalConfig, path string) error {
 		return fmt.Errorf("failed to marshal config to YAML: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// G306: Config files need to be readable by other processes, 0o644 is intentional
+	if err := os.WriteFile(filepath.Clean(path), data, 0o644); err != nil { //nolint:gosec // config files need broader read permissions
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

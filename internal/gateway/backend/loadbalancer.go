@@ -137,13 +137,13 @@ func (lb *WeightedRoundRobinLB) calculateGCD(endpoints []*Endpoint) int {
 }
 
 func (lb *WeightedRoundRobinLB) calculateMaxWeight(endpoints []*Endpoint) int {
-	max := 0
+	maxWeight := 0
 	for _, ep := range endpoints {
-		if ep.Weight > max {
-			max = ep.Weight
+		if ep.Weight > maxWeight {
+			maxWeight = ep.Weight
 		}
 	}
-	return max
+	return maxWeight
 }
 
 func gcd(a, b int) int {
@@ -300,7 +300,7 @@ func (lb *ConsistentHashLB) SelectWithKey(endpoints []*Endpoint, key string) *En
 func (lb *ConsistentHashLB) computeEndpointsHash(endpoints []*Endpoint) string {
 	h := fnv.New64a()
 	for _, ep := range endpoints {
-		h.Write([]byte(ep.FullAddress()))
+		_, _ = h.Write([]byte(ep.FullAddress())) // hash.Write never returns an error
 	}
 	return string(h.Sum(nil))
 }
@@ -381,6 +381,6 @@ func (lb *ConsistentHashLB) search(hash uint32) int {
 
 func (lb *ConsistentHashLB) hash(key string) uint32 {
 	h := fnv.New32a()
-	h.Write([]byte(key))
+	_, _ = h.Write([]byte(key)) // hash.Write never returns an error
 	return h.Sum32()
 }

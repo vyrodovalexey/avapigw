@@ -463,10 +463,39 @@ const (
 	ErrMsgInternalError        = "internal error"
 )
 
+// Metric result labels for controller reconciliation.
+const (
+	MetricResultSuccess = "success"
+	MetricResultError   = "error"
+)
+
+// Backend reference kinds.
+const (
+	BackendKindService = "Service"
+	BackendKindBackend = "Backend"
+)
+
 // WrapWithContext wraps an error with additional context.
-func WrapWithContext(err error, op, resource, context string) error {
+func WrapWithContext(err error, op, resource, ctx string) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%s: %s on %s: %w", context, op, resource, err)
+	return fmt.Errorf("%s: %s on %s: %w", ctx, op, resource, err)
+}
+
+// ============================================================================
+// Safe Type Conversions
+// ============================================================================
+
+// safeIntToInt32 safely converts an int to int32, clamping to max int32 if needed.
+// This prevents integer overflow when converting slice lengths to int32 for status fields.
+func safeIntToInt32(v int) int32 {
+	const maxInt32 = int32(^uint32(0) >> 1) // 2147483647
+	if v < 0 {
+		return 0
+	}
+	if v > int(maxInt32) {
+		return maxInt32
+	}
+	return int32(v)
 }
