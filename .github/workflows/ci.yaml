@@ -64,7 +64,7 @@ jobs:
       - name: Run unit tests
         run: |
           go test -v -race -coverprofile=coverage-unit.tmp -covermode=atomic ./...
-          cat coverage-unit.tmp | grep -vE "\/cmd\/|\/v1alpha1\/" > coverage-unit.out
+          cat coverage-unit.tmp | grep -vE "cmd|v1alpha1" > coverage-unit.out
           rm -f coverage-unit.tmp
 
       - name: Upload coverage artifact

@@ -436,9 +436,9 @@ func applyDefaultSecurityConfig(cfg *Config) {
 func applyDefaultWebhookConfig(cfg *Config) {
 	cfg.WebhookSelfSignedCert = false
 	cfg.WebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
-	cfg.WebhookCertValidity = 365 * 24 * time.Hour // 1 year
-	cfg.WebhookCertRotation = 30 * 24 * time.Hour  // 30 days before expiry
-	cfg.WebhookCertSecretName = "avapigw-webhook-certs"
+	cfg.WebhookCertValidity = 365 * 24 * time.Hour      // 1 year
+	cfg.WebhookCertRotation = 30 * 24 * time.Hour       // 30 days before expiry
+	cfg.WebhookCertSecretName = "avapigw-webhook-certs" // NOSONAR this is not real seacret
 	cfg.WebhookServiceName = "avapigw-webhook-service"
 	cfg.WebhookServiceNamespace = "avapigw-system"
 	cfg.WebhookValidatingConfigName = "avapigw-validating-webhook-configuration"
