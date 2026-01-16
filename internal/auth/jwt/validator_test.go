@@ -83,7 +83,7 @@ func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
 	assert.Equal(t, time.Hour, cfg.JWKSCacheTTL)
-	assert.Equal(t, []string{"RS256", "RS384", "RS512"}, cfg.Algorithms)
+	assert.Equal(t, []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}, cfg.Algorithms)
 	assert.Equal(t, time.Minute, cfg.ClockSkew)
 }
 
@@ -1129,14 +1129,31 @@ func TestCryptoHelpers(t *testing.T) {
 	assert.Len(t, sum512, 64)
 }
 
-// Test rsaVerifyPKCS1v15 with invalid hash type
-func TestRsaVerifyPKCS1v15_InvalidHashType(t *testing.T) {
+// TestRsaVerifyPKCS1v15_ValidHash tests rsaVerifyPKCS1v15 with valid hash types.
+// Note: Invalid hash types are now prevented at compile time since crypto.Hash is a type-safe enum.
+func TestRsaVerifyPKCS1v15_ValidHash(t *testing.T) {
 	t.Parallel()
 
 	key := generateTestRSAKey(t)
 
-	err := rsaVerifyPKCS1v15(&key.PublicKey, "not-a-hash", []byte("hash"), []byte("sig"))
-	assert.ErrorIs(t, err, ErrInvalidAlgorithm)
+	// Test with valid hash types - should fail with invalid signature, not panic
+	tests := []struct {
+		name    string
+		hashAlg crypto.Hash
+	}{
+		{"SHA256", crypto.SHA256},
+		{"SHA384", crypto.SHA384},
+		{"SHA512", crypto.SHA512},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Should return an error (invalid signature) but not panic
+			err := rsaVerifyPKCS1v15(&key.PublicKey, tt.hashAlg, []byte("hash"), []byte("sig"))
+			assert.Error(t, err)
+		})
+	}
 }
 
 // Test for race conditions
@@ -1207,4 +1224,676 @@ func TestValidator_ConcurrentJWKSUpdate(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		<-done
 	}
+}
+
+// Helper function to create a test JWT token with PSS signature
+func createTestTokenPSS(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]interface{}, alg string) string {
+	t.Helper()
+
+	header := map[string]interface{}{
+		"alg": alg,
+		"typ": "JWT",
+		"kid": kid,
+	}
+
+	headerJSON, err := json.Marshal(header)
+	require.NoError(t, err)
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
+
+	claimsJSON, err := json.Marshal(claims)
+	require.NoError(t, err)
+	claimsB64 := base64.RawURLEncoding.EncodeToString(claimsJSON)
+
+	signingInput := headerB64 + "." + claimsB64
+
+	// Determine hash based on algorithm
+	var hash crypto.Hash
+	switch alg {
+	case "PS256":
+		hash = crypto.SHA256
+	case "PS384":
+		hash = crypto.SHA384
+	case "PS512":
+		hash = crypto.SHA512
+	default:
+		t.Fatalf("unsupported PSS algorithm: %s", alg)
+	}
+
+	// Compute hash
+	h := hash.New()
+	h.Write([]byte(signingInput))
+	hashed := h.Sum(nil)
+
+	// Sign with PSS
+	opts := &rsa.PSSOptions{
+		SaltLength: rsa.PSSSaltLengthEqualsHash,
+		Hash:       hash,
+	}
+	signature, err := rsa.SignPSS(rand.Reader, key, hash, hashed, opts)
+	require.NoError(t, err)
+	signatureB64 := base64.RawURLEncoding.EncodeToString(signature)
+
+	return signingInput + "." + signatureB64
+}
+
+// Helper function to create a test JWKS with PSS algorithm
+func createTestJWKSWithAlg(t *testing.T, key *rsa.PublicKey, kid string, alg string) []byte {
+	t.Helper()
+	jwks := JSONWebKeySet{
+		Keys: []JSONWebKey{
+			{
+				Kty: "RSA",
+				Kid: kid,
+				Alg: alg,
+				Use: "sig",
+				N:   base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+			},
+		},
+	}
+	data, err := json.Marshal(jwks)
+	require.NoError(t, err)
+	return data
+}
+
+// TestRsaVerifyPSS tests the rsaVerifyPSS function
+func TestRsaVerifyPSS(t *testing.T) {
+	t.Parallel()
+
+	key := generateTestRSAKey(t)
+
+	tests := []struct {
+		name    string
+		hashAlg crypto.Hash
+	}{
+		{"SHA256", crypto.SHA256},
+		{"SHA384", crypto.SHA384},
+		{"SHA512", crypto.SHA512},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Create a valid PSS signature
+			message := []byte("test message")
+			h := tt.hashAlg.New()
+			h.Write(message)
+			hashed := h.Sum(nil)
+
+			opts := &rsa.PSSOptions{
+				SaltLength: rsa.PSSSaltLengthEqualsHash,
+				Hash:       tt.hashAlg,
+			}
+			signature, err := rsa.SignPSS(rand.Reader, key, tt.hashAlg, hashed, opts)
+			require.NoError(t, err)
+
+			// Verify the signature
+			err = rsaVerifyPSS(&key.PublicKey, tt.hashAlg, hashed, signature)
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestRsaVerifyPSS_InvalidSignature tests rsaVerifyPSS with invalid signature
+func TestRsaVerifyPSS_InvalidSignature(t *testing.T) {
+	t.Parallel()
+
+	key := generateTestRSAKey(t)
+
+	// Create a hash
+	h := crypto.SHA256.New()
+	h.Write([]byte("test message"))
+	hashed := h.Sum(nil)
+
+	// Try to verify with invalid signature
+	err := rsaVerifyPSS(&key.PublicKey, crypto.SHA256, hashed, []byte("invalid-signature"))
+	assert.Error(t, err)
+}
+
+// TestVerifyRSAPSS tests the verifyRSAPSS function
+func TestVerifyRSAPSS(t *testing.T) {
+	t.Parallel()
+
+	key := generateTestRSAKey(t)
+
+	tests := []struct {
+		name      string
+		alg       string
+		wantError bool
+	}{
+		{
+			name:      "PS256",
+			alg:       "PS256",
+			wantError: false,
+		},
+		{
+			name:      "PS384",
+			alg:       "PS384",
+			wantError: false,
+		},
+		{
+			name:      "PS512",
+			alg:       "PS512",
+			wantError: false,
+		},
+		{
+			name:      "Unsupported algorithm",
+			alg:       "RS256",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if tt.wantError {
+				err := verifyRSAPSS("test", []byte("sig"), &key.PublicKey, tt.alg)
+				assert.ErrorIs(t, err, ErrInvalidAlgorithm)
+				return
+			}
+
+			// For supported algorithms, create a valid signature
+			var hash crypto.Hash
+			switch tt.alg {
+			case "PS256":
+				hash = crypto.SHA256
+			case "PS384":
+				hash = crypto.SHA384
+			case "PS512":
+				hash = crypto.SHA512
+			}
+
+			signingInput := "test.payload"
+			h := hash.New()
+			h.Write([]byte(signingInput))
+			hashed := h.Sum(nil)
+
+			opts := &rsa.PSSOptions{
+				SaltLength: rsa.PSSSaltLengthEqualsHash,
+				Hash:       hash,
+			}
+			signature, err := rsa.SignPSS(rand.Reader, key, hash, hashed, opts)
+			require.NoError(t, err)
+
+			err = verifyRSAPSS(signingInput, signature, &key.PublicKey, tt.alg)
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestVerifyRSASignatureWithHashPSS tests PSS hash verification
+func TestVerifyRSASignatureWithHashPSS(t *testing.T) {
+	t.Parallel()
+
+	key := generateTestRSAKey(t)
+
+	tests := []struct {
+		name      string
+		hashFunc  string
+		wantError bool
+	}{
+		{
+			name:      "SHA256",
+			hashFunc:  "SHA256",
+			wantError: false,
+		},
+		{
+			name:      "SHA384",
+			hashFunc:  "SHA384",
+			wantError: false,
+		},
+		{
+			name:      "SHA512",
+			hashFunc:  "SHA512",
+			wantError: false,
+		},
+		{
+			name:      "Unsupported hash",
+			hashFunc:  "MD5",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if tt.wantError {
+				err := verifyRSASignatureWithHashPSS("test", []byte("sig"), &key.PublicKey, tt.hashFunc)
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "unsupported hash function")
+				return
+			}
+
+			// For supported hash functions, create a valid signature
+			var hash crypto.Hash
+			switch tt.hashFunc {
+			case "SHA256":
+				hash = crypto.SHA256
+			case "SHA384":
+				hash = crypto.SHA384
+			case "SHA512":
+				hash = crypto.SHA512
+			}
+
+			signingInput := "test.payload"
+			h := hash.New()
+			h.Write([]byte(signingInput))
+			hashed := h.Sum(nil)
+
+			opts := &rsa.PSSOptions{
+				SaltLength: rsa.PSSSaltLengthEqualsHash,
+				Hash:       hash,
+			}
+			signature, err := rsa.SignPSS(rand.Reader, key, hash, hashed, opts)
+			require.NoError(t, err)
+
+			err = verifyRSASignatureWithHashPSS(signingInput, signature, &key.PublicKey, tt.hashFunc)
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestComputeHash tests the computeHash helper
+func TestComputeHash(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		hashFunc     string
+		expectedLen  int
+		expectedHash crypto.Hash
+		wantError    bool
+	}{
+		{
+			name:         "SHA256",
+			hashFunc:     "SHA256",
+			expectedLen:  32,
+			expectedHash: crypto.SHA256,
+			wantError:    false,
+		},
+		{
+			name:         "SHA384",
+			hashFunc:     "SHA384",
+			expectedLen:  48,
+			expectedHash: crypto.SHA384,
+			wantError:    false,
+		},
+		{
+			name:         "SHA512",
+			hashFunc:     "SHA512",
+			expectedLen:  64,
+			expectedHash: crypto.SHA512,
+			wantError:    false,
+		},
+		{
+			name:      "Unsupported hash",
+			hashFunc:  "MD5",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			hashed, cryptoHash, err := computeHash("test input", tt.hashFunc)
+
+			if tt.wantError {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "unsupported hash function")
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Len(t, hashed, tt.expectedLen)
+			assert.Equal(t, tt.expectedHash, cryptoHash)
+		})
+	}
+}
+
+// TestValidator_Validate_PSS tests PSS algorithm validation
+func TestValidator_Validate_PSS(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		alg  string
+	}{
+		{"PS256", "PS256"},
+		{"PS384", "PS384"},
+		{"PS512", "PS512"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Generate key pair
+			key := generateTestRSAKey(t)
+			jwksData := createTestJWKSWithAlg(t, &key.PublicKey, "test-key", tt.alg)
+
+			// Create validator
+			config := &Config{
+				LocalJWKS:       jwksData,
+				Algorithms:      []string{tt.alg},
+				SkipExpiryCheck: true,
+			}
+
+			validator, err := NewValidator(config, zap.NewNop())
+			require.NoError(t, err)
+
+			// Create valid claims
+			claims := map[string]interface{}{
+				"sub": "user123",
+				"iat": float64(time.Now().Unix()),
+			}
+
+			// Create token with PSS signature
+			token := createTestTokenPSS(t, key, "test-key", claims, tt.alg)
+
+			// Validate token
+			validatedClaims, err := validator.Validate(context.Background(), token)
+			require.NoError(t, err)
+			assert.Equal(t, "user123", validatedClaims.Subject)
+		})
+	}
+}
+
+// TestValidator_verifySignature_PSS tests verifySignature with PSS algorithms
+func TestValidator_verifySignature_PSS(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		alg  string
+	}{
+		{"PS256", "PS256"},
+		{"PS384", "PS384"},
+		{"PS512", "PS512"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			key := generateTestRSAKey(t)
+			jwksData := createTestJWKSWithAlg(t, &key.PublicKey, "test-key", tt.alg)
+
+			config := &Config{
+				LocalJWKS:  jwksData,
+				Algorithms: []string{tt.alg},
+			}
+
+			validator, err := NewValidator(config, zap.NewNop())
+			require.NoError(t, err)
+
+			// Create a valid PSS signature
+			var hash crypto.Hash
+			switch tt.alg {
+			case "PS256":
+				hash = crypto.SHA256
+			case "PS384":
+				hash = crypto.SHA384
+			case "PS512":
+				hash = crypto.SHA512
+			}
+
+			signingInput := "header.payload"
+			h := hash.New()
+			h.Write([]byte(signingInput))
+			hashed := h.Sum(nil)
+
+			opts := &rsa.PSSOptions{
+				SaltLength: rsa.PSSSaltLengthEqualsHash,
+				Hash:       hash,
+			}
+			signature, err := rsa.SignPSS(rand.Reader, key, hash, hashed, opts)
+			require.NoError(t, err)
+
+			// Get the key
+			jwk, err := validator.getSigningKey("test-key")
+			require.NoError(t, err)
+
+			// Verify signature
+			tokenString := signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
+			err = validator.verifySignature(tokenString, signature, jwk, tt.alg)
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestValidator_verifyRSAPSSSignature tests the verifyRSAPSSSignature method
+func TestValidator_verifyRSAPSSSignature(t *testing.T) {
+	t.Parallel()
+
+	key := generateTestRSAKey(t)
+	jwksData := createTestJWKSWithAlg(t, &key.PublicKey, "test-key", "PS256")
+
+	config := &Config{
+		LocalJWKS:  jwksData,
+		Algorithms: []string{"PS256"},
+	}
+
+	validator, err := NewValidator(config, zap.NewNop())
+	require.NoError(t, err)
+
+	// Create a valid PSS signature
+	signingInput := "header.payload"
+	h := crypto.SHA256.New()
+	h.Write([]byte(signingInput))
+	hashed := h.Sum(nil)
+
+	opts := &rsa.PSSOptions{
+		SaltLength: rsa.PSSSaltLengthEqualsHash,
+		Hash:       crypto.SHA256,
+	}
+	signature, err := rsa.SignPSS(rand.Reader, key, crypto.SHA256, hashed, opts)
+	require.NoError(t, err)
+
+	// Get the key
+	jwk, err := validator.getSigningKey("test-key")
+	require.NoError(t, err)
+
+	// Verify signature using the method
+	err = validator.verifyRSAPSSSignature(signingInput, signature, jwk, "PS256")
+	assert.NoError(t, err)
+}
+
+// TestValidator_verifyRSAPSSSignature_InvalidKey tests verifyRSAPSSSignature with invalid key
+func TestValidator_verifyRSAPSSSignature_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Algorithms: []string{"PS256"},
+	}
+
+	validator, err := NewValidator(config, zap.NewNop())
+	require.NoError(t, err)
+
+	// Create an invalid JWK (non-RSA)
+	jwk := &JSONWebKey{
+		Kty: "EC",
+		Kid: "test-key",
+	}
+
+	err = validator.verifyRSAPSSSignature("header.payload", []byte("sig"), jwk, "PS256")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to convert key to RSA")
+}
+
+// TestValidator_Validate_PSS_InvalidSignature tests PSS validation with invalid signature
+func TestValidator_Validate_PSS_InvalidSignature(t *testing.T) {
+	t.Parallel()
+
+	key := generateTestRSAKey(t)
+	jwksData := createTestJWKSWithAlg(t, &key.PublicKey, "test-key", "PS256")
+
+	config := &Config{
+		LocalJWKS:       jwksData,
+		Algorithms:      []string{"PS256"},
+		SkipExpiryCheck: true,
+	}
+
+	validator, err := NewValidator(config, zap.NewNop())
+	require.NoError(t, err)
+
+	// Create a token with invalid signature
+	header := map[string]interface{}{
+		"alg": "PS256",
+		"typ": "JWT",
+		"kid": "test-key",
+	}
+	headerJSON, _ := json.Marshal(header)
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerJSON)
+
+	claims := map[string]interface{}{"sub": "user123"}
+	claimsJSON, _ := json.Marshal(claims)
+	claimsB64 := base64.RawURLEncoding.EncodeToString(claimsJSON)
+
+	// Use invalid signature
+	invalidSig := base64.RawURLEncoding.EncodeToString([]byte("invalid-signature"))
+	token := headerB64 + "." + claimsB64 + "." + invalidSig
+
+	_, err = validator.Validate(context.Background(), token)
+	assert.Error(t, err)
+}
+
+// TestValidator_Validate_AllPSSAlgorithms tests all PSS algorithms in a single validator
+func TestValidator_Validate_AllPSSAlgorithms(t *testing.T) {
+	t.Parallel()
+
+	// Generate key pair
+	key := generateTestRSAKey(t)
+
+	// Create JWKS with all PSS algorithms
+	jwks := JSONWebKeySet{
+		Keys: []JSONWebKey{
+			{
+				Kty: "RSA",
+				Kid: "ps256-key",
+				Alg: "PS256",
+				Use: "sig",
+				N:   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			},
+			{
+				Kty: "RSA",
+				Kid: "ps384-key",
+				Alg: "PS384",
+				Use: "sig",
+				N:   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			},
+			{
+				Kty: "RSA",
+				Kid: "ps512-key",
+				Alg: "PS512",
+				Use: "sig",
+				N:   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			},
+		},
+	}
+	jwksData, err := json.Marshal(jwks)
+	require.NoError(t, err)
+
+	// Create validator with all PSS algorithms
+	config := &Config{
+		LocalJWKS:       jwksData,
+		Algorithms:      []string{"PS256", "PS384", "PS512"},
+		SkipExpiryCheck: true,
+	}
+
+	validator, err := NewValidator(config, zap.NewNop())
+	require.NoError(t, err)
+
+	// Test each algorithm
+	algorithms := []struct {
+		alg string
+		kid string
+	}{
+		{"PS256", "ps256-key"},
+		{"PS384", "ps384-key"},
+		{"PS512", "ps512-key"},
+	}
+
+	for _, tt := range algorithms {
+		t.Run(tt.alg, func(t *testing.T) {
+			claims := map[string]interface{}{
+				"sub": "user123",
+				"alg": tt.alg,
+			}
+
+			token := createTestTokenPSS(t, key, tt.kid, claims, tt.alg)
+
+			validatedClaims, err := validator.Validate(context.Background(), token)
+			require.NoError(t, err)
+			assert.Equal(t, "user123", validatedClaims.Subject)
+		})
+	}
+}
+
+// TestValidator_Validate_MixedRSAndPSS tests validator with both RS and PS algorithms
+func TestValidator_Validate_MixedRSAndPSS(t *testing.T) {
+	t.Parallel()
+
+	// Generate key pair
+	key := generateTestRSAKey(t)
+
+	// Create JWKS with both RS256 and PS256
+	jwks := JSONWebKeySet{
+		Keys: []JSONWebKey{
+			{
+				Kty: "RSA",
+				Kid: "rs256-key",
+				Alg: "RS256",
+				Use: "sig",
+				N:   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			},
+			{
+				Kty: "RSA",
+				Kid: "ps256-key",
+				Alg: "PS256",
+				Use: "sig",
+				N:   base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+				E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+			},
+		},
+	}
+	jwksData, err := json.Marshal(jwks)
+	require.NoError(t, err)
+
+	// Create validator with both algorithms
+	config := &Config{
+		LocalJWKS:       jwksData,
+		Algorithms:      []string{"RS256", "PS256"},
+		SkipExpiryCheck: true,
+	}
+
+	validator, err := NewValidator(config, zap.NewNop())
+	require.NoError(t, err)
+
+	// Test RS256
+	t.Run("RS256", func(t *testing.T) {
+		claims := map[string]interface{}{"sub": "user-rs256"}
+		token := createTestToken(t, key, "rs256-key", claims)
+
+		validatedClaims, err := validator.Validate(context.Background(), token)
+		require.NoError(t, err)
+		assert.Equal(t, "user-rs256", validatedClaims.Subject)
+	})
+
+	// Test PS256
+	t.Run("PS256", func(t *testing.T) {
+		claims := map[string]interface{}{"sub": "user-ps256"}
+		token := createTestTokenPSS(t, key, "ps256-key", claims, "PS256")
+
+		validatedClaims, err := validator.Validate(context.Background(), token)
+		require.NoError(t, err)
+		assert.Equal(t, "user-ps256", validatedClaims.Subject)
+	})
 }

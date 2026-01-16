@@ -31,10 +31,16 @@ func newSHA512() hash.Hash {
 }
 
 // rsaVerifyPKCS1v15 verifies an RSA PKCS#1 v1.5 signature.
-func rsaVerifyPKCS1v15(pub *rsa.PublicKey, hashAlg interface{}, hashed, sig []byte) error {
-	cryptoHash, ok := hashAlg.(crypto.Hash)
-	if !ok {
-		return ErrInvalidAlgorithm
+func rsaVerifyPKCS1v15(pub *rsa.PublicKey, hashAlg crypto.Hash, hashed, sig []byte) error {
+	return rsa.VerifyPKCS1v15(pub, hashAlg, hashed, sig)
+}
+
+// rsaVerifyPSS verifies an RSA-PSS signature.
+// Uses PSSSaltLengthEqualsHash for maximum compatibility with JWT libraries.
+func rsaVerifyPSS(pub *rsa.PublicKey, hashAlg crypto.Hash, hashed, sig []byte) error {
+	opts := &rsa.PSSOptions{
+		SaltLength: rsa.PSSSaltLengthEqualsHash,
+		Hash:       hashAlg,
 	}
-	return rsa.VerifyPKCS1v15(pub, cryptoHash, hashed, sig)
+	return rsa.VerifyPSS(pub, hashAlg, hashed, sig, opts)
 }

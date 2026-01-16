@@ -2,6 +2,8 @@
 package tracing
 
 import (
+	"go.opentelemetry.io/contrib/propagators/b3"
+	"go.opentelemetry.io/contrib/propagators/jaeger"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
@@ -51,14 +53,12 @@ func SetupPropagators(config *PropagatorConfig) {
 		switch t {
 		case PropagatorW3C:
 			propagators = append(propagators, propagation.TraceContext{})
-		case PropagatorB3, PropagatorB3Multi:
-			// B3 propagator would require additional import
-			// For now, we use W3C as fallback
-			propagators = append(propagators, propagation.TraceContext{})
+		case PropagatorB3:
+			propagators = append(propagators, b3.New(b3.WithInjectEncoding(b3.B3SingleHeader)))
+		case PropagatorB3Multi:
+			propagators = append(propagators, b3.New(b3.WithInjectEncoding(b3.B3MultipleHeader)))
 		case PropagatorJaeger:
-			// Jaeger propagator would require additional import
-			// For now, we use W3C as fallback
-			propagators = append(propagators, propagation.TraceContext{})
+			propagators = append(propagators, jaeger.Jaeger{})
 		default:
 			propagators = append(propagators, propagation.TraceContext{})
 		}
@@ -93,6 +93,31 @@ func CompositePropagator() propagation.TextMapPropagator {
 	return propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
+	)
+}
+
+// B3SingleHeaderPropagator returns a B3 single-header propagator.
+func B3SingleHeaderPropagator() propagation.TextMapPropagator {
+	return b3.New(b3.WithInjectEncoding(b3.B3SingleHeader))
+}
+
+// B3MultiHeaderPropagator returns a B3 multi-header propagator.
+func B3MultiHeaderPropagator() propagation.TextMapPropagator {
+	return b3.New(b3.WithInjectEncoding(b3.B3MultipleHeader))
+}
+
+// JaegerPropagator returns a Jaeger propagator.
+func JaegerPropagator() propagation.TextMapPropagator {
+	return jaeger.Jaeger{}
+}
+
+// AllPropagators returns a composite propagator with W3C, B3, and Jaeger support.
+func AllPropagators() propagation.TextMapPropagator {
+	return propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+		b3.New(b3.WithInjectEncoding(b3.B3MultipleHeader|b3.B3SingleHeader)),
+		jaeger.Jaeger{},
 	)
 }
 

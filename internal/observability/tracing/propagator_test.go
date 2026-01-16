@@ -621,3 +621,528 @@ func TestMapCarrier_TextMapCarrierInterface(t *testing.T) {
 func TestMetadataCarrier_TextMapCarrierInterface(t *testing.T) {
 	var _ propagation.TextMapCarrier = MetadataCarrier{}
 }
+
+// TestB3SingleHeaderPropagator tests B3 single-header propagator
+func TestB3SingleHeaderPropagator(t *testing.T) {
+	t.Parallel()
+
+	propagator := B3SingleHeaderPropagator()
+	assert.NotNil(t, propagator)
+
+	// Verify it has the expected fields
+	fields := propagator.Fields()
+	assert.NotEmpty(t, fields)
+
+	// B3 single header should include "b3" field
+	hasB3 := false
+	for _, field := range fields {
+		if field == "b3" {
+			hasB3 = true
+			break
+		}
+	}
+	assert.True(t, hasB3, "B3 single header propagator should have 'b3' field")
+}
+
+// TestB3SingleHeaderPropagator_InjectExtract tests B3 single-header injection and extraction
+func TestB3SingleHeaderPropagator_InjectExtract(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := B3SingleHeaderPropagator()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Inject into carrier
+	carrier := MapCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Verify B3 header was injected
+	b3Header := carrier.Get("b3")
+	assert.NotEmpty(t, b3Header, "B3 header should be injected")
+
+	// Extract from carrier
+	extractedCtx := propagator.Extract(context.Background(), carrier)
+	assert.NotNil(t, extractedCtx)
+}
+
+// TestB3MultiHeaderPropagator tests B3 multi-header propagator
+func TestB3MultiHeaderPropagator(t *testing.T) {
+	t.Parallel()
+
+	propagator := B3MultiHeaderPropagator()
+	assert.NotNil(t, propagator)
+
+	// Verify it has the expected fields
+	fields := propagator.Fields()
+	assert.NotEmpty(t, fields)
+
+	// B3 multi header should include trace-related fields
+	expectedFields := []string{"x-b3-traceid", "x-b3-spanid", "x-b3-sampled"}
+	for _, expected := range expectedFields {
+		found := false
+		for _, field := range fields {
+			if field == expected {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "B3 multi header propagator should have '%s' field", expected)
+	}
+}
+
+// TestB3MultiHeaderPropagator_InjectExtract tests B3 multi-header injection and extraction
+func TestB3MultiHeaderPropagator_InjectExtract(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := B3MultiHeaderPropagator()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Inject into carrier
+	carrier := MapCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Verify B3 headers were injected
+	traceID := carrier.Get("x-b3-traceid")
+	spanID := carrier.Get("x-b3-spanid")
+	assert.NotEmpty(t, traceID, "x-b3-traceid header should be injected")
+	assert.NotEmpty(t, spanID, "x-b3-spanid header should be injected")
+
+	// Extract from carrier
+	extractedCtx := propagator.Extract(context.Background(), carrier)
+	assert.NotNil(t, extractedCtx)
+}
+
+// TestJaegerPropagator tests Jaeger propagator
+func TestJaegerPropagator(t *testing.T) {
+	t.Parallel()
+
+	propagator := JaegerPropagator()
+	assert.NotNil(t, propagator)
+
+	// Verify it has the expected fields
+	fields := propagator.Fields()
+	assert.NotEmpty(t, fields)
+
+	// Jaeger propagator should include "uber-trace-id" field
+	hasUberTraceID := false
+	for _, field := range fields {
+		if field == "uber-trace-id" {
+			hasUberTraceID = true
+			break
+		}
+	}
+	assert.True(t, hasUberTraceID, "Jaeger propagator should have 'uber-trace-id' field")
+}
+
+// TestJaegerPropagator_InjectExtract tests Jaeger injection and extraction
+func TestJaegerPropagator_InjectExtract(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := JaegerPropagator()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Inject into carrier
+	carrier := MapCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Verify uber-trace-id header was injected
+	uberTraceID := carrier.Get("uber-trace-id")
+	assert.NotEmpty(t, uberTraceID, "uber-trace-id header should be injected")
+
+	// Extract from carrier
+	extractedCtx := propagator.Extract(context.Background(), carrier)
+	assert.NotNil(t, extractedCtx)
+}
+
+// TestAllPropagators tests composite propagator with all formats
+func TestAllPropagators(t *testing.T) {
+	t.Parallel()
+
+	propagator := AllPropagators()
+	assert.NotNil(t, propagator)
+
+	// Verify it has fields from all propagators
+	fields := propagator.Fields()
+	assert.NotEmpty(t, fields)
+
+	// Should have W3C traceparent
+	hasTraceparent := false
+	// Should have B3 fields
+	hasB3 := false
+	// Should have Jaeger field
+	hasUberTraceID := false
+	// Should have baggage
+	hasBaggage := false
+
+	for _, field := range fields {
+		switch field {
+		case "traceparent":
+			hasTraceparent = true
+		case "b3", "x-b3-traceid":
+			hasB3 = true
+		case "uber-trace-id":
+			hasUberTraceID = true
+		case "baggage":
+			hasBaggage = true
+		}
+	}
+
+	assert.True(t, hasTraceparent, "AllPropagators should have W3C traceparent field")
+	assert.True(t, hasB3, "AllPropagators should have B3 field")
+	assert.True(t, hasUberTraceID, "AllPropagators should have Jaeger uber-trace-id field")
+	assert.True(t, hasBaggage, "AllPropagators should have baggage field")
+}
+
+// TestAllPropagators_InjectExtract tests AllPropagators injection and extraction
+func TestAllPropagators_InjectExtract(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := AllPropagators()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Inject into carrier
+	carrier := MapCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Verify headers from all propagators were injected
+	assert.NotEmpty(t, carrier.Get("traceparent"), "W3C traceparent should be injected")
+	assert.NotEmpty(t, carrier.Get("uber-trace-id"), "Jaeger uber-trace-id should be injected")
+	// B3 can be either single or multi header
+	hasB3 := carrier.Get("b3") != "" || carrier.Get("x-b3-traceid") != ""
+	assert.True(t, hasB3, "B3 headers should be injected")
+
+	// Extract from carrier
+	extractedCtx := propagator.Extract(context.Background(), carrier)
+	assert.NotNil(t, extractedCtx)
+}
+
+// TestSetupPropagators_B3 tests SetupPropagators with B3
+func TestSetupPropagators_B3(t *testing.T) {
+	// Save original propagator
+	originalPropagator := otel.GetTextMapPropagator()
+	defer otel.SetTextMapPropagator(originalPropagator)
+
+	config := &PropagatorConfig{
+		Types:         []PropagatorType{PropagatorB3},
+		EnableBaggage: false,
+	}
+
+	SetupPropagators(config)
+
+	propagator := otel.GetTextMapPropagator()
+	assert.NotNil(t, propagator)
+
+	// Verify B3 field is present
+	fields := propagator.Fields()
+	hasB3 := false
+	for _, field := range fields {
+		if field == "b3" {
+			hasB3 = true
+			break
+		}
+	}
+	assert.True(t, hasB3, "SetupPropagators with B3 should include 'b3' field")
+}
+
+// TestSetupPropagators_B3Multi tests SetupPropagators with B3 multi-header
+func TestSetupPropagators_B3Multi(t *testing.T) {
+	// Save original propagator
+	originalPropagator := otel.GetTextMapPropagator()
+	defer otel.SetTextMapPropagator(originalPropagator)
+
+	config := &PropagatorConfig{
+		Types:         []PropagatorType{PropagatorB3Multi},
+		EnableBaggage: false,
+	}
+
+	SetupPropagators(config)
+
+	propagator := otel.GetTextMapPropagator()
+	assert.NotNil(t, propagator)
+
+	// Verify B3 multi-header fields are present
+	fields := propagator.Fields()
+	hasTraceID := false
+	for _, field := range fields {
+		if field == "x-b3-traceid" {
+			hasTraceID = true
+			break
+		}
+	}
+	assert.True(t, hasTraceID, "SetupPropagators with B3Multi should include 'x-b3-traceid' field")
+}
+
+// TestSetupPropagators_Jaeger tests SetupPropagators with Jaeger
+func TestSetupPropagators_Jaeger(t *testing.T) {
+	// Save original propagator
+	originalPropagator := otel.GetTextMapPropagator()
+	defer otel.SetTextMapPropagator(originalPropagator)
+
+	config := &PropagatorConfig{
+		Types:         []PropagatorType{PropagatorJaeger},
+		EnableBaggage: false,
+	}
+
+	SetupPropagators(config)
+
+	propagator := otel.GetTextMapPropagator()
+	assert.NotNil(t, propagator)
+
+	// Verify Jaeger field is present
+	fields := propagator.Fields()
+	hasUberTraceID := false
+	for _, field := range fields {
+		if field == "uber-trace-id" {
+			hasUberTraceID = true
+			break
+		}
+	}
+	assert.True(t, hasUberTraceID, "SetupPropagators with Jaeger should include 'uber-trace-id' field")
+}
+
+// TestSetupPropagators_AllTypes tests SetupPropagators with all propagator types
+func TestSetupPropagators_AllTypes(t *testing.T) {
+	// Save original propagator
+	originalPropagator := otel.GetTextMapPropagator()
+	defer otel.SetTextMapPropagator(originalPropagator)
+
+	config := &PropagatorConfig{
+		Types:         []PropagatorType{PropagatorW3C, PropagatorB3, PropagatorB3Multi, PropagatorJaeger},
+		EnableBaggage: true,
+	}
+
+	SetupPropagators(config)
+
+	propagator := otel.GetTextMapPropagator()
+	assert.NotNil(t, propagator)
+
+	// Verify fields from all propagators are present
+	fields := propagator.Fields()
+	assert.NotEmpty(t, fields)
+}
+
+// TestB3Propagator_ExtractFromB3SingleHeader tests extraction from B3 single header format
+func TestB3Propagator_ExtractFromB3SingleHeader(t *testing.T) {
+	propagator := B3SingleHeaderPropagator()
+
+	// Create a carrier with B3 single header format
+	// Format: {TraceId}-{SpanId}-{SamplingState}-{ParentSpanId}
+	carrier := MapCarrier{
+		"b3": "80f198ee56343ba864fe8b2a57d3eff7-e457b5a2e4d86bd1-1",
+	}
+
+	// Extract context
+	ctx := propagator.Extract(context.Background(), carrier)
+	assert.NotNil(t, ctx)
+}
+
+// TestB3Propagator_ExtractFromB3MultiHeader tests extraction from B3 multi-header format
+func TestB3Propagator_ExtractFromB3MultiHeader(t *testing.T) {
+	propagator := B3MultiHeaderPropagator()
+
+	// Create a carrier with B3 multi-header format
+	carrier := MapCarrier{
+		"x-b3-traceid": "80f198ee56343ba864fe8b2a57d3eff7",
+		"x-b3-spanid":  "e457b5a2e4d86bd1",
+		"x-b3-sampled": "1",
+	}
+
+	// Extract context
+	ctx := propagator.Extract(context.Background(), carrier)
+	assert.NotNil(t, ctx)
+}
+
+// TestJaegerPropagator_ExtractFromUberTraceID tests extraction from Jaeger uber-trace-id header
+func TestJaegerPropagator_ExtractFromUberTraceID(t *testing.T) {
+	propagator := JaegerPropagator()
+
+	// Create a carrier with Jaeger uber-trace-id format
+	// Format: {trace-id}:{span-id}:{parent-span-id}:{flags}
+	carrier := MapCarrier{
+		"uber-trace-id": "80f198ee56343ba864fe8b2a57d3eff7:e457b5a2e4d86bd1:0:1",
+	}
+
+	// Extract context
+	ctx := propagator.Extract(context.Background(), carrier)
+	assert.NotNil(t, ctx)
+}
+
+// TestPropagatorConfig_EmptyTypes tests PropagatorConfig with empty types
+func TestPropagatorConfig_EmptyTypes(t *testing.T) {
+	// Save original propagator
+	originalPropagator := otel.GetTextMapPropagator()
+	defer otel.SetTextMapPropagator(originalPropagator)
+
+	config := &PropagatorConfig{
+		Types:         []PropagatorType{},
+		EnableBaggage: true,
+	}
+
+	// Should not panic
+	assert.NotPanics(t, func() {
+		SetupPropagators(config)
+	})
+
+	// Should still have baggage propagator
+	propagator := otel.GetTextMapPropagator()
+	assert.NotNil(t, propagator)
+}
+
+// TestHeaderCarrier_WithB3Propagator tests HeaderCarrier with B3 propagator
+func TestHeaderCarrier_WithB3Propagator(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := B3SingleHeaderPropagator()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Inject into HeaderCarrier
+	carrier := HeaderCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Verify B3 header was injected
+	b3Header := carrier.Get("b3")
+	assert.NotEmpty(t, b3Header, "B3 header should be injected into HeaderCarrier")
+}
+
+// TestMetadataCarrier_WithJaegerPropagator tests MetadataCarrier with Jaeger propagator
+func TestMetadataCarrier_WithJaegerPropagator(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := JaegerPropagator()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Inject into MetadataCarrier
+	carrier := MetadataCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Verify uber-trace-id header was injected
+	uberTraceID := carrier.Get("uber-trace-id")
+	assert.NotEmpty(t, uberTraceID, "uber-trace-id header should be injected into MetadataCarrier")
+}
+
+// TestPropagatorRoundTrip_B3 tests B3 propagator round-trip (inject then extract)
+func TestPropagatorRoundTrip_B3(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := B3SingleHeaderPropagator()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	spanCtx := span.SpanContext()
+	span.End()
+
+	// Inject into carrier
+	carrier := MapCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Extract from carrier
+	extractedCtx := propagator.Extract(context.Background(), carrier)
+
+	// Create a new span from extracted context
+	_, extractedSpan := tracer.Start(extractedCtx, "extracted-span")
+	extractedSpanCtx := extractedSpan.SpanContext()
+	extractedSpan.End()
+
+	// Verify trace ID is preserved
+	assert.Equal(t, spanCtx.TraceID(), extractedSpanCtx.TraceID(), "Trace ID should be preserved in round-trip")
+}
+
+// TestPropagatorRoundTrip_Jaeger tests Jaeger propagator round-trip (inject then extract)
+func TestPropagatorRoundTrip_Jaeger(t *testing.T) {
+	// Setup test tracer
+	exporter := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	propagator := JaegerPropagator()
+
+	// Create a span
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	spanCtx := span.SpanContext()
+	span.End()
+
+	// Inject into carrier
+	carrier := MapCarrier{}
+	propagator.Inject(ctx, carrier)
+
+	// Extract from carrier
+	extractedCtx := propagator.Extract(context.Background(), carrier)
+
+	// Create a new span from extracted context
+	_, extractedSpan := tracer.Start(extractedCtx, "extracted-span")
+	extractedSpanCtx := extractedSpan.SpanContext()
+	extractedSpan.End()
+
+	// Verify trace ID is preserved
+	assert.Equal(t, spanCtx.TraceID(), extractedSpanCtx.TraceID(), "Trace ID should be preserved in round-trip")
+}

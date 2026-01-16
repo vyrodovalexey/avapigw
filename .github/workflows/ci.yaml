@@ -153,7 +153,7 @@ jobs:
             -Dsonar.organization=vyrodovalexey
             -Dsonar.go.coverage.reportPaths=coverage-unit.out,coverage-functional.out
             -Dsonar.sources=.
-            -Dsonar.exclusions=**/*_test.go,**/vendor/**,**/testdata/**,**/test/**
+            -Dsonar.exclusions=**/*_test.go,**/vendor/**,**/testdata/**,**/test/**,**/deployment/**,**/config/**
 
   # ============================================================================
   # Job 5: Build

@@ -2,6 +2,7 @@ package jwt
 
 import (
 	"context"
+	"crypto"
 	"crypto/rsa"
 	"crypto/subtle"
 	"encoding/base64"
@@ -17,6 +18,13 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/vyrodovalexey/avapigw/internal/auth"
+)
+
+// Hash function name constants.
+const (
+	hashSHA256 = "SHA256"
+	hashSHA384 = "SHA384"
+	hashSHA512 = "SHA512"
 )
 
 // Common validation errors.
@@ -88,7 +96,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		JWKSCacheTTL: time.Hour,
-		Algorithms:   []string{"RS256", "RS384", "RS512"},
+		Algorithms:   []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"},
 		ClockSkew:    time.Minute,
 	}
 }
@@ -131,7 +139,7 @@ func NewValidator(config *Config, logger *zap.Logger) (*Validator, error) {
 
 	// Set allowed algorithms
 	if len(config.Algorithms) == 0 {
-		config.Algorithms = []string{"RS256", "RS384", "RS512"}
+		config.Algorithms = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}
 	}
 	for _, alg := range config.Algorithms {
 		v.algorithms[alg] = true
@@ -333,12 +341,14 @@ func (v *Validator) verifySignature(tokenString string, signature []byte, key *J
 	switch alg {
 	case "RS256", "RS384", "RS512":
 		return v.verifyRSASignature(signingInput, signature, key, alg)
+	case "PS256", "PS384", "PS512":
+		return v.verifyRSAPSSSignature(signingInput, signature, key, alg)
 	default:
 		return fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
 	}
 }
 
-// verifyRSASignature verifies an RSA signature.
+// verifyRSASignature verifies an RSA PKCS#1 v1.5 signature.
 func (v *Validator) verifyRSASignature(signingInput string, signature []byte, key *JSONWebKey, alg string) error {
 	rsaKey, err := key.ToRSAPublicKey()
 	if err != nil {
@@ -346,6 +356,20 @@ func (v *Validator) verifyRSASignature(signingInput string, signature []byte, ke
 	}
 
 	return verifyRSAPKCS1v15(signingInput, signature, rsaKey, alg)
+}
+
+// verifyRSAPSSSignature verifies an RSA-PSS signature.
+func (v *Validator) verifyRSAPSSSignature(signingInput string, signature []byte, key *JSONWebKey, alg string) error {
+	rsaKey, err := key.ToRSAPublicKey()
+	if err != nil {
+		v.logger.Debug("failed to convert key to RSA for PSS verification",
+			zap.String("algorithm", alg),
+			zap.Error(err),
+		)
+		return fmt.Errorf("failed to convert key to RSA: %w", err)
+	}
+
+	return verifyRSAPSS(signingInput, signature, rsaKey, alg)
 }
 
 // validateClaims validates the standard claims.
@@ -509,11 +533,11 @@ func verifyRSAPKCS1v15(signingInput string, signature []byte, key *rsa.PublicKey
 	var hashFunc string
 	switch alg {
 	case "RS256":
-		hashFunc = "SHA256"
+		hashFunc = hashSHA256
 	case "RS384":
-		hashFunc = "SHA384"
+		hashFunc = hashSHA384
 	case "RS512":
-		hashFunc = "SHA512"
+		hashFunc = hashSHA512
 	default:
 		return fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
 	}
@@ -522,30 +546,67 @@ func verifyRSAPKCS1v15(signingInput string, signature []byte, key *rsa.PublicKey
 	return verifyRSASignatureWithHash(signingInput, signature, key, hashFunc)
 }
 
-// verifyRSASignatureWithHash verifies an RSA signature with the specified hash.
-func verifyRSASignatureWithHash(signingInput string, signature []byte, key *rsa.PublicKey, hashFunc string) error {
-	var hash []byte
-	var cryptoHash interface{}
-
-	switch hashFunc {
-	case "SHA256":
-		h := newSHA256()
-		h.Write([]byte(signingInput))
-		hash = h.Sum(nil)
-		cryptoHash = cryptoSHA256
-	case "SHA384":
-		h := newSHA384()
-		h.Write([]byte(signingInput))
-		hash = h.Sum(nil)
-		cryptoHash = cryptoSHA384
-	case "SHA512":
-		h := newSHA512()
-		h.Write([]byte(signingInput))
-		hash = h.Sum(nil)
-		cryptoHash = cryptoSHA512
+// verifyRSAPSS verifies an RSA-PSS signature.
+func verifyRSAPSS(signingInput string, signature []byte, key *rsa.PublicKey, alg string) error {
+	var hashFunc string
+	switch alg {
+	case "PS256":
+		hashFunc = hashSHA256
+	case "PS384":
+		hashFunc = hashSHA384
+	case "PS512":
+		hashFunc = hashSHA512
 	default:
-		return fmt.Errorf("unsupported hash function: %s", hashFunc)
+		return fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
 	}
 
-	return rsaVerifyPKCS1v15(key, cryptoHash, hash, signature)
+	return verifyRSASignatureWithHashPSS(signingInput, signature, key, hashFunc)
+}
+
+// verifyRSASignatureWithHash verifies an RSA PKCS#1 v1.5 signature with the specified hash.
+func verifyRSASignatureWithHash(signingInput string, signature []byte, key *rsa.PublicKey, hashFunc string) error {
+	hashed, cryptoHash, err := computeHash(signingInput, hashFunc)
+	if err != nil {
+		return err
+	}
+
+	return rsaVerifyPKCS1v15(key, cryptoHash, hashed, signature)
+}
+
+// verifyRSASignatureWithHashPSS verifies an RSA-PSS signature with the specified hash.
+func verifyRSASignatureWithHashPSS(signingInput string, signature []byte, key *rsa.PublicKey, hashFunc string) error {
+	hashed, cryptoHash, err := computeHash(signingInput, hashFunc)
+	if err != nil {
+		return err
+	}
+
+	return rsaVerifyPSS(key, cryptoHash, hashed, signature)
+}
+
+// computeHash computes the hash of the signing input using the specified hash function.
+func computeHash(signingInput string, hashFunc string) ([]byte, crypto.Hash, error) {
+	var hashed []byte
+	var cryptoHash crypto.Hash
+
+	switch hashFunc {
+	case hashSHA256:
+		h := newSHA256()
+		h.Write([]byte(signingInput))
+		hashed = h.Sum(nil)
+		cryptoHash = cryptoSHA256
+	case hashSHA384:
+		h := newSHA384()
+		h.Write([]byte(signingInput))
+		hashed = h.Sum(nil)
+		cryptoHash = cryptoSHA384
+	case hashSHA512:
+		h := newSHA512()
+		h.Write([]byte(signingInput))
+		hashed = h.Sum(nil)
+		cryptoHash = cryptoSHA512
+	default:
+		return nil, 0, fmt.Errorf("unsupported hash function: %s", hashFunc)
+	}
+
+	return hashed, cryptoHash, nil
 }
