@@ -51,7 +51,6 @@ jobs:
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
-    needs: [lint]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -88,7 +87,6 @@ jobs:
   test-functional:
     name: Functional Tests
     runs-on: ubuntu-latest
-    needs: [test-unit]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -125,7 +123,6 @@ jobs:
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest
-    needs: [test-functional]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -145,7 +142,6 @@ jobs:
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
@@ -161,7 +157,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [sonarcloud]
+    needs: [sonarcloud, test-functional, test-unit, lint ]
     strategy:
       matrix:
         include:
