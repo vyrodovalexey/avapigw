@@ -64,7 +64,12 @@ func NewProxyWithConfig(manager *backend.Manager, logger *zap.Logger, config *Pr
 }
 
 // Proxy proxies data between the client connection and a backend.
-func (p *Proxy) Proxy(ctx context.Context, clientConn net.Conn, backendRef *backend.Backend, timeout time.Duration) error {
+func (p *Proxy) Proxy(
+	ctx context.Context,
+	clientConn net.Conn,
+	backendRef *backend.Backend,
+	timeout time.Duration,
+) error {
 	if backendRef == nil {
 		return fmt.Errorf("backend is nil")
 	}
@@ -98,7 +103,12 @@ func (p *Proxy) Proxy(ctx context.Context, clientConn net.Conn, backendRef *back
 }
 
 // ProxyWithAddress proxies data between the client connection and a specific backend address.
-func (p *Proxy) ProxyWithAddress(ctx context.Context, clientConn net.Conn, backendAddr string, timeout time.Duration) error {
+func (p *Proxy) ProxyWithAddress(
+	ctx context.Context,
+	clientConn net.Conn,
+	backendAddr string,
+	timeout time.Duration,
+) error {
 	// Connect to backend with timeout
 	dialer := &net.Dialer{
 		Timeout: timeout,
@@ -171,51 +181,73 @@ func (p *Proxy) copyWithBufferAndContext(ctx context.Context, dst, src net.Conn)
 	buf := *bufPtr
 
 	for {
-		// Check context before each read
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Set a short read deadline to allow periodic context checks
-		if err := src.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
-			if isClosedError(err) {
-				return nil
-			}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		n, err := src.Read(buf)
+		n, shouldContinue, err := p.readWithDeadline(src, buf)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Timeout, check context and continue
-				continue
-			}
-			if isClosedError(err) {
-				return nil
-			}
 			return err
+		}
+		if shouldContinue {
+			continue
 		}
 
 		if n > 0 {
-			// Reset write deadline
-			if err := dst.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
-				if isClosedError(err) {
-					return nil
-				}
-				return err
-			}
-
-			_, err = dst.Write(buf[:n])
-			if err != nil {
-				if isClosedError(err) {
-					return nil
-				}
+			if err := p.writeWithDeadline(dst, buf[:n]); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// readWithDeadline reads from the connection with a deadline for context checking.
+// Returns bytes read, whether to continue the loop, and any error.
+func (p *Proxy) readWithDeadline(src net.Conn, buf []byte) (bytesRead int, shouldContinue bool, err error) {
+	if err := src.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
+		return 0, false, handleConnError(err)
+	}
+
+	n, err := src.Read(buf)
+	if err != nil {
+		cont, readErr := handleReadError(err)
+		return 0, cont, readErr
+	}
+
+	return n, false, nil
+}
+
+// writeWithDeadline writes data to the connection with a deadline.
+func (p *Proxy) writeWithDeadline(dst net.Conn, data []byte) error {
+	if err := dst.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return handleConnError(err)
+	}
+
+	_, err := dst.Write(data)
+	if err != nil {
+		return handleConnError(err)
+	}
+
+	return nil
+}
+
+// handleConnError processes connection errors, returning nil for closed connections.
+func handleConnError(err error) error {
+	if isClosedError(err) {
+		return nil
+	}
+	return err
+}
+
+// handleReadError processes read errors, returning whether to continue and any error.
+func handleReadError(err error) (shouldContinue bool, returnErr error) {
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true, nil // timeout, continue loop
+	}
+	if isClosedError(err) {
+		return false, nil // closed, exit gracefully
+	}
+	return false, err // propagate error
 }
 
 // CopyWithTimeout copies data with idle timeout support.
@@ -229,68 +261,93 @@ func (p *Proxy) CopyWithTimeoutAndContext(ctx context.Context, dst, src net.Conn
 	defer p.bufferPool.Put(bufPtr)
 	buf := *bufPtr
 
-	// Use a shorter check interval to respond to context cancellation quickly
-	checkInterval := idleTimeout
-	if checkInterval > 1*time.Second {
-		checkInterval = 1 * time.Second
-	}
+	checkInterval := calculateCheckInterval(idleTimeout)
 
 	for {
-		// Check context before each read
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Set read deadline - use the shorter of idle timeout or check interval
-		// to allow periodic context checks
-		if err := src.SetReadDeadline(time.Now().Add(checkInterval)); err != nil {
-			if isClosedError(err) {
-				return nil
-			}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		n, err := src.Read(buf)
+		n, shouldContinue, err := p.readWithTimeoutDeadline(src, buf, checkInterval)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Check if this is an idle timeout or just a check interval timeout
-				// For idle timeout, we need to track the last activity time
-				// For simplicity, we'll just check context and continue
-				continue
-			}
-			if err == io.EOF {
-				return nil
-			}
-			if isClosedError(err) {
-				return nil
-			}
 			return err
+		}
+		if shouldContinue {
+			continue
 		}
 
 		if n > 0 {
-			// Reset write deadline
-			if err := dst.SetWriteDeadline(time.Now().Add(idleTimeout)); err != nil {
-				if isClosedError(err) {
-					return nil
-				}
-				return err
-			}
-
-			_, err = dst.Write(buf[:n])
-			if err != nil {
-				if isClosedError(err) {
-					return nil
-				}
+			if err := p.writeWithTimeoutDeadline(dst, buf[:n], idleTimeout); err != nil {
 				return err
 			}
 		}
 	}
 }
 
+// calculateCheckInterval returns the check interval for context cancellation.
+// Uses a shorter interval to respond to context cancellation quickly.
+func calculateCheckInterval(idleTimeout time.Duration) time.Duration {
+	if idleTimeout > 1*time.Second {
+		return 1 * time.Second
+	}
+	return idleTimeout
+}
+
+// readWithTimeoutDeadline reads from the connection with a configurable deadline.
+// Returns bytes read, whether to continue the loop, and any error.
+func (p *Proxy) readWithTimeoutDeadline(
+	src net.Conn,
+	buf []byte,
+	deadline time.Duration,
+) (bytesRead int, shouldContinue bool, err error) {
+	if err := src.SetReadDeadline(time.Now().Add(deadline)); err != nil {
+		return 0, false, handleConnError(err)
+	}
+
+	n, err := src.Read(buf)
+	if err != nil {
+		cont, readErr := handleReadErrorWithEOF(err)
+		return 0, cont, readErr
+	}
+
+	return n, false, nil
+}
+
+// writeWithTimeoutDeadline writes data to the connection with a configurable deadline.
+func (p *Proxy) writeWithTimeoutDeadline(dst net.Conn, data []byte, timeout time.Duration) error {
+	if err := dst.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return handleConnError(err)
+	}
+
+	_, err := dst.Write(data)
+	if err != nil {
+		return handleConnError(err)
+	}
+
+	return nil
+}
+
+// handleReadErrorWithEOF processes read errors including EOF, returning whether to continue and any error.
+func handleReadErrorWithEOF(err error) (shouldContinue bool, returnErr error) {
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true, nil // timeout, continue loop
+	}
+	if err == io.EOF {
+		return false, nil // EOF, exit gracefully
+	}
+	if isClosedError(err) {
+		return false, nil // closed, exit gracefully
+	}
+	return false, err // propagate error
+}
+
 // ProxyWithIdleTimeout proxies data with idle timeout support.
-func (p *Proxy) ProxyWithIdleTimeout(ctx context.Context, clientConn net.Conn, backendRef *backend.Backend, connectTimeout, idleTimeout time.Duration) error {
+func (p *Proxy) ProxyWithIdleTimeout(
+	ctx context.Context,
+	clientConn net.Conn,
+	backendRef *backend.Backend,
+	connectTimeout, idleTimeout time.Duration,
+) error {
 	if backendRef == nil {
 		return fmt.Errorf("backend is nil")
 	}
@@ -326,7 +383,11 @@ func (p *Proxy) ProxyWithIdleTimeout(ctx context.Context, clientConn net.Conn, b
 
 // bidirectionalCopyWithTimeout copies data bidirectionally with idle timeout.
 // It properly handles context cancellation and ensures both copy goroutines exit.
-func (p *Proxy) bidirectionalCopyWithTimeout(ctx context.Context, conn1, conn2 net.Conn, idleTimeout time.Duration) error {
+func (p *Proxy) bidirectionalCopyWithTimeout(
+	ctx context.Context,
+	conn1, conn2 net.Conn,
+	idleTimeout time.Duration,
+) error {
 	errCh := make(chan error, 2)
 
 	// Create a context that we can cancel to signal copy goroutines

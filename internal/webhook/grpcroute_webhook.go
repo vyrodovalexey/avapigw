@@ -44,7 +44,8 @@ func SetupGRPCRouteWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-grpcroute,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes,verbs=create;update,versions=v1alpha1,name=mgrpcroute.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-grpcroute,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes,verbs=create;update,versions=v1alpha1,name=mgrpcroute.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &GRPCRouteWebhook{}
 
@@ -61,7 +62,8 @@ func (w *GRPCRouteWebhook) Default(ctx context.Context, obj runtime.Object) erro
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-grpcroute,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes,verbs=create;update;delete,versions=v1alpha1,name=vgrpcroute.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-grpcroute,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes,verbs=create;update;delete,versions=v1alpha1,name=vgrpcroute.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomValidator = &GRPCRouteWebhook{}
 
@@ -110,7 +112,10 @@ func (w *GRPCRouteWebhook) ValidateCreate(ctx context.Context, obj runtime.Objec
 }
 
 // ValidateUpdate implements webhook.CustomValidator
-func (w *GRPCRouteWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *GRPCRouteWebhook) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+) (admission.Warnings, error) {
 	route, ok := newObj.(*avapigwv1alpha1.GRPCRoute)
 	if !ok {
 		return nil, fmt.Errorf("expected a GRPCRoute but got %T", newObj)
@@ -138,77 +143,106 @@ func (w *GRPCRouteWebhook) ValidateDelete(ctx context.Context, obj runtime.Objec
 	return nil, nil
 }
 
+// validateGRPCRouteMatch validates a single GRPC route match
+func (w *GRPCRouteWebhook) validateGRPCRouteMatch(
+	match *avapigwv1alpha1.GRPCRouteMatch,
+	ruleIdx, matchIdx int,
+	errs *validator.ValidationErrors,
+) {
+	w.validateGRPCMethodMatch(match.Method, ruleIdx, matchIdx, errs)
+	w.validateGRPCHeaderMatches(match.Headers, ruleIdx, matchIdx, errs)
+}
+
+// validateGRPCMethodMatch validates the GRPC method match configuration
+func (w *GRPCRouteWebhook) validateGRPCMethodMatch(
+	method *avapigwv1alpha1.GRPCMethodMatch,
+	ruleIdx, matchIdx int,
+	errs *validator.ValidationErrors,
+) {
+	if method == nil || method.Type == nil || *method.Type != avapigwv1alpha1.GRPCMethodMatchRegularExpression {
+		return
+	}
+
+	if method.Service != nil {
+		if _, err := regexp.Compile(*method.Service); err != nil {
+			errs.Add(fmt.Sprintf("spec.rules[%d].matches[%d].method.service", ruleIdx, matchIdx),
+				fmt.Sprintf("invalid regex pattern: %v", err))
+		}
+	}
+	if method.Method != nil {
+		if _, err := regexp.Compile(*method.Method); err != nil {
+			errs.Add(fmt.Sprintf("spec.rules[%d].matches[%d].method.method", ruleIdx, matchIdx),
+				fmt.Sprintf("invalid regex pattern: %v", err))
+		}
+	}
+}
+
+// validateGRPCHeaderMatches validates GRPC header match configurations
+func (w *GRPCRouteWebhook) validateGRPCHeaderMatches(
+	headers []avapigwv1alpha1.GRPCHeaderMatch,
+	ruleIdx, matchIdx int,
+	errs *validator.ValidationErrors,
+) {
+	for k, header := range headers {
+		if header.Type == nil || *header.Type != avapigwv1alpha1.HeaderMatchRegularExpression {
+			continue
+		}
+		if _, err := regexp.Compile(header.Value); err != nil {
+			errs.Add(fmt.Sprintf("spec.rules[%d].matches[%d].headers[%d].value", ruleIdx, matchIdx, k),
+				fmt.Sprintf("invalid regex pattern: %v", err))
+		}
+	}
+}
+
+// validateGRPCRouteRule validates a single GRPC route rule
+func (w *GRPCRouteWebhook) validateGRPCRouteRule(
+	rule *avapigwv1alpha1.GRPCRouteRule,
+	ruleIdx int,
+	errs *validator.ValidationErrors,
+) {
+	for j, match := range rule.Matches {
+		w.validateGRPCRouteMatch(&match, ruleIdx, j, errs)
+	}
+
+	if rule.RetryPolicy != nil {
+		if rule.RetryPolicy.NumRetries != nil && *rule.RetryPolicy.NumRetries < 0 {
+			errs.Add(fmt.Sprintf("spec.rules[%d].retryPolicy.numRetries", ruleIdx), "numRetries must be non-negative")
+		}
+		if rule.RetryPolicy.PerTryTimeout != nil {
+			if err := validateDuration(string(*rule.RetryPolicy.PerTryTimeout)); err != nil {
+				errs.Add(fmt.Sprintf("spec.rules[%d].retryPolicy.perTryTimeout", ruleIdx), err.Error())
+			}
+		}
+	}
+
+	if rule.SessionAffinity != nil {
+		switch rule.SessionAffinity.Type {
+		case avapigwv1alpha1.GRPCSessionAffinityTypeHeader:
+			if rule.SessionAffinity.Header == nil {
+				errs.Add(fmt.Sprintf("spec.rules[%d].sessionAffinity.header", ruleIdx),
+					"header configuration is required for Header session affinity type")
+			}
+		case avapigwv1alpha1.GRPCSessionAffinityTypeCookie:
+			if rule.SessionAffinity.Cookie == nil {
+				errs.Add(fmt.Sprintf("spec.rules[%d].sessionAffinity.cookie", ruleIdx),
+					"cookie configuration is required for Cookie session affinity type")
+			}
+		}
+	}
+}
+
 // validateSyntax performs syntax validation
 func (w *GRPCRouteWebhook) validateSyntax(route *avapigwv1alpha1.GRPCRoute) error {
 	errs := validator.NewValidationErrors()
 
-	// Validate hostnames
 	for i, hostname := range route.Spec.Hostnames {
 		if err := validateHostname(string(hostname)); err != nil {
 			errs.Add(fmt.Sprintf("spec.hostnames[%d]", i), err.Error())
 		}
 	}
 
-	// Validate rules
 	for i, rule := range route.Spec.Rules {
-		// Validate matches
-		for j, match := range rule.Matches {
-			// Validate method match
-			if match.Method != nil {
-				if match.Method.Type != nil && *match.Method.Type == avapigwv1alpha1.GRPCMethodMatchRegularExpression {
-					if match.Method.Service != nil {
-						if _, err := regexp.Compile(*match.Method.Service); err != nil {
-							errs.Add(fmt.Sprintf("spec.rules[%d].matches[%d].method.service", i, j),
-								fmt.Sprintf("invalid regex pattern: %v", err))
-						}
-					}
-					if match.Method.Method != nil {
-						if _, err := regexp.Compile(*match.Method.Method); err != nil {
-							errs.Add(fmt.Sprintf("spec.rules[%d].matches[%d].method.method", i, j),
-								fmt.Sprintf("invalid regex pattern: %v", err))
-						}
-					}
-				}
-			}
-
-			// Validate headers
-			for k, header := range match.Headers {
-				if header.Type != nil && *header.Type == avapigwv1alpha1.HeaderMatchRegularExpression {
-					if _, err := regexp.Compile(header.Value); err != nil {
-						errs.Add(fmt.Sprintf("spec.rules[%d].matches[%d].headers[%d].value", i, j, k),
-							fmt.Sprintf("invalid regex pattern: %v", err))
-					}
-				}
-			}
-		}
-
-		// Validate retry policy
-		if rule.RetryPolicy != nil {
-			if rule.RetryPolicy.NumRetries != nil && *rule.RetryPolicy.NumRetries < 0 {
-				errs.Add(fmt.Sprintf("spec.rules[%d].retryPolicy.numRetries", i), "numRetries must be non-negative")
-			}
-			if rule.RetryPolicy.PerTryTimeout != nil {
-				if err := validateDuration(string(*rule.RetryPolicy.PerTryTimeout)); err != nil {
-					errs.Add(fmt.Sprintf("spec.rules[%d].retryPolicy.perTryTimeout", i), err.Error())
-				}
-			}
-		}
-
-		// Validate session affinity
-		if rule.SessionAffinity != nil {
-			switch rule.SessionAffinity.Type {
-			case avapigwv1alpha1.GRPCSessionAffinityTypeHeader:
-				if rule.SessionAffinity.Header == nil {
-					errs.Add(fmt.Sprintf("spec.rules[%d].sessionAffinity.header", i),
-						"header configuration is required for Header session affinity type")
-				}
-			case avapigwv1alpha1.GRPCSessionAffinityTypeCookie:
-				if rule.SessionAffinity.Cookie == nil {
-					errs.Add(fmt.Sprintf("spec.rules[%d].sessionAffinity.cookie", i),
-						"cookie configuration is required for Cookie session affinity type")
-				}
-			}
-		}
+		w.validateGRPCRouteRule(&rule, i, errs)
 	}
 
 	return errs.ToError()
@@ -245,33 +279,48 @@ func (w *GRPCRouteWebhook) validateBackendRefs(ctx context.Context, route *avapi
 
 	for i, rule := range route.Spec.Rules {
 		for j, backendRef := range rule.BackendRefs {
-			namespace := route.Namespace
-			if backendRef.Namespace != nil {
-				namespace = *backendRef.Namespace
-			}
-
-			kind := "Service"
-			if backendRef.Kind != nil {
-				kind = *backendRef.Kind
-			}
-
-			group := ""
-			if backendRef.Group != nil {
-				group = *backendRef.Group
-			}
-
-			switch {
-			case group == "" && kind == "Service":
-				if err := w.ReferenceValidator.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
-					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
-				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend":
-				if err := w.ReferenceValidator.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
-					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
-				}
-			}
+			w.validateSingleBackendRef(ctx, route.Namespace, backendRef, i, j, errs)
 		}
 	}
 
 	return errs.ToError()
+}
+
+// validateSingleBackendRef validates a single backend reference
+func (w *GRPCRouteWebhook) validateSingleBackendRef(
+	ctx context.Context,
+	routeNamespace string,
+	backendRef avapigwv1alpha1.GRPCBackendRef,
+	ruleIdx, refIdx int,
+	errs *validator.ValidationErrors,
+) {
+	namespace := routeNamespace
+	if backendRef.Namespace != nil {
+		namespace = *backendRef.Namespace
+	}
+
+	kind := "Service"
+	if backendRef.Kind != nil {
+		kind = *backendRef.Kind
+	}
+
+	group := ""
+	if backendRef.Group != nil {
+		group = *backendRef.Group
+	}
+
+	fieldPath := fmt.Sprintf("spec.rules[%d].backendRefs[%d]", ruleIdx, refIdx)
+
+	if group == "" && kind == "Service" {
+		if err := w.ReferenceValidator.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
+			errs.Add(fieldPath, err.Error())
+		}
+		return
+	}
+
+	if group == avapigwv1alpha1.GroupVersion.Group && kind == "Backend" {
+		if err := w.ReferenceValidator.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
+			errs.Add(fieldPath, err.Error())
+		}
+	}
 }

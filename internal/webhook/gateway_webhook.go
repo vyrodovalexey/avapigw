@@ -50,7 +50,8 @@ func SetupGatewayWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-gateway,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=create;update,versions=v1alpha1,name=mgateway.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-gateway,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=create;update,versions=v1alpha1,name=mgateway.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &GatewayWebhook{}
 
@@ -67,7 +68,8 @@ func (w *GatewayWebhook) Default(ctx context.Context, obj runtime.Object) error 
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-gateway,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=create;update;delete,versions=v1alpha1,name=vgateway.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-gateway,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=create;update;delete,versions=v1alpha1,name=vgateway.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomValidator = &GatewayWebhook{}
 
@@ -116,7 +118,10 @@ func (w *GatewayWebhook) ValidateCreate(ctx context.Context, obj runtime.Object)
 }
 
 // ValidateUpdate implements webhook.CustomValidator
-func (w *GatewayWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *GatewayWebhook) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+) (admission.Warnings, error) {
 	gateway, ok := newObj.(*avapigwv1alpha1.Gateway)
 	if !ok {
 		return nil, fmt.Errorf("expected a Gateway but got %T", newObj)
@@ -186,52 +191,75 @@ func (w *GatewayWebhook) ValidateDelete(ctx context.Context, obj runtime.Object)
 func (w *GatewayWebhook) validateSyntax(gateway *avapigwv1alpha1.Gateway) error {
 	errs := validator.NewValidationErrors()
 
-	// Validate listeners
 	if len(gateway.Spec.Listeners) == 0 {
 		errs.Add("spec.listeners", "at least one listener is required")
 	}
 
+	w.validateListenersSyntax(gateway.Spec.Listeners, errs)
+	w.validateAddressesSyntax(gateway.Spec.Addresses, errs)
+
+	return errs.ToError()
+}
+
+// validateListenersSyntax validates the syntax of all listeners
+func (w *GatewayWebhook) validateListenersSyntax(
+	listeners []avapigwv1alpha1.Listener,
+	errs *validator.ValidationErrors,
+) {
 	listenerNames := make(map[string]bool)
-	for i, listener := range gateway.Spec.Listeners {
-		// Check for duplicate listener names
-		if listenerNames[listener.Name] {
-			errs.Add(fmt.Sprintf("spec.listeners[%d].name", i), fmt.Sprintf("duplicate listener name: %s", listener.Name))
-		}
-		listenerNames[listener.Name] = true
+	for i, listener := range listeners {
+		w.validateListenerSyntax(i, listener, listenerNames, errs)
+	}
+}
 
-		// Validate port range
-		if listener.Port < 1 || listener.Port > 65535 {
-			errs.Add(fmt.Sprintf("spec.listeners[%d].port", i), "port must be between 1 and 65535")
-		}
+// validateListenerSyntax validates the syntax of a single listener
+func (w *GatewayWebhook) validateListenerSyntax(
+	index int,
+	listener avapigwv1alpha1.Listener,
+	listenerNames map[string]bool,
+	errs *validator.ValidationErrors,
+) {
+	if listenerNames[listener.Name] {
+		errs.Add(
+			fmt.Sprintf("spec.listeners[%d].name", index), fmt.Sprintf("duplicate listener name: %s", listener.Name))
+	}
+	listenerNames[listener.Name] = true
 
-		// Validate hostname format if specified
-		if listener.Hostname != nil {
-			if err := validateHostname(string(*listener.Hostname)); err != nil {
-				errs.Add(fmt.Sprintf("spec.listeners[%d].hostname", i), err.Error())
-			}
-		}
+	if listener.Port < 1 || listener.Port > 65535 {
+		errs.Add(fmt.Sprintf("spec.listeners[%d].port", index), "port must be between 1 and 65535")
+	}
 
-		// Validate TLS configuration for secure protocols
-		if listener.Protocol == avapigwv1alpha1.ProtocolHTTPS ||
-			listener.Protocol == avapigwv1alpha1.ProtocolGRPCS ||
-			listener.Protocol == avapigwv1alpha1.ProtocolTLS {
-			if listener.TLS == nil {
-				errs.Add(fmt.Sprintf("spec.listeners[%d].tls", i),
-					fmt.Sprintf("TLS configuration is required for protocol %s", listener.Protocol))
-			}
+	if listener.Hostname != nil {
+		if err := validateHostname(string(*listener.Hostname)); err != nil {
+			errs.Add(fmt.Sprintf("spec.listeners[%d].hostname", index), err.Error())
 		}
 	}
 
-	// Validate addresses
-	for i, addr := range gateway.Spec.Addresses {
+	if w.requiresTLS(listener.Protocol) && listener.TLS == nil {
+		errs.Add(fmt.Sprintf("spec.listeners[%d].tls", index),
+			fmt.Sprintf("TLS configuration is required for protocol %s", listener.Protocol))
+	}
+}
+
+// requiresTLS returns true if the protocol requires TLS configuration
+func (w *GatewayWebhook) requiresTLS(protocol avapigwv1alpha1.ProtocolType) bool {
+	return protocol == avapigwv1alpha1.ProtocolHTTPS ||
+		protocol == avapigwv1alpha1.ProtocolGRPCS ||
+		protocol == avapigwv1alpha1.ProtocolTLS
+}
+
+// validateAddressesSyntax validates the syntax of all addresses
+func (w *GatewayWebhook) validateAddressesSyntax(
+	addresses []avapigwv1alpha1.GatewayAddress,
+	errs *validator.ValidationErrors,
+) {
+	for i, addr := range addresses {
 		if addr.Type != nil && *addr.Type == avapigwv1alpha1.AddressTypeIPAddress {
 			if net.ParseIP(addr.Value) == nil {
 				errs.Add(fmt.Sprintf("spec.addresses[%d].value", i), "invalid IP address")
 			}
 		}
 	}
-
-	return errs.ToError()
 }
 
 // validateSemantics performs semantic validation
@@ -274,8 +302,10 @@ func (w *GatewayWebhook) validateReferences(ctx context.Context, gateway *avapig
 				if err := w.ReferenceValidator.ValidateTLSConfigExists(ctx, namespace, certRef.Name); err != nil {
 					// Try as Secret
 					if err := w.ReferenceValidator.ValidateSecretExists(ctx, namespace, certRef.Name); err != nil {
-						errs.Add(fmt.Sprintf("spec.listeners[%d].tls.certificateRefs[%d]", i, j),
-							fmt.Sprintf("certificate reference %s/%s not found as TLSConfig or Secret", namespace, certRef.Name))
+						fieldPath := fmt.Sprintf("spec.listeners[%d].tls.certificateRefs[%d]", i, j)
+						msg := fmt.Sprintf(
+							"certificate reference %s/%s not found as TLSConfig or Secret", namespace, certRef.Name)
+						errs.Add(fieldPath, msg)
 					}
 				}
 			}

@@ -15,6 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
+
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 )
 
 // Common validation errors.
@@ -157,9 +159,13 @@ func (v *Validator) Validate(ctx context.Context, tokenString string) (*Claims, 
 }
 
 // ValidateWithClaims validates a JWT token with additional required claims.
-func (v *Validator) ValidateWithClaims(ctx context.Context, tokenString string, requiredClaims map[string][]string) (*Claims, error) {
+func (v *Validator) ValidateWithClaims(
+	ctx context.Context,
+	tokenString string,
+	requiredClaims map[string][]string,
+) (*Claims, error) {
 	start := time.Now()
-	result := "success"
+	result := auth.MetricResultSuccess
 
 	defer func() {
 		duration := time.Since(start).Seconds()
@@ -167,58 +173,21 @@ func (v *Validator) ValidateWithClaims(ctx context.Context, tokenString string, 
 		jwtValidationDuration.WithLabelValues(result).Observe(duration)
 	}()
 
-	// Parse the token
-	header, payload, signature, err := v.parseToken(tokenString)
+	// Parse and validate token structure
+	header, payload, signature, result, err := v.parseAndValidateToken(tokenString)
 	if err != nil {
-		result = "parse_error"
 		return nil, err
 	}
 
-	// Validate the algorithm
-	alg, ok := header["alg"].(string)
-	if !ok {
-		result = "invalid_algorithm"
-		return nil, ErrInvalidAlgorithm
-	}
-
-	if !v.algorithms[alg] {
-		result = "unsupported_algorithm"
-		return nil, fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
-	}
-
-	// Get the key ID
-	kid, _ := header["kid"].(string)
-
-	// Get the signing key
-	key, err := v.getSigningKey(kid)
+	// Verify signature
+	result, err = v.verifyTokenSignature(tokenString, header, signature)
 	if err != nil {
-		result = "key_not_found"
 		return nil, err
 	}
 
-	// Verify the signature
-	if err := v.verifySignature(tokenString, signature, key, alg); err != nil {
-		result = "invalid_signature"
-		return nil, err
-	}
-
-	// Parse the claims
-	claims, err := ParseClaims(payload)
+	// Parse and validate claims
+	claims, result, err := v.parseAndValidateClaims(payload, requiredClaims)
 	if err != nil {
-		result = "invalid_claims"
-		return nil, fmt.Errorf("failed to parse claims: %w", err)
-	}
-
-	// Validate the claims
-	if err := v.validateClaims(claims); err != nil {
-		result = "invalid_claims"
-		return nil, err
-	}
-
-	// Validate additional required claims
-	mergedClaims := v.mergeRequiredClaims(requiredClaims)
-	if err := v.validateRequiredClaims(claims, mergedClaims); err != nil {
-		result = "missing_claims"
 		return nil, err
 	}
 
@@ -230,9 +199,75 @@ func (v *Validator) ValidateWithClaims(ctx context.Context, tokenString string, 
 	return claims, nil
 }
 
+// parseAndValidateToken parses the token and validates the algorithm.
+func (v *Validator) parseAndValidateToken(
+	tokenString string,
+) (header map[string]interface{}, payload map[string]interface{}, signature []byte, metricResult string, err error) {
+	header, payload, signature, err = v.parseToken(tokenString)
+	if err != nil {
+		return nil, nil, nil, "parse_error", err
+	}
+
+	alg, ok := header["alg"].(string)
+	if !ok {
+		return nil, nil, nil, "invalid_algorithm", ErrInvalidAlgorithm
+	}
+
+	if !v.algorithms[alg] {
+		return nil, nil, nil, "unsupported_algorithm", fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
+	}
+
+	return header, payload, signature, auth.MetricResultSuccess, nil
+}
+
+// verifyTokenSignature verifies the token signature using the appropriate key.
+func (v *Validator) verifyTokenSignature(
+	tokenString string,
+	header map[string]interface{},
+	signature []byte,
+) (string, error) {
+	kid, _ := header["kid"].(string)
+	alg, _ := header["alg"].(string)
+
+	key, err := v.getSigningKey(kid)
+	if err != nil {
+		return "key_not_found", err
+	}
+
+	if err := v.verifySignature(tokenString, signature, key, alg); err != nil {
+		return "invalid_signature", err
+	}
+
+	return auth.MetricResultSuccess, nil
+}
+
+// parseAndValidateClaims parses claims and validates them against requirements.
+func (v *Validator) parseAndValidateClaims(
+	payload map[string]interface{},
+	requiredClaims map[string][]string,
+) (*Claims, string, error) {
+	claims, err := ParseClaims(payload)
+	if err != nil {
+		return nil, "invalid_claims", fmt.Errorf("failed to parse claims: %w", err)
+	}
+
+	if err := v.validateClaims(claims); err != nil {
+		return nil, "invalid_claims", err
+	}
+
+	mergedClaims := v.mergeRequiredClaims(requiredClaims)
+	if err := v.validateRequiredClaims(claims, mergedClaims); err != nil {
+		return nil, "missing_claims", err
+	}
+
+	return claims, auth.MetricResultSuccess, nil
+}
+
 // parseToken parses a JWT token into its components.
 // Returns header claims, payload claims, signature bytes, and any error.
-func (v *Validator) parseToken(tokenString string) (header map[string]interface{}, payload map[string]interface{}, signature []byte, err error) {
+func (v *Validator) parseToken(
+	tokenString string,
+) (header map[string]interface{}, payload map[string]interface{}, signature []byte, err error) {
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
 		return nil, nil, nil, ErrMalformedToken
@@ -373,31 +408,44 @@ func (v *Validator) validateRequiredClaims(claims *Claims, requiredClaims map[st
 func (v *Validator) claimValueMatches(value interface{}, allowedValues []string) bool {
 	switch val := value.(type) {
 	case string:
-		for _, allowed := range allowedValues {
-			if subtle.ConstantTimeCompare([]byte(val), []byte(allowed)) == 1 {
+		return v.stringMatchesAny(val, allowedValues)
+	case []interface{}:
+		return v.interfaceSliceMatchesAny(val, allowedValues)
+	case []string:
+		return v.stringSliceMatchesAny(val, allowedValues)
+	}
+	return false
+}
+
+// stringMatchesAny checks if a string matches any of the allowed values using constant-time comparison.
+func (v *Validator) stringMatchesAny(val string, allowedValues []string) bool {
+	for _, allowed := range allowedValues {
+		if subtle.ConstantTimeCompare([]byte(val), []byte(allowed)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// interfaceSliceMatchesAny checks if any string in an interface slice matches the allowed values.
+func (v *Validator) interfaceSliceMatchesAny(val []interface{}, allowedValues []string) bool {
+	for _, item := range val {
+		if str, ok := item.(string); ok {
+			if v.stringMatchesAny(str, allowedValues) {
 				return true
 			}
 		}
-	case []interface{}:
-		for _, item := range val {
-			if str, ok := item.(string); ok {
-				for _, allowed := range allowedValues {
-					if subtle.ConstantTimeCompare([]byte(str), []byte(allowed)) == 1 {
-						return true
-					}
-				}
-			}
-		}
-	case []string:
-		for _, item := range val {
-			for _, allowed := range allowedValues {
-				if subtle.ConstantTimeCompare([]byte(item), []byte(allowed)) == 1 {
-					return true
-				}
-			}
+	}
+	return false
+}
+
+// stringSliceMatchesAny checks if any string in a slice matches the allowed values.
+func (v *Validator) stringSliceMatchesAny(val []string, allowedValues []string) bool {
+	for _, item := range val {
+		if v.stringMatchesAny(item, allowedValues) {
+			return true
 		}
 	}
-
 	return false
 }
 

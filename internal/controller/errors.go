@@ -185,35 +185,8 @@ func ClassifyError(op, resource string, err error) *ReconcileError {
 	}
 
 	// Check for Kubernetes API errors
-	if apierrors.IsNotFound(err) {
-		return NewDependencyError(op, resource, err)
-	}
-	if apierrors.IsConflict(err) {
-		return NewTransientError(op, resource, err)
-	}
-	if apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) {
-		return NewTransientError(op, resource, err)
-	}
-	if apierrors.IsTooManyRequests(err) {
-		return NewTransientError(op, resource, err)
-	}
-	if apierrors.IsServiceUnavailable(err) {
-		return NewTransientError(op, resource, err)
-	}
-	if apierrors.IsInternalError(err) {
-		return NewTransientError(op, resource, err)
-	}
-	if apierrors.IsBadRequest(err) {
-		return NewValidationError(op, resource, err)
-	}
-	if apierrors.IsInvalid(err) {
-		return NewValidationError(op, resource, err)
-	}
-	if apierrors.IsForbidden(err) {
-		return NewPermanentError(op, resource, err)
-	}
-	if apierrors.IsUnauthorized(err) {
-		return NewPermanentError(op, resource, err)
+	if classified := classifyKubernetesAPIError(op, resource, err); classified != nil {
+		return classified
 	}
 
 	// Check for network errors (transient)
@@ -221,14 +194,63 @@ func ClassifyError(op, resource string, err error) *ReconcileError {
 		return NewTransientError(op, resource, err)
 	}
 
-	// Check for context errors using the standard library context error types.
-	// This correctly identifies context cancellation and deadline exceeded errors.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// Check for context errors
+	if isContextError(err) {
 		return NewTransientError(op, resource, err)
 	}
 
 	// Default to internal error for unknown errors
 	return NewInternalError(op, resource, err)
+}
+
+// classifyKubernetesAPIError classifies Kubernetes API errors.
+func classifyKubernetesAPIError(op, resource string, err error) *ReconcileError {
+	// Dependency errors
+	if apierrors.IsNotFound(err) {
+		return NewDependencyError(op, resource, err)
+	}
+
+	// Transient errors
+	if isTransientAPIError(err) {
+		return NewTransientError(op, resource, err)
+	}
+
+	// Validation errors
+	if isValidationAPIError(err) {
+		return NewValidationError(op, resource, err)
+	}
+
+	// Permanent errors
+	if isPermanentAPIError(err) {
+		return NewPermanentError(op, resource, err)
+	}
+
+	return nil
+}
+
+// isTransientAPIError checks if the error is a transient Kubernetes API error.
+func isTransientAPIError(err error) bool {
+	return apierrors.IsConflict(err) ||
+		apierrors.IsServerTimeout(err) ||
+		apierrors.IsTimeout(err) ||
+		apierrors.IsTooManyRequests(err) ||
+		apierrors.IsServiceUnavailable(err) ||
+		apierrors.IsInternalError(err)
+}
+
+// isValidationAPIError checks if the error is a validation Kubernetes API error.
+func isValidationAPIError(err error) bool {
+	return apierrors.IsBadRequest(err) || apierrors.IsInvalid(err)
+}
+
+// isPermanentAPIError checks if the error is a permanent Kubernetes API error.
+func isPermanentAPIError(err error) bool {
+	return apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err)
+}
+
+// isContextError checks if the error is a context-related error.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // isNetworkError checks if the error is a network-related error.

@@ -661,81 +661,130 @@ type AuthRuleConfig struct {
 	Allow bool `yaml:"allow"`
 }
 
+// configNameRegistry holds maps of registered names for validation.
+type configNameRegistry struct {
+	routes      map[string]bool
+	backends    map[string]bool
+	rateLimits  map[string]bool
+	authPolices map[string]bool
+}
+
+// newConfigNameRegistry creates a new configNameRegistry.
+func newConfigNameRegistry() *configNameRegistry {
+	return &configNameRegistry{
+		routes:      make(map[string]bool),
+		backends:    make(map[string]bool),
+		rateLimits:  make(map[string]bool),
+		authPolices: make(map[string]bool),
+	}
+}
+
 // Validate validates the LocalConfig and returns an error if invalid.
 func (c *LocalConfig) Validate() error {
-	// Validate gateway configuration
 	if err := c.Gateway.Validate(); err != nil {
 		return fmt.Errorf("gateway validation failed: %w", err)
 	}
 
-	// Validate routes
-	routeNames := make(map[string]bool)
+	registry := newConfigNameRegistry()
+
+	if err := c.validateRoutes(registry); err != nil {
+		return err
+	}
+	if err := c.validateBackends(registry); err != nil {
+		return err
+	}
+	if err := c.validateRateLimits(registry); err != nil {
+		return err
+	}
+	if err := c.validateAuthPolicies(registry); err != nil {
+		return err
+	}
+	if err := c.validateReferences(registry); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateRoutes validates all routes and registers their names.
+func (c *LocalConfig) validateRoutes(registry *configNameRegistry) error {
 	for i, route := range c.Routes {
 		if err := route.Validate(); err != nil {
 			return fmt.Errorf("route[%d] validation failed: %w", i, err)
 		}
-		if routeNames[route.Name] {
+		if registry.routes[route.Name] {
 			return fmt.Errorf("duplicate route name: %s", route.Name)
 		}
-		routeNames[route.Name] = true
+		registry.routes[route.Name] = true
 	}
+	return nil
+}
 
-	// Validate backends
-	backendNames := make(map[string]bool)
+// validateBackends validates all backends and registers their names.
+func (c *LocalConfig) validateBackends(registry *configNameRegistry) error {
 	for i, backend := range c.Backends {
 		if err := backend.Validate(); err != nil {
 			return fmt.Errorf("backend[%d] validation failed: %w", i, err)
 		}
-		if backendNames[backend.Name] {
+		if registry.backends[backend.Name] {
 			return fmt.Errorf("duplicate backend name: %s", backend.Name)
 		}
-		backendNames[backend.Name] = true
+		registry.backends[backend.Name] = true
 	}
+	return nil
+}
 
-	// Validate rate limits
-	rateLimitNames := make(map[string]bool)
+// validateRateLimits validates all rate limits and registers their names.
+func (c *LocalConfig) validateRateLimits(registry *configNameRegistry) error {
 	for i, rateLimit := range c.RateLimits {
 		if err := rateLimit.Validate(); err != nil {
 			return fmt.Errorf("rateLimit[%d] validation failed: %w", i, err)
 		}
-		if rateLimitNames[rateLimit.Name] {
+		if registry.rateLimits[rateLimit.Name] {
 			return fmt.Errorf("duplicate rate limit name: %s", rateLimit.Name)
 		}
-		rateLimitNames[rateLimit.Name] = true
+		registry.rateLimits[rateLimit.Name] = true
 	}
+	return nil
+}
 
-	// Validate auth policies
-	authPolicyNames := make(map[string]bool)
+// validateAuthPolicies validates all auth policies and registers their names.
+func (c *LocalConfig) validateAuthPolicies(registry *configNameRegistry) error {
 	for i, authPolicy := range c.AuthPolicies {
 		if err := authPolicy.Validate(); err != nil {
 			return fmt.Errorf("authPolicy[%d] validation failed: %w", i, err)
 		}
-		if authPolicyNames[authPolicy.Name] {
+		if registry.authPolices[authPolicy.Name] {
 			return fmt.Errorf("duplicate auth policy name: %s", authPolicy.Name)
 		}
-		authPolicyNames[authPolicy.Name] = true
+		registry.authPolices[authPolicy.Name] = true
 	}
+	return nil
+}
 
-	// Validate references
+// validateReferences validates that all route references point to existing resources.
+func (c *LocalConfig) validateReferences(registry *configNameRegistry) error {
 	for _, route := range c.Routes {
-		// Validate backend references
-		for _, backendRef := range route.BackendRefs {
-			if !backendNames[backendRef.Name] {
-				return fmt.Errorf("route %s references unknown backend: %s", route.Name, backendRef.Name)
-			}
-		}
-
-		// Validate rate limit reference
-		if route.RateLimitRef != "" && !rateLimitNames[route.RateLimitRef] {
-			return fmt.Errorf("route %s references unknown rate limit: %s", route.Name, route.RateLimitRef)
-		}
-
-		// Validate auth policy reference
-		if route.AuthPolicyRef != "" && !authPolicyNames[route.AuthPolicyRef] {
-			return fmt.Errorf("route %s references unknown auth policy: %s", route.Name, route.AuthPolicyRef)
+		if err := c.validateRouteReferences(route, registry); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
+// validateRouteReferences validates references for a single route.
+func (c *LocalConfig) validateRouteReferences(route LocalRoute, registry *configNameRegistry) error {
+	for _, backendRef := range route.BackendRefs {
+		if !registry.backends[backendRef.Name] {
+			return fmt.Errorf("route %s references unknown backend: %s", route.Name, backendRef.Name)
+		}
+	}
+	if route.RateLimitRef != "" && !registry.rateLimits[route.RateLimitRef] {
+		return fmt.Errorf("route %s references unknown rate limit: %s", route.Name, route.RateLimitRef)
+	}
+	if route.AuthPolicyRef != "" && !registry.authPolices[route.AuthPolicyRef] {
+		return fmt.Errorf("route %s references unknown auth policy: %s", route.Name, route.AuthPolicyRef)
+	}
 	return nil
 }
 
@@ -789,7 +838,10 @@ func (l *ListenerConfig) Validate() error {
 	}
 
 	// TLS configuration is required for HTTPS and TLS protocols
-	if (strings.EqualFold(l.Protocol, "HTTPS") || strings.EqualFold(l.Protocol, "TLS") || strings.EqualFold(l.Protocol, "GRPCS")) && l.TLS == nil {
+	requiresTLS := strings.EqualFold(l.Protocol, "HTTPS") ||
+		strings.EqualFold(l.Protocol, "TLS") ||
+		strings.EqualFold(l.Protocol, "GRPCS")
+	if requiresTLS && l.TLS == nil {
 		return fmt.Errorf("TLS configuration is required for %s protocol", l.Protocol)
 	}
 

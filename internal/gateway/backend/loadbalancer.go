@@ -224,8 +224,10 @@ type RandomLB struct {
 
 // NewRandomLB creates a new random load balancer.
 func NewRandomLB() *RandomLB {
+	//nolint:gosec // weak random is acceptable for load balancing
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return &RandomLB{
-		rng: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for load balancing
+		rng: rng,
 	}
 }
 

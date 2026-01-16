@@ -144,45 +144,64 @@ func (s *Server) GetConnectionTracker() *ConnectionTracker {
 // Start starts the TCP server.
 // The server will gracefully shut down when the context is cancelled.
 func (s *Server) Start(ctx context.Context) error {
+	if err := s.initializeServer(ctx); err != nil {
+		return err
+	}
+
+	serverCtx, acceptDeadline := s.getServerContext(ctx)
+	s.logServerStart(acceptDeadline)
+
+	return s.acceptLoop(serverCtx, acceptDeadline)
+}
+
+// initializeServer initializes the server listener and state.
+func (s *Server) initializeServer(ctx context.Context) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.running {
-		s.mu.Unlock()
 		return fmt.Errorf("server already running")
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
-
-	// Create listener
-	var listener net.Listener
-	var err error
-
-	if s.config.TLS != nil {
-		listener, err = tls.Listen("tcp", addr, s.config.TLS)
-	} else {
-		lc := &net.ListenConfig{}
-		listener, err = lc.Listen(context.Background(), "tcp", addr)
-	}
-
+	listener, err := s.createListener(addr)
 	if err != nil {
-		s.mu.Unlock()
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 
-	// Create a cancellable context for the server
-	serverCtx, cancel := context.WithCancel(ctx)
+	_, cancel := context.WithCancel(ctx)
 	s.cancelFunc = cancel
-
 	s.listener = listener
 	s.running = true
 	s.stopCh = make(chan struct{})
-	s.mu.Unlock()
 
-	// Get accept deadline from config or use default
+	return nil
+}
+
+// createListener creates a TCP listener with optional TLS.
+func (s *Server) createListener(addr string) (net.Listener, error) {
+	if s.config.TLS != nil {
+		return tls.Listen("tcp", addr, s.config.TLS)
+	}
+	lc := &net.ListenConfig{}
+	return lc.Listen(context.Background(), "tcp", addr)
+}
+
+// getServerContext returns the server context and accept deadline.
+func (s *Server) getServerContext(ctx context.Context) (context.Context, time.Duration) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	acceptDeadline := s.config.AcceptDeadline
 	if acceptDeadline <= 0 {
 		acceptDeadline = DefaultAcceptDeadline
 	}
+	return ctx, acceptDeadline
+}
 
+// logServerStart logs the server startup information.
+func (s *Server) logServerStart(acceptDeadline time.Duration) {
+	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
 	s.logger.Info("starting TCP server",
 		zap.String("address", addr),
 		zap.Duration("readTimeout", s.config.ReadTimeout),
@@ -193,59 +212,84 @@ func (s *Server) Start(ctx context.Context) error {
 		zap.Duration("acceptDeadline", acceptDeadline),
 		zap.Duration("shutdownTimeout", s.config.ShutdownTimeout),
 	)
+}
 
-	// Accept connections loop with proper context cancellation handling
+// acceptLoop runs the main connection accept loop.
+func (s *Server) acceptLoop(serverCtx context.Context, acceptDeadline time.Duration) error {
 	for {
-		// Check for context cancellation or stop signal first
-		select {
-		case <-serverCtx.Done():
-			s.logger.Debug("server context cancelled, stopping accept loop")
-			return serverCtx.Err()
-		case <-s.stopCh:
-			s.logger.Debug("stop signal received, stopping accept loop")
-			return nil
-		default:
-			// Continue to accept
+		if err := s.checkShutdown(serverCtx); err != nil {
+			return err
 		}
 
-		// Set accept deadline to allow periodic context checks
-		// This ensures we respond to context cancellation within acceptDeadline
 		if err := s.setAcceptDeadline(acceptDeadline); err != nil {
 			s.logger.Warn("failed to set accept deadline", zap.Error(err))
 		}
 
 		conn, err := s.listener.Accept()
 		if err != nil {
-			// Check if it's a timeout - this is expected for context checking
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue // Timeout, loop back to check context
-			}
-
-			// Check if we're shutting down
-			select {
-			case <-serverCtx.Done():
-				return serverCtx.Err()
-			case <-s.stopCh:
-				return nil
-			default:
-				// Log unexpected errors but continue accepting
-				s.logger.Error("accept error", zap.Error(err))
+			if shouldContinueOnError(err, serverCtx, s.stopCh, s.logger) {
 				continue
 			}
+			return s.handleAcceptShutdown(serverCtx)
 		}
 
-		// Create a connection-scoped context that will be cancelled when
-		// the server context is cancelled
-		connCtx, connCancel := context.WithCancel(serverCtx)
-
-		// Handle connection in a goroutine
-		s.wg.Add(1)
-		go func(ctx context.Context, cancel context.CancelFunc, c net.Conn) {
-			defer s.wg.Done()
-			defer cancel() // Ensure connection context is cancelled when handler exits
-			s.handleConnection(ctx, c)
-		}(connCtx, connCancel, conn)
+		s.spawnConnectionHandler(serverCtx, conn)
 	}
+}
+
+// checkShutdown checks if the server should stop accepting connections.
+func (s *Server) checkShutdown(serverCtx context.Context) error {
+	select {
+	case <-serverCtx.Done():
+		s.logger.Debug("server context cancelled, stopping accept loop")
+		return serverCtx.Err()
+	case <-s.stopCh:
+		s.logger.Debug("stop signal received, stopping accept loop")
+		return nil
+	default:
+		return nil
+	}
+}
+
+// shouldContinueOnError determines if the accept loop should continue after an error.
+func shouldContinueOnError(err error, serverCtx context.Context, stopCh chan struct{}, logger *zap.Logger) bool {
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true
+	}
+
+	select {
+	case <-serverCtx.Done():
+		return false
+	case <-stopCh:
+		return false
+	default:
+		logger.Error("accept error", zap.Error(err))
+		return true
+	}
+}
+
+// handleAcceptShutdown handles shutdown during accept.
+func (s *Server) handleAcceptShutdown(serverCtx context.Context) error {
+	select {
+	case <-serverCtx.Done():
+		return serverCtx.Err()
+	case <-s.stopCh:
+		return nil
+	default:
+		return nil
+	}
+}
+
+// spawnConnectionHandler spawns a goroutine to handle a new connection.
+func (s *Server) spawnConnectionHandler(serverCtx context.Context, conn net.Conn) {
+	connCtx, connCancel := context.WithCancel(serverCtx)
+
+	s.wg.Add(1)
+	go func(ctx context.Context, cancel context.CancelFunc, c net.Conn) {
+		defer s.wg.Done()
+		defer cancel()
+		s.handleConnection(ctx, c)
+	}(connCtx, connCancel, conn)
 }
 
 // setAcceptDeadline sets the accept deadline on the listener.
@@ -265,30 +309,52 @@ func (s *Server) setAcceptDeadline(deadline time.Duration) error {
 // Stop stops the TCP server gracefully.
 // It will wait for active connections to complete up to the shutdown timeout.
 func (s *Server) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
+	shutdownTimeout, shouldStop := s.prepareShutdown()
+	if !shouldStop {
 		return nil
 	}
 
-	// Get shutdown timeout from config
+	s.signalShutdown()
+	s.closeListener()
+
+	shutdownCtx, cancel := s.createShutdownContext(ctx, shutdownTimeout)
+	defer cancel()
+
+	s.waitForConnectionsOrTimeout(shutdownCtx)
+	s.finalizeShutdown()
+
+	s.logger.Info("TCP server stopped")
+	return nil
+}
+
+// prepareShutdown prepares for server shutdown and returns the timeout and whether to proceed.
+func (s *Server) prepareShutdown() (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.running {
+		return 0, false
+	}
+
 	shutdownTimeout := s.config.ShutdownTimeout
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = DefaultShutdownTimeout
 	}
-	s.mu.Unlock()
 
 	s.logger.Info("stopping TCP server",
 		zap.Duration("shutdownTimeout", shutdownTimeout),
 		zap.Int("activeConnections", s.connections.Count()),
 	)
 
-	// Cancel the server context to signal all connection handlers
+	return shutdownTimeout, true
+}
+
+// signalShutdown signals all handlers to stop.
+func (s *Server) signalShutdown() {
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
 
-	// Signal to stop accepting new connections
 	s.mu.Lock()
 	select {
 	case <-s.stopCh:
@@ -297,26 +363,30 @@ func (s *Server) Stop(ctx context.Context) error {
 		close(s.stopCh)
 	}
 	s.mu.Unlock()
+}
 
-	// Close the listener to unblock Accept()
+// closeListener closes the server listener.
+func (s *Server) closeListener() {
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil {
 			s.logger.Debug("error closing listener", zap.Error(err))
 		}
 	}
+}
 
-	// Create a timeout context for shutdown if not provided
-	var shutdownCtx context.Context
-	var cancel context.CancelFunc
+// createShutdownContext creates a context with the shutdown timeout.
+func (s *Server) createShutdownContext(
+	ctx context.Context,
+	shutdownTimeout time.Duration,
+) (context.Context, context.CancelFunc) {
 	if ctx == nil {
-		shutdownCtx, cancel = context.WithTimeout(context.Background(), shutdownTimeout)
-	} else {
-		// Use the shorter of the provided context or shutdown timeout
-		shutdownCtx, cancel = context.WithTimeout(ctx, shutdownTimeout)
+		return context.WithTimeout(context.Background(), shutdownTimeout)
 	}
-	defer cancel()
+	return context.WithTimeout(ctx, shutdownTimeout)
+}
 
-	// Wait for all connections to finish with timeout
+// waitForConnectionsOrTimeout waits for connections to close or times out.
+func (s *Server) waitForConnectionsOrTimeout(shutdownCtx context.Context) {
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -329,35 +399,43 @@ func (s *Server) Stop(ctx context.Context) error {
 			zap.Int("remainingConnections", s.connections.Count()),
 		)
 	case <-shutdownCtx.Done():
-		remainingConns := s.connections.Count()
-		s.logger.Warn("graceful shutdown timed out, force closing remaining connections",
-			zap.Int("remainingConnections", remainingConns),
-		)
-		// Force close all remaining connections
-		s.connections.CloseAll()
-
-		// Wait a short time for goroutines to exit after force close
-		forceCloseWait := make(chan struct{})
-		go func() {
-			s.wg.Wait()
-			close(forceCloseWait)
-		}()
-
-		select {
-		case <-forceCloseWait:
-			s.logger.Debug("all connection handlers exited after force close")
-		case <-time.After(1 * time.Second):
-			s.logger.Warn("some connection handlers may still be running")
-		}
+		s.handleShutdownTimeout()
 	}
+}
 
+// handleShutdownTimeout handles the case when graceful shutdown times out.
+func (s *Server) handleShutdownTimeout() {
+	remainingConns := s.connections.Count()
+	s.logger.Warn("graceful shutdown timed out, force closing remaining connections",
+		zap.Int("remainingConnections", remainingConns),
+	)
+
+	s.connections.CloseAll()
+	s.waitForForceClose()
+}
+
+// waitForForceClose waits briefly for handlers to exit after force close.
+func (s *Server) waitForForceClose() {
+	forceCloseWait := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(forceCloseWait)
+	}()
+
+	select {
+	case <-forceCloseWait:
+		s.logger.Debug("all connection handlers exited after force close")
+	case <-time.After(1 * time.Second):
+		s.logger.Warn("some connection handlers may still be running")
+	}
+}
+
+// finalizeShutdown finalizes the server shutdown state.
+func (s *Server) finalizeShutdown() {
 	s.mu.Lock()
 	s.running = false
 	s.cancelFunc = nil
 	s.mu.Unlock()
-
-	s.logger.Info("TCP server stopped")
-	return nil
 }
 
 // IsRunning returns whether the server is running.
@@ -370,113 +448,141 @@ func (s *Server) IsRunning() bool {
 // handleConnection handles a single TCP connection.
 // The connection will be closed when the context is cancelled.
 func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
-	// Check context before doing any work
+	if s.isContextCancelled(ctx, conn) {
+		return
+	}
+
+	tracked, ok := s.trackConnection(conn)
+	if !ok {
+		return
+	}
+	defer s.connections.Remove(tracked.ID)
+	defer func() { _ = conn.Close() }()
+
+	done := s.setupContextCancellation(ctx, conn, tracked.ID)
+	defer close(done)
+
+	route := s.matchRoute(ctx, conn, tracked.ID)
+	if route == nil {
+		return
+	}
+
+	backendSvc := s.getBackendService(tracked.ID, route)
+	if backendSvc == nil {
+		return
+	}
+
+	s.proxyConnection(ctx, conn, tracked, route, backendSvc)
+}
+
+// isContextCancelled checks if context is cancelled before handling connection.
+func (s *Server) isContextCancelled(ctx context.Context, conn net.Conn) bool {
 	select {
 	case <-ctx.Done():
 		s.logger.Debug("context cancelled before handling connection",
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
 		)
-		_ = conn.Close() // Ignore error on cleanup
-		return
+		_ = conn.Close()
+		return true
 	default:
+		return false
 	}
+}
 
-	// Track the connection
+// trackConnection adds the connection to the tracker.
+func (s *Server) trackConnection(conn net.Conn) (*TrackedConnection, bool) {
 	tracked, err := s.connections.Add(conn)
 	if err != nil {
 		s.logger.Warn("connection rejected",
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
 			zap.Error(err),
 		)
-		_ = conn.Close() // Ignore error on cleanup
-		return
+		_ = conn.Close()
+		return nil, false
 	}
-	defer s.connections.Remove(tracked.ID)
-	defer func() { _ = conn.Close() }() // Ignore error on cleanup
 
 	s.logger.Debug("handling connection",
 		zap.String("id", tracked.ID),
 		zap.String("remoteAddr", tracked.RemoteAddr),
 	)
+	return tracked, true
+}
 
-	// Set up a goroutine to close the connection when context is cancelled
-	// This ensures the connection is closed promptly on shutdown
+// setupContextCancellation sets up a goroutine to close connection on context cancellation.
+func (s *Server) setupContextCancellation(ctx context.Context, conn net.Conn, connID string) chan struct{} {
 	done := make(chan struct{})
-	defer close(done)
-
 	go func() {
 		select {
 		case <-ctx.Done():
-			s.logger.Debug("context cancelled, closing connection",
-				zap.String("id", tracked.ID),
-			)
-			_ = conn.Close() // Ignore error on cleanup
+			s.logger.Debug("context cancelled, closing connection", zap.String("id", connID))
+			_ = conn.Close()
 		case <-done:
-			// Handler completed normally
 		}
 	}()
+	return done
+}
 
-	// Find matching route
+// matchRoute finds a matching route for the connection.
+func (s *Server) matchRoute(ctx context.Context, conn net.Conn, connID string) *TCPRoute {
 	route, err := s.router.Match(conn)
 	if err != nil {
-		s.logger.Debug("no matching route",
-			zap.String("id", tracked.ID),
-			zap.Error(err),
-		)
-		return
+		s.logger.Debug("no matching route", zap.String("id", connID), zap.Error(err))
+		return nil
 	}
 
-	// Check context again after route matching
 	select {
 	case <-ctx.Done():
-		s.logger.Debug("context cancelled after route matching",
-			zap.String("id", tracked.ID),
-		)
-		return
+		s.logger.Debug("context cancelled after route matching", zap.String("id", connID))
+		return nil
 	default:
+		return route
 	}
+}
 
-	// Check if proxy is available
+// getBackendService retrieves the backend service for the route.
+func (s *Server) getBackendService(connID string, route *TCPRoute) *backend.Backend {
 	if s.proxy == nil {
-		s.logger.Error("proxy not configured",
-			zap.String("id", tracked.ID),
-			zap.String("route", route.Name),
-		)
-		return
+		s.logger.Error("proxy not configured", zap.String("id", connID), zap.String("route", route.Name))
+		return nil
 	}
 
-	// Get backend from route
 	if len(route.BackendRefs) == 0 {
-		s.logger.Error("no backends configured for route",
-			zap.String("id", tracked.ID),
-			zap.String("route", route.Name),
-		)
-		return
+		s.logger.Error("no backends configured for route", zap.String("id", connID), zap.String("route", route.Name))
+		return nil
 	}
 
-	// Use the first backend (load balancing is handled by the backend manager)
 	backendRef := route.BackendRefs[0]
 	backendKey := backendRef.Name
 	if backendRef.Namespace != "" {
 		backendKey = fmt.Sprintf("%s/%s", backendRef.Namespace, backendRef.Name)
 	}
 
-	// Get backend from manager
 	backendSvc := s.proxy.backendManager.GetBackend(backendKey)
 	if backendSvc == nil {
-		s.logger.Error("backend not found",
-			zap.String("id", tracked.ID),
-			zap.String("backend", backendKey),
-		)
-		return
+		s.logger.Error("backend not found", zap.String("id", connID), zap.String("backend", backendKey))
+		return nil
 	}
+	return backendSvc
+}
 
-	// Wrap connection for byte counting
+// proxyConnection proxies the connection to the backend and logs stats.
+func (s *Server) proxyConnection(
+	ctx context.Context,
+	conn net.Conn,
+	tracked *TrackedConnection,
+	route *TCPRoute,
+	backendSvc *backend.Backend,
+) {
 	countingConn := NewCountingConn(conn, tracked)
 
-	// Proxy the connection - the context will handle cancellation
-	if err := s.proxy.ProxyWithIdleTimeout(ctx, countingConn, backendSvc, route.ConnectTimeout, route.IdleTimeout); err != nil {
-		// Don't log context cancellation as an error - it's expected during shutdown
+	err := s.proxy.ProxyWithIdleTimeout(
+		ctx,
+		countingConn,
+		backendSvc,
+		route.ConnectTimeout,
+		route.IdleTimeout,
+	)
+	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Debug("proxy error",
 				zap.String("id", tracked.ID),

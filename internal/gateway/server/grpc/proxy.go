@@ -79,18 +79,34 @@ func (p *Proxy) GetConnection(ctx context.Context, backendRef *BackendRef) (*grp
 		return nil, fmt.Errorf("backend reference is nil")
 	}
 
-	key := fmt.Sprintf("%s/%s:%d", backendRef.Namespace, backendRef.Name, backendRef.Port)
+	key := p.buildConnectionKey(backendRef)
 
-	// Check for existing connection
+	if conn := p.getExistingConnection(key); conn != nil {
+		return conn, nil
+	}
+
+	return p.createNewConnection(backendRef, key)
+}
+
+// buildConnectionKey constructs the connection pool key from backend reference.
+func (p *Proxy) buildConnectionKey(backendRef *BackendRef) string {
+	return fmt.Sprintf("%s/%s:%d", backendRef.Namespace, backendRef.Name, backendRef.Port)
+}
+
+// getExistingConnection returns an existing valid connection if available.
+func (p *Proxy) getExistingConnection(key string) *grpc.ClientConn {
 	p.mu.RLock()
 	conn, exists := p.connections[key]
 	p.mu.RUnlock()
 
 	if exists && conn.GetState().String() != "SHUTDOWN" {
-		return conn, nil
+		return conn
 	}
+	return nil
+}
 
-	// Create new connection
+// createNewConnection creates a new gRPC connection to the backend.
+func (p *Proxy) createNewConnection(backendRef *BackendRef, key string) (*grpc.ClientConn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -99,7 +115,22 @@ func (p *Proxy) GetConnection(ctx context.Context, backendRef *BackendRef) (*grp
 		return conn, nil
 	}
 
-	// Get backend from manager
+	endpoint, backendKey, err := p.getBackendEndpoint(backendRef)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := p.dialBackend(endpoint, backendKey)
+	if err != nil {
+		return nil, err
+	}
+
+	p.connections[key] = conn
+	return conn, nil
+}
+
+// getBackendEndpoint retrieves a healthy endpoint from the backend manager.
+func (p *Proxy) getBackendEndpoint(backendRef *BackendRef) (*backend.Endpoint, string, error) {
 	backendKey := backendRef.Name
 	if backendRef.Namespace != "" {
 		backendKey = fmt.Sprintf("%s/%s", backendRef.Namespace, backendRef.Name)
@@ -107,32 +138,27 @@ func (p *Proxy) GetConnection(ctx context.Context, backendRef *BackendRef) (*grp
 
 	be := p.backendManager.GetBackend(backendKey)
 	if be == nil {
-		return nil, fmt.Errorf("backend %s not found", backendKey)
+		return nil, "", fmt.Errorf("backend %s not found", backendKey)
 	}
 
-	// Get a healthy endpoint
 	endpoint := be.GetHealthyEndpoint()
 	if endpoint == nil {
-		return nil, fmt.Errorf("no healthy endpoints available for backend %s", backendKey)
+		return nil, "", fmt.Errorf("no healthy endpoints available for backend %s", backendKey)
 	}
 
-	// Build dial options
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(p.config.MaxRecvMsgSize),
-			grpc.MaxCallSendMsgSize(p.config.MaxSendMsgSize),
-		),
-	}
+	return endpoint, backendKey, nil
+}
 
-	// Create the gRPC client connection
+// dialBackend creates a gRPC client connection to the endpoint.
+func (p *Proxy) dialBackend(endpoint *backend.Endpoint, backendKey string) (*grpc.ClientConn, error) {
+	opts := p.buildDialOptions()
 	target := endpoint.FullAddress()
+
 	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client for backend %s: %w", target, err)
 	}
 
-	p.connections[key] = conn
 	p.logger.Debug("created gRPC connection to backend",
 		zap.String("backend", backendKey),
 		zap.String("target", target),
@@ -141,8 +167,24 @@ func (p *Proxy) GetConnection(ctx context.Context, backendRef *BackendRef) (*grp
 	return conn, nil
 }
 
+// buildDialOptions constructs the gRPC dial options.
+func (p *Proxy) buildDialOptions() []grpc.DialOption {
+	return []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(p.config.MaxRecvMsgSize),
+			grpc.MaxCallSendMsgSize(p.config.MaxSendMsgSize),
+		),
+	}
+}
+
 // ProxyUnary proxies a unary RPC call to the backend.
-func (p *Proxy) ProxyUnary(ctx context.Context, fullMethod string, req []byte, backendRef *BackendRef) ([]byte, metadata.MD, error) {
+func (p *Proxy) ProxyUnary(
+	ctx context.Context,
+	fullMethod string,
+	req []byte,
+	backendRef *BackendRef,
+) ([]byte, metadata.MD, error) {
 	conn, err := p.GetConnection(ctx, backendRef)
 	if err != nil {
 		return nil, nil, status.Errorf(codes.Unavailable, "failed to get connection: %v", err)
@@ -176,7 +218,13 @@ func (p *Proxy) ProxyUnary(ctx context.Context, fullMethod string, req []byte, b
 }
 
 // ProxyStream proxies a streaming RPC call to the backend.
-func (p *Proxy) ProxyStream(ctx context.Context, desc *grpc.StreamDesc, fullMethod string, backendRef *BackendRef, serverStream grpc.ServerStream) error {
+func (p *Proxy) ProxyStream(
+	ctx context.Context,
+	desc *grpc.StreamDesc,
+	fullMethod string,
+	backendRef *BackendRef,
+	serverStream grpc.ServerStream,
+) error {
 	conn, err := p.GetConnection(ctx, backendRef)
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "failed to get connection: %v", err)

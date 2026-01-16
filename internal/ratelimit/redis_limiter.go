@@ -202,7 +202,8 @@ func (r *RedisRateLimiter) createFallbackLimiter() Limiter {
 		rate := float64(r.config.Requests) / r.config.Window.Seconds()
 		return NewTokenBucketLimiter(nil, rate, r.config.Burst, r.logger)
 	case AlgorithmSlidingWindow:
-		return NewSlidingWindowLimiterWithPrecision(nil, r.config.Requests, r.config.Window, r.config.Precision, r.logger)
+		return NewSlidingWindowLimiterWithPrecision(
+			nil, r.config.Requests, r.config.Window, r.config.Precision, r.logger)
 	case AlgorithmFixedWindow:
 		return NewFixedWindowLimiter(nil, r.config.Requests, r.config.Window, r.logger)
 	default:

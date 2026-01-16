@@ -474,7 +474,8 @@ type SecurityHeadersConfig struct {
 	XXSSProtection *string `json:"xXSSProtection,omitempty"`
 
 	// ReferrerPolicy is the Referrer-Policy header value.
-	// +kubebuilder:validation:Enum=no-referrer;no-referrer-when-downgrade;origin;origin-when-cross-origin;same-origin;strict-origin;strict-origin-when-cross-origin;unsafe-url
+	//nolint:lll // kubebuilder validation enum cannot be shortened
+	//+kubebuilder:validation:Enum=no-referrer;no-referrer-when-downgrade;origin;origin-when-cross-origin;same-origin;strict-origin;strict-origin-when-cross-origin;unsafe-url
 	// +optional
 	ReferrerPolicy *string `json:"referrerPolicy,omitempty"`
 
@@ -571,6 +572,22 @@ type HSTSConfig struct {
 // AuthPolicyStatus defines the observed state of AuthPolicy
 type AuthPolicyStatus struct {
 	Status `json:",inline"`
+}
+
+// GetTargetRef returns the target reference for the policy.
+// This implements the PolicyWithTargetRef interface.
+func (p *AuthPolicy) GetTargetRef() TargetRef {
+	return p.Spec.TargetRef
+}
+
+// GetPolicies returns the list of AuthPolicy items.
+// This implements the PolicyList interface for watch handlers.
+func (l *AuthPolicyList) GetPolicies() []*AuthPolicy {
+	policies := make([]*AuthPolicy, len(l.Items))
+	for i := range l.Items {
+		policies[i] = &l.Items[i]
+	}
+	return policies
 }
 
 func init() {

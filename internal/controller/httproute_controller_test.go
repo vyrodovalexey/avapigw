@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/controller/route"
 )
 
 // ============================================================================
@@ -856,9 +857,7 @@ func TestHTTPRouteReconciler_hostnameMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &HTTPRouteReconciler{}
-
-			result := r.hostnameMatch(tt.routeHost, tt.listenerHost)
+			result := route.HostnameMatch(tt.routeHost, tt.listenerHost)
 
 			assert.Equal(t, tt.wantMatch, result)
 		})
@@ -1234,7 +1233,7 @@ func TestHTTPRouteReconciler_findHTTPRoutesForBackend(t *testing.T) {
 				WithObjects(tt.objects...).
 				WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteBackendIndexField, func(obj client.Object) []string {
 					route := obj.(*avapigwv1alpha1.HTTPRoute)
-					return extractBackendRefs(route.Namespace, route.Spec.Rules)
+					return extractHTTPBackendRefs(route.Namespace, route.Spec.Rules)
 				}).
 				Build()
 
@@ -1723,9 +1722,7 @@ func TestHTTPRouteReconciler_hostnameMatch_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &HTTPRouteReconciler{}
-
-			result := r.hostnameMatch(tt.routeHost, tt.listenerHost)
+			result := route.HostnameMatch(tt.routeHost, tt.listenerHost)
 
 			assert.Equal(t, tt.wantMatch, result)
 		})

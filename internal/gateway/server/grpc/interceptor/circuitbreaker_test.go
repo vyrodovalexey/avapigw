@@ -287,7 +287,7 @@ func TestStreamCircuitBreakerInterceptorWithConfig(t *testing.T) {
 	})
 }
 
-// TestIsCircuitBreakerFailure tests the isCircuitBreakerFailure function
+// TestIsCircuitBreakerFailure tests the IsCircuitBreakerFailure function
 func TestIsCircuitBreakerFailure(t *testing.T) {
 	t.Parallel()
 
@@ -312,7 +312,7 @@ func TestIsCircuitBreakerFailure(t *testing.T) {
 		t.Run(tc.code.String(), func(t *testing.T) {
 			t.Parallel()
 
-			result := isCircuitBreakerFailure(tc.code)
+			result := IsCircuitBreakerFailure(tc.code)
 			assert.Equal(t, tc.expected, result)
 		})
 	}

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,48 +15,24 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/controller/base"
+	"github.com/vyrodovalexey/avapigw/internal/controller/route"
 )
 
+// Compile-time check that TCPRoute implements route.RouteWithParentRefs
+var _ route.RouteWithParentRefs = &avapigwv1alpha1.TCPRoute{}
+
+// Local aliases for constants to maintain backward compatibility.
+// These reference the centralized constants from constants.go.
 const (
-	tcpRouteFinalizer = "avapigw.vyrodovalexey.github.com/tcproute-finalizer"
-
-	// tcpRouteReconcileTimeout is the maximum duration for a single TCPRoute reconciliation
-	tcpRouteReconcileTimeout = 30 * time.Second
+	tcpRouteFinalizer        = TCPRouteFinalizerName
+	tcpRouteReconcileTimeout = TCPRouteReconcileTimeout
 )
-
-// Prometheus metrics for TCPRoute controller
-var (
-	tcpRouteReconcileDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "tcproute_reconcile_duration_seconds",
-			Help:      "Duration of TCPRoute reconciliation in seconds",
-			Buckets:   prometheus.DefBuckets,
-		},
-		[]string{"result"},
-	)
-
-	tcpRouteReconcileTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "tcproute_reconcile_total",
-			Help:      "Total number of TCPRoute reconciliations",
-		},
-		[]string{"result"},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(tcpRouteReconcileDuration, tcpRouteReconcileTotal)
-}
 
 // TCPRouteReconciler reconciles a TCPRoute object
 type TCPRouteReconciler struct {
@@ -65,6 +41,10 @@ type TCPRouteReconciler struct {
 	Recorder            record.EventRecorder
 	RequeueStrategy     *RequeueStrategy
 	requeueStrategyOnce sync.Once // Ensures thread-safe initialization of RequeueStrategy
+
+	// Base reconciler components
+	metrics          *base.ControllerMetrics
+	finalizerHandler *base.FinalizerHandler
 }
 
 // getRequeueStrategy returns the requeue strategy, initializing with defaults if needed.
@@ -79,7 +59,26 @@ func (r *TCPRouteReconciler) getRequeueStrategy() *RequeueStrategy {
 	return r.RequeueStrategy
 }
 
-// +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
+// initBaseComponents initializes the base controller components.
+// This is called automatically during reconciliation but can also be called
+// explicitly for testing purposes.
+func (r *TCPRouteReconciler) initBaseComponents() {
+	if r.metrics == nil {
+		r.metrics = base.DefaultMetricsRegistry.RegisterController("tcproute")
+	}
+	if r.finalizerHandler == nil {
+		r.finalizerHandler = base.NewFinalizerHandler(r.Client, tcpRouteFinalizer)
+	}
+}
+
+// ensureInitialized ensures base components are initialized.
+// This is a helper for methods that may be called directly in tests.
+func (r *TCPRouteReconciler) ensureInitialized() {
+	r.initBaseComponents()
+}
+
+//nolint:lll // kubebuilder RBAC marker cannot be shortened
+//+kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=tcproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=tcproutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=tcproutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=get;list;watch
@@ -89,7 +88,8 @@ func (r *TCPRouteReconciler) getRequeueStrategy() *RequeueStrategy {
 
 // Reconcile handles TCPRoute reconciliation
 func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// Add timeout to prevent hanging reconciliations
+	r.initBaseComponents()
+
 	ctx, cancel := context.WithTimeout(ctx, tcpRouteReconcileTimeout)
 	defer cancel()
 
@@ -97,17 +97,10 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	strategy := r.getRequeueStrategy()
 	resourceKey := req.String()
 
-	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
-		duration := time.Since(start).Seconds()
-		result := MetricResultSuccess
-		if reconcileErr != nil {
-			result = MetricResultError
-		}
-		tcpRouteReconcileDuration.WithLabelValues(result).Observe(duration)
-		tcpRouteReconcileTotal.WithLabelValues(result).Inc()
+		r.metrics.ObserveReconcile(time.Since(start).Seconds(), reconcileErr == nil)
 	}()
 
 	logger.Info("Reconciling TCPRoute",
@@ -116,80 +109,120 @@ func (r *TCPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		"failureCount", strategy.GetFailureCount(resourceKey),
 	)
 
-	// Fetch the TCPRoute instance
+	tcpRoute, result, err := r.fetchTCPRoute(ctx, req, strategy, resourceKey)
+	if err != nil {
+		reconcileErr = err
+		return result, reconcileErr
+	}
+	if tcpRoute == nil {
+		return result, nil
+	}
+
+	if !tcpRoute.DeletionTimestamp.IsZero() {
+		result, delErr := r.handleDeletion(ctx, tcpRoute)
+		if delErr == nil {
+			strategy.ResetFailureCount(resourceKey)
+		}
+		return result, delErr
+	}
+
+	return r.ensureFinalizerAndReconcileTCPRoute(ctx, tcpRoute, strategy, resourceKey, &reconcileErr, logger)
+}
+
+// fetchTCPRoute fetches the TCPRoute instance and handles not-found errors.
+func (r *TCPRouteReconciler) fetchTCPRoute(
+	ctx context.Context,
+	req ctrl.Request,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (*avapigwv1alpha1.TCPRoute, ctrl.Result, *ReconcileError) {
+	logger := log.FromContext(ctx)
 	tcpRoute := &avapigwv1alpha1.TCPRoute{}
 	if err := r.Get(ctx, req.NamespacedName, tcpRoute); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("TCPRoute not found, ignoring")
 			strategy.ResetFailureCount(resourceKey)
-			return ctrl.Result{}, nil
+			return nil, ctrl.Result{}, nil
 		}
-		reconcileErr = ClassifyError("getTCPRoute", resourceKey, err)
+		reconcileErr := ClassifyError("getTCPRoute", resourceKey, err)
 		logger.Error(reconcileErr, "Failed to get TCPRoute",
 			"errorType", reconcileErr.Type,
 			"retryable", reconcileErr.Retryable,
 		)
-		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+		return nil, strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
 	}
+	return tcpRoute, ctrl.Result{}, nil
+}
 
-	// Handle deletion
-	if !tcpRoute.DeletionTimestamp.IsZero() {
-		result, err := r.handleDeletion(ctx, tcpRoute)
-		if err == nil {
-			strategy.ResetFailureCount(resourceKey)
-		}
-		return result, err
-	}
-
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(tcpRoute, tcpRouteFinalizer) {
-		controllerutil.AddFinalizer(tcpRoute, tcpRouteFinalizer)
-		if err := r.Update(ctx, tcpRoute); err != nil {
-			reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
-			logger.Error(reconcileErr, "Failed to add finalizer",
-				"errorType", reconcileErr.Type,
-			)
+// ensureFinalizerAndReconcileTCPRoute ensures the finalizer is present and performs reconciliation.
+func (r *TCPRouteReconciler) ensureFinalizerAndReconcileTCPRoute(
+	ctx context.Context,
+	tcpRoute *avapigwv1alpha1.TCPRoute,
+	strategy *RequeueStrategy,
+	resourceKey string,
+	reconcileErr **ReconcileError,
+	logger logr.Logger,
+) (ctrl.Result, error) {
+	if !r.finalizerHandler.HasFinalizer(tcpRoute) {
+		added, err := r.finalizerHandler.EnsureFinalizer(ctx, tcpRoute)
+		if err != nil {
+			*reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
+			logger.Error(*reconcileErr, "Failed to add finalizer", "errorType", (*reconcileErr).Type)
 			r.Recorder.Event(tcpRoute, corev1.EventTypeWarning, "FinalizerError", err.Error())
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+			return strategy.ForTransientErrorWithBackoff(resourceKey), *reconcileErr
 		}
-		return strategy.ForImmediateRequeue(), nil
+		if added {
+			return strategy.ForImmediateRequeue(), nil
+		}
 	}
 
-	// Reconcile the TCPRoute
 	if err := r.reconcileTCPRoute(ctx, tcpRoute); err != nil {
-		reconcileErr = ClassifyError("reconcileTCPRoute", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to reconcile TCPRoute",
-			"errorType", reconcileErr.Type,
-			"retryable", reconcileErr.Retryable,
-			"userActionRequired", reconcileErr.UserActionRequired,
+		*reconcileErr = ClassifyError("reconcileTCPRoute", resourceKey, err)
+		logger.Error(*reconcileErr, "Failed to reconcile TCPRoute",
+			"errorType", (*reconcileErr).Type,
+			"retryable", (*reconcileErr).Retryable,
+			"userActionRequired", (*reconcileErr).UserActionRequired,
 		)
-		r.Recorder.Event(tcpRoute, corev1.EventTypeWarning, string(reconcileErr.Type)+"Error", err.Error())
-
-		switch reconcileErr.Type {
-		case ErrorTypeValidation:
-			return strategy.ForValidationError(), reconcileErr
-		case ErrorTypePermanent:
-			return strategy.ForPermanentError(), reconcileErr
-		case ErrorTypeDependency:
-			return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
-		default:
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
-		}
+		r.Recorder.Event(tcpRoute, corev1.EventTypeWarning, string((*reconcileErr).Type)+"Error", err.Error())
+		return r.handleTCPRouteReconcileError(*reconcileErr, strategy, resourceKey)
 	}
 
-	// Success - reset failure count
 	strategy.ResetFailureCount(resourceKey)
-	logger.Info("TCPRoute reconciled successfully", "name", req.Name, "namespace", req.Namespace)
+	logger.Info("TCPRoute reconciled successfully", "name", tcpRoute.Name, "namespace", tcpRoute.Namespace)
 	return strategy.ForSuccess(), nil
 }
 
+// handleTCPRouteReconcileError returns the appropriate result based on error type.
+func (r *TCPRouteReconciler) handleTCPRouteReconcileError(
+	reconcileErr *ReconcileError,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (ctrl.Result, error) {
+	switch reconcileErr.Type {
+	case ErrorTypeValidation:
+		return strategy.ForValidationError(), reconcileErr
+	case ErrorTypePermanent:
+		return strategy.ForPermanentError(), reconcileErr
+	case ErrorTypeDependency:
+		return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
+	default:
+		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	}
+}
+
 // handleDeletion handles TCPRoute deletion
-func (r *TCPRouteReconciler) handleDeletion(ctx context.Context, tcpRoute *avapigwv1alpha1.TCPRoute) (ctrl.Result, error) {
+func (r *TCPRouteReconciler) handleDeletion(
+	ctx context.Context,
+	tcpRoute *avapigwv1alpha1.TCPRoute,
+) (ctrl.Result, error) {
+	// Ensure base components are initialized (needed when called directly in tests)
+	r.ensureInitialized()
+
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
 	resourceKey := client.ObjectKeyFromObject(tcpRoute).String()
 
-	if controllerutil.ContainsFinalizer(tcpRoute, tcpRouteFinalizer) {
+	if r.finalizerHandler.HasFinalizer(tcpRoute) {
 		// Perform cleanup
 		logger.Info("Performing cleanup for TCPRoute deletion",
 			"name", tcpRoute.Name,
@@ -200,8 +233,7 @@ func (r *TCPRouteReconciler) handleDeletion(ctx context.Context, tcpRoute *avapi
 		r.Recorder.Event(tcpRoute, corev1.EventTypeNormal, "Deleting", "TCPRoute is being deleted")
 
 		// Remove finalizer
-		controllerutil.RemoveFinalizer(tcpRoute, tcpRouteFinalizer)
-		if err := r.Update(ctx, tcpRoute); err != nil {
+		if _, err := r.finalizerHandler.RemoveFinalizer(ctx, tcpRoute); err != nil {
 			reconcileErr := ClassifyError("removeFinalizer", resourceKey, err)
 			logger.Error(reconcileErr, "Failed to remove finalizer",
 				"errorType", reconcileErr.Type,
@@ -216,17 +248,26 @@ func (r *TCPRouteReconciler) handleDeletion(ctx context.Context, tcpRoute *avapi
 // reconcileTCPRoute performs the main reconciliation logic
 func (r *TCPRouteReconciler) reconcileTCPRoute(ctx context.Context, tcpRoute *avapigwv1alpha1.TCPRoute) error {
 	logger := log.FromContext(ctx)
+	resourceKey := client.ObjectKeyFromObject(tcpRoute).String()
 
 	// Validate parent references (Gateways)
 	parentStatuses, err := r.validateParentRefs(ctx, tcpRoute)
 	if err != nil {
-		logger.Error(err, "Failed to validate parent references")
-		return err
+		reconcileErr := ClassifyError("validateParentRefs", resourceKey, err)
+		logger.Error(reconcileErr, "Failed to validate parent references",
+			"errorType", reconcileErr.Type,
+		)
+		return reconcileErr
 	}
 
 	// Validate backend references
 	if err := r.validateBackendRefs(ctx, tcpRoute); err != nil {
-		logger.Error(err, "Failed to validate backend references")
+		// Log but continue - backend validation errors are not fatal
+		reconcileErr := ClassifyError("validateBackendRefs", resourceKey, err)
+		logger.Info("Backend validation warning, continuing with reconciliation",
+			"error", err.Error(),
+			"errorType", reconcileErr.Type,
+		)
 		// Continue with status update even if backends are invalid
 	}
 
@@ -235,83 +276,104 @@ func (r *TCPRouteReconciler) reconcileTCPRoute(ctx context.Context, tcpRoute *av
 
 	// Update status
 	if err := r.Status().Update(ctx, tcpRoute); err != nil {
-		logger.Error(err, "Failed to update TCPRoute status")
-		return err
+		reconcileErr := ClassifyError("updateStatus", resourceKey, err)
+		logger.Error(reconcileErr, "Failed to update TCPRoute status",
+			"errorType", reconcileErr.Type,
+		)
+		return reconcileErr
 	}
 
-	r.Recorder.Event(tcpRoute, corev1.EventTypeNormal, "Reconciled", "TCPRoute reconciled successfully")
+	r.Recorder.Event(tcpRoute, corev1.EventTypeNormal, EventReasonReconciled, "TCPRoute reconciled successfully")
 	return nil
 }
 
-// validateParentRefs validates parent references and returns parent statuses
-func (r *TCPRouteReconciler) validateParentRefs(ctx context.Context, tcpRoute *avapigwv1alpha1.TCPRoute) ([]avapigwv1alpha1.RouteParentStatus, error) {
+// buildAcceptedConditions builds the conditions for an accepted route.
+func (r *TCPRouteReconciler) buildAcceptedConditions() []avapigwv1alpha1.Condition {
+	return []avapigwv1alpha1.Condition{
+		{
+			Type:               avapigwv1alpha1.ConditionTypeAccepted,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             string(avapigwv1alpha1.ReasonAccepted),
+			Message:            "Route accepted by Gateway",
+		},
+		{
+			Type:               avapigwv1alpha1.ConditionTypeResolvedRefs,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             string(avapigwv1alpha1.ReasonResolvedRefs),
+			Message:            "All references resolved",
+		},
+	}
+}
+
+// buildRejectedCondition builds a condition for a rejected route.
+func (r *TCPRouteReconciler) buildRejectedCondition(
+	reason avapigwv1alpha1.ConditionReason,
+	message string,
+) []avapigwv1alpha1.Condition {
+	return []avapigwv1alpha1.Condition{
+		{
+			Type:               avapigwv1alpha1.ConditionTypeAccepted,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             string(reason),
+			Message:            message,
+		},
+	}
+}
+
+// validateSingleParentRef validates a single parent reference and returns its status.
+func (r *TCPRouteReconciler) validateSingleParentRef(
+	ctx context.Context,
+	tcpRoute *avapigwv1alpha1.TCPRoute,
+	parentRef avapigwv1alpha1.ParentRef,
+) (avapigwv1alpha1.RouteParentStatus, error) {
 	logger := log.FromContext(ctx)
+	parentStatus := avapigwv1alpha1.RouteParentStatus{
+		ParentRef:      parentRef,
+		ControllerName: GatewayControllerName,
+	}
+
+	namespace := tcpRoute.Namespace
+	if parentRef.Namespace != nil {
+		namespace = *parentRef.Namespace
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: parentRef.Name}, gateway)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("Parent Gateway not found", "gateway", parentRef.Name, "namespace", namespace)
+			parentStatus.Conditions = r.buildRejectedCondition(avapigwv1alpha1.ReasonNoMatchingParent,
+				fmt.Sprintf("Gateway %s/%s not found", namespace, parentRef.Name))
+			return parentStatus, nil
+		}
+		return parentStatus, fmt.Errorf("failed to get Gateway %s/%s: %w", namespace, parentRef.Name, err)
+	}
+
+	accepted, message := r.validateListenerMatch(gateway, parentRef)
+	if accepted {
+		parentStatus.Conditions = r.buildAcceptedConditions()
+	} else {
+		parentStatus.Conditions = r.buildRejectedCondition(avapigwv1alpha1.ReasonNotAllowedByListeners, message)
+	}
+
+	return parentStatus, nil
+}
+
+// validateParentRefs validates parent references and returns parent statuses
+func (r *TCPRouteReconciler) validateParentRefs(
+	ctx context.Context,
+	tcpRoute *avapigwv1alpha1.TCPRoute,
+) ([]avapigwv1alpha1.RouteParentStatus, error) {
 	parentStatuses := make([]avapigwv1alpha1.RouteParentStatus, 0, len(tcpRoute.Spec.ParentRefs))
 
 	for _, parentRef := range tcpRoute.Spec.ParentRefs {
-		parentStatus := avapigwv1alpha1.RouteParentStatus{
-			ParentRef:      parentRef,
-			ControllerName: "avapigw.vyrodovalexey.github.com/gateway-controller",
-		}
-
-		// Determine namespace
-		namespace := tcpRoute.Namespace
-		if parentRef.Namespace != nil {
-			namespace = *parentRef.Namespace
-		}
-
-		// Get the Gateway
-		gateway := &avapigwv1alpha1.Gateway{}
-		err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: parentRef.Name}, gateway)
+		parentStatus, err := r.validateSingleParentRef(ctx, tcpRoute, parentRef)
 		if err != nil {
-			if errors.IsNotFound(err) {
-				logger.Info("Parent Gateway not found", "gateway", parentRef.Name, "namespace", namespace)
-				parentStatus.Conditions = []avapigwv1alpha1.Condition{
-					{
-						Type:               avapigwv1alpha1.ConditionTypeAccepted,
-						Status:             metav1.ConditionFalse,
-						LastTransitionTime: metav1.Now(),
-						Reason:             string(avapigwv1alpha1.ReasonNoMatchingParent),
-						Message:            fmt.Sprintf("Gateway %s/%s not found", namespace, parentRef.Name),
-					},
-				}
-				parentStatuses = append(parentStatuses, parentStatus)
-				continue
-			}
-			return nil, fmt.Errorf("failed to get Gateway %s/%s: %w", namespace, parentRef.Name, err)
+			return nil, err
 		}
-
-		// Validate listener match
-		accepted, message := r.validateListenerMatch(gateway, parentRef)
-		if accepted {
-			parentStatus.Conditions = []avapigwv1alpha1.Condition{
-				{
-					Type:               avapigwv1alpha1.ConditionTypeAccepted,
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonAccepted),
-					Message:            "Route accepted by Gateway",
-				},
-				{
-					Type:               avapigwv1alpha1.ConditionTypeResolvedRefs,
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonResolvedRefs),
-					Message:            "All references resolved",
-				},
-			}
-		} else {
-			parentStatus.Conditions = []avapigwv1alpha1.Condition{
-				{
-					Type:               avapigwv1alpha1.ConditionTypeAccepted,
-					Status:             metav1.ConditionFalse,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonNotAllowedByListeners),
-					Message:            message,
-				},
-			}
-		}
-
 		parentStatuses = append(parentStatuses, parentStatus)
 	}
 
@@ -319,94 +381,82 @@ func (r *TCPRouteReconciler) validateParentRefs(ctx context.Context, tcpRoute *a
 }
 
 // validateListenerMatch validates that the route matches a listener on the gateway
-func (r *TCPRouteReconciler) validateListenerMatch(gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (matches bool, reason string) {
+func (r *TCPRouteReconciler) validateListenerMatch(
+	gateway *avapigwv1alpha1.Gateway,
+	parentRef avapigwv1alpha1.ParentRef,
+) (matches bool, reason string) {
 	// If a specific section (listener) is specified, validate it
 	if parentRef.SectionName != nil {
-		listenerName := *parentRef.SectionName
-		for _, listener := range gateway.Spec.Listeners {
-			if listener.Name == listenerName {
-				// Check protocol compatibility
-				if listener.Protocol != avapigwv1alpha1.ProtocolTCP {
-					return false, fmt.Sprintf("Listener %s does not support TCP protocol", listenerName)
-				}
-				// Check port match if specified
-				if parentRef.Port != nil && int32(listener.Port) != *parentRef.Port {
-					return false, fmt.Sprintf("Port %d does not match listener %s port %d", *parentRef.Port, listenerName, listener.Port)
-				}
-				return true, ""
-			}
-		}
-		return false, fmt.Sprintf("Listener %s not found on Gateway", listenerName)
+		return r.validateSpecificTCPListener(gateway, *parentRef.SectionName, parentRef.Port)
 	}
 
 	// No specific listener, check if any TCP listener matches
-	for _, listener := range gateway.Spec.Listeners {
-		if listener.Protocol == avapigwv1alpha1.ProtocolTCP {
-			// Check port match if specified
-			if parentRef.Port != nil && int32(listener.Port) != *parentRef.Port {
-				continue
-			}
-			return true, ""
-		}
-	}
+	return r.findMatchingTCPListener(gateway, parentRef.Port)
+}
 
+// validateSpecificTCPListener validates a specific named listener for TCP protocol compatibility.
+func (r *TCPRouteReconciler) validateSpecificTCPListener(
+	gateway *avapigwv1alpha1.Gateway,
+	listenerName string,
+	port *int32,
+) (matches bool, reason string) {
+	for _, listener := range gateway.Spec.Listeners {
+		if listener.Name != listenerName {
+			continue
+		}
+		// Check protocol compatibility
+		if listener.Protocol != avapigwv1alpha1.ProtocolTCP {
+			return false, fmt.Sprintf("Listener %s does not support TCP protocol", listenerName)
+		}
+		// Check port match if specified
+		if port != nil && int32(listener.Port) != *port {
+			return false, fmt.Sprintf("Port %d does not match listener %s port %d", *port, listenerName, listener.Port)
+		}
+		return true, ""
+	}
+	return false, fmt.Sprintf("Listener %s not found on Gateway", listenerName)
+}
+
+// findMatchingTCPListener finds any TCP listener that matches the route.
+func (r *TCPRouteReconciler) findMatchingTCPListener(
+	gateway *avapigwv1alpha1.Gateway,
+	port *int32,
+) (matches bool, reason string) {
+	for _, listener := range gateway.Spec.Listeners {
+		if listener.Protocol != avapigwv1alpha1.ProtocolTCP {
+			continue
+		}
+		// Check port match if specified
+		if port != nil && int32(listener.Port) != *port {
+			continue
+		}
+		return true, ""
+	}
 	return false, "No matching TCP listener found on Gateway"
 }
 
-// validateBackendRefs validates backend references
+// validateBackendRefs validates backend references for the TCPRoute.
+// It extracts backend refs from all rules and delegates validation to the shared validator.
 func (r *TCPRouteReconciler) validateBackendRefs(ctx context.Context, tcpRoute *avapigwv1alpha1.TCPRoute) error {
-	logger := log.FromContext(ctx)
+	backendRefs := r.extractBackendRefs(tcpRoute)
+	validator := route.NewBackendRefValidator(r.Client, r.Recorder)
+	return validator.ValidateBackendRefs(ctx, tcpRoute, backendRefs)
+}
 
+// extractBackendRefs extracts all backend references from a TCPRoute's rules.
+func (r *TCPRouteReconciler) extractBackendRefs(tcpRoute *avapigwv1alpha1.TCPRoute) []route.BackendRefInfo {
+	var refs []route.BackendRefInfo
 	for _, rule := range tcpRoute.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
-			namespace := tcpRoute.Namespace
-			if backendRef.Namespace != nil {
-				namespace = *backendRef.Namespace
-			}
-
-			kind := BackendKindService
-			if backendRef.Kind != nil {
-				kind = *backendRef.Kind
-			}
-
-			group := ""
-			if backendRef.Group != nil {
-				group = *backendRef.Group
-			}
-
-			// Check based on kind
-			switch {
-			case group == "" && kind == BackendKindService:
-				// Kubernetes Service
-				svc := &corev1.Service{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, svc); err != nil {
-					if errors.IsNotFound(err) {
-						logger.Info("Backend Service not found", "service", backendRef.Name, "namespace", namespace)
-						r.Recorder.Event(tcpRoute, corev1.EventTypeWarning, "BackendNotFound",
-							fmt.Sprintf("Service %s/%s not found", namespace, backendRef.Name))
-						continue
-					}
-					return fmt.Errorf("failed to get Service %s/%s: %w", namespace, backendRef.Name, err)
-				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == BackendKindBackend:
-				// Custom Backend resource
-				backend := &avapigwv1alpha1.Backend{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, backend); err != nil {
-					if errors.IsNotFound(err) {
-						logger.Info("Backend not found", "backend", backendRef.Name, "namespace", namespace)
-						r.Recorder.Event(tcpRoute, corev1.EventTypeWarning, "BackendNotFound",
-							fmt.Sprintf("Backend %s/%s not found", namespace, backendRef.Name))
-						continue
-					}
-					return fmt.Errorf("failed to get Backend %s/%s: %w", namespace, backendRef.Name, err)
-				}
-			default:
-				logger.Info("Unsupported backend kind", "group", group, "kind", kind)
-			}
+			refs = append(refs, route.BackendRefInfo{
+				Name:      backendRef.Name,
+				Namespace: backendRef.Namespace,
+				Kind:      backendRef.Kind,
+				Group:     backendRef.Group,
+			})
 		}
 	}
-
-	return nil
+	return refs
 }
 
 // SetupWithManager sets up the controller with the Manager
@@ -424,69 +474,51 @@ func (r *TCPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// findTCPRoutesForGateway finds TCPRoutes that reference a Gateway
+// findTCPRoutesForGateway finds TCPRoutes that reference a Gateway.
+// Uses field indexers for efficient filtered lookups.
 func (r *TCPRouteReconciler) findTCPRoutesForGateway(ctx context.Context, obj client.Object) []reconcile.Request {
 	gateway := obj.(*avapigwv1alpha1.Gateway)
-	var requests []reconcile.Request
 
+	// Use field index for efficient lookup
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
 	var tcpRoutes avapigwv1alpha1.TCPRouteList
-	if err := r.List(ctx, &tcpRoutes); err != nil {
-		return requests
+	if err := r.List(ctx, &tcpRoutes, client.MatchingFields{TCPRouteGatewayIndexField: gatewayKey}); err != nil {
+		return nil
 	}
 
-	for _, route := range tcpRoutes.Items {
-		for _, parentRef := range route.Spec.ParentRefs {
-			namespace := route.Namespace
-			if parentRef.Namespace != nil {
-				namespace = *parentRef.Namespace
-			}
-			if namespace == gateway.Namespace && parentRef.Name == gateway.Name {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: client.ObjectKey{
-						Namespace: route.Namespace,
-						Name:      route.Name,
-					},
-				})
-				break
-			}
-		}
+	requests := make([]reconcile.Request, 0, len(tcpRoutes.Items))
+	for _, tcpRoute := range tcpRoutes.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Namespace: tcpRoute.Namespace,
+				Name:      tcpRoute.Name,
+			},
+		})
 	}
 
 	return requests
 }
 
-// findTCPRoutesForBackend finds TCPRoutes that reference a Backend
+// findTCPRoutesForBackend finds TCPRoutes that reference a Backend.
+// Uses field indexers for efficient filtered lookups.
 func (r *TCPRouteReconciler) findTCPRoutesForBackend(ctx context.Context, obj client.Object) []reconcile.Request {
 	backend := obj.(*avapigwv1alpha1.Backend)
-	var requests []reconcile.Request
 
+	// Use field index for efficient lookup
+	backendKey := BackendIndexKey(backend.Namespace, backend.Name)
 	var tcpRoutes avapigwv1alpha1.TCPRouteList
-	if err := r.List(ctx, &tcpRoutes); err != nil {
-		return requests
+	if err := r.List(ctx, &tcpRoutes, client.MatchingFields{TCPRouteBackendIndexField: backendKey}); err != nil {
+		return nil
 	}
 
-	for _, route := range tcpRoutes.Items {
-		for _, rule := range route.Spec.Rules {
-			for _, backendRef := range rule.BackendRefs {
-				namespace := route.Namespace
-				if backendRef.Namespace != nil {
-					namespace = *backendRef.Namespace
-				}
-				kind := BackendKindService
-				if backendRef.Kind != nil {
-					kind = *backendRef.Kind
-				}
-				if kind == BackendKindBackend && namespace == backend.Namespace && backendRef.Name == backend.Name {
-					requests = append(requests, reconcile.Request{
-						NamespacedName: client.ObjectKey{
-							Namespace: route.Namespace,
-							Name:      route.Name,
-						},
-					})
-					break
-				}
-			}
-		}
+	requests := make([]reconcile.Request, 0, len(tcpRoutes.Items))
+	for _, tcpRoute := range tcpRoutes.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Namespace: tcpRoute.Namespace,
+				Name:      tcpRoute.Name,
+			},
+		})
 	}
 
 	return requests

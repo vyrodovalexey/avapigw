@@ -185,7 +185,8 @@ func ValidateProviderType(providerType string) (ProviderType, error) {
 	case ProviderTypeKubernetes, ProviderTypeVault, ProviderTypeLocal, ProviderTypeEnv:
 		return ProviderType(providerType), nil
 	default:
-		return "", fmt.Errorf("%w: %s, must be one of: kubernetes, vault, local, env", ErrInvalidProviderType, providerType)
+		return "", fmt.Errorf(
+			"%w: %s, must be one of: kubernetes, vault, local, env", ErrInvalidProviderType, providerType)
 	}
 }
 

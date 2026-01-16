@@ -1108,3 +1108,1076 @@ func TestAuthPolicyReconciler_setCondition(t *testing.T) {
 	assert.Equal(t, "Ready", condition.Reason)
 	assert.Equal(t, "Policy is ready", condition.Message)
 }
+
+// ============================================================================
+// AuthPolicyReconciler.reconcileAuthPolicy Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_reconcileAuthPolicy(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name     string
+		objects  []client.Object
+		policy   *avapigwv1alpha1.AuthPolicy
+		wantErr  bool
+		errMsg   string
+		validate func(t *testing.T, cl client.Client, policy *avapigwv1alpha1.AuthPolicy)
+	}{
+		{
+			name: "successful reconciliation - no authentication config",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-policy",
+					Namespace:  "default",
+					Finalizers: []string{authPolicyFinalizer},
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+				},
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cl client.Client, policy *avapigwv1alpha1.AuthPolicy) {
+				assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, policy.Status.Phase)
+			},
+		},
+		{
+			name: "successful reconciliation - with valid JWT config",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-policy",
+					Namespace:  "default",
+					Finalizers: []string{authPolicyFinalizer},
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							Enabled: ptrBool(true),
+							JWKSUri: ptrString("https://example.com/.well-known/jwks.json"),
+						},
+					},
+				},
+			},
+			wantErr: false,
+			validate: func(t *testing.T, cl client.Client, policy *avapigwv1alpha1.AuthPolicy) {
+				assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, policy.Status.Phase)
+			},
+		},
+		{
+			name:    "error - target reference not found",
+			objects: []client.Object{},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-policy",
+					Namespace:  "default",
+					Finalizers: []string{authPolicyFinalizer},
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "missing-gateway",
+					},
+				},
+			},
+			wantErr: false, // updateStatus succeeds, but phase is Error
+			validate: func(t *testing.T, cl client.Client, policy *avapigwv1alpha1.AuthPolicy) {
+				assert.Equal(t, avapigwv1alpha1.PhaseStatusError, policy.Status.Phase)
+			},
+		},
+		{
+			name: "error - invalid authentication config",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-policy",
+					Namespace:  "default",
+					Finalizers: []string{authPolicyFinalizer},
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							Enabled: ptrBool(true),
+							// Missing JWKS URI and secret
+						},
+					},
+				},
+			},
+			wantErr: false, // updateStatus succeeds, but phase is Error
+			validate: func(t *testing.T, cl client.Client, policy *avapigwv1alpha1.AuthPolicy) {
+				assert.Equal(t, avapigwv1alpha1.PhaseStatusError, policy.Status.Phase)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(append(tt.objects, tt.policy)...).
+				WithStatusSubresource(&avapigwv1alpha1.AuthPolicy{}).
+				Build()
+
+			r := newAuthPolicyReconciler(cl, scheme)
+
+			// Fetch the policy to get the version from the fake client
+			fetchedPolicy := &avapigwv1alpha1.AuthPolicy{}
+			err := cl.Get(context.Background(), types.NamespacedName{Name: tt.policy.Name, Namespace: tt.policy.Namespace}, fetchedPolicy)
+			require.NoError(t, err)
+
+			err = r.reconcileAuthPolicy(context.Background(), fetchedPolicy)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+
+			if tt.validate != nil {
+				tt.validate(t, cl, fetchedPolicy)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// AuthPolicyReconciler.validateAuthenticationConfig Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_validateAuthenticationConfig(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name    string
+		objects []client.Object
+		policy  *avapigwv1alpha1.AuthPolicy
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid JWT config with JWKS URI",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							Enabled: ptrBool(true),
+							JWKSUri: ptrString("https://example.com/.well-known/jwks.json"),
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid JWT config with JWKS secret",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "jwks-secret", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							Enabled: ptrBool(true),
+							JWKS: &avapigwv1alpha1.SecretObjectReference{
+								Name: "jwks-secret",
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid JWT config - missing JWKS",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							Enabled: ptrBool(true),
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "JWT configuration error",
+		},
+		{
+			name: "valid API key config with secret validation",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "api-key-secret", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						APIKey: &avapigwv1alpha1.APIKeyAuthConfig{
+							Enabled: ptrBool(true),
+							Validation: &avapigwv1alpha1.APIKeyValidationConfig{
+								Type: avapigwv1alpha1.APIKeyValidationSecret,
+								SecretRef: &avapigwv1alpha1.SecretObjectReference{
+									Name: "api-key-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid API key config - missing validation",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						APIKey: &avapigwv1alpha1.APIKeyAuthConfig{
+							Enabled: ptrBool(true),
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "API Key configuration error",
+		},
+		{
+			name: "valid basic auth config",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "basic-auth-secret", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						Basic: &avapigwv1alpha1.BasicAuthConfig{
+							Enabled: ptrBool(true),
+							SecretRef: &avapigwv1alpha1.SecretObjectReference{
+								Name: "basic-auth-secret",
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid basic auth config - missing secret ref",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						Basic: &avapigwv1alpha1.BasicAuthConfig{
+							Enabled: ptrBool(true),
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "basic auth configuration error",
+		},
+		{
+			name: "valid OAuth2 config",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						OAuth2: &avapigwv1alpha1.OAuth2Config{
+							Enabled:       ptrBool(true),
+							TokenEndpoint: ptrString("https://auth.example.com/token"),
+							ClientID:      ptrString("my-client-id"),
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid OAuth2 config - missing token endpoint",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						OAuth2: &avapigwv1alpha1.OAuth2Config{
+							Enabled:  ptrBool(true),
+							ClientID: ptrString("my-client-id"),
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "OAuth2 configuration error",
+		},
+		{
+			name: "multiple auth methods - all valid",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "api-key-secret", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							Enabled: ptrBool(true),
+							JWKSUri: ptrString("https://example.com/.well-known/jwks.json"),
+						},
+						APIKey: &avapigwv1alpha1.APIKeyAuthConfig{
+							Enabled: ptrBool(true),
+							Validation: &avapigwv1alpha1.APIKeyValidationConfig{
+								Type: avapigwv1alpha1.APIKeyValidationSecret,
+								SecretRef: &avapigwv1alpha1.SecretObjectReference{
+									Name: "api-key-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "disabled auth methods are not validated",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+				},
+			},
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					TargetRef: avapigwv1alpha1.TargetRef{
+						Group: avapigwv1alpha1.GroupVersion.Group,
+						Kind:  "Gateway",
+						Name:  "test-gateway",
+					},
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							Enabled: ptrBool(false), // Disabled - should not validate
+						},
+						APIKey: &avapigwv1alpha1.APIKeyAuthConfig{
+							Enabled: ptrBool(false), // Disabled - should not validate
+						},
+						Basic: &avapigwv1alpha1.BasicAuthConfig{
+							Enabled: ptrBool(false), // Disabled - should not validate
+						},
+						OAuth2: &avapigwv1alpha1.OAuth2Config{
+							Enabled: ptrBool(false), // Disabled - should not validate
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			r := newAuthPolicyReconciler(cl, scheme)
+
+			err := r.validateAuthenticationConfig(context.Background(), tt.policy)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// AuthPolicyReconciler.findPoliciesForHTTPRoute Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_findPoliciesForHTTPRoute(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name         string
+		objects      []client.Object
+		route        *avapigwv1alpha1.HTTPRoute
+		wantRequests int
+	}{
+		{
+			name: "finds policies targeting HTTPRoute",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "HTTPRoute",
+							Name:  "test-route",
+						},
+					},
+				},
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-2",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "HTTPRoute",
+							Name:  "test-route",
+						},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 2,
+		},
+		{
+			name: "returns empty for no matches",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "HTTPRoute",
+							Name:  "other-route",
+						},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			r := newAuthPolicyReconciler(cl, scheme)
+
+			requests := r.findPoliciesForHTTPRoute(context.Background(), tt.route)
+
+			assert.Len(t, requests, tt.wantRequests)
+		})
+	}
+}
+
+// ============================================================================
+// AuthPolicyReconciler.findPoliciesForGRPCRoute Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_findPoliciesForGRPCRoute(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name         string
+		objects      []client.Object
+		route        *avapigwv1alpha1.GRPCRoute
+		wantRequests int
+	}{
+		{
+			name: "finds policies targeting GRPCRoute",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "GRPCRoute",
+							Name:  "test-route",
+						},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.GRPCRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 1,
+		},
+		{
+			name: "returns empty for no matches",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "GRPCRoute",
+							Name:  "other-route",
+						},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.GRPCRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			r := newAuthPolicyReconciler(cl, scheme)
+
+			requests := r.findPoliciesForGRPCRoute(context.Background(), tt.route)
+
+			assert.Len(t, requests, tt.wantRequests)
+		})
+	}
+}
+
+// ============================================================================
+// AuthPolicyReconciler.findPoliciesForSecret Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_findPoliciesForSecret(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name         string
+		objects      []client.Object
+		secret       *corev1.Secret
+		wantRequests int
+	}{
+		{
+			name: "finds policies referencing JWT JWKS secret",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "Gateway",
+							Name:  "test-gateway",
+						},
+						Authentication: &avapigwv1alpha1.AuthenticationConfig{
+							JWT: &avapigwv1alpha1.JWTAuthConfig{
+								JWKS: &avapigwv1alpha1.SecretObjectReference{
+									Name: "jwks-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "jwks-secret",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 1,
+		},
+		{
+			name: "finds policies referencing API key secret",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "Gateway",
+							Name:  "test-gateway",
+						},
+						Authentication: &avapigwv1alpha1.AuthenticationConfig{
+							APIKey: &avapigwv1alpha1.APIKeyAuthConfig{
+								Validation: &avapigwv1alpha1.APIKeyValidationConfig{
+									SecretRef: &avapigwv1alpha1.SecretObjectReference{
+										Name: "api-key-secret",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "api-key-secret",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 1,
+		},
+		{
+			name: "finds policies referencing basic auth secret",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "Gateway",
+							Name:  "test-gateway",
+						},
+						Authentication: &avapigwv1alpha1.AuthenticationConfig{
+							Basic: &avapigwv1alpha1.BasicAuthConfig{
+								SecretRef: &avapigwv1alpha1.SecretObjectReference{
+									Name: "basic-auth-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "basic-auth-secret",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 1,
+		},
+		{
+			name: "finds policies referencing OAuth2 client secret",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "Gateway",
+							Name:  "test-gateway",
+						},
+						Authentication: &avapigwv1alpha1.AuthenticationConfig{
+							OAuth2: &avapigwv1alpha1.OAuth2Config{
+								ClientSecretRef: &avapigwv1alpha1.SecretObjectReference{
+									Name: "oauth2-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "oauth2-secret",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 1,
+		},
+		{
+			name: "returns empty for no matches",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "Gateway",
+							Name:  "test-gateway",
+						},
+						Authentication: &avapigwv1alpha1.AuthenticationConfig{
+							JWT: &avapigwv1alpha1.JWTAuthConfig{
+								JWKS: &avapigwv1alpha1.SecretObjectReference{
+									Name: "other-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "unrelated-secret",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name: "finds multiple policies referencing same secret",
+			objects: []client.Object{
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "Gateway",
+							Name:  "test-gateway",
+						},
+						Authentication: &avapigwv1alpha1.AuthenticationConfig{
+							JWT: &avapigwv1alpha1.JWTAuthConfig{
+								JWKS: &avapigwv1alpha1.SecretObjectReference{
+									Name: "shared-secret",
+								},
+							},
+						},
+					},
+				},
+				&avapigwv1alpha1.AuthPolicy{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-2",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.AuthPolicySpec{
+						TargetRef: avapigwv1alpha1.TargetRef{
+							Group: avapigwv1alpha1.GroupVersion.Group,
+							Kind:  "Gateway",
+							Name:  "test-gateway-2",
+						},
+						Authentication: &avapigwv1alpha1.AuthenticationConfig{
+							JWT: &avapigwv1alpha1.JWTAuthConfig{
+								JWKS: &avapigwv1alpha1.SecretObjectReference{
+									Name: "shared-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "shared-secret",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			r := newAuthPolicyReconciler(cl, scheme)
+
+			requests := r.findPoliciesForSecret(context.Background(), tt.secret)
+
+			assert.Len(t, requests, tt.wantRequests)
+		})
+	}
+}
+
+// ============================================================================
+// AuthPolicyReconciler.policyReferencesSecret with Namespace Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_policyReferencesSecret_WithNamespace(t *testing.T) {
+	tests := []struct {
+		name            string
+		policy          *avapigwv1alpha1.AuthPolicy
+		secretNamespace string
+		secretName      string
+		wantResult      bool
+	}{
+		{
+			name: "JWT JWKS secret with explicit namespace - match",
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-policy",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							JWKS: &avapigwv1alpha1.SecretObjectReference{
+								Name:      "jwks-secret",
+								Namespace: ptrString("other-ns"),
+							},
+						},
+					},
+				},
+			},
+			secretNamespace: "other-ns",
+			secretName:      "jwks-secret",
+			wantResult:      true,
+		},
+		{
+			name: "JWT JWKS secret with explicit namespace - no match",
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-policy",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						JWT: &avapigwv1alpha1.JWTAuthConfig{
+							JWKS: &avapigwv1alpha1.SecretObjectReference{
+								Name:      "jwks-secret",
+								Namespace: ptrString("other-ns"),
+							},
+						},
+					},
+				},
+			},
+			secretNamespace: "default",
+			secretName:      "jwks-secret",
+			wantResult:      false,
+		},
+		{
+			name: "API key secret with explicit namespace - match",
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-policy",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						APIKey: &avapigwv1alpha1.APIKeyAuthConfig{
+							Validation: &avapigwv1alpha1.APIKeyValidationConfig{
+								SecretRef: &avapigwv1alpha1.SecretObjectReference{
+									Name:      "api-key-secret",
+									Namespace: ptrString("other-ns"),
+								},
+							},
+						},
+					},
+				},
+			},
+			secretNamespace: "other-ns",
+			secretName:      "api-key-secret",
+			wantResult:      true,
+		},
+		{
+			name: "Basic auth secret with explicit namespace - match",
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-policy",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						Basic: &avapigwv1alpha1.BasicAuthConfig{
+							SecretRef: &avapigwv1alpha1.SecretObjectReference{
+								Name:      "basic-auth-secret",
+								Namespace: ptrString("other-ns"),
+							},
+						},
+					},
+				},
+			},
+			secretNamespace: "other-ns",
+			secretName:      "basic-auth-secret",
+			wantResult:      true,
+		},
+		{
+			name: "OAuth2 client secret with explicit namespace - match",
+			policy: &avapigwv1alpha1.AuthPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-policy",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.AuthPolicySpec{
+					Authentication: &avapigwv1alpha1.AuthenticationConfig{
+						OAuth2: &avapigwv1alpha1.OAuth2Config{
+							ClientSecretRef: &avapigwv1alpha1.SecretObjectReference{
+								Name:      "oauth2-secret",
+								Namespace: ptrString("other-ns"),
+							},
+						},
+					},
+				},
+			},
+			secretNamespace: "other-ns",
+			secretName:      "oauth2-secret",
+			wantResult:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &AuthPolicyReconciler{}
+
+			result := r.policyReferencesSecret(tt.policy, tt.secretNamespace, tt.secretName)
+
+			assert.Equal(t, tt.wantResult, result)
+		})
+	}
+}

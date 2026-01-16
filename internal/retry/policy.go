@@ -119,7 +119,10 @@ func (p *Policy) Execute(ctx context.Context, fn func() (interface{}, error)) (i
 
 // ExecuteWithStatusCode executes the function with retry logic, considering HTTP status codes.
 // Returns the result, HTTP status code, and any error.
-func (p *Policy) ExecuteWithStatusCode(ctx context.Context, fn func() (interface{}, int, error)) (result interface{}, statusCode int, err error) {
+func (p *Policy) ExecuteWithStatusCode(
+	ctx context.Context,
+	fn func() (interface{}, int, error),
+) (result interface{}, statusCode int, err error) {
 	p.Validate()
 
 	backoff := NewExponentialBackoff(p.InitialBackoff, p.MaxBackoff, p.BackoffFactor, p.Jitter)

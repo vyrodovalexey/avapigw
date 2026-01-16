@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/vyrodovalexey/avapigw/internal/circuitbreaker"
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 	"go.uber.org/zap"
 )
 
@@ -48,45 +49,37 @@ func CircuitBreakerMiddleware(registry *circuitbreaker.Registry) gin.HandlerFunc
 
 // CircuitBreakerMiddlewareWithConfig returns a circuit breaker middleware with custom configuration.
 func CircuitBreakerMiddlewareWithConfig(config CircuitBreakerConfig) gin.HandlerFunc {
-	if config.Registry == nil {
-		config.Registry = circuitbreaker.NewRegistry(nil, nil)
-	}
-	if config.NameFunc == nil {
-		config.NameFunc = func(c *gin.Context) string {
+	// Create core circuit breaker
+	cbCore := core.NewCircuitBreakerCore(core.CircuitBreakerCoreConfig{
+		BaseConfig: core.BaseConfig{
+			Logger:    config.Logger,
+			SkipPaths: config.SkipPaths,
+		},
+		Registry: config.Registry,
+	})
+
+	nameFunc := config.NameFunc
+	if nameFunc == nil {
+		nameFunc = func(c *gin.Context) string {
 			return c.Request.URL.Path
 		}
 	}
 
-	skipPaths := make(map[string]bool)
-	for _, path := range config.SkipPaths {
-		skipPaths[path] = true
-	}
-
 	return func(c *gin.Context) {
 		// Skip circuit breaker for certain paths
-		if skipPaths[c.Request.URL.Path] {
+		if cbCore.ShouldSkip(c.Request.URL.Path) {
 			c.Next()
 			return
 		}
 
 		// Get circuit breaker name
-		name := config.NameFunc(c)
-
-		// Get or create circuit breaker
-		cb := config.Registry.GetOrCreate(name)
+		name := nameFunc(c)
 
 		// Check if circuit allows the request
-		if !cb.Allow() {
-			if config.Logger != nil {
-				config.Logger.Debug("circuit breaker open",
-					zap.String("name", name),
-					zap.String("state", cb.State().String()),
-				)
-			}
-
+		if !cbCore.Allow(name) {
 			// Call fallback handler if provided
 			if config.FallbackHandler != nil {
-				config.FallbackHandler(c, circuitbreaker.ErrCircuitOpen)
+				config.FallbackHandler(c, core.ErrCircuitOpen)
 				return
 			}
 
@@ -109,10 +102,56 @@ func CircuitBreakerMiddlewareWithConfig(config CircuitBreakerConfig) gin.Handler
 
 		// Record result based on response status
 		statusCode := c.Writer.Status()
-		if statusCode >= 500 {
-			cb.RecordFailure()
+		if cbCore.IsHTTPFailure(statusCode) {
+			cbCore.RecordFailure(name)
 		} else {
-			cb.RecordSuccess()
+			cbCore.RecordSuccess(name)
+		}
+	}
+}
+
+// CircuitBreakerMiddlewareWithCore returns a circuit breaker middleware using the core package directly.
+func CircuitBreakerMiddlewareWithCore(
+	coreConfig core.CircuitBreakerCoreConfig,
+	nameFunc func(*gin.Context) string,
+) gin.HandlerFunc {
+	cbCore := core.NewCircuitBreakerCore(coreConfig)
+
+	if nameFunc == nil {
+		nameFunc = func(c *gin.Context) string {
+			return c.Request.URL.Path
+		}
+	}
+
+	return func(c *gin.Context) {
+		// Skip circuit breaker for certain paths
+		if cbCore.ShouldSkip(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+
+		// Get circuit breaker name
+		name := nameFunc(c)
+
+		// Check if circuit allows the request
+		if !cbCore.Allow(name) {
+			// Default error response
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "Service Unavailable",
+				"message": "Circuit breaker is open",
+			})
+			return
+		}
+
+		// Process request
+		c.Next()
+
+		// Record result based on response status
+		statusCode := c.Writer.Status()
+		if cbCore.IsHTTPFailure(statusCode) {
+			cbCore.RecordFailure(name)
+		} else {
+			cbCore.RecordSuccess(name)
 		}
 	}
 }

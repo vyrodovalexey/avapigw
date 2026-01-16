@@ -137,7 +137,12 @@ func (m *RouteMatcher) matchHostname(route *CompiledRoute, host string) bool {
 }
 
 // matchRule checks if the request matches the rule.
-func (m *RouteMatcher) matchRule(rule *CompiledRule, path, method string, headers, query map[string]string, captures map[string]string) bool {
+func (m *RouteMatcher) matchRule(
+	rule *CompiledRule,
+	path, method string,
+	headers, query map[string]string,
+	captures map[string]string,
+) bool {
 	// Check path
 	if rule.PathMatcher != nil {
 		matched, pathCaptures := rule.PathMatcher.Match(path)

@@ -162,48 +162,73 @@ func (s *Server) GetHealthServer() *health.Server {
 
 // Start starts the gRPC server.
 func (s *Server) Start(ctx context.Context) error {
-	s.mu.Lock()
-	if s.running {
+	if err := s.initializeGRPCServer(); err != nil {
+		return err
+	}
+
+	s.logServerStart()
+
+	if err := s.grpcServer.Serve(s.listener); err != nil {
+		s.mu.Lock()
+		s.running = false
 		s.mu.Unlock()
+		return fmt.Errorf("gRPC server error: %w", err)
+	}
+
+	return nil
+}
+
+// initializeGRPCServer initializes the gRPC server and listener.
+func (s *Server) initializeGRPCServer() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.running {
 		return fmt.Errorf("server already running")
 	}
 
-	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
+	if err := s.createListener(); err != nil {
+		return err
+	}
 
-	// Create listener
+	s.grpcServer = grpc.NewServer(s.buildServerOptions()...)
+	s.registerServices()
+	s.running = true
+
+	return nil
+}
+
+// createListener creates the TCP listener for the gRPC server.
+func (s *Server) createListener() error {
+	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
 	lc := &net.ListenConfig{}
 	listener, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
-		s.mu.Unlock()
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 	s.listener = listener
+	return nil
+}
 
-	// Build server options
-	opts := s.buildServerOptions()
-
-	// Create gRPC server
-	s.grpcServer = grpc.NewServer(opts...)
-
-	// Register health service if enabled
+// registerServices registers health check, reflection, and proxy handler services.
+func (s *Server) registerServices() {
 	if s.config.EnableHealthCheck {
 		s.healthServer = health.NewServer()
 		healthpb.RegisterHealthServer(s.grpcServer, s.healthServer)
 		s.healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	}
 
-	// Enable reflection if configured
 	if s.config.EnableReflection {
 		reflection.Register(s.grpcServer)
 		s.logger.Info("gRPC reflection enabled")
 	}
 
-	// Register the transparent proxy handler for unknown services
 	s.registerUnknownServiceHandler()
+}
 
-	s.running = true
-	s.mu.Unlock()
-
+// logServerStart logs the server startup information.
+func (s *Server) logServerStart() {
+	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
 	s.logger.Info("starting gRPC server",
 		zap.String("address", addr),
 		zap.Int("maxRecvMsgSize", s.config.MaxRecvMsgSize),
@@ -213,16 +238,6 @@ func (s *Server) Start(ctx context.Context) error {
 		zap.Bool("reflectionEnabled", s.config.EnableReflection),
 		zap.Bool("healthCheckEnabled", s.config.EnableHealthCheck),
 	)
-
-	// Start serving
-	if err := s.grpcServer.Serve(listener); err != nil {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		return fmt.Errorf("gRPC server error: %w", err)
-	}
-
-	return nil
 }
 
 // Stop stops the gRPC server gracefully.

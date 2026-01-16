@@ -140,63 +140,106 @@ func (s *MemoryStore) Increment(ctx context.Context, key string, delta int64) (i
 }
 
 // IncrementWithExpiry implements Store.
-func (s *MemoryStore) IncrementWithExpiry(ctx context.Context, key string, delta int64, expiration time.Duration) (int64, error) {
+func (s *MemoryStore) IncrementWithExpiry(
+	ctx context.Context,
+	key string,
+	delta int64,
+	expiration time.Duration,
+) (int64, error) {
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	default:
 	}
 
-	var exp time.Time
-	if expiration > 0 {
-		exp = time.Now().Add(expiration)
-	}
+	exp := s.calculateExpiration(expiration)
 
 	for retries := 0; retries < maxCASRetries; retries++ {
-		value, ok := s.data.Load(key)
-		if !ok {
-			// Key doesn't exist, create it with expiration
-			newEntry := &entry{
-				value:      delta,
-				expiration: exp,
-			}
-			if actual, loaded := s.data.LoadOrStore(key, newEntry); loaded {
-				// Another goroutine created it, retry
-				value = actual
-			} else {
-				return delta, nil
-			}
+		newValue, done, _ := s.tryIncrementWithExpiry(key, delta, exp)
+		if done {
+			return newValue, nil
 		}
-
-		e := value.(*entry)
-
-		// Check if expired - use CAS to avoid race condition
-		if !e.expiration.IsZero() && time.Now().After(e.expiration) {
-			// Reset with new expiration using CAS
-			newEntry := &entry{
-				value:      delta,
-				expiration: exp,
-			}
-			if s.data.CompareAndSwap(key, e, newEntry) {
-				return delta, nil
-			}
-			// CAS failed, retry the loop
-			continue
-		}
-
-		// Create new entry with incremented value (keep original expiration)
-		newEntry := &entry{
-			value:      e.value + delta,
-			expiration: e.expiration,
-		}
-
-		if s.data.CompareAndSwap(key, e, newEntry) {
-			return newEntry.value, nil
-		}
-		// CAS failed, retry
+		// Continue retrying - either CAS failed or entry was expired
 	}
 
 	return 0, fmt.Errorf("increment with expiry failed: max retries (%d) exceeded", maxCASRetries)
+}
+
+// calculateExpiration returns the expiration time based on the duration.
+func (s *MemoryStore) calculateExpiration(expiration time.Duration) time.Time {
+	if expiration > 0 {
+		return time.Now().Add(expiration)
+	}
+	return time.Time{}
+}
+
+// tryIncrementWithExpiry attempts a single increment operation with expiry.
+// Returns (newValue, done, shouldContinue) where:
+// - done=true means operation completed successfully
+// - shouldContinue=true means the entry was expired and loop should continue
+func (s *MemoryStore) tryIncrementWithExpiry(
+	key string,
+	delta int64,
+	exp time.Time,
+) (newValue int64, done bool, shouldContinue bool) {
+	value, ok := s.data.Load(key)
+	if !ok {
+		return s.createNewEntryWithExpiry(key, delta, exp)
+	}
+
+	e := value.(*entry)
+
+	// Check if expired - use CAS to avoid race condition
+	if !e.expiration.IsZero() && time.Now().After(e.expiration) {
+		return s.resetExpiredEntry(key, e, delta, exp)
+	}
+
+	// Create new entry with incremented value (keep original expiration)
+	newEntry := &entry{
+		value:      e.value + delta,
+		expiration: e.expiration,
+	}
+
+	if s.data.CompareAndSwap(key, e, newEntry) {
+		return newEntry.value, true, false
+	}
+	// CAS failed, retry
+	return 0, false, false
+}
+
+// createNewEntryWithExpiry creates a new entry when the key doesn't exist.
+func (s *MemoryStore) createNewEntryWithExpiry(
+	key string,
+	delta int64,
+	exp time.Time,
+) (newValue int64, done bool, shouldContinue bool) {
+	newEntry := &entry{
+		value:      delta,
+		expiration: exp,
+	}
+	if _, loaded := s.data.LoadOrStore(key, newEntry); loaded {
+		// Another goroutine created it, retry
+		return 0, false, false
+	}
+	return delta, true, false
+}
+
+// resetExpiredEntry resets an expired entry with new value and expiration.
+func (s *MemoryStore) resetExpiredEntry(
+	key string,
+	e *entry,
+	delta int64,
+	exp time.Time,
+) (newValue int64, done bool, shouldContinue bool) {
+	newEntry := &entry{
+		value:      delta,
+		expiration: exp,
+	}
+	if s.data.CompareAndSwap(key, e, newEntry) {
+		return delta, true, false
+	}
+	// CAS failed, retry the loop
+	return 0, false, true
 }
 
 // Delete implements Store.

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,51 +15,21 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/controller/base"
 )
 
+// Local aliases for constants to maintain backward compatibility.
+// These reference the centralized constants from constants.go.
 const (
-	gatewayFinalizer = "avapigw.vyrodovalexey.github.com/gateway-finalizer"
-
-	// reconcileTimeout is the maximum duration for a single reconciliation
-	reconcileTimeout = 30 * time.Second
-
-	// listPageSize is the page size for paginated list operations in watch handlers
-	listPageSize = 100
+	gatewayFinalizer = GatewayFinalizerName
+	reconcileTimeout = GatewayReconcileTimeout
+	listPageSize     = DefaultListPageSize
 )
-
-// Prometheus metrics for Gateway controller
-var (
-	gatewayReconcileDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "gateway_reconcile_duration_seconds",
-			Help:      "Duration of Gateway reconciliation in seconds",
-			Buckets:   prometheus.DefBuckets,
-		},
-		[]string{"result"},
-	)
-
-	gatewayReconcileTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "gateway_reconcile_total",
-			Help:      "Total number of Gateway reconciliations",
-		},
-		[]string{"result"},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(gatewayReconcileDuration, gatewayReconcileTotal)
-}
 
 // GatewayReconciler reconciles a Gateway object
 type GatewayReconciler struct {
@@ -68,6 +38,10 @@ type GatewayReconciler struct {
 	Recorder            record.EventRecorder
 	RequeueStrategy     *RequeueStrategy
 	requeueStrategyOnce sync.Once // Ensures thread-safe initialization of RequeueStrategy
+
+	// Base reconciler components
+	metrics          *base.ControllerMetrics
+	finalizerHandler *base.FinalizerHandler
 }
 
 // getRequeueStrategy returns the requeue strategy, initializing with defaults if needed.
@@ -82,7 +56,26 @@ func (r *GatewayReconciler) getRequeueStrategy() *RequeueStrategy {
 	return r.RequeueStrategy
 }
 
-// +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=get;list;watch;create;update;patch;delete
+// initBaseComponents initializes the base controller components.
+// This is called automatically during reconciliation but can also be called
+// explicitly for testing purposes.
+func (r *GatewayReconciler) initBaseComponents() {
+	if r.metrics == nil {
+		r.metrics = base.DefaultMetricsRegistry.RegisterController("gateway")
+	}
+	if r.finalizerHandler == nil {
+		r.finalizerHandler = base.NewFinalizerHandler(r.Client, gatewayFinalizer)
+	}
+}
+
+// ensureInitialized ensures base components are initialized.
+// This is a helper for methods that may be called directly in tests.
+func (r *GatewayReconciler) ensureInitialized() {
+	r.initBaseComponents()
+}
+
+//nolint:lll // kubebuilder RBAC marker cannot be shortened
+//+kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=gateways/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=gateways/finalizers,verbs=update
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=httproutes,verbs=get;list;watch
@@ -96,7 +89,8 @@ func (r *GatewayReconciler) getRequeueStrategy() *RequeueStrategy {
 
 // Reconcile handles Gateway reconciliation
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// Add timeout to prevent hanging
+	r.initBaseComponents()
+
 	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
 
@@ -104,17 +98,10 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	strategy := r.getRequeueStrategy()
 	resourceKey := req.String()
 
-	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
-		duration := time.Since(start).Seconds()
-		result := MetricResultSuccess
-		if reconcileErr != nil {
-			result = MetricResultError
-		}
-		gatewayReconcileDuration.WithLabelValues(result).Observe(duration)
-		gatewayReconcileTotal.WithLabelValues(result).Inc()
+		r.metrics.ObserveReconcile(time.Since(start).Seconds(), reconcileErr == nil)
 	}()
 
 	logger.Info("Reconciling Gateway",
@@ -124,21 +111,13 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	)
 
 	// Fetch the Gateway instance
-	gateway := &avapigwv1alpha1.Gateway{}
-	if err := r.Get(ctx, req.NamespacedName, gateway); err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("Gateway not found, ignoring")
-			// Clean up failure tracking for deleted resources
-			strategy.ResetFailureCount(resourceKey)
-			return ctrl.Result{}, nil
-		}
-		// Classify and handle the error
-		reconcileErr = ClassifyError("getGateway", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to get Gateway",
-			"errorType", reconcileErr.Type,
-			"retryable", reconcileErr.Retryable,
-		)
-		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	gateway, result, err := r.fetchGateway(ctx, req, strategy, resourceKey)
+	if err != nil {
+		reconcileErr = err
+		return result, reconcileErr
+	}
+	if gateway == nil {
+		return result, nil
 	}
 
 	// Handle deletion
@@ -150,56 +129,104 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return result, err
 	}
 
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(gateway, gatewayFinalizer) {
-		controllerutil.AddFinalizer(gateway, gatewayFinalizer)
-		if err := r.Update(ctx, gateway); err != nil {
-			reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
-			logger.Error(reconcileErr, "Failed to add finalizer",
-				"errorType", reconcileErr.Type,
-			)
-			r.Recorder.Event(gateway, corev1.EventTypeWarning, "FinalizerError", err.Error())
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	// Ensure finalizer and reconcile
+	return r.ensureFinalizerAndReconcileGateway(ctx, gateway, strategy, resourceKey, &reconcileErr)
+}
+
+// fetchGateway fetches the Gateway instance and handles not-found errors.
+func (r *GatewayReconciler) fetchGateway(
+	ctx context.Context,
+	req ctrl.Request,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (*avapigwv1alpha1.Gateway, ctrl.Result, *ReconcileError) {
+	logger := log.FromContext(ctx)
+	gateway := &avapigwv1alpha1.Gateway{}
+	if err := r.Get(ctx, req.NamespacedName, gateway); err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("Gateway not found, ignoring")
+			strategy.ResetFailureCount(resourceKey)
+			return nil, ctrl.Result{}, nil
 		}
-		return strategy.ForImmediateRequeue(), nil
+		reconcileErr := ClassifyError("getGateway", resourceKey, err)
+		logger.Error(reconcileErr, "Failed to get Gateway",
+			"errorType", reconcileErr.Type,
+			"retryable", reconcileErr.Retryable,
+		)
+		return nil, strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	}
+	return gateway, ctrl.Result{}, nil
+}
+
+// ensureFinalizerAndReconcileGateway ensures the finalizer is present and performs reconciliation.
+func (r *GatewayReconciler) ensureFinalizerAndReconcileGateway(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	strategy *RequeueStrategy,
+	resourceKey string,
+	reconcileErr **ReconcileError,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Add finalizer if not present
+	if !r.finalizerHandler.HasFinalizer(gateway) {
+		added, err := r.finalizerHandler.EnsureFinalizer(ctx, gateway)
+		if err != nil {
+			*reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
+			logger.Error(*reconcileErr, "Failed to add finalizer", "errorType", (*reconcileErr).Type)
+			r.Recorder.Event(gateway, corev1.EventTypeWarning, "FinalizerError", err.Error())
+			return strategy.ForTransientErrorWithBackoff(resourceKey), *reconcileErr
+		}
+		if added {
+			return strategy.ForImmediateRequeue(), nil
+		}
 	}
 
 	// Reconcile the Gateway
 	if err := r.reconcileGateway(ctx, gateway); err != nil {
-		reconcileErr = ClassifyError("reconcileGateway", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to reconcile Gateway",
-			"errorType", reconcileErr.Type,
-			"retryable", reconcileErr.Retryable,
-			"userActionRequired", reconcileErr.UserActionRequired,
+		*reconcileErr = ClassifyError("reconcileGateway", resourceKey, err)
+		logger.Error(*reconcileErr, "Failed to reconcile Gateway",
+			"errorType", (*reconcileErr).Type,
+			"retryable", (*reconcileErr).Retryable,
+			"userActionRequired", (*reconcileErr).UserActionRequired,
 		)
-		r.Recorder.Event(gateway, corev1.EventTypeWarning, string(reconcileErr.Type)+"Error", err.Error())
-
-		// Return appropriate result based on error type
-		switch reconcileErr.Type {
-		case ErrorTypeValidation:
-			return strategy.ForValidationError(), reconcileErr
-		case ErrorTypePermanent:
-			return strategy.ForPermanentError(), reconcileErr
-		case ErrorTypeDependency:
-			return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
-		default:
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
-		}
+		r.Recorder.Event(gateway, corev1.EventTypeWarning, string((*reconcileErr).Type)+"Error", err.Error())
+		return r.handleGatewayReconcileError(*reconcileErr, strategy, resourceKey)
 	}
 
-	// Success - reset failure count and requeue for periodic reconciliation
 	strategy.ResetFailureCount(resourceKey)
-	logger.Info("Gateway reconciled successfully", "name", req.Name, "namespace", req.Namespace)
+	logger.Info("Gateway reconciled successfully", "name", gateway.Name, "namespace", gateway.Namespace)
 	return strategy.ForSuccess(), nil
+}
+
+// handleGatewayReconcileError returns the appropriate result based on error type.
+func (r *GatewayReconciler) handleGatewayReconcileError(
+	reconcileErr *ReconcileError,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (ctrl.Result, error) {
+	switch reconcileErr.Type {
+	case ErrorTypeValidation:
+		return strategy.ForValidationError(), reconcileErr
+	case ErrorTypePermanent:
+		return strategy.ForPermanentError(), reconcileErr
+	case ErrorTypeDependency:
+		return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
+	default:
+		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	}
 }
 
 // handleDeletion handles Gateway deletion
 func (r *GatewayReconciler) handleDeletion(ctx context.Context, gateway *avapigwv1alpha1.Gateway) (ctrl.Result, error) {
+	// Ensure base components are initialized (needed when called directly in tests)
+	r.ensureInitialized()
+
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
 	resourceKey := client.ObjectKeyFromObject(gateway).String()
 
-	if controllerutil.ContainsFinalizer(gateway, gatewayFinalizer) {
+	if r.finalizerHandler.HasFinalizer(gateway) {
 		// Perform cleanup
 		logger.Info("Performing cleanup for Gateway deletion",
 			"name", gateway.Name,
@@ -210,8 +237,7 @@ func (r *GatewayReconciler) handleDeletion(ctx context.Context, gateway *avapigw
 		r.Recorder.Event(gateway, corev1.EventTypeNormal, "Deleting", "Gateway is being deleted")
 
 		// Remove finalizer
-		controllerutil.RemoveFinalizer(gateway, gatewayFinalizer)
-		if err := r.Update(ctx, gateway); err != nil {
+		if _, err := r.finalizerHandler.RemoveFinalizer(ctx, gateway); err != nil {
 			reconcileErr := ClassifyError("removeFinalizer", resourceKey, err)
 			logger.Error(reconcileErr, "Failed to remove finalizer",
 				"errorType", reconcileErr.Type,
@@ -228,67 +254,95 @@ func (r *GatewayReconciler) reconcileGateway(ctx context.Context, gateway *avapi
 	logger := log.FromContext(ctx)
 	resourceKey := client.ObjectKeyFromObject(gateway).String()
 
-	// Update status to reconciling
-	gateway.Status.Phase = avapigwv1alpha1.PhaseStatusReconciling
-	gateway.Status.ObservedGeneration = gateway.Generation
-	gateway.Status.LastReconciledTime = &metav1.Time{Time: time.Now()}
+	r.initGatewayStatus(gateway)
 
 	// Validate and resolve TLS config references
 	if err := r.validateTLSConfigs(ctx, gateway); err != nil {
-		// Determine if this is a validation or dependency error
-		var reconcileErr *ReconcileError
-		if errors.IsNotFound(err) {
-			reconcileErr = NewDependencyError("validateTLSConfigs", resourceKey, err)
-		} else {
-			reconcileErr = NewValidationError("validateTLSConfigs", resourceKey, err)
-		}
-
-		logger.Error(reconcileErr, "TLS configuration validation failed",
-			"errorType", reconcileErr.Type,
-		)
-
-		r.setCondition(gateway, avapigwv1alpha1.ConditionTypeAccepted, metav1.ConditionFalse,
-			string(avapigwv1alpha1.ReasonInvalidRef), err.Error())
-		gateway.Status.Phase = avapigwv1alpha1.PhaseStatusError
-
-		// Update status even on error
-		if statusErr := r.updateStatus(ctx, gateway); statusErr != nil {
-			logger.Error(statusErr, "Failed to update status after TLS validation error")
-		}
-		return reconcileErr
+		return r.handleTLSValidationError(ctx, gateway, resourceKey, err, logger)
 	}
 
 	// Update listener statuses
 	if err := r.updateListenerStatuses(ctx, gateway); err != nil {
 		reconcileErr := NewInternalError("updateListenerStatuses", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to update listener statuses",
-			"errorType", reconcileErr.Type,
-		)
+		logger.Error(reconcileErr, "Failed to update listener statuses", "errorType", reconcileErr.Type)
 		return reconcileErr
 	}
 
-	// Count attached routes
+	// Count and update attached routes
+	if err := r.updateAttachedRouteCounts(ctx, gateway, resourceKey, logger); err != nil {
+		return err
+	}
+
+	// Finalize gateway status
+	return r.finalizeGatewayStatus(ctx, gateway, resourceKey, logger)
+}
+
+// initGatewayStatus initializes the gateway status for reconciliation.
+func (r *GatewayReconciler) initGatewayStatus(gateway *avapigwv1alpha1.Gateway) {
+	gateway.Status.Phase = avapigwv1alpha1.PhaseStatusReconciling
+	gateway.Status.ObservedGeneration = gateway.Generation
+	gateway.Status.LastReconciledTime = &metav1.Time{Time: time.Now()}
+}
+
+// handleTLSValidationError handles TLS validation errors.
+func (r *GatewayReconciler) handleTLSValidationError(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	resourceKey string,
+	err error,
+	logger logr.Logger,
+) error {
+	var reconcileErr *ReconcileError
+	if errors.IsNotFound(err) {
+		reconcileErr = NewDependencyError("validateTLSConfigs", resourceKey, err)
+	} else {
+		reconcileErr = NewValidationError("validateTLSConfigs", resourceKey, err)
+	}
+
+	logger.Error(reconcileErr, "TLS configuration validation failed", "errorType", reconcileErr.Type)
+
+	r.setCondition(gateway, avapigwv1alpha1.ConditionTypeAccepted, metav1.ConditionFalse,
+		string(avapigwv1alpha1.ReasonInvalidRef), err.Error())
+	gateway.Status.Phase = avapigwv1alpha1.PhaseStatusError
+
+	if statusErr := r.updateStatus(ctx, gateway); statusErr != nil {
+		logger.Error(statusErr, "Failed to update status after TLS validation error")
+	}
+	return reconcileErr
+}
+
+// updateAttachedRouteCounts counts and updates attached routes for each listener.
+func (r *GatewayReconciler) updateAttachedRouteCounts(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	resourceKey string,
+	logger logr.Logger,
+) error {
 	attachedRoutes, err := r.countAttachedRoutes(ctx, gateway)
 	if err != nil {
 		reconcileErr := ClassifyError("countAttachedRoutes", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to count attached routes",
-			"errorType", reconcileErr.Type,
-		)
+		logger.Error(reconcileErr, "Failed to count attached routes", "errorType", reconcileErr.Type)
 		return reconcileErr
 	}
 
-	// Update listener attached route counts
 	for i := range gateway.Status.Listeners {
 		listenerName := gateway.Status.Listeners[i].Name
 		if count, ok := attachedRoutes[listenerName]; ok {
 			gateway.Status.Listeners[i].AttachedRoutes = count
 		}
 	}
+	return nil
+}
 
-	// Update addresses
+// finalizeGatewayStatus sets final conditions and updates the gateway status.
+func (r *GatewayReconciler) finalizeGatewayStatus(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	resourceKey string,
+	logger logr.Logger,
+) error {
 	r.updateAddresses(gateway)
 
-	// Set conditions
 	r.setCondition(gateway, avapigwv1alpha1.ConditionTypeAccepted, metav1.ConditionTrue,
 		string(avapigwv1alpha1.ReasonAccepted), "Gateway configuration accepted")
 	r.setCondition(gateway, avapigwv1alpha1.ConditionTypeProgrammed, metav1.ConditionTrue,
@@ -297,12 +351,9 @@ func (r *GatewayReconciler) reconcileGateway(ctx context.Context, gateway *avapi
 	gateway.Status.Phase = avapigwv1alpha1.PhaseStatusReady
 	gateway.Status.ListenersCount = safeIntToInt32(len(gateway.Spec.Listeners))
 
-	// Update status
 	if err := r.updateStatus(ctx, gateway); err != nil {
 		reconcileErr := ClassifyError("updateStatus", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to update Gateway status",
-			"errorType", reconcileErr.Type,
-		)
+		logger.Error(reconcileErr, "Failed to update Gateway status", "errorType", reconcileErr.Type)
 		return reconcileErr
 	}
 
@@ -311,7 +362,10 @@ func (r *GatewayReconciler) reconcileGateway(ctx context.Context, gateway *avapi
 }
 
 // validateTLSConfigs validates TLS configuration references
-func (r *GatewayReconciler) validateTLSConfigs(ctx context.Context, gateway *avapigwv1alpha1.Gateway) error {
+func (r *GatewayReconciler) validateTLSConfigs(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+) error {
 	for _, listener := range gateway.Spec.Listeners {
 		if listener.TLS == nil {
 			continue
@@ -333,8 +387,12 @@ func (r *GatewayReconciler) validateTLSConfigs(ctx context.Context, gateway *ava
 
 				// Try as Secret
 				secret := &corev1.Secret{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: certRef.Name}, secret); err != nil {
-					return fmt.Errorf("certificate reference %s/%s not found as TLSConfig or Secret", namespace, certRef.Name)
+				secretKey := client.ObjectKey{Namespace: namespace, Name: certRef.Name}
+				if err := r.Get(ctx, secretKey, secret); err != nil {
+					return fmt.Errorf(
+						"certificate reference %s/%s not found as TLSConfig or Secret",
+						namespace, certRef.Name,
+					)
 				}
 			}
 		}
@@ -346,7 +404,12 @@ func (r *GatewayReconciler) validateTLSConfigs(ctx context.Context, gateway *ava
 // updateListenerStatuses updates the status of each listener.
 // Note: Currently always returns nil, but error return is kept for API stability
 // and potential future validation logic.
-func (r *GatewayReconciler) updateListenerStatuses(ctx context.Context, gateway *avapigwv1alpha1.Gateway) error { //nolint:unparam // error return kept for API stability and future validation logic
+//
+//nolint:unparam // error return kept for API stability and future validation logic
+func (r *GatewayReconciler) updateListenerStatuses(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+) error {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Updating listener statuses", "listenerCount", len(gateway.Spec.Listeners))
 
@@ -399,7 +462,10 @@ func (r *GatewayReconciler) updateListenerStatuses(ctx context.Context, gateway 
 
 // countAttachedRoutes counts routes attached to each listener
 // Uses field indexers for efficient filtered lookups instead of listing all routes
-func (r *GatewayReconciler) countAttachedRoutes(ctx context.Context, gateway *avapigwv1alpha1.Gateway) (map[string]int32, error) {
+func (r *GatewayReconciler) countAttachedRoutes(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+) (map[string]int32, error) {
 	counts := make(map[string]int32)
 
 	// Initialize counts for all listeners
@@ -407,98 +473,121 @@ func (r *GatewayReconciler) countAttachedRoutes(ctx context.Context, gateway *av
 		counts[listener.Name] = 0
 	}
 
-	// Create the index key for this gateway
 	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
 
-	// Count HTTPRoutes using field index for efficient lookup
-	var httpRoutes avapigwv1alpha1.HTTPRouteList
-	if err := r.List(ctx, &httpRoutes, client.MatchingFields{HTTPRouteGatewayIndexField: gatewayKey}); err != nil {
-		return nil, fmt.Errorf("failed to list HTTPRoutes: %w", err)
+	// Count each route type
+	if err := r.countHTTPRoutes(ctx, gateway, gatewayKey, counts); err != nil {
+		return nil, err
 	}
-	for _, route := range httpRoutes.Items {
-		for _, parentRef := range route.Spec.ParentRefs {
-			if r.matchesGateway(gateway, &route, parentRef) {
-				listenerName := r.getListenerName(parentRef)
-				if listenerName != "" {
-					counts[listenerName]++
-				} else {
-					// Route matches all listeners
-					for name := range counts {
-						counts[name]++
-					}
-				}
-			}
-		}
+	if err := r.countGRPCRoutes(ctx, gateway, gatewayKey, counts); err != nil {
+		return nil, err
 	}
-
-	// Count GRPCRoutes using field index
-	var grpcRoutes avapigwv1alpha1.GRPCRouteList
-	if err := r.List(ctx, &grpcRoutes, client.MatchingFields{GRPCRouteGatewayIndexField: gatewayKey}); err != nil {
-		return nil, fmt.Errorf("failed to list GRPCRoutes: %w", err)
+	if err := r.countTCPRoutes(ctx, gateway, gatewayKey, counts); err != nil {
+		return nil, err
 	}
-	for _, route := range grpcRoutes.Items {
-		for _, parentRef := range route.Spec.ParentRefs {
-			if r.matchesGateway(gateway, &route, parentRef) {
-				listenerName := r.getListenerName(parentRef)
-				if listenerName != "" {
-					counts[listenerName]++
-				} else {
-					// Route matches all listeners
-					for name := range counts {
-						counts[name]++
-					}
-				}
-			}
-		}
-	}
-
-	// Count TCPRoutes using field index
-	var tcpRoutes avapigwv1alpha1.TCPRouteList
-	if err := r.List(ctx, &tcpRoutes, client.MatchingFields{TCPRouteGatewayIndexField: gatewayKey}); err != nil {
-		return nil, fmt.Errorf("failed to list TCPRoutes: %w", err)
-	}
-	for _, route := range tcpRoutes.Items {
-		for _, parentRef := range route.Spec.ParentRefs {
-			if r.matchesGateway(gateway, &route, parentRef) {
-				listenerName := r.getListenerName(parentRef)
-				if listenerName != "" {
-					counts[listenerName]++
-				} else {
-					// Route matches all listeners
-					for name := range counts {
-						counts[name]++
-					}
-				}
-			}
-		}
-	}
-
-	// Count TLSRoutes using field index
-	var tlsRoutes avapigwv1alpha1.TLSRouteList
-	if err := r.List(ctx, &tlsRoutes, client.MatchingFields{TLSRouteGatewayIndexField: gatewayKey}); err != nil {
-		return nil, fmt.Errorf("failed to list TLSRoutes: %w", err)
-	}
-	for _, route := range tlsRoutes.Items {
-		for _, parentRef := range route.Spec.ParentRefs {
-			if r.matchesGateway(gateway, &route, parentRef) {
-				listenerName := r.getListenerName(parentRef)
-				if listenerName != "" {
-					counts[listenerName]++
-				} else {
-					// Route matches all listeners
-					for name := range counts {
-						counts[name]++
-					}
-				}
-			}
-		}
+	if err := r.countTLSRoutes(ctx, gateway, gatewayKey, counts); err != nil {
+		return nil, err
 	}
 
 	return counts, nil
 }
 
+// countHTTPRoutes counts HTTPRoutes attached to the gateway.
+func (r *GatewayReconciler) countHTTPRoutes(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	gatewayKey string,
+	counts map[string]int32,
+) error {
+	var httpRoutes avapigwv1alpha1.HTTPRouteList
+	if err := r.List(ctx, &httpRoutes, client.MatchingFields{HTTPRouteGatewayIndexField: gatewayKey}); err != nil {
+		return fmt.Errorf("failed to list HTTPRoutes: %w", err)
+	}
+	for _, route := range httpRoutes.Items {
+		r.countRouteParentRefs(gateway, &route, route.Spec.ParentRefs, counts)
+	}
+	return nil
+}
+
+// countGRPCRoutes counts GRPCRoutes attached to the gateway.
+func (r *GatewayReconciler) countGRPCRoutes(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	gatewayKey string,
+	counts map[string]int32,
+) error {
+	var grpcRoutes avapigwv1alpha1.GRPCRouteList
+	if err := r.List(ctx, &grpcRoutes, client.MatchingFields{GRPCRouteGatewayIndexField: gatewayKey}); err != nil {
+		return fmt.Errorf("failed to list GRPCRoutes: %w", err)
+	}
+	for _, route := range grpcRoutes.Items {
+		r.countRouteParentRefs(gateway, &route, route.Spec.ParentRefs, counts)
+	}
+	return nil
+}
+
+// countTCPRoutes counts TCPRoutes attached to the gateway.
+func (r *GatewayReconciler) countTCPRoutes(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	gatewayKey string,
+	counts map[string]int32,
+) error {
+	var tcpRoutes avapigwv1alpha1.TCPRouteList
+	if err := r.List(ctx, &tcpRoutes, client.MatchingFields{TCPRouteGatewayIndexField: gatewayKey}); err != nil {
+		return fmt.Errorf("failed to list TCPRoutes: %w", err)
+	}
+	for _, route := range tcpRoutes.Items {
+		r.countRouteParentRefs(gateway, &route, route.Spec.ParentRefs, counts)
+	}
+	return nil
+}
+
+// countTLSRoutes counts TLSRoutes attached to the gateway.
+func (r *GatewayReconciler) countTLSRoutes(
+	ctx context.Context,
+	gateway *avapigwv1alpha1.Gateway,
+	gatewayKey string,
+	counts map[string]int32,
+) error {
+	var tlsRoutes avapigwv1alpha1.TLSRouteList
+	if err := r.List(ctx, &tlsRoutes, client.MatchingFields{TLSRouteGatewayIndexField: gatewayKey}); err != nil {
+		return fmt.Errorf("failed to list TLSRoutes: %w", err)
+	}
+	for _, route := range tlsRoutes.Items {
+		r.countRouteParentRefs(gateway, &route, route.Spec.ParentRefs, counts)
+	}
+	return nil
+}
+
+// countRouteParentRefs counts parent refs for a single route.
+func (r *GatewayReconciler) countRouteParentRefs(
+	gateway *avapigwv1alpha1.Gateway,
+	route client.Object,
+	parentRefs []avapigwv1alpha1.ParentRef,
+	counts map[string]int32,
+) {
+	for _, parentRef := range parentRefs {
+		if r.matchesGateway(gateway, route, parentRef) {
+			listenerName := r.getListenerName(parentRef)
+			if listenerName != "" {
+				counts[listenerName]++
+			} else {
+				// Route matches all listeners
+				for name := range counts {
+					counts[name]++
+				}
+			}
+		}
+	}
+}
+
 // matchesGateway checks if a route's parent ref matches this gateway
-func (r *GatewayReconciler) matchesGateway(gateway *avapigwv1alpha1.Gateway, route client.Object, parentRef avapigwv1alpha1.ParentRef) bool {
+func (r *GatewayReconciler) matchesGateway(
+	gateway *avapigwv1alpha1.Gateway,
+	route client.Object,
+	parentRef avapigwv1alpha1.ParentRef,
+) bool {
 	namespace := route.GetNamespace()
 	if parentRef.Namespace != nil {
 		namespace = *parentRef.Namespace
@@ -527,7 +616,12 @@ func (r *GatewayReconciler) updateAddresses(gateway *avapigwv1alpha1.Gateway) {
 }
 
 // setCondition sets a condition on the gateway status
-func (r *GatewayReconciler) setCondition(gateway *avapigwv1alpha1.Gateway, conditionType avapigwv1alpha1.ConditionType, status metav1.ConditionStatus, reason, message string) {
+func (r *GatewayReconciler) setCondition(
+	gateway *avapigwv1alpha1.Gateway,
+	conditionType avapigwv1alpha1.ConditionType,
+	status metav1.ConditionStatus,
+	reason, message string,
+) {
 	gateway.Status.SetCondition(conditionType, status, reason, message)
 }
 
@@ -563,62 +657,111 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// findGatewaysForTLSConfig finds gateways that reference a TLSConfig
-// Uses pagination to handle large numbers of gateways efficiently
+// findGatewaysForTLSConfig finds gateways that reference a TLSConfig.
+// Uses pagination to handle large numbers of gateways efficiently.
 func (r *GatewayReconciler) findGatewaysForTLSConfig(ctx context.Context, obj client.Object) []reconcile.Request {
 	tlsConfig, ok := obj.(*avapigwv1alpha1.TLSConfig)
 	if !ok {
 		return nil
 	}
-	var requests []reconcile.Request
+
 	logger := log.FromContext(ctx)
+	var requests []reconcile.Request
 
 	// Use pagination to list gateways
 	var continueToken string
 	for {
-		var gateways avapigwv1alpha1.GatewayList
-		listOpts := []client.ListOption{
-			client.Limit(listPageSize),
-		}
-		if continueToken != "" {
-			listOpts = append(listOpts, client.Continue(continueToken))
-		}
-
-		if err := r.List(ctx, &gateways, listOpts...); err != nil {
+		gateways, token, err := r.listGatewayPage(ctx, continueToken)
+		if err != nil {
 			logger.Error(err, "Failed to list gateways for TLSConfig watch")
 			return requests
 		}
 
-		for _, gateway := range gateways.Items {
-			for _, listener := range gateway.Spec.Listeners {
-				if listener.TLS != nil {
-					for _, certRef := range listener.TLS.CertificateRefs {
-						namespace := gateway.Namespace
-						if certRef.Namespace != nil {
-							namespace = *certRef.Namespace
-						}
-						if namespace == tlsConfig.Namespace && certRef.Name == tlsConfig.Name {
-							requests = append(requests, reconcile.Request{
-								NamespacedName: client.ObjectKey{
-									Namespace: gateway.Namespace,
-									Name:      gateway.Name,
-								},
-							})
-							break
-						}
-					}
-				}
+		// Check each gateway for TLSConfig references
+		for i := range gateways {
+			if r.gatewayReferencesTLSConfig(&gateways[i], tlsConfig.Namespace, tlsConfig.Name) {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: client.ObjectKey{
+						Namespace: gateways[i].Namespace,
+						Name:      gateways[i].Name,
+					},
+				})
 			}
 		}
 
 		// Check if there are more pages
-		continueToken = gateways.GetContinue()
+		continueToken = token
 		if continueToken == "" {
 			break
 		}
 	}
 
 	return requests
+}
+
+// listGatewayPage lists a single page of gateways with the given continue token.
+// Returns the list of gateways, the next continue token, and any error.
+func (r *GatewayReconciler) listGatewayPage(
+	ctx context.Context,
+	continueToken string,
+) ([]avapigwv1alpha1.Gateway, string, error) {
+	var gateways avapigwv1alpha1.GatewayList
+	listOpts := []client.ListOption{
+		client.Limit(listPageSize),
+	}
+	if continueToken != "" {
+		listOpts = append(listOpts, client.Continue(continueToken))
+	}
+
+	if err := r.List(ctx, &gateways, listOpts...); err != nil {
+		return nil, "", err
+	}
+
+	return gateways.Items, gateways.GetContinue(), nil
+}
+
+// gatewayReferencesTLSConfig checks if a gateway references the specified TLSConfig.
+func (r *GatewayReconciler) gatewayReferencesTLSConfig(
+	gateway *avapigwv1alpha1.Gateway,
+	tlsConfigNamespace, tlsConfigName string,
+) bool {
+	for _, listener := range gateway.Spec.Listeners {
+		if r.listenerReferencesTLSConfig(gateway.Namespace, &listener, tlsConfigNamespace, tlsConfigName) {
+			return true
+		}
+	}
+	return false
+}
+
+// listenerReferencesTLSConfig checks if a listener references the specified TLSConfig.
+func (r *GatewayReconciler) listenerReferencesTLSConfig(
+	gatewayNamespace string,
+	listener *avapigwv1alpha1.Listener,
+	tlsConfigNamespace, tlsConfigName string,
+) bool {
+	if listener.TLS == nil {
+		return false
+	}
+
+	for _, certRef := range listener.TLS.CertificateRefs {
+		if certRefMatchesTLSConfig(gatewayNamespace, &certRef, tlsConfigNamespace, tlsConfigName) {
+			return true
+		}
+	}
+	return false
+}
+
+// certRefMatchesTLSConfig checks if a certificate reference matches the specified TLSConfig.
+func certRefMatchesTLSConfig(
+	defaultNamespace string,
+	certRef *avapigwv1alpha1.SecretObjectReference,
+	tlsConfigNamespace, tlsConfigName string,
+) bool {
+	namespace := defaultNamespace
+	if certRef.Namespace != nil {
+		namespace = *certRef.Namespace
+	}
+	return namespace == tlsConfigNamespace && certRef.Name == tlsConfigName
 }
 
 // findGatewaysForRoute finds gateways that a route references

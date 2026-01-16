@@ -40,6 +40,51 @@ func Timeout(timeout time.Duration) gin.HandlerFunc {
 	})
 }
 
+// logTimeout logs a timeout event if logger is configured.
+func logTimeout(logger *zap.Logger, method, path string, timeout time.Duration) {
+	if logger != nil {
+		logger.Warn("request timeout",
+			zap.String("method", method),
+			zap.String("path", path),
+			zap.Duration("timeout", timeout),
+		)
+	}
+}
+
+// handleTimeoutResponse handles the response when a timeout occurs.
+func handleTimeoutResponse(c *gin.Context, config TimeoutConfig) {
+	logTimeout(config.Logger, c.Request.Method, c.Request.URL.Path, config.Timeout)
+
+	// Call custom timeout handler if provided
+	if config.TimeoutHandler != nil {
+		config.TimeoutHandler(c)
+		return
+	}
+
+	// Default timeout response
+	c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
+		"error":   "Gateway Timeout",
+		"message": config.TimeoutMessage,
+	})
+}
+
+// waitForCompletionOrTimeout waits for the handler to complete or timeout.
+// Returns true if the handler completed normally, false if timeout occurred.
+func waitForCompletionOrTimeout(ctx context.Context, done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		// Wait a brief moment for the handler goroutine to potentially finish
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
 // TimeoutWithConfig returns a timeout middleware with custom configuration.
 // Note: This middleware uses a mutex to prevent race conditions between the
 // handler goroutine and the timeout handler when accessing gin's context.
@@ -52,70 +97,35 @@ func TimeoutWithConfig(config TimeoutConfig) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		// Create a context with timeout
 		ctx, cancel := context.WithTimeout(c.Request.Context(), config.Timeout)
 		defer cancel()
 
-		// Replace request context
 		c.Request = c.Request.WithContext(ctx)
-
-		// Create a channel to signal completion
 		done := make(chan struct{})
 
 		// Use a mutex to protect gin context access and a flag to track timeout
 		var mu sync.Mutex
 		timedOut := false
 
-		// Run the handler in a goroutine
 		go func() {
 			defer close(done)
 			c.Next()
 		}()
 
-		// Wait for completion or timeout
-		select {
-		case <-done:
-			// Request completed normally
+		if waitForCompletionOrTimeout(ctx, done) {
 			return
-		case <-ctx.Done():
-			// Timeout occurred - set flag under lock
-			mu.Lock()
-			timedOut = true
-			mu.Unlock()
-
-			// Wait a brief moment for the handler goroutine to potentially finish
-			// This reduces (but doesn't eliminate) the chance of a race
-			select {
-			case <-done:
-				// Handler finished just after timeout, don't write response
-				return
-			default:
-			}
-
-			if config.Logger != nil {
-				config.Logger.Warn("request timeout",
-					zap.String("method", c.Request.Method),
-					zap.String("path", c.Request.URL.Path),
-					zap.Duration("timeout", config.Timeout),
-				)
-			}
-
-			// Call custom timeout handler if provided
-			if config.TimeoutHandler != nil {
-				config.TimeoutHandler(c)
-				return
-			}
-
-			// Default timeout response
-			c.AbortWithStatusJSON(http.StatusGatewayTimeout, gin.H{
-				"error":   "Gateway Timeout",
-				"message": config.TimeoutMessage,
-			})
-
-			// Suppress unused variable warning - timedOut can be used by handlers
-			// that check context cancellation
-			_ = timedOut
 		}
+
+		// Timeout occurred - set flag under lock
+		mu.Lock()
+		timedOut = true
+		mu.Unlock()
+
+		handleTimeoutResponse(c, config)
+
+		// Suppress unused variable warning - timedOut can be used by handlers
+		// that check context cancellation
+		_ = timedOut
 	}
 }
 

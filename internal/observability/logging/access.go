@@ -90,6 +90,27 @@ func AccessLogMiddleware(logger *Logger) gin.HandlerFunc {
 
 // AccessLogMiddlewareWithConfig returns an access log middleware with custom configuration.
 func AccessLogMiddlewareWithConfig(config *AccessLogConfig) gin.HandlerFunc {
+	config = normalizeAccessLogConfig(config)
+	skipPaths, sensitiveParams := buildAccessLogMaps(config)
+
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if shouldSkipLogging(path, skipPaths, config.SkipHealthCheck) {
+			c.Next()
+			return
+		}
+
+		start := time.Now()
+		c.Next()
+		latency := time.Since(start)
+
+		fields := buildGinAccessLogFields(c, path, latency, sensitiveParams, config)
+		logAccessByStatus(config.Logger, c.Writer.Status(), fields)
+	}
+}
+
+// normalizeAccessLogConfig ensures config has all required defaults.
+func normalizeAccessLogConfig(config *AccessLogConfig) *AccessLogConfig {
 	if config == nil {
 		config = DefaultAccessLogConfig()
 	}
@@ -105,105 +126,97 @@ func AccessLogMiddlewareWithConfig(config *AccessLogConfig) gin.HandlerFunc {
 	if config.SensitiveFields == nil {
 		config.SensitiveFields = DefaultAccessLogConfig().SensitiveFields
 	}
+	return config
+}
 
-	skipPaths := make(map[string]bool)
+// buildAccessLogMaps creates lookup maps for skip paths and sensitive params.
+func buildAccessLogMaps(config *AccessLogConfig) (skipPaths map[string]bool, sensitiveParams map[string]bool) {
+	skipPaths = make(map[string]bool)
 	for _, path := range config.SkipPaths {
 		skipPaths[path] = true
 	}
 
-	sensitiveHeaders := make(map[string]bool)
-	for _, h := range config.SensitiveHeaders {
-		sensitiveHeaders[strings.ToLower(h)] = true
-	}
-
-	sensitiveParams := make(map[string]bool)
+	sensitiveParams = make(map[string]bool)
 	for _, p := range config.SensitiveParams {
 		sensitiveParams[strings.ToLower(p)] = true
 	}
 
-	return func(c *gin.Context) {
-		// Skip logging for certain paths
-		path := c.Request.URL.Path
-		if skipPaths[path] {
-			c.Next()
-			return
-		}
+	return skipPaths, sensitiveParams
+}
 
-		// Skip health check endpoints if configured
-		if config.SkipHealthCheck && isHealthCheckPath(path) {
-			c.Next()
-			return
-		}
+// shouldSkipLogging determines if logging should be skipped for the given path.
+func shouldSkipLogging(path string, skipPaths map[string]bool, skipHealthCheck bool) bool {
+	if skipPaths[path] {
+		return true
+	}
+	if skipHealthCheck && isHealthCheckPath(path) {
+		return true
+	}
+	return false
+}
 
-		start := time.Now()
+// buildGinAccessLogFields constructs log fields from a Gin context.
+func buildGinAccessLogFields(
+	c *gin.Context,
+	path string,
+	latency time.Duration,
+	sensitiveParams map[string]bool,
+	config *AccessLogConfig,
+) []zap.Field {
+	fields := []zap.Field{
+		Method(c.Request.Method),
+		Path(path),
+		StatusCode(c.Writer.Status()),
+		Latency(latency),
+		LatencyMS(latency),
+		ClientIP(c.ClientIP()),
+		ResponseSize(c.Writer.Size()),
+	}
 
-		// Process request
-		c.Next()
+	fields = appendGinOptionalFields(fields, c, sensitiveParams)
 
-		// Calculate latency
-		latency := time.Since(start)
+	if config.CustomFields != nil {
+		fields = append(fields, config.CustomFields(c)...)
+	}
 
-		// Build log fields
-		fields := []zap.Field{
-			Method(c.Request.Method),
-			Path(path),
-			StatusCode(c.Writer.Status()),
-			Latency(latency),
-			LatencyMS(latency),
-			ClientIP(c.ClientIP()),
-			ResponseSize(c.Writer.Size()),
-		}
+	return fields
+}
 
-		// Add request ID if present
-		if requestID := c.GetHeader("X-Request-ID"); requestID != "" {
-			fields = append(fields, RequestID(requestID))
-		}
+// appendGinOptionalFields adds optional fields from Gin context.
+func appendGinOptionalFields(fields []zap.Field, c *gin.Context, sensitiveParams map[string]bool) []zap.Field {
+	if requestID := c.GetHeader("X-Request-ID"); requestID != "" {
+		fields = append(fields, RequestID(requestID))
+	}
+	if query := c.Request.URL.RawQuery; query != "" {
+		fields = append(fields, Query(redactQueryParams(query, sensitiveParams)))
+	}
+	if ua := c.Request.UserAgent(); ua != "" {
+		fields = append(fields, UserAgent(ua))
+	}
+	if ct := c.ContentType(); ct != "" {
+		fields = append(fields, ContentType(ct))
+	}
+	if c.Request.ContentLength > 0 {
+		fields = append(fields, ContentLength(c.Request.ContentLength))
+	}
+	if referer := c.Request.Referer(); referer != "" {
+		fields = append(fields, String("referer", referer))
+	}
+	if len(c.Errors) > 0 {
+		fields = append(fields, String("errors", c.Errors.String()))
+	}
+	return fields
+}
 
-		// Add query string (with sensitive params redacted)
-		if query := c.Request.URL.RawQuery; query != "" {
-			fields = append(fields, Query(redactQueryParams(query, sensitiveParams)))
-		}
-
-		// Add user agent
-		if ua := c.Request.UserAgent(); ua != "" {
-			fields = append(fields, UserAgent(ua))
-		}
-
-		// Add content type
-		if ct := c.ContentType(); ct != "" {
-			fields = append(fields, ContentType(ct))
-		}
-
-		// Add content length
-		if c.Request.ContentLength > 0 {
-			fields = append(fields, ContentLength(c.Request.ContentLength))
-		}
-
-		// Add referer
-		if referer := c.Request.Referer(); referer != "" {
-			fields = append(fields, String("referer", referer))
-		}
-
-		// Add errors if present
-		if len(c.Errors) > 0 {
-			fields = append(fields, String("errors", c.Errors.String()))
-		}
-
-		// Add custom fields if provided
-		if config.CustomFields != nil {
-			fields = append(fields, config.CustomFields(c)...)
-		}
-
-		// Log based on status code
-		statusCode := c.Writer.Status()
-		switch {
-		case statusCode >= 500:
-			config.Logger.Error("request completed", fields...)
-		case statusCode >= 400:
-			config.Logger.Warn("request completed", fields...)
-		default:
-			config.Logger.Info("request completed", fields...)
-		}
+// logAccessByStatus logs the request with appropriate level based on status code.
+func logAccessByStatus(logger *Logger, statusCode int, fields []zap.Field) {
+	switch {
+	case statusCode >= 500:
+		logger.Error("request completed", fields...)
+	case statusCode >= 400:
+		logger.Warn("request completed", fields...)
+	default:
+		logger.Info("request completed", fields...)
 	}
 }
 
@@ -216,99 +229,93 @@ func HTTPAccessLogMiddleware(logger *Logger) func(http.Handler) http.Handler {
 
 // HTTPAccessLogMiddlewareWithConfig returns an HTTP access log middleware with custom configuration.
 func HTTPAccessLogMiddlewareWithConfig(config *AccessLogConfig) func(http.Handler) http.Handler {
+	config = normalizeHTTPAccessLogConfig(config)
+	skipPaths, sensitiveParams := buildHTTPAccessLogMaps(config)
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+			if shouldSkipLogging(path, skipPaths, config.SkipHealthCheck) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			start := time.Now()
+			wrapped := &accessResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+			next.ServeHTTP(wrapped, r)
+			latency := time.Since(start)
+
+			fields := buildHTTPAccessLogFields(r, wrapped, path, latency, sensitiveParams)
+			logAccessByStatus(config.Logger, wrapped.statusCode, fields)
+		})
+	}
+}
+
+// normalizeHTTPAccessLogConfig ensures HTTP config has all required defaults.
+func normalizeHTTPAccessLogConfig(config *AccessLogConfig) *AccessLogConfig {
 	if config == nil {
 		config = DefaultAccessLogConfig()
 	}
 	if config.Logger == nil {
 		config.Logger = GetGlobalLogger()
 	}
+	return config
+}
 
-	skipPaths := make(map[string]bool)
+// buildHTTPAccessLogMaps creates lookup maps for HTTP middleware.
+func buildHTTPAccessLogMaps(config *AccessLogConfig) (skipPaths map[string]bool, sensitiveParams map[string]bool) {
+	skipPaths = make(map[string]bool)
 	for _, path := range config.SkipPaths {
 		skipPaths[path] = true
 	}
 
-	sensitiveParams := make(map[string]bool)
+	sensitiveParams = make(map[string]bool)
 	for _, p := range config.SensitiveParams {
 		sensitiveParams[strings.ToLower(p)] = true
 	}
 
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip logging for certain paths
-			path := r.URL.Path
-			if skipPaths[path] {
-				next.ServeHTTP(w, r)
-				return
-			}
+	return skipPaths, sensitiveParams
+}
 
-			// Skip health check endpoints if configured
-			if config.SkipHealthCheck && isHealthCheckPath(path) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			start := time.Now()
-
-			// Wrap response writer to capture status code and size
-			wrapped := &accessResponseWriter{
-				ResponseWriter: w,
-				statusCode:     http.StatusOK,
-			}
-
-			// Process request
-			next.ServeHTTP(wrapped, r)
-
-			// Calculate latency
-			latency := time.Since(start)
-
-			// Build log fields
-			fields := []zap.Field{
-				Method(r.Method),
-				Path(path),
-				StatusCode(wrapped.statusCode),
-				Latency(latency),
-				LatencyMS(latency),
-				ClientIP(getClientIPFromRequest(r)),
-				ResponseSize(wrapped.size),
-			}
-
-			// Add request ID if present
-			if requestID := r.Header.Get("X-Request-ID"); requestID != "" {
-				fields = append(fields, RequestID(requestID))
-			}
-
-			// Add query string (with sensitive params redacted)
-			if query := r.URL.RawQuery; query != "" {
-				fields = append(fields, Query(redactQueryParams(query, sensitiveParams)))
-			}
-
-			// Add user agent
-			if ua := r.UserAgent(); ua != "" {
-				fields = append(fields, UserAgent(ua))
-			}
-
-			// Add content type
-			if ct := r.Header.Get("Content-Type"); ct != "" {
-				fields = append(fields, ContentType(ct))
-			}
-
-			// Add content length
-			if r.ContentLength > 0 {
-				fields = append(fields, ContentLength(r.ContentLength))
-			}
-
-			// Log based on status code
-			switch {
-			case wrapped.statusCode >= 500:
-				config.Logger.Error("request completed", fields...)
-			case wrapped.statusCode >= 400:
-				config.Logger.Warn("request completed", fields...)
-			default:
-				config.Logger.Info("request completed", fields...)
-			}
-		})
+// buildHTTPAccessLogFields constructs log fields from an HTTP request.
+func buildHTTPAccessLogFields(
+	r *http.Request,
+	wrapped *accessResponseWriter,
+	path string,
+	latency time.Duration,
+	sensitiveParams map[string]bool,
+) []zap.Field {
+	fields := []zap.Field{
+		Method(r.Method),
+		Path(path),
+		StatusCode(wrapped.statusCode),
+		Latency(latency),
+		LatencyMS(latency),
+		ClientIP(getClientIPFromRequest(r)),
+		ResponseSize(wrapped.size),
 	}
+
+	return appendHTTPOptionalFields(fields, r, sensitiveParams)
+}
+
+// appendHTTPOptionalFields adds optional fields from HTTP request.
+func appendHTTPOptionalFields(fields []zap.Field, r *http.Request, sensitiveParams map[string]bool) []zap.Field {
+	if requestID := r.Header.Get("X-Request-ID"); requestID != "" {
+		fields = append(fields, RequestID(requestID))
+	}
+	if query := r.URL.RawQuery; query != "" {
+		fields = append(fields, Query(redactQueryParams(query, sensitiveParams)))
+	}
+	if ua := r.UserAgent(); ua != "" {
+		fields = append(fields, UserAgent(ua))
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		fields = append(fields, ContentType(ct))
+	}
+	if r.ContentLength > 0 {
+		fields = append(fields, ContentLength(r.ContentLength))
+	}
+	return fields
 }
 
 // accessResponseWriter wraps http.ResponseWriter to capture status code and size.

@@ -330,7 +330,10 @@ func (m *CertificateManager) TLSConfig() *tls.Config {
 }
 
 // TLSConfigWithClientAuth returns a tls.Config with client certificate authentication.
-func (m *CertificateManager) TLSConfigWithClientAuth(clientCAs *x509.CertPool, authType tls.ClientAuthType) *tls.Config {
+func (m *CertificateManager) TLSConfigWithClientAuth(
+	clientCAs *x509.CertPool,
+	authType tls.ClientAuthType,
+) *tls.Config {
 	config := m.TLSConfig()
 	config.ClientCAs = clientCAs
 	config.ClientAuth = authType

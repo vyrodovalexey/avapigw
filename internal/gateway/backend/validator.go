@@ -154,56 +154,77 @@ func NewURLValidator(config *URLValidatorConfig, logger *zap.Logger) (*URLValida
 		allowedSchemes: make(map[string]bool),
 	}
 
-	// Parse allowed schemes
-	if len(config.AllowedSchemes) == 0 {
+	v.initAllowedSchemes(config.AllowedSchemes)
+
+	if err := v.initPrivateNetworks(config); err != nil {
+		return nil, err
+	}
+
+	if err := v.initCIDRNetworks(config); err != nil {
+		return nil, err
+	}
+
+	v.initHostMaps(config)
+
+	return v, nil
+}
+
+// initAllowedSchemes initializes the allowed URL schemes map.
+func (v *URLValidator) initAllowedSchemes(schemes []string) {
+	if len(schemes) == 0 {
 		v.allowedSchemes["http"] = true
 		v.allowedSchemes["https"] = true
-	} else {
-		for _, scheme := range config.AllowedSchemes {
-			v.allowedSchemes[strings.ToLower(scheme)] = true
-		}
+		return
+	}
+	for _, scheme := range schemes {
+		v.allowedSchemes[strings.ToLower(scheme)] = true
+	}
+}
+
+// initPrivateNetworks parses and initializes private CIDR ranges if blocking is enabled.
+func (v *URLValidator) initPrivateNetworks(config *URLValidatorConfig) error {
+	if !config.BlockPrivateIPs && !config.BlockLoopback && !config.BlockLinkLocal {
+		return nil
 	}
 
-	// Parse private CIDR ranges
-	if config.BlockPrivateIPs || config.BlockLoopback || config.BlockLinkLocal {
-		for _, cidr := range defaultPrivateCIDRs {
-			_, ipNet, err := net.ParseCIDR(cidr)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse default private CIDR %s: %w", cidr, err)
-			}
-			v.privateNets = append(v.privateNets, ipNet)
+	for _, cidr := range defaultPrivateCIDRs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("failed to parse default private CIDR %s: %w", cidr, err)
 		}
+		v.privateNets = append(v.privateNets, ipNet)
 	}
+	return nil
+}
 
-	// Parse allowed CIDRs
+// initCIDRNetworks parses and initializes allowed and blocked CIDR ranges.
+func (v *URLValidator) initCIDRNetworks(config *URLValidatorConfig) error {
 	for _, cidr := range config.AllowedCIDRs {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse allowed CIDR %s: %w", cidr, err)
+			return fmt.Errorf("failed to parse allowed CIDR %s: %w", cidr, err)
 		}
 		v.allowedNets = append(v.allowedNets, ipNet)
 	}
 
-	// Parse blocked CIDRs
 	for _, cidr := range config.BlockedCIDRs {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse blocked CIDR %s: %w", cidr, err)
+			return fmt.Errorf("failed to parse blocked CIDR %s: %w", cidr, err)
 		}
 		v.blockedNets = append(v.blockedNets, ipNet)
 	}
+	return nil
+}
 
-	// Build allowed hosts map
+// initHostMaps initializes the allowed and blocked hosts maps.
+func (v *URLValidator) initHostMaps(config *URLValidatorConfig) {
 	for _, host := range config.AllowedHosts {
 		v.allowedHosts[strings.ToLower(host)] = true
 	}
-
-	// Build blocked hosts map
 	for _, host := range config.BlockedHosts {
 		v.blockedHosts[strings.ToLower(host)] = true
 	}
-
-	return v, nil
 }
 
 // ValidateURL validates a URL string and returns an error if it's not allowed.
@@ -218,7 +239,23 @@ func (v *URLValidator) ValidateURLWithContext(ctx context.Context, rawURL string
 		urlValidationDuration.Observe(time.Since(start).Seconds())
 	}()
 
-	// Parse the URL
+	parsedURL, err := v.parseAndValidateURL(rawURL)
+	if err != nil {
+		return err
+	}
+
+	host := parsedURL.Hostname()
+	if err := v.validateHost(ctx, rawURL, host); err != nil {
+		return err
+	}
+
+	v.recordAllowed()
+	v.logger.Debug("URL validation passed", zap.String("url", rawURL))
+	return nil
+}
+
+// parseAndValidateURL parses the URL and validates its scheme.
+func (v *URLValidator) parseAndValidateURL(rawURL string) (*url.URL, error) {
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
 		v.recordBlocked("invalid_url")
@@ -226,30 +263,29 @@ func (v *URLValidator) ValidateURLWithContext(ctx context.Context, rawURL string
 			zap.String("url", rawURL),
 			zap.Error(err),
 		)
-		return fmt.Errorf("%w: %v", ErrInvalidURL, err)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidURL, err)
 	}
 
-	// Validate scheme
 	if err := v.validateScheme(parsedURL.Scheme); err != nil {
 		v.recordBlocked("invalid_scheme")
 		v.logger.Warn("URL validation failed: invalid scheme",
 			zap.String("url", rawURL),
 			zap.String("scheme", parsedURL.Scheme),
 		)
-		return err
+		return nil, err
 	}
 
-	// Get host without port
-	host := parsedURL.Hostname()
+	return parsedURL, nil
+}
+
+// validateHost validates the host portion of the URL.
+func (v *URLValidator) validateHost(ctx context.Context, rawURL, host string) error {
 	if host == "" {
 		v.recordBlocked("empty_host")
-		v.logger.Warn("URL validation failed: empty host",
-			zap.String("url", rawURL),
-		)
+		v.logger.Warn("URL validation failed: empty host", zap.String("url", rawURL))
 		return ErrEmptyHost
 	}
 
-	// Check blocked hosts first
 	if v.isBlockedHost(host) {
 		v.recordBlocked("blocked_host")
 		v.logger.Warn("URL validation failed: blocked host",
@@ -259,9 +295,7 @@ func (v *URLValidator) ValidateURLWithContext(ctx context.Context, rawURL string
 		return fmt.Errorf("host %s is blocked", host)
 	}
 
-	// Check if host is explicitly allowed (bypasses IP checks)
 	if v.isAllowedHost(host) {
-		v.recordAllowed()
 		v.logger.Debug("URL validation passed: allowed host",
 			zap.String("url", rawURL),
 			zap.String("host", host),
@@ -269,40 +303,48 @@ func (v *URLValidator) ValidateURLWithContext(ctx context.Context, rawURL string
 		return nil
 	}
 
-	// Try to parse as IP address
+	return v.validateHostOrIP(ctx, rawURL, host)
+}
+
+// validateHostOrIP validates the host as either an IP address or hostname.
+func (v *URLValidator) validateHostOrIP(ctx context.Context, rawURL, host string) error {
 	ip := net.ParseIP(host)
 	if ip != nil {
-		// Host is an IP address, validate it directly
-		if err := v.validateIP(ip); err != nil {
-			v.recordBlocked("blocked_ip")
-			v.logger.Warn("URL validation failed: blocked IP",
-				zap.String("url", rawURL),
-				zap.String("ip", ip.String()),
-				zap.Error(err),
-			)
-			return err
-		}
-		v.recordAllowed()
+		return v.validateIPHost(rawURL, ip)
+	}
+
+	return v.validateHostnameWithDNS(ctx, rawURL, host)
+}
+
+// validateIPHost validates a host that is an IP address.
+func (v *URLValidator) validateIPHost(rawURL string, ip net.IP) error {
+	if err := v.validateIP(ip); err != nil {
+		v.recordBlocked("blocked_ip")
+		v.logger.Warn("URL validation failed: blocked IP",
+			zap.String("url", rawURL),
+			zap.String("ip", ip.String()),
+			zap.Error(err),
+		)
+		return err
+	}
+	return nil
+}
+
+// validateHostnameWithDNS validates a hostname with optional DNS rebinding protection.
+func (v *URLValidator) validateHostnameWithDNS(ctx context.Context, rawURL, host string) error {
+	if !v.config.EnableDNSRebindingProtection {
 		return nil
 	}
 
-	// Host is a hostname, optionally resolve and validate
-	if v.config.EnableDNSRebindingProtection {
-		if err := v.validateHostname(ctx, host); err != nil {
-			v.recordBlocked("dns_rebinding_protection")
-			v.logger.Warn("URL validation failed: DNS rebinding protection",
-				zap.String("url", rawURL),
-				zap.String("host", host),
-				zap.Error(err),
-			)
-			return err
-		}
+	if err := v.validateHostname(ctx, host); err != nil {
+		v.recordBlocked("dns_rebinding_protection")
+		v.logger.Warn("URL validation failed: DNS rebinding protection",
+			zap.String("url", rawURL),
+			zap.String("host", host),
+			zap.Error(err),
+		)
+		return err
 	}
-
-	v.recordAllowed()
-	v.logger.Debug("URL validation passed",
-		zap.String("url", rawURL),
-	)
 	return nil
 }
 
@@ -387,7 +429,8 @@ func (v *URLValidator) validateHostname(ctx context.Context, hostname string) er
 	// Validate all resolved IPs
 	for _, ipAddr := range ips {
 		if err := v.validateIP(ipAddr.IP); err != nil {
-			return fmt.Errorf("%w: %s resolves to blocked IP %s: %v", ErrResolvedIPBlocked, hostname, ipAddr.IP.String(), err)
+			return fmt.Errorf(
+				"%w: %s resolves to blocked IP %s: %v", ErrResolvedIPBlocked, hostname, ipAddr.IP.String(), err)
 		}
 	}
 

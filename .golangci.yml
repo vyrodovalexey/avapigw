@@ -19,6 +19,7 @@ linters:
     - goconst
     - asciicheck
     - goheader
+    - gocognit
     - lll
     - unparam
     - dogsled
@@ -59,106 +60,6 @@ linters:
           - lll
         source: "`json:.*yaml:.*`"
       # Exclude lll for API types (kubebuilder annotations)
-      - linters:
-          - lll
-        path: "api/v1alpha1/.*_types\\.go$"
-      # Exclude lll for config files (flag definitions and validation)
-      - linters:
-          - lll
-        path: "internal/config/.*\\.go$"
-      # Exclude lll for controller files (kubebuilder RBAC markers)
-      - linters:
-          - lll
-        path: "internal/controller/.*\\.go$"
-      # Exclude lll for health checks
-      - linters:
-          - lll
-        path: "internal/health/.*\\.go$"
-      # Exclude lll for gRPC interceptors (long function signatures)
-      - linters:
-          - lll
-        path: "internal/gateway/server/grpc/interceptor/.*\\.go$"
-      # Exclude lll for gateway server files (long function signatures)
-      - linters:
-          - lll
-        path: "internal/gateway/server/.*\\.go$"
-      # Exclude lll for gateway routing files
-      - linters:
-          - lll
-        path: "internal/gateway/routing/.*\\.go$"
-      # Exclude lll for auth files
-      - linters:
-          - lll
-        path: "internal/auth/.*\\.go$"
-      # Exclude lll for observability files
-      - linters:
-          - lll
-        path: "internal/observability/.*\\.go$"
-      # Exclude lll for ratelimit files
-      - linters:
-          - lll
-        path: "internal/ratelimit/.*\\.go$"
-      # Exclude lll for retry files
-      - linters:
-          - lll
-        path: "internal/retry/.*\\.go$"
-      # Exclude lll for secrets files
-      - linters:
-          - lll
-        path: "internal/secrets/.*\\.go$"
-      # Exclude lll for vault files
-      - linters:
-          - lll
-        path: "internal/vault/.*\\.go$"
-      # Exclude lll for webhook files
-      - linters:
-          - lll
-        path: "internal/webhook/.*\\.go$"
-      # Exclude lll for cmd files (flag definitions)
-      - linters:
-          - lll
-        path: "cmd/.*\\.go$"
-      # Exclude lll for authz files
-      - linters:
-          - lll
-        path: "internal/authz/.*\\.go$"
-      # Exclude lll for gateway backend files
-      - linters:
-          - lll
-        path: "internal/gateway/backend/.*\\.go$"
-      # Exclude nestif for complex validation functions
-      - linters:
-          - nestif
-        path: "internal/webhook/.*_webhook\\.go$"
-      - linters:
-          - nestif
-        path: "internal/config/.*\\.go$"
-      - linters:
-          - nestif
-        path: "internal/controller/.*_controller\\.go$"
-      - linters:
-          - nestif
-        path: "internal/gateway/.*\\.go$"
-      # Exclude gocyclo for config validation and loader functions
-      - linters:
-          - gocyclo
-        path: "internal/config/.*\\.go$"
-      - linters:
-          - gocyclo
-        path: "internal/webhook/.*_webhook\\.go$"
-      - linters:
-          - gocyclo
-        path: "cmd/gateway/main\\.go$"
-      - linters:
-          - gocyclo
-        path: "internal/gateway/server/http/middleware/.*\\.go$"
-      # Exclude funlen for main functions and config loaders
-      - linters:
-          - funlen
-        path: "cmd/.*main\\.go$"
-      - linters:
-          - funlen
-        path: "internal/config/.*\\.go$"
   settings:
     errcheck:
       exclude-functions:
@@ -183,7 +84,7 @@ linters:
         rangeValCopy:
           sizeThreshold: 512
     funlen:
-      lines: 500
+      lines: 300
       statements: 90
     lll:
       line-length: 120
@@ -191,4 +92,6 @@ linters:
     nestif:
       min-complexity: 6
     gocyclo:
-      min-complexity: 35
+      min-complexity: 15
+    gocognit:
+      min-complexity: 20

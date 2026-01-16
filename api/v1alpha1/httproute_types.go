@@ -228,7 +228,8 @@ const (
 type HTTPRouteFilter struct {
 	// Type identifies the type of filter to apply.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=RequestHeaderModifier;ResponseHeaderModifier;RequestMirror;RequestRedirect;URLRewrite;DirectResponse;ExtensionRef
+	//nolint:lll // kubebuilder validation enum cannot be shortened
+	//+kubebuilder:validation:Enum=RequestHeaderModifier;ResponseHeaderModifier;RequestMirror;RequestRedirect;URLRewrite;DirectResponse;ExtensionRef
 	Type HTTPRouteFilterType `json:"type"`
 
 	// RequestHeaderModifier defines a schema for a filter that modifies request headers.
@@ -264,6 +265,8 @@ type HTTPRouteFilter struct {
 
 // HTTPRouteFilterType identifies a type of HTTPRoute filter.
 // +kubebuilder:validation:Enum=RequestHeaderModifier;ResponseHeaderModifier;RequestMirror;RequestRedirect;URLRewrite;DirectResponse;ExtensionRef
+//
+//nolint:lll // kubebuilder validation enum cannot be shortened
 type HTTPRouteFilterType string
 
 const (
@@ -501,6 +504,8 @@ type HTTPRetryPolicy struct {
 
 // HTTPRetryOn defines conditions for retry.
 // +kubebuilder:validation:Enum=server-error;gateway-error;reset;connect-failure;retriable-client-error;refused-stream;retriable-status-codes;retriable-headers
+//
+//nolint:lll // kubebuilder validation enum cannot be shortened
 type HTTPRetryOn string
 
 const (

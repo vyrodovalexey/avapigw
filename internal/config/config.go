@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+// Configuration constants for default values.
+const (
+	// DefaultVaultRole is the default Vault role name.
+	DefaultVaultRole = "avapigw"
+	// DefaultVaultAuthMethod is the default Vault authentication method.
+	DefaultVaultAuthMethod = "kubernetes"
+	// DefaultServiceName is the default service name for observability.
+	DefaultServiceName = "avapigw"
+)
+
 // Config holds all configuration settings for the API Gateway.
 type Config struct {
 	// Server settings
@@ -74,8 +84,9 @@ type Config struct {
 	MetricsPath    string `json:"metricsPath" yaml:"metricsPath"`
 
 	// Rate limiting
-	RateLimitEnabled   bool          `json:"rateLimitEnabled" yaml:"rateLimitEnabled"`
-	RateLimitAlgorithm string        `json:"rateLimitAlgorithm" yaml:"rateLimitAlgorithm"` // token_bucket, sliding_window, fixed_window
+	RateLimitEnabled bool `json:"rateLimitEnabled" yaml:"rateLimitEnabled"`
+	// RateLimitAlgorithm: token_bucket, sliding_window, fixed_window
+	RateLimitAlgorithm string        `json:"rateLimitAlgorithm" yaml:"rateLimitAlgorithm"`
 	RateLimitRequests  int           `json:"rateLimitRequests" yaml:"rateLimitRequests"`
 	RateLimitWindow    time.Duration `json:"rateLimitWindow" yaml:"rateLimitWindow"`
 	RateLimitBurst     int           `json:"rateLimitBurst" yaml:"rateLimitBurst"`
@@ -89,7 +100,7 @@ type Config struct {
 	CircuitBreakerMaxFailures      int           `json:"circuitBreakerMaxFailures" yaml:"circuitBreakerMaxFailures"`
 	CircuitBreakerTimeout          time.Duration `json:"circuitBreakerTimeout" yaml:"circuitBreakerTimeout"`
 	CircuitBreakerHalfOpenMax      int           `json:"circuitBreakerHalfOpenMax" yaml:"circuitBreakerHalfOpenMax"`
-	CircuitBreakerSuccessThreshold int           `json:"circuitBreakerSuccessThreshold" yaml:"circuitBreakerSuccessThreshold"`
+	CircuitBreakerSuccessThreshold int           `json:"circuitBreakerSuccessThreshold" yaml:"circuitBreakerSuccessThreshold"` //nolint:lll // long struct tag for JSON/YAML serialization
 
 	// Retry
 	RetryEnabled        bool          `json:"retryEnabled" yaml:"retryEnabled"`
@@ -199,200 +210,288 @@ type Config struct {
 }
 
 // DefaultConfig returns a Config with default values.
+// It assembles defaults from domain-specific helper functions.
 func DefaultConfig() *Config {
-	return &Config{
-		// Server settings
-		HTTPPort:    8080,
-		GRPCPort:    9090,
-		MetricsPort: 9091,
-		HealthPort:  8081,
+	cfg := &Config{}
+	applyDefaultServerConfig(cfg)
+	applyDefaultTLSConfig(cfg)
+	applyDefaultVaultConfig(cfg)
+	applyDefaultSecretsProviderConfig(cfg)
+	applyDefaultObservabilityConfig(cfg)
+	applyDefaultRateLimitConfig(cfg)
+	applyDefaultResilienceConfig(cfg)
+	applyDefaultBackendConfig(cfg)
+	applyDefaultHealthConfig(cfg)
+	applyDefaultGRPCConfig(cfg)
+	applyDefaultTCPConfig(cfg)
+	applyDefaultAuthConfig(cfg)
+	applyDefaultSecurityConfig(cfg)
+	applyDefaultWebhookConfig(cfg)
+	return cfg
+}
 
-		// Server timeouts
-		ReadTimeout:     30 * time.Second,
-		WriteTimeout:    30 * time.Second,
-		IdleTimeout:     120 * time.Second,
-		ShutdownTimeout: 30 * time.Second,
+// applyDefaultServerConfig sets default server settings.
+func applyDefaultServerConfig(cfg *Config) {
+	cfg.HTTPPort = 8080
+	cfg.GRPCPort = 9090
+	cfg.MetricsPort = 9091
+	cfg.HealthPort = 8081
+	cfg.ReadTimeout = 30 * time.Second
+	cfg.WriteTimeout = 30 * time.Second
+	cfg.IdleTimeout = 120 * time.Second
+	cfg.ShutdownTimeout = 30 * time.Second
+}
 
-		// TLS settings
-		TLSEnabled:  false,
-		TLSCertFile: "",
-		TLSKeyFile:  "",
-		TLSCAFile:   "",
+// applyDefaultTLSConfig sets default TLS settings.
+func applyDefaultTLSConfig(cfg *Config) {
+	cfg.TLSEnabled = false
+	cfg.TLSCertFile = ""
+	cfg.TLSKeyFile = ""
+	cfg.TLSCAFile = ""
+	cfg.TLSPassthroughEnabled = false
+	cfg.TLSPassthroughPort = 8444
+}
 
-		// Vault settings
-		VaultEnabled:          false,
-		VaultAddress:          "http://localhost:8200",
-		VaultNamespace:        "",
-		VaultAuthMethod:       "kubernetes",
-		VaultRole:             "avapigw",
-		VaultMountPath:        "kubernetes",
-		VaultSecretMountPoint: "secret",
-		VaultTLSSkipVerify:    false,
-		VaultCACert:           "",
-		VaultClientCert:       "",
-		VaultClientKey:        "",
-		VaultTimeout:          30 * time.Second,
-		VaultMaxRetries:       3,
-		VaultRetryWaitMin:     500 * time.Millisecond,
-		VaultRetryWaitMax:     5 * time.Second,
-		VaultCacheEnabled:     true,
-		VaultCacheTTL:         5 * time.Minute,
-		VaultTokenRenewal:     true,
-		VaultTokenRenewalTime: 5 * time.Minute,
+// applyDefaultVaultConfig sets default Vault settings.
+func applyDefaultVaultConfig(cfg *Config) {
+	cfg.VaultEnabled = false
+	cfg.VaultAddress = "http://localhost:8200"
+	cfg.VaultNamespace = ""
+	cfg.VaultAuthMethod = DefaultVaultAuthMethod
+	cfg.VaultRole = DefaultVaultRole
+	cfg.VaultMountPath = DefaultVaultAuthMethod
+	cfg.VaultSecretMountPoint = "secret"
+	cfg.VaultTLSSkipVerify = false
+	cfg.VaultCACert = ""
+	cfg.VaultClientCert = ""
+	cfg.VaultClientKey = ""
+	cfg.VaultTimeout = 30 * time.Second
+	cfg.VaultMaxRetries = 3
+	cfg.VaultRetryWaitMin = 500 * time.Millisecond
+	cfg.VaultRetryWaitMax = 5 * time.Second
+	cfg.VaultCacheEnabled = true
+	cfg.VaultCacheTTL = 5 * time.Minute
+	cfg.VaultTokenRenewal = true
+	cfg.VaultTokenRenewalTime = 5 * time.Minute
+}
 
-		// Secrets Provider settings
-		SecretsProvider:  "",                     // empty means auto-detect (vault if enabled, otherwise kubernetes)
-		SecretsLocalPath: "/etc/avapigw/secrets", // default path for local secrets
-		SecretsEnvPrefix: "AVAPIGW_SECRET_",      // default prefix for env secrets
+// applyDefaultSecretsProviderConfig sets default secrets provider settings.
+func applyDefaultSecretsProviderConfig(cfg *Config) {
+	cfg.SecretsProvider = ""                      // empty means auto-detect (vault if enabled, otherwise kubernetes)
+	cfg.SecretsLocalPath = "/etc/avapigw/secrets" // default path for local secrets
+	cfg.SecretsEnvPrefix = "AVAPIGW_SECRET_"      // default prefix for env secrets
+}
 
-		// Observability - Logging
-		LogLevel:         "info",
-		LogFormat:        "json",
-		LogOutput:        "stdout",
-		AccessLogEnabled: true,
+// applyDefaultObservabilityConfig sets default observability settings (logging, tracing, metrics).
+func applyDefaultObservabilityConfig(cfg *Config) {
+	// Logging
+	cfg.LogLevel = "info"
+	cfg.LogFormat = "json"
+	cfg.LogOutput = "stdout"
+	cfg.AccessLogEnabled = true
 
-		// Observability - Tracing
-		TracingEnabled:    false,
-		TracingExporter:   "otlp-grpc",
-		OTLPEndpoint:      "localhost:4317",
-		TracingSampleRate: 1.0,
-		ServiceName:       "avapigw",
-		ServiceVersion:    "1.0.0",
-		TracingInsecure:   true,
+	// Tracing
+	cfg.TracingEnabled = false
+	cfg.TracingExporter = "otlp-grpc"
+	cfg.OTLPEndpoint = "localhost:4317"
+	cfg.TracingSampleRate = 1.0
+	cfg.ServiceName = DefaultServiceName
+	cfg.ServiceVersion = "1.0.0"
+	cfg.TracingInsecure = true
 
-		// Observability - Metrics
-		MetricsEnabled: true,
-		MetricsPath:    "/metrics",
+	// Metrics
+	cfg.MetricsEnabled = true
+	cfg.MetricsPath = "/metrics"
+}
 
-		// Rate limiting
-		RateLimitEnabled:   false,
-		RateLimitAlgorithm: "token_bucket",
-		RateLimitRequests:  100,
-		RateLimitWindow:    time.Minute,
-		RateLimitBurst:     10,
-		RateLimitStoreType: "memory",
-		RedisAddress:       "localhost:6379",
-		RedisPassword:      "",
-		RedisDB:            0,
+// applyDefaultRateLimitConfig sets default rate limiting settings.
+func applyDefaultRateLimitConfig(cfg *Config) {
+	cfg.RateLimitEnabled = false
+	cfg.RateLimitAlgorithm = "token_bucket"
+	cfg.RateLimitRequests = 100
+	cfg.RateLimitWindow = time.Minute
+	cfg.RateLimitBurst = 10
+	cfg.RateLimitStoreType = "memory"
+	cfg.RedisAddress = "localhost:6379"
+	cfg.RedisPassword = ""
+	cfg.RedisDB = 0
+}
 
-		// Circuit Breaker
-		CircuitBreakerEnabled:          false,
-		CircuitBreakerMaxFailures:      5,
-		CircuitBreakerTimeout:          30 * time.Second,
-		CircuitBreakerHalfOpenMax:      3,
-		CircuitBreakerSuccessThreshold: 2,
+// applyDefaultResilienceConfig sets default circuit breaker and retry settings.
+func applyDefaultResilienceConfig(cfg *Config) {
+	// Circuit Breaker
+	cfg.CircuitBreakerEnabled = false
+	cfg.CircuitBreakerMaxFailures = 5
+	cfg.CircuitBreakerTimeout = 30 * time.Second
+	cfg.CircuitBreakerHalfOpenMax = 3
+	cfg.CircuitBreakerSuccessThreshold = 2
 
-		// Retry
-		RetryEnabled:        false,
-		RetryMaxAttempts:    3,
-		RetryInitialBackoff: 100 * time.Millisecond,
-		RetryMaxBackoff:     10 * time.Second,
-		RetryBackoffFactor:  2.0,
+	// Retry
+	cfg.RetryEnabled = false
+	cfg.RetryMaxAttempts = 3
+	cfg.RetryInitialBackoff = 100 * time.Millisecond
+	cfg.RetryMaxBackoff = 10 * time.Second
+	cfg.RetryBackoffFactor = 2.0
+}
 
-		// Backend settings
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		MaxConnsPerHost:     100,
-		IdleConnTimeout:     90 * time.Second,
+// applyDefaultBackendConfig sets default backend connection pool settings.
+func applyDefaultBackendConfig(cfg *Config) {
+	cfg.MaxIdleConns = 100
+	cfg.MaxIdleConnsPerHost = 10
+	cfg.MaxConnsPerHost = 100
+	cfg.IdleConnTimeout = 90 * time.Second
+}
 
-		// Health check settings
-		HealthCheckInterval: 10 * time.Second,
-		HealthCheckTimeout:  5 * time.Second,
+// applyDefaultHealthConfig sets default health check and server timeout settings.
+func applyDefaultHealthConfig(cfg *Config) {
+	// Health check settings
+	cfg.HealthCheckInterval = 10 * time.Second
+	cfg.HealthCheckTimeout = 5 * time.Second
 
-		// Health server timeouts - used for the dedicated health check server
-		HealthServerReadTimeout:     5 * time.Second,
-		HealthServerWriteTimeout:    5 * time.Second,
-		HealthServerShutdownTimeout: 5 * time.Second,
+	// Health server timeouts - used for the dedicated health check server
+	cfg.HealthServerReadTimeout = 5 * time.Second
+	cfg.HealthServerWriteTimeout = 5 * time.Second
+	cfg.HealthServerShutdownTimeout = 5 * time.Second
 
-		// Metrics server timeouts - used for the Prometheus metrics server
-		MetricsServerReadTimeout:     5 * time.Second,
-		MetricsServerWriteTimeout:    10 * time.Second,
-		MetricsServerShutdownTimeout: 5 * time.Second,
+	// Metrics server timeouts - used for the Prometheus metrics server
+	cfg.MetricsServerReadTimeout = 5 * time.Second
+	cfg.MetricsServerWriteTimeout = 10 * time.Second
+	cfg.MetricsServerShutdownTimeout = 5 * time.Second
 
-		// Readiness/Liveness probe timeouts - context timeout for health check execution
-		ReadinessProbeTimeout: 5 * time.Second,
-		LivenessProbeTimeout:  10 * time.Second,
+	// Readiness/Liveness probe timeouts - context timeout for health check execution
+	cfg.ReadinessProbeTimeout = 5 * time.Second
+	cfg.LivenessProbeTimeout = 10 * time.Second
+}
 
-		// gRPC settings
-		GRPCEnabled:              true,
-		GRPCMaxRecvMsgSize:       4 * 1024 * 1024, // 4 MB
-		GRPCMaxSendMsgSize:       4 * 1024 * 1024, // 4 MB
-		GRPCMaxConcurrentStreams: 1000,
-		GRPCEnableReflection:     false,
-		GRPCEnableHealthCheck:    true,
+// applyDefaultGRPCConfig sets default gRPC server settings.
+func applyDefaultGRPCConfig(cfg *Config) {
+	cfg.GRPCEnabled = true
+	cfg.GRPCMaxRecvMsgSize = 4 * 1024 * 1024 // 4 MB
+	cfg.GRPCMaxSendMsgSize = 4 * 1024 * 1024 // 4 MB
+	cfg.GRPCMaxConcurrentStreams = 1000
+	cfg.GRPCEnableReflection = false
+	cfg.GRPCEnableHealthCheck = true
+}
 
-		// TCP settings
-		TCPEnabled:        false,
-		TCPPort:           8443,
-		TCPReadTimeout:    30 * time.Second,
-		TCPWriteTimeout:   30 * time.Second,
-		TCPIdleTimeout:    5 * time.Minute,
-		TCPMaxConnections: 10000,
+// applyDefaultTCPConfig sets default TCP server settings.
+func applyDefaultTCPConfig(cfg *Config) {
+	cfg.TCPEnabled = false
+	cfg.TCPPort = 8443
+	cfg.TCPReadTimeout = 30 * time.Second
+	cfg.TCPWriteTimeout = 30 * time.Second
+	cfg.TCPIdleTimeout = 5 * time.Minute
+	cfg.TCPMaxConnections = 10000
+}
 
-		// TLS Passthrough settings
-		TLSPassthroughEnabled: false,
-		TLSPassthroughPort:    8444,
+// applyDefaultAuthConfig sets default authentication settings.
+func applyDefaultAuthConfig(cfg *Config) {
+	// JWT
+	cfg.JWTEnabled = false
+	cfg.JWTIssuer = ""
+	cfg.JWTAudiences = nil
+	cfg.JWKSURL = ""
+	cfg.JWKSCacheTTL = time.Hour
+	cfg.JWTClockSkew = time.Minute
+	cfg.JWTAlgorithms = []string{"RS256", "RS384", "RS512"}
+	cfg.JWTTokenHeader = "Authorization"
+	cfg.JWTTokenPrefix = "Bearer "
+	cfg.JWTTokenCookie = ""
+	cfg.JWTTokenQuery = ""
 
-		// Authentication - JWT
-		JWTEnabled:     false,
-		JWTIssuer:      "",
-		JWTAudiences:   nil,
-		JWKSURL:        "",
-		JWKSCacheTTL:   time.Hour,
-		JWTClockSkew:   time.Minute,
-		JWTAlgorithms:  []string{"RS256", "RS384", "RS512"},
-		JWTTokenHeader: "Authorization",
-		JWTTokenPrefix: "Bearer ",
-		JWTTokenCookie: "",
-		JWTTokenQuery:  "",
+	// API Key
+	cfg.APIKeyEnabled = false
+	cfg.APIKeyHeader = "X-API-Key"
+	cfg.APIKeyQueryParam = "api_key"
 
-		// Authentication - API Key
-		APIKeyEnabled:    false,
-		APIKeyHeader:     "X-API-Key",
-		APIKeyQueryParam: "api_key",
+	// Basic Auth
+	cfg.BasicAuthEnabled = false
+	cfg.BasicAuthRealm = "Restricted"
 
-		// Authentication - Basic Auth
-		BasicAuthEnabled: false,
-		BasicAuthRealm:   "Restricted",
+	// OAuth2 Client Credentials
+	cfg.OAuth2Enabled = false
+	cfg.OAuth2TokenEndpoint = ""
+	cfg.OAuth2ClientID = ""
+	cfg.OAuth2Scopes = nil
+	cfg.OAuth2Timeout = 30 * time.Second
 
-		// Authentication - OAuth2 Client Credentials
-		OAuth2Enabled:       false,
-		OAuth2TokenEndpoint: "",
-		OAuth2ClientID:      "",
-		OAuth2Scopes:        nil,
-		OAuth2Timeout:       30 * time.Second,
+	// Authorization
+	cfg.AuthzEnabled = false
+	cfg.AuthzDefaultAllow = false
+}
 
-		// Authorization
-		AuthzEnabled:      false,
-		AuthzDefaultAllow: false,
+// applyDefaultSecurityConfig sets default security header settings.
+func applyDefaultSecurityConfig(cfg *Config) {
+	cfg.SecurityHeadersEnabled = true
+	cfg.HSTSEnabled = true
+	cfg.HSTSMaxAge = 31536000 // 1 year
+	cfg.HSTSIncludeSubDomains = true
+	cfg.HSTSPreload = false
+	cfg.CSPPolicy = ""
+	cfg.XFrameOptions = "DENY"
+	cfg.XContentTypeOptions = "nosniff"
+	cfg.ReferrerPolicy = "strict-origin-when-cross-origin"
+}
 
-		// Security Headers
-		SecurityHeadersEnabled: true,
-		HSTSEnabled:            true,
-		HSTSMaxAge:             31536000, // 1 year
-		HSTSIncludeSubDomains:  true,
-		HSTSPreload:            false,
-		CSPPolicy:              "",
-		XFrameOptions:          "DENY",
-		XContentTypeOptions:    "nosniff",
-		ReferrerPolicy:         "strict-origin-when-cross-origin",
-
-		// Webhook Certificate Settings
-		WebhookSelfSignedCert:       false,
-		WebhookCertDir:              "/tmp/k8s-webhook-server/serving-certs",
-		WebhookCertValidity:         365 * 24 * time.Hour, // 1 year
-		WebhookCertRotation:         30 * 24 * time.Hour,  // 30 days before expiry
-		WebhookCertSecretName:       "avapigw-webhook-certs",
-		WebhookServiceName:          "avapigw-webhook-service",
-		WebhookServiceNamespace:     "avapigw-system",
-		WebhookValidatingConfigName: "avapigw-validating-webhook-configuration",
-		WebhookMutatingConfigName:   "avapigw-mutating-webhook-configuration",
-	}
+// applyDefaultWebhookConfig sets default webhook certificate settings.
+func applyDefaultWebhookConfig(cfg *Config) {
+	cfg.WebhookSelfSignedCert = false
+	cfg.WebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
+	cfg.WebhookCertValidity = 365 * 24 * time.Hour // 1 year
+	cfg.WebhookCertRotation = 30 * 24 * time.Hour  // 30 days before expiry
+	cfg.WebhookCertSecretName = "avapigw-webhook-certs"
+	cfg.WebhookServiceName = "avapigw-webhook-service"
+	cfg.WebhookServiceNamespace = "avapigw-system"
+	cfg.WebhookValidatingConfigName = "avapigw-validating-webhook-configuration"
+	cfg.WebhookMutatingConfigName = "avapigw-mutating-webhook-configuration"
 }
 
 // Validate validates the configuration and returns an error if invalid.
+// It delegates to domain-specific validators for each configuration section.
 func (c *Config) Validate() error {
-	// Validate ports
+	if err := c.validateServerConfig(); err != nil {
+		return err
+	}
+	if err := c.validateTLSConfig(); err != nil {
+		return err
+	}
+	if err := c.validateVaultConfig(); err != nil {
+		return err
+	}
+	if err := c.validateSecretsProviderConfig(); err != nil {
+		return err
+	}
+	if err := c.validateObservabilityConfig(); err != nil {
+		return err
+	}
+	if err := c.validateRateLimitConfig(); err != nil {
+		return err
+	}
+	if err := c.validateResilienceConfig(); err != nil {
+		return err
+	}
+	if err := c.validateBackendConfig(); err != nil {
+		return err
+	}
+	if err := c.validateHealthConfig(); err != nil {
+		return err
+	}
+	if err := c.validateTCPConfig(); err != nil {
+		return err
+	}
+	if err := c.validateAuthConfig(); err != nil {
+		return err
+	}
+	if err := c.validateSecurityConfig(); err != nil {
+		return err
+	}
+	if err := c.validateWebhookConfig(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateServerConfig validates server-related settings.
+func (c *Config) validateServerConfig() error {
 	if err := validatePort(c.HTTPPort, "HTTPPort"); err != nil {
 		return err
 	}
@@ -405,175 +504,6 @@ func (c *Config) Validate() error {
 	if err := validatePort(c.HealthPort, "HealthPort"); err != nil {
 		return err
 	}
-
-	// Validate TLS settings
-	if c.TLSEnabled {
-		if c.TLSCertFile == "" {
-			return fmt.Errorf("TLSCertFile is required when TLS is enabled")
-		}
-		if c.TLSKeyFile == "" {
-			return fmt.Errorf("TLSKeyFile is required when TLS is enabled")
-		}
-	}
-
-	// Validate Vault settings
-	if c.VaultEnabled {
-		if c.VaultAddress == "" {
-			return fmt.Errorf("VaultAddress is required when Vault is enabled")
-		}
-		validAuthMethods := map[string]bool{
-			"kubernetes": true,
-			"token":      true,
-			"approle":    true,
-		}
-		if !validAuthMethods[c.VaultAuthMethod] {
-			return fmt.Errorf("invalid VaultAuthMethod: %s, must be one of: kubernetes, token, approle", c.VaultAuthMethod)
-		}
-		if c.VaultAuthMethod == "kubernetes" && c.VaultRole == "" {
-			return fmt.Errorf("VaultRole is required when using Kubernetes auth")
-		}
-		if c.VaultTimeout <= 0 {
-			return fmt.Errorf("VaultTimeout must be positive")
-		}
-		if c.VaultMaxRetries < 0 {
-			return fmt.Errorf("VaultMaxRetries must be non-negative")
-		}
-	}
-
-	// Validate secrets provider
-	if c.SecretsProvider != "" {
-		validProviders := map[string]bool{
-			"kubernetes": true,
-			"vault":      true,
-			"local":      true,
-			"env":        true,
-		}
-		if !validProviders[c.SecretsProvider] {
-			return fmt.Errorf("invalid SecretsProvider: %s, must be one of: kubernetes, vault, local, env", c.SecretsProvider)
-		}
-
-		// Validate provider-specific settings
-		if c.SecretsProvider == "vault" && !c.VaultEnabled {
-			return fmt.Errorf("VaultEnabled must be true when SecretsProvider is vault")
-		}
-	}
-
-	// Validate log level
-	validLogLevels := map[string]bool{
-		"debug": true,
-		"info":  true,
-		"warn":  true,
-		"error": true,
-	}
-	if !validLogLevels[c.LogLevel] {
-		return fmt.Errorf("invalid LogLevel: %s, must be one of: debug, info, warn, error", c.LogLevel)
-	}
-
-	// Validate log format
-	validLogFormats := map[string]bool{
-		"json":    true,
-		"console": true,
-	}
-	if !validLogFormats[c.LogFormat] {
-		return fmt.Errorf("invalid LogFormat: %s, must be one of: json, console", c.LogFormat)
-	}
-
-	// Validate log output
-	validLogOutputs := map[string]bool{
-		"stdout": true,
-		"stderr": true,
-	}
-	if c.LogOutput != "" && !validLogOutputs[c.LogOutput] {
-		// Allow file paths as well
-		if c.LogOutput[0] != '/' && c.LogOutput[0] != '.' {
-			return fmt.Errorf("invalid LogOutput: %s, must be stdout, stderr, or a file path", c.LogOutput)
-		}
-	}
-
-	// Validate tracing settings
-	if c.TracingEnabled {
-		if c.OTLPEndpoint == "" {
-			return fmt.Errorf("OTLPEndpoint is required when tracing is enabled")
-		}
-		validExporters := map[string]bool{
-			"otlp-grpc": true,
-			"otlp-http": true,
-		}
-		if !validExporters[c.TracingExporter] {
-			return fmt.Errorf("invalid TracingExporter: %s, must be one of: otlp-grpc, otlp-http", c.TracingExporter)
-		}
-		if c.TracingSampleRate < 0 || c.TracingSampleRate > 1 {
-			return fmt.Errorf("TracingSampleRate must be between 0.0 and 1.0")
-		}
-	}
-
-	// Validate rate limiting settings
-	if c.RateLimitEnabled {
-		validAlgorithms := map[string]bool{
-			"token_bucket":   true,
-			"sliding_window": true,
-			"fixed_window":   true,
-		}
-		if !validAlgorithms[c.RateLimitAlgorithm] {
-			return fmt.Errorf("invalid RateLimitAlgorithm: %s, must be one of: token_bucket, sliding_window, fixed_window", c.RateLimitAlgorithm)
-		}
-
-		validStoreTypes := map[string]bool{
-			"memory": true,
-			"redis":  true,
-		}
-		if !validStoreTypes[c.RateLimitStoreType] {
-			return fmt.Errorf("invalid RateLimitStoreType: %s, must be one of: memory, redis", c.RateLimitStoreType)
-		}
-
-		if c.RateLimitStoreType == "redis" && c.RedisAddress == "" {
-			return fmt.Errorf("RedisAddress is required when rate limit store type is redis")
-		}
-
-		if c.RateLimitRequests <= 0 {
-			return fmt.Errorf("RateLimitRequests must be positive")
-		}
-		if c.RateLimitWindow <= 0 {
-			return fmt.Errorf("RateLimitWindow must be positive")
-		}
-		if c.RateLimitBurst <= 0 {
-			return fmt.Errorf("RateLimitBurst must be positive")
-		}
-	}
-
-	// Validate circuit breaker settings
-	if c.CircuitBreakerEnabled {
-		if c.CircuitBreakerMaxFailures <= 0 {
-			return fmt.Errorf("CircuitBreakerMaxFailures must be positive")
-		}
-		if c.CircuitBreakerTimeout <= 0 {
-			return fmt.Errorf("CircuitBreakerTimeout must be positive")
-		}
-		if c.CircuitBreakerHalfOpenMax <= 0 {
-			return fmt.Errorf("CircuitBreakerHalfOpenMax must be positive")
-		}
-		if c.CircuitBreakerSuccessThreshold <= 0 {
-			return fmt.Errorf("CircuitBreakerSuccessThreshold must be positive")
-		}
-	}
-
-	// Validate retry settings
-	if c.RetryEnabled {
-		if c.RetryMaxAttempts < 0 {
-			return fmt.Errorf("RetryMaxAttempts must be non-negative")
-		}
-		if c.RetryInitialBackoff <= 0 {
-			return fmt.Errorf("RetryInitialBackoff must be positive")
-		}
-		if c.RetryMaxBackoff <= 0 {
-			return fmt.Errorf("RetryMaxBackoff must be positive")
-		}
-		if c.RetryBackoffFactor <= 0 {
-			return fmt.Errorf("RetryBackoffFactor must be positive")
-		}
-	}
-
-	// Validate timeouts
 	if c.ReadTimeout <= 0 {
 		return fmt.Errorf("ReadTimeout must be positive")
 	}
@@ -586,38 +516,228 @@ func (c *Config) Validate() error {
 	if c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("ShutdownTimeout must be positive")
 	}
+	return nil
+}
 
-	// Validate health server timeouts
-	if c.HealthServerReadTimeout <= 0 {
-		return fmt.Errorf("HealthServerReadTimeout must be positive")
+// validateTLSConfig validates TLS-related settings.
+func (c *Config) validateTLSConfig() error {
+	if c.TLSEnabled {
+		if c.TLSCertFile == "" {
+			return fmt.Errorf("TLSCertFile is required when TLS is enabled")
+		}
+		if c.TLSKeyFile == "" {
+			return fmt.Errorf("TLSKeyFile is required when TLS is enabled")
+		}
 	}
-	if c.HealthServerWriteTimeout <= 0 {
-		return fmt.Errorf("HealthServerWriteTimeout must be positive")
+	if c.TLSPassthroughEnabled {
+		if err := validatePort(c.TLSPassthroughPort, "TLSPassthroughPort"); err != nil {
+			return err
+		}
 	}
-	if c.HealthServerShutdownTimeout <= 0 {
-		return fmt.Errorf("HealthServerShutdownTimeout must be positive")
-	}
+	return nil
+}
 
-	// Validate metrics server timeouts
-	if c.MetricsServerReadTimeout <= 0 {
-		return fmt.Errorf("MetricsServerReadTimeout must be positive")
+// validateVaultConfig validates Vault-related settings.
+func (c *Config) validateVaultConfig() error {
+	if !c.VaultEnabled {
+		return nil
 	}
-	if c.MetricsServerWriteTimeout <= 0 {
-		return fmt.Errorf("MetricsServerWriteTimeout must be positive")
+	if c.VaultAddress == "" {
+		return fmt.Errorf("VaultAddress is required when Vault is enabled")
 	}
-	if c.MetricsServerShutdownTimeout <= 0 {
-		return fmt.Errorf("MetricsServerShutdownTimeout must be positive")
+	validAuthMethods := map[string]bool{
+		DefaultVaultAuthMethod: true,
+		"token":                true,
+		"approle":              true,
 	}
+	if !validAuthMethods[c.VaultAuthMethod] {
+		return fmt.Errorf("invalid VaultAuthMethod: %s, must be one of: kubernetes, token, approle", c.VaultAuthMethod)
+	}
+	if c.VaultAuthMethod == DefaultVaultAuthMethod && c.VaultRole == "" {
+		return fmt.Errorf("VaultRole is required when using Kubernetes auth")
+	}
+	if c.VaultTimeout <= 0 {
+		return fmt.Errorf("VaultTimeout must be positive")
+	}
+	if c.VaultMaxRetries < 0 {
+		return fmt.Errorf("VaultMaxRetries must be non-negative")
+	}
+	return nil
+}
 
-	// Validate probe timeouts
-	if c.ReadinessProbeTimeout <= 0 {
-		return fmt.Errorf("ReadinessProbeTimeout must be positive")
+// validateSecretsProviderConfig validates secrets provider settings.
+func (c *Config) validateSecretsProviderConfig() error {
+	if c.SecretsProvider == "" {
+		return nil
 	}
-	if c.LivenessProbeTimeout <= 0 {
-		return fmt.Errorf("LivenessProbeTimeout must be positive")
+	validProviders := map[string]bool{
+		DefaultVaultAuthMethod: true,
+		"vault":                true,
+		"local":                true,
+		"env":                  true,
 	}
+	if !validProviders[c.SecretsProvider] {
+		return fmt.Errorf(
+			"invalid SecretsProvider: %s, must be one of: kubernetes, vault, local, env", c.SecretsProvider)
+	}
+	if c.SecretsProvider == "vault" && !c.VaultEnabled {
+		return fmt.Errorf("VaultEnabled must be true when SecretsProvider is vault")
+	}
+	return nil
+}
 
-	// Validate backend settings
+// validateObservabilityConfig validates observability settings (logging, tracing, metrics).
+func (c *Config) validateObservabilityConfig() error {
+	if err := c.validateLoggingConfig(); err != nil {
+		return err
+	}
+	if err := c.validateTracingConfig(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateLoggingConfig validates logging settings.
+func (c *Config) validateLoggingConfig() error {
+	validLogLevels := map[string]bool{
+		"debug": true,
+		"info":  true,
+		"warn":  true,
+		"error": true,
+	}
+	if !validLogLevels[c.LogLevel] {
+		return fmt.Errorf("invalid LogLevel: %s, must be one of: debug, info, warn, error", c.LogLevel)
+	}
+	validLogFormats := map[string]bool{
+		"json":    true,
+		"console": true,
+	}
+	if !validLogFormats[c.LogFormat] {
+		return fmt.Errorf("invalid LogFormat: %s, must be one of: json, console", c.LogFormat)
+	}
+	validLogOutputs := map[string]bool{
+		"stdout": true,
+		"stderr": true,
+	}
+	if c.LogOutput != "" && !validLogOutputs[c.LogOutput] {
+		// Allow file paths as well
+		if c.LogOutput[0] != '/' && c.LogOutput[0] != '.' {
+			return fmt.Errorf("invalid LogOutput: %s, must be stdout, stderr, or a file path", c.LogOutput)
+		}
+	}
+	return nil
+}
+
+// validateTracingConfig validates tracing settings.
+func (c *Config) validateTracingConfig() error {
+	if !c.TracingEnabled {
+		return nil
+	}
+	if c.OTLPEndpoint == "" {
+		return fmt.Errorf("OTLPEndpoint is required when tracing is enabled")
+	}
+	validExporters := map[string]bool{
+		"otlp-grpc": true,
+		"otlp-http": true,
+	}
+	if !validExporters[c.TracingExporter] {
+		return fmt.Errorf("invalid TracingExporter: %s, must be one of: otlp-grpc, otlp-http", c.TracingExporter)
+	}
+	if c.TracingSampleRate < 0 || c.TracingSampleRate > 1 {
+		return fmt.Errorf("TracingSampleRate must be between 0.0 and 1.0")
+	}
+	return nil
+}
+
+// validateRateLimitConfig validates rate limiting settings.
+func (c *Config) validateRateLimitConfig() error {
+	if !c.RateLimitEnabled {
+		return nil
+	}
+	validAlgorithms := map[string]bool{
+		"token_bucket":   true,
+		"sliding_window": true,
+		"fixed_window":   true,
+	}
+	if !validAlgorithms[c.RateLimitAlgorithm] {
+		return fmt.Errorf("invalid RateLimitAlgorithm: %s, must be one of: "+
+			"token_bucket, sliding_window, fixed_window", c.RateLimitAlgorithm)
+	}
+	validStoreTypes := map[string]bool{
+		"memory": true,
+		"redis":  true,
+	}
+	if !validStoreTypes[c.RateLimitStoreType] {
+		return fmt.Errorf("invalid RateLimitStoreType: %s, must be one of: memory, redis", c.RateLimitStoreType)
+	}
+	if c.RateLimitStoreType == "redis" && c.RedisAddress == "" {
+		return fmt.Errorf("RedisAddress is required when rate limit store type is redis")
+	}
+	if c.RateLimitRequests <= 0 {
+		return fmt.Errorf("RateLimitRequests must be positive")
+	}
+	if c.RateLimitWindow <= 0 {
+		return fmt.Errorf("RateLimitWindow must be positive")
+	}
+	if c.RateLimitBurst <= 0 {
+		return fmt.Errorf("RateLimitBurst must be positive")
+	}
+	return nil
+}
+
+// validateResilienceConfig validates circuit breaker and retry settings.
+func (c *Config) validateResilienceConfig() error {
+	if err := c.validateCircuitBreakerConfig(); err != nil {
+		return err
+	}
+	if err := c.validateRetryConfig(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateCircuitBreakerConfig validates circuit breaker settings.
+func (c *Config) validateCircuitBreakerConfig() error {
+	if !c.CircuitBreakerEnabled {
+		return nil
+	}
+	if c.CircuitBreakerMaxFailures <= 0 {
+		return fmt.Errorf("CircuitBreakerMaxFailures must be positive")
+	}
+	if c.CircuitBreakerTimeout <= 0 {
+		return fmt.Errorf("CircuitBreakerTimeout must be positive")
+	}
+	if c.CircuitBreakerHalfOpenMax <= 0 {
+		return fmt.Errorf("CircuitBreakerHalfOpenMax must be positive")
+	}
+	if c.CircuitBreakerSuccessThreshold <= 0 {
+		return fmt.Errorf("CircuitBreakerSuccessThreshold must be positive")
+	}
+	return nil
+}
+
+// validateRetryConfig validates retry settings.
+func (c *Config) validateRetryConfig() error {
+	if !c.RetryEnabled {
+		return nil
+	}
+	if c.RetryMaxAttempts < 0 {
+		return fmt.Errorf("RetryMaxAttempts must be non-negative")
+	}
+	if c.RetryInitialBackoff <= 0 {
+		return fmt.Errorf("RetryInitialBackoff must be positive")
+	}
+	if c.RetryMaxBackoff <= 0 {
+		return fmt.Errorf("RetryMaxBackoff must be positive")
+	}
+	if c.RetryBackoffFactor <= 0 {
+		return fmt.Errorf("RetryBackoffFactor must be positive")
+	}
+	return nil
+}
+
+// validateBackendConfig validates backend connection pool settings.
+func (c *Config) validateBackendConfig() error {
 	if c.MaxIdleConns <= 0 {
 		return fmt.Errorf("MaxIdleConns must be positive")
 	}
@@ -627,99 +747,154 @@ func (c *Config) Validate() error {
 	if c.MaxConnsPerHost <= 0 {
 		return fmt.Errorf("MaxConnsPerHost must be positive")
 	}
+	return nil
+}
 
-	// Validate TCP settings
-	if c.TCPEnabled {
-		if err := validatePort(c.TCPPort, "TCPPort"); err != nil {
-			return err
-		}
-		if c.TCPReadTimeout <= 0 {
-			return fmt.Errorf("TCPReadTimeout must be positive")
-		}
-		if c.TCPWriteTimeout <= 0 {
-			return fmt.Errorf("TCPWriteTimeout must be positive")
-		}
-		if c.TCPIdleTimeout <= 0 {
-			return fmt.Errorf("TCPIdleTimeout must be positive")
-		}
-		if c.TCPMaxConnections <= 0 {
-			return fmt.Errorf("TCPMaxConnections must be positive")
-		}
+// validateHealthConfig validates health check and server timeout settings.
+func (c *Config) validateHealthConfig() error {
+	// Health server timeouts
+	if c.HealthServerReadTimeout <= 0 {
+		return fmt.Errorf("HealthServerReadTimeout must be positive")
 	}
-
-	// Validate TLS Passthrough settings
-	if c.TLSPassthroughEnabled {
-		if err := validatePort(c.TLSPassthroughPort, "TLSPassthroughPort"); err != nil {
-			return err
-		}
+	if c.HealthServerWriteTimeout <= 0 {
+		return fmt.Errorf("HealthServerWriteTimeout must be positive")
 	}
-
-	// Validate JWT settings
-	if c.JWTEnabled {
-		if c.JWKSURL == "" && c.JWTIssuer == "" {
-			return fmt.Errorf("either JWKSURL or JWTIssuer is required when JWT is enabled")
-		}
-		if c.JWKSCacheTTL <= 0 {
-			return fmt.Errorf("JWKSCacheTTL must be positive")
-		}
-		if c.JWTClockSkew < 0 {
-			return fmt.Errorf("JWTClockSkew must be non-negative")
-		}
+	if c.HealthServerShutdownTimeout <= 0 {
+		return fmt.Errorf("HealthServerShutdownTimeout must be positive")
 	}
-
-	// Validate OAuth2 settings
-	if c.OAuth2Enabled {
-		if c.OAuth2TokenEndpoint == "" {
-			return fmt.Errorf("OAuth2TokenEndpoint is required when OAuth2 is enabled")
-		}
-		if c.OAuth2ClientID == "" {
-			return fmt.Errorf("OAuth2ClientID is required when OAuth2 is enabled")
-		}
-		if c.OAuth2Timeout <= 0 {
-			return fmt.Errorf("OAuth2Timeout must be positive")
-		}
+	// Metrics server timeouts
+	if c.MetricsServerReadTimeout <= 0 {
+		return fmt.Errorf("MetricsServerReadTimeout must be positive")
 	}
-
-	// Validate Security Headers settings
-	if c.SecurityHeadersEnabled {
-		if c.HSTSEnabled && c.HSTSMaxAge < 0 {
-			return fmt.Errorf("HSTSMaxAge must be non-negative")
-		}
-		validXFrameOptions := map[string]bool{
-			"":           true,
-			"DENY":       true,
-			"SAMEORIGIN": true,
-		}
-		if !validXFrameOptions[c.XFrameOptions] {
-			return fmt.Errorf("invalid XFrameOptions: %s, must be one of: DENY, SAMEORIGIN", c.XFrameOptions)
-		}
+	if c.MetricsServerWriteTimeout <= 0 {
+		return fmt.Errorf("MetricsServerWriteTimeout must be positive")
 	}
-
-	// Validate Webhook Certificate settings
-	if c.WebhookSelfSignedCert {
-		if c.WebhookCertDir == "" {
-			return fmt.Errorf("WebhookCertDir is required when self-signed certificates are enabled")
-		}
-		if c.WebhookCertValidity <= 0 {
-			return fmt.Errorf("WebhookCertValidity must be positive")
-		}
-		if c.WebhookCertRotation <= 0 {
-			return fmt.Errorf("WebhookCertRotation must be positive")
-		}
-		if c.WebhookCertRotation >= c.WebhookCertValidity {
-			return fmt.Errorf("WebhookCertRotation must be less than WebhookCertValidity")
-		}
-		if c.WebhookCertSecretName == "" {
-			return fmt.Errorf("WebhookCertSecretName is required when self-signed certificates are enabled")
-		}
-		if c.WebhookServiceName == "" {
-			return fmt.Errorf("WebhookServiceName is required when self-signed certificates are enabled")
-		}
-		if c.WebhookServiceNamespace == "" {
-			return fmt.Errorf("WebhookServiceNamespace is required when self-signed certificates are enabled")
-		}
+	if c.MetricsServerShutdownTimeout <= 0 {
+		return fmt.Errorf("MetricsServerShutdownTimeout must be positive")
 	}
+	// Probe timeouts
+	if c.ReadinessProbeTimeout <= 0 {
+		return fmt.Errorf("ReadinessProbeTimeout must be positive")
+	}
+	if c.LivenessProbeTimeout <= 0 {
+		return fmt.Errorf("LivenessProbeTimeout must be positive")
+	}
+	return nil
+}
 
+// validateTCPConfig validates TCP server settings.
+func (c *Config) validateTCPConfig() error {
+	if !c.TCPEnabled {
+		return nil
+	}
+	if err := validatePort(c.TCPPort, "TCPPort"); err != nil {
+		return err
+	}
+	if c.TCPReadTimeout <= 0 {
+		return fmt.Errorf("TCPReadTimeout must be positive")
+	}
+	if c.TCPWriteTimeout <= 0 {
+		return fmt.Errorf("TCPWriteTimeout must be positive")
+	}
+	if c.TCPIdleTimeout <= 0 {
+		return fmt.Errorf("TCPIdleTimeout must be positive")
+	}
+	if c.TCPMaxConnections <= 0 {
+		return fmt.Errorf("TCPMaxConnections must be positive")
+	}
+	return nil
+}
+
+// validateAuthConfig validates authentication settings (JWT, OAuth2).
+func (c *Config) validateAuthConfig() error {
+	if err := c.validateJWTConfig(); err != nil {
+		return err
+	}
+	if err := c.validateOAuth2Config(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateJWTConfig validates JWT authentication settings.
+func (c *Config) validateJWTConfig() error {
+	if !c.JWTEnabled {
+		return nil
+	}
+	if c.JWKSURL == "" && c.JWTIssuer == "" {
+		return fmt.Errorf("either JWKSURL or JWTIssuer is required when JWT is enabled")
+	}
+	if c.JWKSCacheTTL <= 0 {
+		return fmt.Errorf("JWKSCacheTTL must be positive")
+	}
+	if c.JWTClockSkew < 0 {
+		return fmt.Errorf("JWTClockSkew must be non-negative")
+	}
+	return nil
+}
+
+// validateOAuth2Config validates OAuth2 authentication settings.
+func (c *Config) validateOAuth2Config() error {
+	if !c.OAuth2Enabled {
+		return nil
+	}
+	if c.OAuth2TokenEndpoint == "" {
+		return fmt.Errorf("OAuth2TokenEndpoint is required when OAuth2 is enabled")
+	}
+	if c.OAuth2ClientID == "" {
+		return fmt.Errorf("OAuth2ClientID is required when OAuth2 is enabled")
+	}
+	if c.OAuth2Timeout <= 0 {
+		return fmt.Errorf("OAuth2Timeout must be positive")
+	}
+	return nil
+}
+
+// validateSecurityConfig validates security header settings.
+func (c *Config) validateSecurityConfig() error {
+	if !c.SecurityHeadersEnabled {
+		return nil
+	}
+	if c.HSTSEnabled && c.HSTSMaxAge < 0 {
+		return fmt.Errorf("HSTSMaxAge must be non-negative")
+	}
+	validXFrameOptions := map[string]bool{
+		"":           true,
+		"DENY":       true,
+		"SAMEORIGIN": true,
+	}
+	if !validXFrameOptions[c.XFrameOptions] {
+		return fmt.Errorf("invalid XFrameOptions: %s, must be one of: DENY, SAMEORIGIN", c.XFrameOptions)
+	}
+	return nil
+}
+
+// validateWebhookConfig validates webhook certificate settings.
+func (c *Config) validateWebhookConfig() error {
+	if !c.WebhookSelfSignedCert {
+		return nil
+	}
+	if c.WebhookCertDir == "" {
+		return fmt.Errorf("WebhookCertDir is required when self-signed certificates are enabled")
+	}
+	if c.WebhookCertValidity <= 0 {
+		return fmt.Errorf("WebhookCertValidity must be positive")
+	}
+	if c.WebhookCertRotation <= 0 {
+		return fmt.Errorf("WebhookCertRotation must be positive")
+	}
+	if c.WebhookCertRotation >= c.WebhookCertValidity {
+		return fmt.Errorf("WebhookCertRotation must be less than WebhookCertValidity")
+	}
+	if c.WebhookCertSecretName == "" {
+		return fmt.Errorf("WebhookCertSecretName is required when self-signed certificates are enabled")
+	}
+	if c.WebhookServiceName == "" {
+		return fmt.Errorf("WebhookServiceName is required when self-signed certificates are enabled")
+	}
+	if c.WebhookServiceNamespace == "" {
+		return fmt.Errorf("WebhookServiceNamespace is required when self-signed certificates are enabled")
+	}
 	return nil
 }
 
@@ -734,7 +909,11 @@ func validatePort(port int, name string) error {
 // String returns a string representation of the config (without sensitive data).
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"Config{HTTPPort: %d, GRPCPort: %d, MetricsPort: %d, HealthPort: %d, TLSEnabled: %t, VaultEnabled: %t, LogLevel: %s, TracingEnabled: %t, TCPEnabled: %t, TCPPort: %d, TLSPassthroughEnabled: %t, TLSPassthroughPort: %d}",
-		c.HTTPPort, c.GRPCPort, c.MetricsPort, c.HealthPort, c.TLSEnabled, c.VaultEnabled, c.LogLevel, c.TracingEnabled, c.TCPEnabled, c.TCPPort, c.TLSPassthroughEnabled, c.TLSPassthroughPort,
+		"Config{HTTPPort: %d, GRPCPort: %d, MetricsPort: %d, HealthPort: %d, "+
+			"TLSEnabled: %t, VaultEnabled: %t, LogLevel: %s, TracingEnabled: %t, "+
+			"TCPEnabled: %t, TCPPort: %d, TLSPassthroughEnabled: %t, TLSPassthroughPort: %d}",
+		c.HTTPPort, c.GRPCPort, c.MetricsPort, c.HealthPort,
+		c.TLSEnabled, c.VaultEnabled, c.LogLevel, c.TracingEnabled,
+		c.TCPEnabled, c.TCPPort, c.TLSPassthroughEnabled, c.TLSPassthroughPort,
 	)
 }

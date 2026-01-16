@@ -34,7 +34,8 @@ func NewExponentialBackoff(initial, maxDuration time.Duration, factor, jitter fl
 		max:     maxDuration,
 		factor:  factor,
 		jitter:  jitter,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
+		//nolint:gosec,lll // weak random is acceptable for jitter timing
+		rand: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -199,7 +200,8 @@ func NewDecorrelatedJitterBackoff(initial, maxDuration time.Duration) *Decorrela
 	return &DecorrelatedJitterBackoff{
 		initial: initial,
 		max:     maxDuration,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
+		//nolint:gosec,lll // weak random is acceptable for jitter timing
+		rand:    rand.New(rand.NewSource(time.Now().UnixNano())),
 		current: initial,
 	}
 }
@@ -359,7 +361,8 @@ func NewFullJitterBackoff(initial, maxDuration time.Duration) *FullJitterBackoff
 	return &FullJitterBackoff{
 		initial: initial,
 		max:     maxDuration,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
+		//nolint:gosec,lll // weak random is acceptable for jitter timing
+		rand: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -405,7 +408,8 @@ func NewEqualJitterBackoff(initial, maxDuration time.Duration) *EqualJitterBacko
 	return &EqualJitterBackoff{
 		initial: initial,
 		max:     maxDuration,
-		rand:    rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // weak random is acceptable for jitter timing
+		//nolint:gosec,lll // weak random is acceptable for jitter timing
+		rand: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 

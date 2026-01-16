@@ -7,6 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestDefaultRequeueConfig(t *testing.T) {
@@ -435,10 +439,131 @@ func TestAddJitter(t *testing.T) {
 }
 
 func TestResourceKey(t *testing.T) {
-	// This test would require a mock client.Object
-	// For now, we just verify the function exists and can be called
-	// The actual implementation uses client.ObjectKeyFromObject
+	tests := []struct {
+		name      string
+		namespace string
+		objName   string
+		expected  string
+	}{
+		{
+			name:      "resource in default namespace",
+			namespace: "default",
+			objName:   "my-resource",
+			expected:  "default/my-resource",
+		},
+		{
+			name:      "resource in custom namespace",
+			namespace: "production",
+			objName:   "api-gateway",
+			expected:  "production/api-gateway",
+		},
+		{
+			name:      "resource with empty namespace",
+			namespace: "",
+			objName:   "cluster-resource",
+			expected:  "/cluster-resource",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a simple object that implements client.Object
+			obj := &testObject{
+				namespace: tt.namespace,
+				name:      tt.objName,
+			}
+			result := ResourceKey(obj)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }
+
+func TestRecordRequeueInterval(t *testing.T) {
+	tests := []struct {
+		name      string
+		errorType ErrorType
+		interval  time.Duration
+	}{
+		{
+			name:      "transient error interval",
+			errorType: ErrorTypeTransient,
+			interval:  10 * time.Second,
+		},
+		{
+			name:      "dependency error interval",
+			errorType: ErrorTypeDependency,
+			interval:  30 * time.Second,
+		},
+		{
+			name:      "validation error interval",
+			errorType: ErrorTypeValidation,
+			interval:  5 * time.Minute,
+		},
+		{
+			name:      "permanent error interval",
+			errorType: ErrorTypePermanent,
+			interval:  10 * time.Minute,
+		},
+		{
+			name:      "internal error interval",
+			errorType: ErrorTypeInternal,
+			interval:  15 * time.Second,
+		},
+		{
+			name:      "zero interval",
+			errorType: ErrorTypeTransient,
+			interval:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// RecordRequeueInterval should not panic
+			assert.NotPanics(t, func() {
+				RecordRequeueInterval(tt.errorType, tt.interval)
+			})
+		})
+	}
+}
+
+// testObject is a minimal implementation of client.Object for testing.
+type testObject struct {
+	namespace string
+	name      string
+}
+
+func (t *testObject) GetNamespace() string                                       { return t.namespace }
+func (t *testObject) SetNamespace(namespace string)                              { t.namespace = namespace }
+func (t *testObject) GetName() string                                            { return t.name }
+func (t *testObject) SetName(name string)                                        { t.name = name }
+func (t *testObject) GetGenerateName() string                                    { return "" }
+func (t *testObject) SetGenerateName(name string)                                {}
+func (t *testObject) GetUID() types.UID                                          { return "" }
+func (t *testObject) SetUID(uid types.UID)                                       {}
+func (t *testObject) GetResourceVersion() string                                 { return "" }
+func (t *testObject) SetResourceVersion(version string)                          {}
+func (t *testObject) GetGeneration() int64                                       { return 0 }
+func (t *testObject) SetGeneration(generation int64)                             {}
+func (t *testObject) GetSelfLink() string                                        { return "" }
+func (t *testObject) SetSelfLink(selfLink string)                                {}
+func (t *testObject) GetCreationTimestamp() metav1.Time                          { return metav1.Time{} }
+func (t *testObject) SetCreationTimestamp(timestamp metav1.Time)                 {}
+func (t *testObject) GetDeletionTimestamp() *metav1.Time                         { return nil }
+func (t *testObject) SetDeletionTimestamp(timestamp *metav1.Time)                {}
+func (t *testObject) GetDeletionGracePeriodSeconds() *int64                      { return nil }
+func (t *testObject) SetDeletionGracePeriodSeconds(*int64)                       {}
+func (t *testObject) GetLabels() map[string]string                               { return nil }
+func (t *testObject) SetLabels(labels map[string]string)                         {}
+func (t *testObject) GetAnnotations() map[string]string                          { return nil }
+func (t *testObject) SetAnnotations(annotations map[string]string)               {}
+func (t *testObject) GetFinalizers() []string                                    { return nil }
+func (t *testObject) SetFinalizers(finalizers []string)                          {}
+func (t *testObject) GetOwnerReferences() []metav1.OwnerReference                { return nil }
+func (t *testObject) SetOwnerReferences([]metav1.OwnerReference)                 {}
+func (t *testObject) GetManagedFields() []metav1.ManagedFieldsEntry              { return nil }
+func (t *testObject) SetManagedFields(managedFields []metav1.ManagedFieldsEntry) {}
+func (t *testObject) GetObjectKind() schema.ObjectKind                           { return nil }
+func (t *testObject) DeepCopyObject() runtime.Object                             { return nil }
 
 func TestRequeueStrategy_ForDependencyErrorWithBackoff(t *testing.T) {
 	config := &RequeueConfig{

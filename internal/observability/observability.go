@@ -296,7 +296,11 @@ func (o *Observability) RuntimeCollector() *metrics.RuntimeCollector {
 }
 
 // RecordHTTPRequest records an HTTP request metric.
-func (o *Observability) RecordHTTPRequest(method, path, statusCode string, duration float64, requestSize, responseSize int64) {
+func (o *Observability) RecordHTTPRequest(
+	method, path, statusCode string,
+	duration float64,
+	requestSize, responseSize int64,
+) {
 	metrics.RecordHTTPRequest(method, path, statusCode, duration, requestSize, responseSize)
 }
 

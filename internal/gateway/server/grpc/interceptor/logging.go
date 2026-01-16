@@ -36,61 +36,82 @@ func UnaryLoggingInterceptorWithConfig(config LoggingConfig) grpc.UnaryServerInt
 		config.Logger = zap.NewNop()
 	}
 
-	skipMethods := make(map[string]bool)
-	for _, method := range config.SkipMethods {
-		skipMethods[method] = true
-	}
+	skipMethods := buildSkipMethodsMap(config.SkipMethods)
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		// Skip logging for certain methods
-		if skipMethods[info.FullMethod] {
-			return handler(ctx, req)
-		}
-
-		// Skip health check endpoints if configured
-		if config.SkipHealthCheck && isHealthCheckMethod(info.FullMethod) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		if shouldSkipUnaryLogging(skipMethods, info.FullMethod, config.SkipHealthCheck) {
 			return handler(ctx, req)
 		}
 
 		start := time.Now()
-
-		// Get or generate request ID
 		requestID := getOrGenerateRequestID(ctx)
-
-		// Add request ID to outgoing context
 		ctx = metadata.AppendToOutgoingContext(ctx, RequestIDKey, requestID)
 
-		// Process request
 		resp, err := handler(ctx, req)
 
-		// Calculate latency
-		latency := time.Since(start)
-
-		// Get status code
-		st, _ := status.FromError(err)
-
-		// Build log fields
-		fields := []zap.Field{
-			zap.String("requestID", requestID),
-			zap.String("method", info.FullMethod),
-			zap.Duration("latency", latency),
-			zap.String("grpcCode", st.Code().String()),
-		}
-
-		// Add peer info if available
-		if peerAddr := getPeerAddress(ctx); peerAddr != "" {
-			fields = append(fields, zap.String("peer", peerAddr))
-		}
-
-		// Log based on error
-		if err != nil {
-			fields = append(fields, zap.Error(err))
-			config.Logger.Error("gRPC request failed", fields...)
-		} else {
-			config.Logger.Info("gRPC request completed", fields...)
-		}
+		fields := buildUnaryLogFields(requestID, info.FullMethod, time.Since(start), ctx, err)
+		logUnaryResult(config.Logger, err, fields)
 
 		return resp, err
+	}
+}
+
+// buildSkipMethodsMap creates a map of methods to skip for logging.
+func buildSkipMethodsMap(methods []string) map[string]bool {
+	skipMethods := make(map[string]bool)
+	for _, method := range methods {
+		skipMethods[method] = true
+	}
+	return skipMethods
+}
+
+// shouldSkipUnaryLogging determines if logging should be skipped for the unary call.
+func shouldSkipUnaryLogging(skipMethods map[string]bool, method string, skipHealthCheck bool) bool {
+	if skipMethods[method] {
+		return true
+	}
+	if skipHealthCheck && isHealthCheckMethod(method) {
+		return true
+	}
+	return false
+}
+
+// buildUnaryLogFields constructs log fields for unary request logging.
+func buildUnaryLogFields(
+	requestID string,
+	method string,
+	latency time.Duration,
+	ctx context.Context,
+	err error,
+) []zap.Field {
+	st, _ := status.FromError(err)
+
+	fields := []zap.Field{
+		zap.String("requestID", requestID),
+		zap.String("method", method),
+		zap.Duration("latency", latency),
+		zap.String("grpcCode", st.Code().String()),
+	}
+
+	if peerAddr := getPeerAddress(ctx); peerAddr != "" {
+		fields = append(fields, zap.String("peer", peerAddr))
+	}
+
+	return fields
+}
+
+// logUnaryResult logs the unary request result based on error status.
+func logUnaryResult(logger *zap.Logger, err error, fields []zap.Field) {
+	if err != nil {
+		fields = append(fields, zap.Error(err))
+		logger.Error("gRPC request failed", fields...)
+	} else {
+		logger.Info("gRPC request completed", fields...)
 	}
 }
 
@@ -105,69 +126,74 @@ func StreamLoggingInterceptorWithConfig(config LoggingConfig) grpc.StreamServerI
 		config.Logger = zap.NewNop()
 	}
 
-	skipMethods := make(map[string]bool)
-	for _, method := range config.SkipMethods {
-		skipMethods[method] = true
-	}
+	skipMethods := buildSkipMethodsMap(config.SkipMethods)
 
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		// Skip logging for certain methods
-		if skipMethods[info.FullMethod] {
-			return handler(srv, ss)
-		}
-
-		// Skip health check endpoints if configured
-		if config.SkipHealthCheck && isHealthCheckMethod(info.FullMethod) {
+		if shouldSkipStreamLogging(skipMethods, info.FullMethod, config.SkipHealthCheck) {
 			return handler(srv, ss)
 		}
 
 		start := time.Now()
 		ctx := ss.Context()
-
-		// Get or generate request ID
 		requestID := getOrGenerateRequestID(ctx)
 
-		// Wrap the stream to track messages
-		wrappedStream := &loggingServerStream{
-			ServerStream: ss,
-			requestID:    requestID,
-		}
-
-		// Process stream
+		wrappedStream := &loggingServerStream{ServerStream: ss, requestID: requestID}
 		err := handler(srv, wrappedStream)
 
-		// Calculate latency
-		latency := time.Since(start)
-
-		// Get status code
-		st, _ := status.FromError(err)
-
-		// Build log fields
-		fields := []zap.Field{
-			zap.String("requestID", requestID),
-			zap.String("method", info.FullMethod),
-			zap.Duration("latency", latency),
-			zap.String("grpcCode", st.Code().String()),
-			zap.Bool("clientStream", info.IsClientStream),
-			zap.Bool("serverStream", info.IsServerStream),
-			zap.Int64("recvMsgs", wrappedStream.recvCount),
-			zap.Int64("sentMsgs", wrappedStream.sentCount),
-		}
-
-		// Add peer info if available
-		if peerAddr := getPeerAddress(ctx); peerAddr != "" {
-			fields = append(fields, zap.String("peer", peerAddr))
-		}
-
-		// Log based on error
-		if err != nil {
-			fields = append(fields, zap.Error(err))
-			config.Logger.Error("gRPC stream failed", fields...)
-		} else {
-			config.Logger.Info("gRPC stream completed", fields...)
-		}
+		fields := buildStreamLogFields(requestID, info, wrappedStream, time.Since(start), ctx, err)
+		logStreamResult(config.Logger, err, fields)
 
 		return err
+	}
+}
+
+// shouldSkipStreamLogging determines if logging should be skipped for the stream.
+func shouldSkipStreamLogging(skipMethods map[string]bool, method string, skipHealthCheck bool) bool {
+	if skipMethods[method] {
+		return true
+	}
+	if skipHealthCheck && isHealthCheckMethod(method) {
+		return true
+	}
+	return false
+}
+
+// buildStreamLogFields constructs log fields for stream logging.
+func buildStreamLogFields(
+	requestID string,
+	info *grpc.StreamServerInfo,
+	wrappedStream *loggingServerStream,
+	latency time.Duration,
+	ctx context.Context,
+	err error,
+) []zap.Field {
+	st, _ := status.FromError(err)
+
+	fields := []zap.Field{
+		zap.String("requestID", requestID),
+		zap.String("method", info.FullMethod),
+		zap.Duration("latency", latency),
+		zap.String("grpcCode", st.Code().String()),
+		zap.Bool("clientStream", info.IsClientStream),
+		zap.Bool("serverStream", info.IsServerStream),
+		zap.Int64("recvMsgs", wrappedStream.recvCount),
+		zap.Int64("sentMsgs", wrappedStream.sentCount),
+	}
+
+	if peerAddr := getPeerAddress(ctx); peerAddr != "" {
+		fields = append(fields, zap.String("peer", peerAddr))
+	}
+
+	return fields
+}
+
+// logStreamResult logs the stream result based on error status.
+func logStreamResult(logger *zap.Logger, err error, fields []zap.Field) {
+	if err != nil {
+		fields = append(fields, zap.Error(err))
+		logger.Error("gRPC stream failed", fields...)
+	} else {
+		logger.Info("gRPC stream completed", fields...)
 	}
 }
 

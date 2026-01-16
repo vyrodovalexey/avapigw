@@ -75,13 +75,18 @@ func ExtendedSecurityHeaders() gin.HandlerFunc {
 	return ExtendedSecurityHeadersWithConfig(DefaultExtendedSecurityConfig())
 }
 
-// ExtendedSecurityHeadersWithConfig returns an extended security headers middleware with custom configuration.
-func ExtendedSecurityHeadersWithConfig(config *ExtendedSecurityConfig) gin.HandlerFunc {
+// securityHeadersContext holds pre-computed values for security headers middleware.
+type securityHeadersContext struct {
+	config    *ExtendedSecurityConfig
+	hstsValue string
+}
+
+// newSecurityHeadersContext creates and initializes the security headers context.
+func newSecurityHeadersContext(config *ExtendedSecurityConfig) *securityHeadersContext {
 	if config == nil {
 		config = DefaultExtendedSecurityConfig()
 	}
 
-	// Pre-compute HSTS header value
 	var hstsValue string
 	if config.HSTSEnabled {
 		hstsValue = fmt.Sprintf("max-age=%d", config.HSTSMaxAge)
@@ -93,71 +98,89 @@ func ExtendedSecurityHeadersWithConfig(config *ExtendedSecurityConfig) gin.Handl
 		}
 	}
 
+	return &securityHeadersContext{
+		config:    config,
+		hstsValue: hstsValue,
+	}
+}
+
+// setHSTSHeaders sets HTTP Strict Transport Security headers.
+func (ctx *securityHeadersContext) setHSTSHeaders(c *gin.Context) {
+	if ctx.config.HSTSEnabled && ctx.hstsValue != "" {
+		c.Header("Strict-Transport-Security", ctx.hstsValue)
+	}
+}
+
+// setCSPHeaders sets Content Security Policy headers.
+func (ctx *securityHeadersContext) setCSPHeaders(c *gin.Context) {
+	if ctx.config.ContentSecurityPolicy != "" {
+		c.Header("Content-Security-Policy", ctx.config.ContentSecurityPolicy)
+	}
+}
+
+// setFrameAndXSSHeaders sets X-Frame-Options, X-Content-Type-Options, and X-XSS-Protection headers.
+func (ctx *securityHeadersContext) setFrameAndXSSHeaders(c *gin.Context) {
+	if ctx.config.XFrameOptions != "" {
+		c.Header("X-Frame-Options", ctx.config.XFrameOptions)
+	}
+	if ctx.config.XContentTypeOptions != "" {
+		c.Header("X-Content-Type-Options", ctx.config.XContentTypeOptions)
+	}
+	if ctx.config.XXSSProtection != "" {
+		c.Header("X-XSS-Protection", ctx.config.XXSSProtection)
+	}
+}
+
+// setPolicyHeaders sets Referrer-Policy and Permissions-Policy headers.
+func (ctx *securityHeadersContext) setPolicyHeaders(c *gin.Context) {
+	if ctx.config.ReferrerPolicy != "" {
+		c.Header("Referrer-Policy", ctx.config.ReferrerPolicy)
+	}
+	if ctx.config.PermissionsPolicy != "" {
+		c.Header("Permissions-Policy", ctx.config.PermissionsPolicy)
+	}
+}
+
+// setCrossOriginHeaders sets Cross-Origin-* headers.
+func (ctx *securityHeadersContext) setCrossOriginHeaders(c *gin.Context) {
+	if ctx.config.CrossOriginEmbedderPolicy != "" {
+		c.Header("Cross-Origin-Embedder-Policy", ctx.config.CrossOriginEmbedderPolicy)
+	}
+	if ctx.config.CrossOriginOpenerPolicy != "" {
+		c.Header("Cross-Origin-Opener-Policy", ctx.config.CrossOriginOpenerPolicy)
+	}
+	if ctx.config.CrossOriginResourcePolicy != "" {
+		c.Header("Cross-Origin-Resource-Policy", ctx.config.CrossOriginResourcePolicy)
+	}
+}
+
+// setCacheAndCustomHeaders sets Cache-Control and custom headers.
+func (ctx *securityHeadersContext) setCacheAndCustomHeaders(c *gin.Context) {
+	if ctx.config.CacheControl != "" {
+		c.Header("Cache-Control", ctx.config.CacheControl)
+	}
+	for name, value := range ctx.config.CustomHeaders {
+		c.Header(name, value)
+	}
+}
+
+// ExtendedSecurityHeadersWithConfig returns an extended security headers middleware with custom configuration.
+func ExtendedSecurityHeadersWithConfig(config *ExtendedSecurityConfig) gin.HandlerFunc {
+	ctx := newSecurityHeadersContext(config)
+
 	return func(c *gin.Context) {
 		// Remove specified headers
-		for _, header := range config.RemoveHeaders {
+		for _, header := range ctx.config.RemoveHeaders {
 			c.Header(header, "")
 		}
 
-		// HSTS
-		if config.HSTSEnabled && hstsValue != "" {
-			c.Header("Strict-Transport-Security", hstsValue)
-		}
-
-		// Content Security Policy
-		if config.ContentSecurityPolicy != "" {
-			c.Header("Content-Security-Policy", config.ContentSecurityPolicy)
-		}
-
-		// X-Frame-Options
-		if config.XFrameOptions != "" {
-			c.Header("X-Frame-Options", config.XFrameOptions)
-		}
-
-		// X-Content-Type-Options
-		if config.XContentTypeOptions != "" {
-			c.Header("X-Content-Type-Options", config.XContentTypeOptions)
-		}
-
-		// X-XSS-Protection
-		if config.XXSSProtection != "" {
-			c.Header("X-XSS-Protection", config.XXSSProtection)
-		}
-
-		// Referrer-Policy
-		if config.ReferrerPolicy != "" {
-			c.Header("Referrer-Policy", config.ReferrerPolicy)
-		}
-
-		// Permissions-Policy
-		if config.PermissionsPolicy != "" {
-			c.Header("Permissions-Policy", config.PermissionsPolicy)
-		}
-
-		// Cross-Origin-Embedder-Policy
-		if config.CrossOriginEmbedderPolicy != "" {
-			c.Header("Cross-Origin-Embedder-Policy", config.CrossOriginEmbedderPolicy)
-		}
-
-		// Cross-Origin-Opener-Policy
-		if config.CrossOriginOpenerPolicy != "" {
-			c.Header("Cross-Origin-Opener-Policy", config.CrossOriginOpenerPolicy)
-		}
-
-		// Cross-Origin-Resource-Policy
-		if config.CrossOriginResourcePolicy != "" {
-			c.Header("Cross-Origin-Resource-Policy", config.CrossOriginResourcePolicy)
-		}
-
-		// Cache-Control
-		if config.CacheControl != "" {
-			c.Header("Cache-Control", config.CacheControl)
-		}
-
-		// Custom headers
-		for name, value := range config.CustomHeaders {
-			c.Header(name, value)
-		}
+		// Set all security headers using helper methods
+		ctx.setHSTSHeaders(c)
+		ctx.setCSPHeaders(c)
+		ctx.setFrameAndXSSHeaders(c)
+		ctx.setPolicyHeaders(c)
+		ctx.setCrossOriginHeaders(c)
+		ctx.setCacheAndCustomHeaders(c)
 
 		c.Next()
 	}

@@ -404,6 +404,22 @@ type RateLimitPolicyStatus struct {
 	Status `json:",inline"`
 }
 
+// GetTargetRef returns the target reference for the policy.
+// This implements the PolicyWithTargetRef interface.
+func (p *RateLimitPolicy) GetTargetRef() TargetRef {
+	return p.Spec.TargetRef
+}
+
+// GetPolicies returns the list of RateLimitPolicy items.
+// This implements the PolicyList interface for watch handlers.
+func (l *RateLimitPolicyList) GetPolicies() []*RateLimitPolicy {
+	policies := make([]*RateLimitPolicy, len(l.Items))
+	for i := range l.Items {
+		policies[i] = &l.Items[i]
+	}
+	return policies
+}
+
 func init() {
 	SchemeBuilder.Register(&RateLimitPolicy{}, &RateLimitPolicyList{})
 }

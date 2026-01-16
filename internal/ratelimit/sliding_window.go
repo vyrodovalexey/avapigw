@@ -46,7 +46,13 @@ func NewSlidingWindowLimiter(s store.Store, limit int, window time.Duration, log
 }
 
 // NewSlidingWindowLimiterWithPrecision creates a new sliding window rate limiter with custom precision.
-func NewSlidingWindowLimiterWithPrecision(s store.Store, limit int, window time.Duration, precision int, logger *zap.Logger) *SlidingWindowLimiter {
+func NewSlidingWindowLimiterWithPrecision(
+	s store.Store,
+	limit int,
+	window time.Duration,
+	precision int,
+	logger *zap.Logger,
+) *SlidingWindowLimiter {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -80,69 +86,16 @@ func (l *SlidingWindowLimiter) AllowN(ctx context.Context, key string, n int) (*
 // allowLocal performs rate limiting using in-memory storage.
 func (l *SlidingWindowLimiter) allowLocal(key string, n int) (*Result, error) {
 	now := time.Now()
-	windowStart := now.Add(-l.window)
-
-	// Get or create window state
-	value, _ := l.windows.LoadOrStore(key, &windowState{
-		requests: make([]time.Time, 0),
-	})
-	ws := value.(*windowState)
+	ws := l.getOrCreateWindowState(key)
 
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
-	// Remove old requests outside the window
-	validRequests := make([]time.Time, 0, len(ws.requests))
-	for _, t := range ws.requests {
-		if t.After(windowStart) {
-			validRequests = append(validRequests, t)
-		}
-	}
-	ws.requests = validRequests
-
-	// Check if we can allow the request
-	currentCount := len(ws.requests)
-	allowed := currentCount+n <= l.limit
-
-	if allowed {
-		// Add new requests
-		for i := 0; i < n; i++ {
-			ws.requests = append(ws.requests, now)
-		}
-		currentCount += n
-	}
-
-	// Calculate remaining
-	remaining := l.limit - currentCount
-	if remaining < 0 {
-		remaining = 0
-	}
-
-	// Calculate reset time (when oldest request expires)
-	var resetAfter time.Duration
-	if len(ws.requests) > 0 {
-		oldestRequest := ws.requests[0]
-		resetAfter = oldestRequest.Add(l.window).Sub(now)
-		if resetAfter < 0 {
-			resetAfter = 0
-		}
-	} else {
-		resetAfter = l.window
-	}
-
-	// Calculate retry time
-	var retryAfter time.Duration
-	if !allowed && len(ws.requests) > 0 {
-		// Time until enough requests expire
-		excessRequests := currentCount + n - l.limit
-		if excessRequests > 0 && excessRequests <= len(ws.requests) {
-			oldestToExpire := ws.requests[excessRequests-1]
-			retryAfter = oldestToExpire.Add(l.window).Sub(now)
-			if retryAfter < 0 {
-				retryAfter = 0
-			}
-		}
-	}
+	l.cleanupOldRequests(ws, now)
+	currentCount, allowed := l.processLocalRequest(ws, now, n)
+	remaining := l.calculateRemaining(currentCount)
+	resetAfter := l.calculateResetAfter(ws, now)
+	retryAfter := l.calculateRetryAfter(ws, now, currentCount, n, allowed)
 
 	return &Result{
 		Allowed:    allowed,
@@ -151,6 +104,89 @@ func (l *SlidingWindowLimiter) allowLocal(key string, n int) (*Result, error) {
 		ResetAfter: resetAfter,
 		RetryAfter: retryAfter,
 	}, nil
+}
+
+// getOrCreateWindowState retrieves or creates a window state for the given key.
+func (l *SlidingWindowLimiter) getOrCreateWindowState(key string) *windowState {
+	value, _ := l.windows.LoadOrStore(key, &windowState{
+		requests: make([]time.Time, 0),
+	})
+	return value.(*windowState)
+}
+
+// cleanupOldRequests removes requests outside the current window.
+func (l *SlidingWindowLimiter) cleanupOldRequests(ws *windowState, now time.Time) {
+	windowStart := now.Add(-l.window)
+	validRequests := make([]time.Time, 0, len(ws.requests))
+	for _, t := range ws.requests {
+		if t.After(windowStart) {
+			validRequests = append(validRequests, t)
+		}
+	}
+	ws.requests = validRequests
+}
+
+// processLocalRequest checks if request is allowed and updates state.
+// Returns current count and whether the request was allowed.
+func (l *SlidingWindowLimiter) processLocalRequest(ws *windowState, now time.Time, n int) (int, bool) {
+	currentCount := len(ws.requests)
+	allowed := currentCount+n <= l.limit
+
+	if allowed {
+		for i := 0; i < n; i++ {
+			ws.requests = append(ws.requests, now)
+		}
+		currentCount += n
+	}
+
+	return currentCount, allowed
+}
+
+// calculateRemaining calculates remaining requests in the window.
+func (l *SlidingWindowLimiter) calculateRemaining(currentCount int) int {
+	remaining := l.limit - currentCount
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining
+}
+
+// calculateResetAfter calculates time until the window resets.
+func (l *SlidingWindowLimiter) calculateResetAfter(ws *windowState, now time.Time) time.Duration {
+	if len(ws.requests) == 0 {
+		return l.window
+	}
+
+	oldestRequest := ws.requests[0]
+	resetAfter := oldestRequest.Add(l.window).Sub(now)
+	if resetAfter < 0 {
+		resetAfter = 0
+	}
+	return resetAfter
+}
+
+// calculateRetryAfter calculates time until retry is possible.
+func (l *SlidingWindowLimiter) calculateRetryAfter(
+	ws *windowState,
+	now time.Time,
+	currentCount, n int,
+	allowed bool,
+) time.Duration {
+	if allowed || len(ws.requests) == 0 {
+		return 0
+	}
+
+	excessRequests := currentCount + n - l.limit
+	if excessRequests <= 0 || excessRequests > len(ws.requests) {
+		return 0
+	}
+
+	oldestToExpire := ws.requests[excessRequests-1]
+	retryAfter := oldestToExpire.Add(l.window).Sub(now)
+	if retryAfter < 0 {
+		retryAfter = 0
+	}
+	return retryAfter
 }
 
 // allowDistributed performs rate limiting using distributed storage.

@@ -31,7 +31,12 @@ func UnaryRecoveryInterceptorWithConfig(config RecoveryConfig) grpc.UnaryServerI
 		config.Logger = zap.NewNop()
 	}
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (resp interface{}, err error) {
 		defer func() {
 			if p := recover(); p != nil {
 				err = handlePanic(ctx, p, info.FullMethod, config)
@@ -56,7 +61,12 @@ func StreamRecoveryInterceptorWithConfig(config RecoveryConfig) grpc.StreamServe
 		config.Logger = zap.NewNop()
 	}
 
-	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	return func(
+		srv interface{},
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) (err error) {
 		defer func() {
 			if p := recover(); p != nil {
 				err = handlePanic(ss.Context(), p, info.FullMethod, config)

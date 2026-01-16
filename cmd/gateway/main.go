@@ -70,8 +70,48 @@ func (s *configState) Update(cfg *config.Config, localCfg *config.LocalConfig) {
 	s.localConfig = localCfg
 }
 
+// serverComponents holds all server instances for the gateway.
+type serverComponents struct {
+	httpServer           *httpserver.Server
+	grpcServer           *grpcserver.Server
+	tcpServer            *tcpserver.Server
+	tlsPassthroughServer *tlsserver.Server
+	configWatcher        *config.ConfigWatcher
+	listenerMgr          *listener.Manager
+	backendMgr           *backend.Manager
+	healthHandler        *health.Handler
+}
+
 func main() {
-	// Load configuration with local config support
+	cfg, state, configFilePath, logger := initializeGateway()
+	defer func() {
+		_ = logger.Sync()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := setupSignalHandler()
+
+	components := createServerComponents(ctx, cfg, state, configFilePath, logger, cancel)
+
+	g, gCtx := errgroup.WithContext(ctx)
+	startAllServers(g, gCtx, cfg, components, state, configFilePath, logger)
+
+	waitForShutdownSignal(sigCh, gCtx, logger)
+
+	performGracefulShutdown(cfg, components, logger)
+
+	cancel()
+	if err := g.Wait(); err != nil {
+		logger.Error("error during shutdown", zap.Error(err))
+	}
+
+	logger.Info("API Gateway shutdown complete")
+}
+
+// initializeGateway loads configuration and initializes the logger.
+func initializeGateway() (*config.Config, *configState, string, *zap.Logger) {
 	loader := config.NewLoader()
 	cfg, err := loader.LoadConfig(os.Args[1:])
 	if err != nil {
@@ -79,25 +119,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get local config if YAML file was specified
 	localCfg := loader.GetLocalConfig()
 	configFilePath := loader.GetConfigFilePath()
 
-	// Initialize config state for hot-reload support
 	state := &configState{
 		cfg:         cfg,
 		localConfig: localCfg,
 	}
 
-	// Initialize logger
 	logger, err := newLogger(cfg.LogLevel, cfg.LogFormat)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
-	defer func() {
-		_ = logger.Sync() // Explicitly ignore error as we're shutting down
-	}()
 
 	logger.Info("starting API Gateway",
 		zap.Int("httpPort", cfg.HTTPPort),
@@ -107,32 +141,51 @@ func main() {
 		zap.String("configFile", configFilePath),
 	)
 
-	// Create context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	return cfg, state, configFilePath, logger
+}
 
-	// Handle shutdown signals
+// setupSignalHandler sets up OS signal handling for graceful shutdown.
+func setupSignalHandler() chan os.Signal {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	return sigCh
+}
 
-	// Create listener manager
+// createServerComponents creates all server components.
+func createServerComponents(
+	ctx context.Context,
+	cfg *config.Config,
+	_ *configState,
+	_ string,
+	logger *zap.Logger,
+	cancel context.CancelFunc,
+) *serverComponents {
 	listenerMgr := listener.NewManager(logger)
 
-	// Create and start backend manager
 	backendMgr := backend.NewManager(logger)
 	if err := backendMgr.Start(ctx); err != nil {
 		logger.Error("failed to start backend manager", zap.Error(err))
-		cancel()   // Ensure context cleanup before exit
+		cancel()
 		os.Exit(1) //nolint:gocritic // exitAfterDefer: cancel() called explicitly above
 	}
 
-	// Create health handler with configurable timeouts
 	healthHandler := health.NewHandlerWithConfig(logger, &health.HandlerConfig{
 		ReadinessProbeTimeout: cfg.ReadinessProbeTimeout,
 		LivenessProbeTimeout:  cfg.LivenessProbeTimeout,
 	})
 
-	// Create HTTP server
+	httpServer := createHTTPServer(cfg, healthHandler, logger)
+
+	return &serverComponents{
+		httpServer:    httpServer,
+		listenerMgr:   listenerMgr,
+		backendMgr:    backendMgr,
+		healthHandler: healthHandler,
+	}
+}
+
+// createHTTPServer creates and configures the HTTP server.
+func createHTTPServer(cfg *config.Config, healthHandler *health.Handler, logger *zap.Logger) *httpserver.Server {
 	httpServer := httpserver.NewServer(&httpserver.ServerConfig{
 		Port:         cfg.HTTPPort,
 		ReadTimeout:  cfg.ReadTimeout,
@@ -140,219 +193,290 @@ func main() {
 		IdleTimeout:  cfg.IdleTimeout,
 	}, logger)
 
-	// Setup middleware
 	setupMiddleware(httpServer, cfg, logger)
-
-	// Setup health check routes on the main server
 	healthHandler.RegisterRoutes(httpServer.GetEngine())
 
-	// Create error group for managing goroutines
-	g, gCtx := errgroup.WithContext(ctx)
+	return httpServer
+}
 
-	// Start HTTP server
+// startAllServers starts all server goroutines.
+func startAllServers(
+	g *errgroup.Group,
+	gCtx context.Context,
+	cfg *config.Config,
+	components *serverComponents,
+	state *configState,
+	configFilePath string,
+	logger *zap.Logger,
+) {
+	startCoreServers(g, gCtx, cfg, components, logger)
+	startOptionalServers(g, gCtx, cfg, components, state, configFilePath, logger)
+}
+
+// startCoreServers starts the core HTTP, health, and listener servers.
+func startCoreServers(
+	g *errgroup.Group,
+	gCtx context.Context,
+	cfg *config.Config,
+	components *serverComponents,
+	logger *zap.Logger,
+) {
 	g.Go(func() error {
 		logger.Info("starting HTTP server", zap.Int("port", cfg.HTTPPort))
-		if err := httpServer.Start(gCtx); err != nil && err != http.ErrServerClosed {
+		if err := components.httpServer.Start(gCtx); err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("HTTP server error: %w", err)
 		}
 		return nil
 	})
 
-	// Start health server on separate port
 	g.Go(func() error {
-		return startHealthServer(gCtx, cfg, healthHandler, logger)
+		return startHealthServer(gCtx, cfg, components.healthHandler, logger)
 	})
 
-	// Start metrics server if enabled
 	if cfg.MetricsEnabled {
 		g.Go(func() error {
 			return startMetricsServer(gCtx, cfg, logger)
 		})
 	}
 
-	// Start listener manager
 	g.Go(func() error {
-		if err := listenerMgr.Start(gCtx); err != nil {
+		if err := components.listenerMgr.Start(gCtx); err != nil {
 			return fmt.Errorf("listener manager error: %w", err)
 		}
 		return nil
 	})
+}
 
-	// Start config watcher if config file was specified
-	var configWatcher *config.ConfigWatcher
-	if configFilePath != "" {
-		configWatcher, err = config.NewConfigWatcher(
-			configFilePath,
-			func(newLocalCfg *config.LocalConfig) error {
-				// Handle configuration reload
-				logger.Info("configuration file changed, applying new configuration",
-					zap.String("path", configFilePath),
-				)
+// startOptionalServers starts optional servers based on configuration.
+func startOptionalServers(
+	g *errgroup.Group,
+	gCtx context.Context,
+	cfg *config.Config,
+	components *serverComponents,
+	state *configState,
+	configFilePath string,
+	logger *zap.Logger,
+) {
+	startConfigWatcher(g, gCtx, cfg, components, state, configFilePath, logger)
+	startGRPCServer(g, gCtx, cfg, components, logger)
+	startTCPServer(g, gCtx, cfg, components, logger)
+	startTLSPassthroughServer(g, gCtx, cfg, components, logger)
+}
 
-				// Merge new local config with base config
-				newCfg := config.MergeConfigs(config.DefaultConfig(), newLocalCfg)
+// startConfigWatcher starts the config watcher if a config file was specified.
+func startConfigWatcher(
+	g *errgroup.Group,
+	gCtx context.Context,
+	_ *config.Config,
+	components *serverComponents,
+	state *configState,
+	configFilePath string,
+	logger *zap.Logger,
+) {
+	if configFilePath == "" {
+		return
+	}
 
-				// Validate the new configuration
-				if err := newCfg.Validate(); err != nil {
-					logger.Error("new configuration validation failed",
-						zap.Error(err),
-					)
-					return err
-				}
+	watcher, err := config.NewConfigWatcher(
+		configFilePath,
+		createConfigReloadCallback(state, configFilePath, logger),
+		config.WithDebounce(500*time.Millisecond),
+		config.WithLogger(logger),
+	)
+	if err != nil {
+		logger.Error("failed to create config watcher", zap.Error(err))
+		return
+	}
 
-				// Update the config state
-				state.Update(newCfg, newLocalCfg)
+	components.configWatcher = watcher
+	g.Go(func() error {
+		logger.Info("starting config watcher", zap.String("path", configFilePath))
+		return watcher.Start(gCtx)
+	})
+}
 
-				// Log the reload
-				logger.Info("configuration reloaded successfully",
-					zap.Int("routes", len(newLocalCfg.Routes)),
-					zap.Int("backends", len(newLocalCfg.Backends)),
-					zap.Int("rateLimits", len(newLocalCfg.RateLimits)),
-					zap.Int("authPolicies", len(newLocalCfg.AuthPolicies)),
-				)
-
-				return nil
-			},
-			config.WithDebounce(500*time.Millisecond),
-			config.WithLogger(logger),
+// createConfigReloadCallback creates the callback function for config reloads.
+func createConfigReloadCallback(state *configState, configFilePath string, logger *zap.Logger) config.ConfigCallback {
+	return func(newLocalCfg *config.LocalConfig) error {
+		logger.Info("configuration file changed, applying new configuration",
+			zap.String("path", configFilePath),
 		)
-		if err != nil {
-			logger.Error("failed to create config watcher", zap.Error(err))
-			// Continue without hot-reload support
-		} else {
-			g.Go(func() error {
-				logger.Info("starting config watcher",
-					zap.String("path", configFilePath),
-				)
-				return configWatcher.Start(gCtx)
-			})
+
+		newCfg := config.MergeConfigs(config.DefaultConfig(), newLocalCfg)
+		if err := newCfg.Validate(); err != nil {
+			logger.Error("new configuration validation failed", zap.Error(err))
+			return err
 		}
+
+		state.Update(newCfg, newLocalCfg)
+		logger.Info("configuration reloaded successfully",
+			zap.Int("routes", len(newLocalCfg.Routes)),
+			zap.Int("backends", len(newLocalCfg.Backends)),
+			zap.Int("rateLimits", len(newLocalCfg.RateLimits)),
+			zap.Int("authPolicies", len(newLocalCfg.AuthPolicies)),
+		)
+		return nil
+	}
+}
+
+// startGRPCServer starts the gRPC server if enabled.
+func startGRPCServer(
+	g *errgroup.Group,
+	gCtx context.Context,
+	cfg *config.Config,
+	components *serverComponents,
+	logger *zap.Logger,
+) {
+	if !cfg.GRPCEnabled {
+		return
 	}
 
-	// Create and start gRPC server if enabled
-	var grpcServer *grpcserver.Server
-	if cfg.GRPCEnabled {
-		grpcServer = grpcserver.NewServer(&grpcserver.ServerConfig{
-			Port:                 cfg.GRPCPort,
-			MaxRecvMsgSize:       cfg.GRPCMaxRecvMsgSize,
-			MaxSendMsgSize:       cfg.GRPCMaxSendMsgSize,
-			MaxConcurrentStreams: safeIntToUint32(cfg.GRPCMaxConcurrentStreams),
-			EnableReflection:     cfg.GRPCEnableReflection,
-			EnableHealthCheck:    cfg.GRPCEnableHealthCheck,
-		}, backendMgr, logger)
+	components.grpcServer = grpcserver.NewServer(&grpcserver.ServerConfig{
+		Port:                 cfg.GRPCPort,
+		MaxRecvMsgSize:       cfg.GRPCMaxRecvMsgSize,
+		MaxSendMsgSize:       cfg.GRPCMaxSendMsgSize,
+		MaxConcurrentStreams: safeIntToUint32(cfg.GRPCMaxConcurrentStreams),
+		EnableReflection:     cfg.GRPCEnableReflection,
+		EnableHealthCheck:    cfg.GRPCEnableHealthCheck,
+	}, components.backendMgr, logger)
 
-		// Add interceptors
-		setupGRPCInterceptors(grpcServer, cfg, logger)
+	setupGRPCInterceptors(components.grpcServer, cfg, logger)
 
-		g.Go(func() error {
-			logger.Info("starting gRPC server", zap.Int("port", cfg.GRPCPort))
-			if err := grpcServer.Start(gCtx); err != nil {
-				return fmt.Errorf("gRPC server error: %w", err)
-			}
-			return nil
-		})
+	g.Go(func() error {
+		logger.Info("starting gRPC server", zap.Int("port", cfg.GRPCPort))
+		if err := components.grpcServer.Start(gCtx); err != nil {
+			return fmt.Errorf("gRPC server error: %w", err)
+		}
+		return nil
+	})
+}
+
+// startTCPServer starts the TCP server if enabled.
+func startTCPServer(
+	g *errgroup.Group,
+	gCtx context.Context,
+	cfg *config.Config,
+	components *serverComponents,
+	logger *zap.Logger,
+) {
+	if !cfg.TCPEnabled {
+		return
 	}
 
-	// Create and start TCP server if enabled
-	var tcpServer *tcpserver.Server
-	if cfg.TCPEnabled {
-		tcpServer = tcpserver.NewServerWithBackend(&tcpserver.ServerConfig{
-			Port:           cfg.TCPPort,
-			ReadTimeout:    cfg.TCPReadTimeout,
-			WriteTimeout:   cfg.TCPWriteTimeout,
-			IdleTimeout:    cfg.TCPIdleTimeout,
-			MaxConnections: cfg.TCPMaxConnections,
-		}, backendMgr, logger)
+	components.tcpServer = tcpserver.NewServerWithBackend(&tcpserver.ServerConfig{
+		Port:           cfg.TCPPort,
+		ReadTimeout:    cfg.TCPReadTimeout,
+		WriteTimeout:   cfg.TCPWriteTimeout,
+		IdleTimeout:    cfg.TCPIdleTimeout,
+		MaxConnections: cfg.TCPMaxConnections,
+	}, components.backendMgr, logger)
 
-		g.Go(func() error {
-			logger.Info("starting TCP server", zap.Int("port", cfg.TCPPort))
-			if err := tcpServer.Start(gCtx); err != nil {
-				return fmt.Errorf("TCP server error: %w", err)
-			}
-			return nil
-		})
+	g.Go(func() error {
+		logger.Info("starting TCP server", zap.Int("port", cfg.TCPPort))
+		if err := components.tcpServer.Start(gCtx); err != nil {
+			return fmt.Errorf("TCP server error: %w", err)
+		}
+		return nil
+	})
+}
+
+// startTLSPassthroughServer starts the TLS passthrough server if enabled.
+func startTLSPassthroughServer(
+	g *errgroup.Group,
+	gCtx context.Context,
+	cfg *config.Config,
+	components *serverComponents,
+	logger *zap.Logger,
+) {
+	if !cfg.TLSPassthroughEnabled {
+		return
 	}
 
-	// Create and start TLS passthrough server if enabled
-	var tlsPassthroughServer *tlsserver.Server
-	if cfg.TLSPassthroughEnabled {
-		tlsPassthroughServer = tlsserver.NewServerWithBackend(&tlsserver.ServerConfig{
-			Port:           cfg.TLSPassthroughPort,
-			Mode:           tlsserver.TLSModePassthrough,
-			ReadTimeout:    cfg.ReadTimeout,
-			WriteTimeout:   cfg.WriteTimeout,
-			IdleTimeout:    cfg.IdleTimeout,
-			MaxConnections: cfg.TCPMaxConnections,
-		}, backendMgr, logger)
+	components.tlsPassthroughServer = tlsserver.NewServerWithBackend(&tlsserver.ServerConfig{
+		Port:           cfg.TLSPassthroughPort,
+		Mode:           tlsserver.TLSModePassthrough,
+		ReadTimeout:    cfg.ReadTimeout,
+		WriteTimeout:   cfg.WriteTimeout,
+		IdleTimeout:    cfg.IdleTimeout,
+		MaxConnections: cfg.TCPMaxConnections,
+	}, components.backendMgr, logger)
 
-		g.Go(func() error {
-			logger.Info("starting TLS passthrough server", zap.Int("port", cfg.TLSPassthroughPort))
-			if err := tlsPassthroughServer.Start(gCtx); err != nil {
-				return fmt.Errorf("TLS passthrough server error: %w", err)
-			}
-			return nil
-		})
-	}
+	g.Go(func() error {
+		logger.Info("starting TLS passthrough server", zap.Int("port", cfg.TLSPassthroughPort))
+		if err := components.tlsPassthroughServer.Start(gCtx); err != nil {
+			return fmt.Errorf("TLS passthrough server error: %w", err)
+		}
+		return nil
+	})
+}
 
-	// Wait for shutdown signal
+// waitForShutdownSignal waits for a shutdown signal or context cancellation.
+func waitForShutdownSignal(sigCh chan os.Signal, gCtx context.Context, logger *zap.Logger) {
 	select {
 	case sig := <-sigCh:
 		logger.Info("received shutdown signal", zap.String("signal", sig.String()))
 	case <-gCtx.Done():
 		logger.Info("context cancelled")
 	}
+}
 
-	// Graceful shutdown
+// performGracefulShutdown performs graceful shutdown of all components.
+func performGracefulShutdown(cfg *config.Config, components *serverComponents, logger *zap.Logger) {
 	logger.Info("initiating graceful shutdown", zap.Duration("timeout", cfg.ShutdownTimeout))
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
 
-	// Stop HTTP server
-	if err := httpServer.Stop(shutdownCtx); err != nil {
+	stopServers(shutdownCtx, components, logger)
+	stopManagers(shutdownCtx, components, logger)
+	logFinalStats(components, logger)
+}
+
+// stopServers stops all server instances.
+func stopServers(ctx context.Context, components *serverComponents, logger *zap.Logger) {
+	if err := components.httpServer.Stop(ctx); err != nil {
 		logger.Error("error stopping HTTP server", zap.Error(err))
 	}
 
-	// Stop gRPC server if running
-	if grpcServer != nil {
-		if err := grpcServer.Stop(shutdownCtx); err != nil {
+	if components.grpcServer != nil {
+		if err := components.grpcServer.Stop(ctx); err != nil {
 			logger.Error("error stopping gRPC server", zap.Error(err))
 		}
 	}
 
-	// Stop TCP server if running
-	if tcpServer != nil {
-		if err := tcpServer.Stop(shutdownCtx); err != nil {
+	if components.tcpServer != nil {
+		if err := components.tcpServer.Stop(ctx); err != nil {
 			logger.Error("error stopping TCP server", zap.Error(err))
 		}
 	}
 
-	// Stop TLS passthrough server if running
-	if tlsPassthroughServer != nil {
-		if err := tlsPassthroughServer.Stop(shutdownCtx); err != nil {
+	if components.tlsPassthroughServer != nil {
+		if err := components.tlsPassthroughServer.Stop(ctx); err != nil {
 			logger.Error("error stopping TLS passthrough server", zap.Error(err))
 		}
 	}
 
-	// Stop config watcher if running
-	if configWatcher != nil {
-		if err := configWatcher.Stop(); err != nil {
+	if components.configWatcher != nil {
+		if err := components.configWatcher.Stop(); err != nil {
 			logger.Error("error stopping config watcher", zap.Error(err))
 		}
 	}
+}
 
-	// Stop listener manager
-	if err := listenerMgr.Stop(shutdownCtx); err != nil {
+// stopManagers stops the listener and backend managers.
+func stopManagers(ctx context.Context, components *serverComponents, logger *zap.Logger) {
+	if err := components.listenerMgr.Stop(ctx); err != nil {
 		logger.Error("error stopping listener manager", zap.Error(err))
 	}
 
-	// Stop backend manager
-	if err := backendMgr.Stop(shutdownCtx); err != nil {
+	if err := components.backendMgr.Stop(ctx); err != nil {
 		logger.Error("error stopping backend manager", zap.Error(err))
 	}
+}
 
-	// Log backend manager stats before shutdown
-	stats := backendMgr.Stats()
+// logFinalStats logs the final backend manager statistics.
+func logFinalStats(components *serverComponents, logger *zap.Logger) {
+	stats := components.backendMgr.Stats()
 	logger.Info("backend manager final stats",
 		zap.Int("totalBackends", stats.TotalBackends),
 		zap.Int("healthyBackends", stats.HealthyBackends),
@@ -360,16 +484,6 @@ func main() {
 		zap.Int("healthyEndpoints", stats.HealthyEndpoints),
 		zap.Duration("uptime", stats.Uptime),
 	)
-
-	// Cancel context to stop all goroutines
-	cancel()
-
-	// Wait for all goroutines to finish
-	if err := g.Wait(); err != nil {
-		logger.Error("error during shutdown", zap.Error(err))
-	}
-
-	logger.Info("API Gateway shutdown complete")
 }
 
 // newLogger creates a new zap logger with the specified level and format.

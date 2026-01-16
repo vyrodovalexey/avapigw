@@ -84,7 +84,10 @@ func PeekClientHello(conn net.Conn) (serverName string, clientHello []byte, err 
 
 // PeekClientHelloWithTimeout peeks at the ClientHello with a custom timeout.
 // Returns the server name, raw ClientHello bytes, and any error.
-func PeekClientHelloWithTimeout(conn net.Conn, timeout time.Duration) (serverName string, clientHello []byte, err error) {
+func PeekClientHelloWithTimeout(
+	conn net.Conn,
+	timeout time.Duration,
+) (serverName string, clientHello []byte, err error) {
 	// For peeking, we need to use a buffered connection
 	// Since we can't truly "peek" on a raw net.Conn, we read and return the data
 	// The caller is responsible for prepending this data when forwarding
@@ -93,82 +96,145 @@ func PeekClientHelloWithTimeout(conn net.Conn, timeout time.Duration) (serverNam
 
 // parseClientHello parses a TLS ClientHello message and extracts the SNI.
 func parseClientHello(data []byte) (string, error) {
+	if err := validateClientHelloHeader(data); err != nil {
+		return "", err
+	}
+
+	// Skip to extensions
+	pos, err := skipToExtensions(data)
+	if err != nil {
+		return "", err
+	}
+
+	// No extensions present
+	if pos < 0 {
+		return "", nil
+	}
+
+	return findSNIInExtensions(data, pos)
+}
+
+// validateClientHelloHeader validates the ClientHello message header.
+func validateClientHelloHeader(data []byte) error {
 	if len(data) < 4 {
-		return "", fmt.Errorf("handshake message too short")
+		return fmt.Errorf("handshake message too short")
 	}
 
 	// Check handshake type (should be ClientHello = 1)
 	if data[0] != 1 {
-		return "", fmt.Errorf("not a ClientHello message: type=%d", data[0])
+		return fmt.Errorf("not a ClientHello message: type=%d", data[0])
 	}
 
 	// Get handshake length
 	handshakeLength := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if len(data) < 4+handshakeLength {
-		return "", fmt.Errorf("handshake message truncated")
+		return fmt.Errorf("handshake message truncated")
 	}
 
-	// Skip to the ClientHello body
-	pos := 4
+	return nil
+}
 
-	// Skip client version (2 bytes)
-	if pos+2 > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing version")
-	}
-	pos += 2
+// skipToExtensions skips the fixed fields in ClientHello and returns the position of extensions.
+// Returns -1 if no extensions are present.
+func skipToExtensions(data []byte) (int, error) {
+	pos := 4 // Start after handshake header
 
-	// Skip random (32 bytes)
-	if pos+32 > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing random")
+	// Skip client version (2 bytes) and random (32 bytes)
+	pos, err := skipFixedFields(data, pos)
+	if err != nil {
+		return 0, err
 	}
-	pos += 32
 
-	// Skip session ID
-	if pos+1 > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing session ID length")
+	// Skip variable-length fields
+	pos, err = skipVariableFields(data, pos)
+	if err != nil {
+		return 0, err
 	}
-	sessionIDLength := int(data[pos])
-	pos++
-	if pos+sessionIDLength > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing session ID")
-	}
-	pos += sessionIDLength
-
-	// Skip cipher suites
-	if pos+2 > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing cipher suites length")
-	}
-	cipherSuitesLength := int(binary.BigEndian.Uint16(data[pos : pos+2]))
-	pos += 2
-	if pos+cipherSuitesLength > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing cipher suites")
-	}
-	pos += cipherSuitesLength
-
-	// Skip compression methods
-	if pos+1 > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing compression methods length")
-	}
-	compressionMethodsLength := int(data[pos])
-	pos++
-	if pos+compressionMethodsLength > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing compression methods")
-	}
-	pos += compressionMethodsLength
 
 	// Check if there are extensions
 	if pos+2 > len(data) {
-		return "", nil // No extensions, no SNI
+		return -1, nil // No extensions, no SNI
 	}
 
 	extensionsLength := int(binary.BigEndian.Uint16(data[pos : pos+2]))
 	pos += 2
 	if pos+extensionsLength > len(data) {
-		return "", fmt.Errorf("ClientHello too short: missing extensions")
+		return 0, fmt.Errorf("ClientHello too short: missing extensions")
 	}
 
-	// Parse extensions to find SNI
+	return pos, nil
+}
+
+// skipFixedFields skips the version and random fields.
+func skipFixedFields(data []byte, pos int) (int, error) {
+	// Skip client version (2 bytes)
+	if pos+2 > len(data) {
+		return 0, fmt.Errorf("ClientHello too short: missing version")
+	}
+	pos += 2
+
+	// Skip random (32 bytes)
+	if pos+32 > len(data) {
+		return 0, fmt.Errorf("ClientHello too short: missing random")
+	}
+	pos += 32
+
+	return pos, nil
+}
+
+// skipVariableFields skips session ID, cipher suites, and compression methods.
+func skipVariableFields(data []byte, pos int) (int, error) {
+	var err error
+
+	// Skip session ID
+	pos, err = skipLengthPrefixedField(data, pos, 1, "session ID")
+	if err != nil {
+		return 0, err
+	}
+
+	// Skip cipher suites
+	pos, err = skipLengthPrefixedField(data, pos, 2, "cipher suites")
+	if err != nil {
+		return 0, err
+	}
+
+	// Skip compression methods
+	pos, err = skipLengthPrefixedField(data, pos, 1, "compression methods")
+	if err != nil {
+		return 0, err
+	}
+
+	return pos, nil
+}
+
+// skipLengthPrefixedField skips a field with a length prefix.
+func skipLengthPrefixedField(data []byte, pos, lengthBytes int, fieldName string) (int, error) {
+	if pos+lengthBytes > len(data) {
+		return 0, fmt.Errorf("ClientHello too short: missing %s length", fieldName)
+	}
+
+	var fieldLength int
+	if lengthBytes == 1 {
+		fieldLength = int(data[pos])
+	} else {
+		fieldLength = int(binary.BigEndian.Uint16(data[pos : pos+lengthBytes]))
+	}
+	pos += lengthBytes
+
+	if pos+fieldLength > len(data) {
+		return 0, fmt.Errorf("ClientHello too short: missing %s", fieldName)
+	}
+	pos += fieldLength
+
+	return pos, nil
+}
+
+// findSNIInExtensions searches for the SNI extension in the extensions block.
+func findSNIInExtensions(data []byte, pos int) (string, error) {
+	// Calculate extensions end position
+	extensionsLength := int(binary.BigEndian.Uint16(data[pos-2 : pos]))
 	extensionsEnd := pos + extensionsLength
+
 	for pos < extensionsEnd {
 		if pos+4 > len(data) {
 			break

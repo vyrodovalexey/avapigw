@@ -116,6 +116,16 @@ func NewGatewayCollector(serviceName, version string) *GatewayCollector {
 		customCounters: make(map[string]prometheus.Counter),
 	}
 
+	gc.registerGatewayInfoMetrics(serviceName, version)
+	gc.registerRuntimeMetrics()
+	gc.registerConnectionMetrics()
+	gc.registerRequestMetrics()
+
+	return gc
+}
+
+// registerGatewayInfoMetrics registers gateway info and uptime metrics.
+func (gc *GatewayCollector) registerGatewayInfoMetrics(serviceName, version string) {
 	gc.gatewayInfo = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -133,7 +143,10 @@ func NewGatewayCollector(serviceName, version string) *GatewayCollector {
 			Help:      "Gateway uptime in seconds",
 		},
 	)
+}
 
+// registerRuntimeMetrics registers Go runtime metrics (goroutines, threads, heap, GC).
+func (gc *GatewayCollector) registerRuntimeMetrics() {
 	gc.goroutines = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -174,7 +187,10 @@ func NewGatewayCollector(serviceName, version string) *GatewayCollector {
 			Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1},
 		},
 	)
+}
 
+// registerConnectionMetrics registers connection-related metrics.
+func (gc *GatewayCollector) registerConnectionMetrics() {
 	gc.activeConnections = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -207,7 +223,10 @@ func NewGatewayCollector(serviceName, version string) *GatewayCollector {
 			Buckets:   prometheus.ExponentialBuckets(0.1, 2, 15), // 0.1s to ~3276s
 		},
 	)
+}
 
+// registerRequestMetrics registers request-related metrics.
+func (gc *GatewayCollector) registerRequestMetrics() {
 	gc.requestsInProgress = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -223,8 +242,6 @@ func NewGatewayCollector(serviceName, version string) *GatewayCollector {
 			Help:      "Current size of the request queue",
 		},
 	)
-
-	return gc
 }
 
 // Collect updates all metrics. Should be called periodically.
@@ -378,7 +395,14 @@ type RuntimeCollector struct {
 // NewRuntimeCollector creates a new RuntimeCollector.
 func NewRuntimeCollector() *RuntimeCollector {
 	rc := &RuntimeCollector{}
+	rc.registerMemoryMetrics()
+	rc.registerGCMetrics()
+	rc.registerGoroutineMetrics()
+	return rc
+}
 
+// registerMemoryMetrics registers memory-related runtime metrics.
+func (rc *RuntimeCollector) registerMemoryMetrics() {
 	rc.allocBytes = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -423,7 +447,10 @@ func NewRuntimeCollector() *RuntimeCollector {
 			Help:      "Total number of frees",
 		},
 	)
+}
 
+// registerGCMetrics registers garbage collection metrics.
+func (rc *RuntimeCollector) registerGCMetrics() {
 	rc.gcSysBytes = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -459,7 +486,10 @@ func NewRuntimeCollector() *RuntimeCollector {
 			Help:      "Total number of completed GC cycles",
 		},
 	)
+}
 
+// registerGoroutineMetrics registers goroutine and cgo metrics.
+func (rc *RuntimeCollector) registerGoroutineMetrics() {
 	rc.numGoroutines = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: Namespace,
@@ -477,8 +507,6 @@ func NewRuntimeCollector() *RuntimeCollector {
 			Help:      "Total number of cgo calls",
 		},
 	)
-
-	return rc
 }
 
 // Collect updates all runtime metrics.

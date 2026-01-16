@@ -43,7 +43,8 @@ func SetupVaultSecretWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-vaultsecret,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=vaultsecrets,verbs=create;update,versions=v1alpha1,name=mvaultsecret.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-vaultsecret,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=vaultsecrets,verbs=create;update,versions=v1alpha1,name=mvaultsecret.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &VaultSecretWebhook{}
 
@@ -60,7 +61,8 @@ func (w *VaultSecretWebhook) Default(ctx context.Context, obj runtime.Object) er
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-vaultsecret,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=vaultsecrets,verbs=create;update;delete,versions=v1alpha1,name=vvaultsecret.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-vaultsecret,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=vaultsecrets,verbs=create;update;delete,versions=v1alpha1,name=vvaultsecret.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomValidator = &VaultSecretWebhook{}
 
@@ -94,7 +96,10 @@ func (w *VaultSecretWebhook) ValidateCreate(ctx context.Context, obj runtime.Obj
 }
 
 // ValidateUpdate implements webhook.CustomValidator
-func (w *VaultSecretWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *VaultSecretWebhook) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+) (admission.Warnings, error) {
 	secret, ok := newObj.(*avapigwv1alpha1.VaultSecret)
 	if !ok {
 		return nil, fmt.Errorf("expected a VaultSecret but got %T", newObj)
@@ -122,17 +127,18 @@ func (w *VaultSecretWebhook) ValidateDelete(ctx context.Context, obj runtime.Obj
 	return nil, nil
 }
 
-// validateSyntax performs syntax validation
-func (w *VaultSecretWebhook) validateSyntax(secret *avapigwv1alpha1.VaultSecret) error {
-	errs := validator.NewValidationErrors()
+// validSecretTypes contains the list of valid Kubernetes secret types
+var validSecretTypes = map[string]bool{
+	"Opaque":                         true,
+	"kubernetes.io/tls":              true,
+	"kubernetes.io/dockerconfigjson": true,
+}
 
-	// Validate Vault address format
-	if _, err := url.Parse(secret.Spec.VaultConnection.Address); err != nil {
-		errs.Add("spec.vaultConnection.address", fmt.Sprintf("invalid URL format: %v", err))
-	}
-
-	// Validate authentication method - at least one must be specified
-	auth := secret.Spec.VaultConnection.Auth
+// validateVaultAuth validates Vault authentication configuration
+func (w *VaultSecretWebhook) validateVaultAuth(
+	auth *avapigwv1alpha1.VaultAuthConfig,
+	errs *validator.ValidationErrors,
+) {
 	hasKubernetes := auth.Kubernetes != nil
 	hasToken := auth.Token != nil
 	hasAppRole := auth.AppRole != nil
@@ -142,7 +148,6 @@ func (w *VaultSecretWebhook) validateSyntax(secret *avapigwv1alpha1.VaultSecret)
 			"at least one authentication method must be specified (kubernetes, token, or appRole)")
 	}
 
-	// Count how many auth methods are specified
 	authCount := 0
 	if hasKubernetes {
 		authCount++
@@ -159,30 +164,22 @@ func (w *VaultSecretWebhook) validateSyntax(secret *avapigwv1alpha1.VaultSecret)
 			"only one authentication method should be specified")
 	}
 
-	// Validate Kubernetes auth configuration
-	if auth.Kubernetes != nil {
-		if auth.Kubernetes.Role == "" {
-			errs.Add("spec.vaultConnection.auth.kubernetes.role", "role is required")
-		}
+	if auth.Kubernetes != nil && auth.Kubernetes.Role == "" {
+		errs.Add("spec.vaultConnection.auth.kubernetes.role", "role is required")
 	}
 
-	// Validate AppRole auth configuration
-	if auth.AppRole != nil {
-		if auth.AppRole.RoleID == "" {
-			errs.Add("spec.vaultConnection.auth.appRole.roleId", "roleId is required")
-		}
+	if auth.AppRole != nil && auth.AppRole.RoleID == "" {
+		errs.Add("spec.vaultConnection.auth.appRole.roleId", "roleId is required")
 	}
+}
 
-	// Validate path format
-	if secret.Spec.Path == "" {
-		errs.Add("spec.path", "path is required")
-	} else if strings.HasPrefix(secret.Spec.Path, "/") {
-		errs.Add("spec.path", "path should not start with /")
-	}
-
-	// Validate key mappings
+// validateVaultKeyMappings validates key mappings configuration
+func (w *VaultSecretWebhook) validateVaultKeyMappings(
+	keys []avapigwv1alpha1.VaultKeyMapping,
+	errs *validator.ValidationErrors,
+) {
 	keyNames := make(map[string]bool)
-	for i, mapping := range secret.Spec.Keys {
+	for i, mapping := range keys {
 		if mapping.VaultKey == "" {
 			errs.Add(fmt.Sprintf("spec.keys[%d].vaultKey", i), "vaultKey is required")
 		}
@@ -190,40 +187,58 @@ func (w *VaultSecretWebhook) validateSyntax(secret *avapigwv1alpha1.VaultSecret)
 			errs.Add(fmt.Sprintf("spec.keys[%d].targetKey", i), "targetKey is required")
 		}
 
-		// Check for duplicate target keys
 		if keyNames[mapping.TargetKey] {
 			errs.Add(fmt.Sprintf("spec.keys[%d].targetKey", i),
 				fmt.Sprintf("duplicate target key: %s", mapping.TargetKey))
 		}
 		keyNames[mapping.TargetKey] = true
 	}
+}
 
-	// Validate refresh configuration
-	if secret.Spec.Refresh != nil {
-		if secret.Spec.Refresh.Interval != nil {
-			if err := validateDuration(string(*secret.Spec.Refresh.Interval)); err != nil {
-				errs.Add("spec.refresh.interval", err.Error())
-			}
+// validateVaultTarget validates target configuration
+func (w *VaultSecretWebhook) validateVaultTarget(
+	target *avapigwv1alpha1.VaultTargetConfig,
+	errs *validator.ValidationErrors,
+) {
+	if target == nil {
+		return
+	}
+
+	if target.Name == "" {
+		errs.Add("spec.target.name", "name is required")
+	}
+
+	if target.Type != nil && !validSecretTypes[*target.Type] {
+		errs.Add("spec.target.type",
+			fmt.Sprintf("invalid secret type: %s", *target.Type))
+	}
+}
+
+// validateSyntax performs syntax validation
+func (w *VaultSecretWebhook) validateSyntax(secret *avapigwv1alpha1.VaultSecret) error {
+	errs := validator.NewValidationErrors()
+
+	if _, err := url.Parse(secret.Spec.VaultConnection.Address); err != nil {
+		errs.Add("spec.vaultConnection.address", fmt.Sprintf("invalid URL format: %v", err))
+	}
+
+	w.validateVaultAuth(&secret.Spec.VaultConnection.Auth, errs)
+
+	if secret.Spec.Path == "" {
+		errs.Add("spec.path", "path is required")
+	} else if strings.HasPrefix(secret.Spec.Path, "/") {
+		errs.Add("spec.path", "path should not start with /")
+	}
+
+	w.validateVaultKeyMappings(secret.Spec.Keys, errs)
+
+	if secret.Spec.Refresh != nil && secret.Spec.Refresh.Interval != nil {
+		if err := validateDuration(string(*secret.Spec.Refresh.Interval)); err != nil {
+			errs.Add("spec.refresh.interval", err.Error())
 		}
 	}
 
-	// Validate target configuration
-	if secret.Spec.Target != nil {
-		if secret.Spec.Target.Name == "" {
-			errs.Add("spec.target.name", "name is required")
-		}
-
-		// Validate secret type
-		validTypes := map[string]bool{
-			"Opaque":                         true,
-			"kubernetes.io/tls":              true,
-			"kubernetes.io/dockerconfigjson": true,
-		}
-		if secret.Spec.Target.Type != nil && !validTypes[*secret.Spec.Target.Type] {
-			errs.Add("spec.target.type",
-				fmt.Sprintf("invalid secret type: %s", *secret.Spec.Target.Type))
-		}
-	}
+	w.validateVaultTarget(secret.Spec.Target, errs)
 
 	return errs.ToError()
 }
@@ -259,30 +274,39 @@ func (w *VaultSecretWebhook) validateReferences(ctx context.Context, secret *ava
 	}
 
 	// Validate TLS configuration references
-	if secret.Spec.VaultConnection.TLS != nil {
-		tls := secret.Spec.VaultConnection.TLS
+	w.validateTLSReferences(ctx, secret, errs)
 
-		if tls.CACertRef != nil {
-			if err := w.ReferenceValidator.ValidateSecretObjectReference(
-				ctx, tls.CACertRef, secret.Namespace); err != nil {
-				errs.Add("spec.vaultConnection.tls.caCertRef", err.Error())
-			}
-		}
+	return errs.ToError()
+}
 
-		if tls.ClientCertRef != nil {
-			if err := w.ReferenceValidator.ValidateSecretObjectReference(
-				ctx, tls.ClientCertRef, secret.Namespace); err != nil {
-				errs.Add("spec.vaultConnection.tls.clientCertRef", err.Error())
-			}
-		}
+// validateTLSReferences validates TLS-related secret references
+func (w *VaultSecretWebhook) validateTLSReferences(
+	ctx context.Context,
+	secret *avapigwv1alpha1.VaultSecret,
+	errs *validator.ValidationErrors,
+) {
+	tls := secret.Spec.VaultConnection.TLS
+	if tls == nil {
+		return
+	}
 
-		if tls.ClientKeyRef != nil {
-			if err := w.ReferenceValidator.ValidateSecretObjectReference(
-				ctx, tls.ClientKeyRef, secret.Namespace); err != nil {
-				errs.Add("spec.vaultConnection.tls.clientKeyRef", err.Error())
-			}
+	if tls.CACertRef != nil {
+		if err := w.ReferenceValidator.ValidateSecretObjectReference(ctx, tls.CACertRef, secret.Namespace); err != nil {
+			errs.Add("spec.vaultConnection.tls.caCertRef", err.Error())
 		}
 	}
 
-	return errs.ToError()
+	if tls.ClientCertRef != nil {
+		err := w.ReferenceValidator.ValidateSecretObjectReference(ctx, tls.ClientCertRef, secret.Namespace)
+		if err != nil {
+			errs.Add("spec.vaultConnection.tls.clientCertRef", err.Error())
+		}
+	}
+
+	if tls.ClientKeyRef != nil {
+		err := w.ReferenceValidator.ValidateSecretObjectReference(ctx, tls.ClientKeyRef, secret.Namespace)
+		if err != nil {
+			errs.Add("spec.vaultConnection.tls.clientKeyRef", err.Error())
+		}
+	}
 }

@@ -27,6 +27,45 @@ func Logging(logger *zap.Logger) gin.HandlerFunc {
 	return LoggingWithConfig(LoggingConfig{Logger: logger})
 }
 
+// isHealthCheckPath checks if the path is a health check endpoint.
+func isHealthCheckPath(path string) bool {
+	return path == "/health" || path == "/healthz" || path == "/ready" || path == "/readyz"
+}
+
+// buildLogFields builds the log fields from request and response data.
+func buildLogFields(c *gin.Context, requestID, path string, latency time.Duration, status int) []zap.Field {
+	fields := []zap.Field{
+		zap.String("requestID", requestID),
+		zap.String("method", c.Request.Method),
+		zap.String("path", path),
+		zap.String("query", c.Request.URL.RawQuery),
+		zap.Int("status", status),
+		zap.Duration("latency", latency),
+		zap.String("clientIP", c.ClientIP()),
+		zap.String("userAgent", c.Request.UserAgent()),
+		zap.Int("bodySize", c.Writer.Size()),
+	}
+
+	// Add error if present
+	if len(c.Errors) > 0 {
+		fields = append(fields, zap.String("errors", c.Errors.String()))
+	}
+
+	return fields
+}
+
+// logRequestByStatus logs the request with appropriate level based on status code.
+func logRequestByStatus(logger *zap.Logger, status int, fields []zap.Field) {
+	switch {
+	case status >= 500:
+		logger.Error("request completed", fields...)
+	case status >= 400:
+		logger.Warn("request completed", fields...)
+	default:
+		logger.Info("request completed", fields...)
+	}
+}
+
 // LoggingWithConfig returns a logging middleware with custom configuration.
 func LoggingWithConfig(config LoggingConfig) gin.HandlerFunc {
 	if config.Logger == nil {
@@ -39,15 +78,10 @@ func LoggingWithConfig(config LoggingConfig) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		// Skip logging for certain paths
 		path := c.Request.URL.Path
-		if skipPaths[path] {
-			c.Next()
-			return
-		}
 
-		// Skip health check endpoints if configured
-		if config.SkipHealthCheck && (path == "/health" || path == "/healthz" || path == "/ready" || path == "/readyz") {
+		// Skip logging for certain paths
+		if skipPaths[path] || (config.SkipHealthCheck && isHealthCheckPath(path)) {
 			c.Next()
 			return
 		}
@@ -65,39 +99,11 @@ func LoggingWithConfig(config LoggingConfig) gin.HandlerFunc {
 		// Process request
 		c.Next()
 
-		// Calculate latency
+		// Build and log fields
 		latency := time.Since(start)
-
-		// Get response status
 		status := c.Writer.Status()
-
-		// Build log fields
-		fields := []zap.Field{
-			zap.String("requestID", requestID),
-			zap.String("method", c.Request.Method),
-			zap.String("path", path),
-			zap.String("query", c.Request.URL.RawQuery),
-			zap.Int("status", status),
-			zap.Duration("latency", latency),
-			zap.String("clientIP", c.ClientIP()),
-			zap.String("userAgent", c.Request.UserAgent()),
-			zap.Int("bodySize", c.Writer.Size()),
-		}
-
-		// Add error if present
-		if len(c.Errors) > 0 {
-			fields = append(fields, zap.String("errors", c.Errors.String()))
-		}
-
-		// Log based on status code
-		switch {
-		case status >= 500:
-			config.Logger.Error("request completed", fields...)
-		case status >= 400:
-			config.Logger.Warn("request completed", fields...)
-		default:
-			config.Logger.Info("request completed", fields...)
-		}
+		fields := buildLogFields(c, requestID, path, latency, status)
+		logRequestByStatus(config.Logger, status, fields)
 	}
 }
 

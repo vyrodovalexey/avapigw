@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/controller/route"
 )
 
 // ============================================================================
@@ -587,9 +588,7 @@ func TestGRPCRouteReconciler_hostnameMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &GRPCRouteReconciler{}
-
-			result := r.hostnameMatch(tt.routeHost, tt.listenerHost)
+			result := route.HostnameMatch(tt.routeHost, tt.listenerHost)
 
 			assert.Equal(t, tt.wantMatch, result)
 		})
@@ -783,9 +782,14 @@ func TestGRPCRouteReconciler_findGRPCRoutesForGateway(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Build client with indexer
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tt.objects...).
+				WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, func(obj client.Object) []string {
+					route := obj.(*avapigwv1alpha1.GRPCRoute)
+					return extractGatewayRefs(route.Namespace, route.Spec.ParentRefs)
+				}).
 				Build()
 
 			r := newGRPCRouteReconciler(cl, scheme)
@@ -874,9 +878,14 @@ func TestGRPCRouteReconciler_findGRPCRoutesForBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Build client with indexer
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tt.objects...).
+				WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteBackendIndexField, func(obj client.Object) []string {
+					route := obj.(*avapigwv1alpha1.GRPCRoute)
+					return extractGRPCBackendRefs(route.Namespace, route.Spec.Rules)
+				}).
 				Build()
 
 			r := newGRPCRouteReconciler(cl, scheme)

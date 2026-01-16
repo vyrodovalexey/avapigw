@@ -318,7 +318,8 @@ func (v *Validator) Validate(ctx context.Context, username, password string) (*U
 		if errors.Is(err, ErrUserNotFound) {
 			result = "user_not_found"
 			// Use constant-time comparison to prevent timing attacks
-			_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$dummy"), []byte(password))
+			// nolint:gosec // G101 false positive: dummy hash for timing attack prevention, not a real secret
+			_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$dummy"), []byte(password)) // NOSONAR
 			return nil, ErrInvalidCredentials
 		}
 		result = "store_error"
@@ -464,7 +465,8 @@ func (v *SimpleValidator) Validate(ctx context.Context, username, password strin
 	hash, ok := v.credentials[username]
 	if !ok {
 		// Use constant-time comparison to prevent timing attacks
-		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$dummy"), []byte(password))
+		// nolint:gosec // G101 false positive: dummy hash for timing attack prevention, not a real secret
+		_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$dummy"), []byte(password)) // NOSONAR
 		return nil, ErrInvalidCredentials
 	}
 

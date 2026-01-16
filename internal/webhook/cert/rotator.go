@@ -231,22 +231,9 @@ func (r *Rotator) EnsureCertificates(ctx context.Context) error {
 	return nil
 }
 
-// RotateIfNeeded checks if certificates need rotation and rotates them if necessary.
-// Returns true if certificates were rotated.
-func (r *Rotator) RotateIfNeeded(ctx context.Context) (bool, error) {
-	r.mu.RLock()
-	bundle := r.currentBundle
-	r.mu.RUnlock()
-
-	if bundle == nil {
-		// No current bundle, ensure certificates exist
-		if err := r.EnsureCertificates(ctx); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// Check if rotation is needed
+// checkRotationNeeded checks if the current bundle needs rotation.
+// Returns true if rotation is needed, false otherwise.
+func (r *Rotator) checkRotationNeeded(bundle *CertificateBundle) (bool, error) {
 	needsRotation, err := NeedsRotation(bundle.ServerCert, r.config.RotationThreshold)
 	if err != nil {
 		return false, fmt.Errorf("failed to check if rotation is needed: %w", err)
@@ -257,39 +244,42 @@ func (r *Rotator) RotateIfNeeded(ctx context.Context) (bool, error) {
 			zap.Time("expiresAt", bundle.ExpiresAt),
 			zap.Duration("rotationThreshold", r.config.RotationThreshold),
 		)
-		return false, nil
 	}
 
+	return needsRotation, nil
+}
+
+// performRotation generates new certificates, saves them, and updates the current bundle.
+func (r *Rotator) performRotation(ctx context.Context, currentExpiresAt time.Time) (*CertificateBundle, error) {
 	r.logger.Info("certificates need rotation, generating new ones",
-		zap.Time("currentExpiresAt", bundle.ExpiresAt),
+		zap.Time("currentExpiresAt", currentExpiresAt),
 	)
 
-	// Generate new certificates
 	newBundle, err := r.generator.Generate()
 	if err != nil {
-		return false, fmt.Errorf("failed to generate new certificates: %w", err)
+		return nil, fmt.Errorf("failed to generate new certificates: %w", err)
 	}
 
-	// Save to secret
 	if err := r.saveToSecret(ctx, newBundle); err != nil {
-		return false, fmt.Errorf("failed to save new certificates to secret: %w", err)
+		return nil, fmt.Errorf("failed to save new certificates to secret: %w", err)
 	}
 
-	// Write to disk
 	if err := r.WriteCertificatesToDir(newBundle); err != nil {
-		return false, fmt.Errorf("failed to write new certificates to directory: %w", err)
+		return nil, fmt.Errorf("failed to write new certificates to directory: %w", err)
 	}
 
-	// Update current bundle
+	return newBundle, nil
+}
+
+// updateBundleAndNotify updates the current bundle and notifies callbacks.
+func (r *Rotator) updateBundleAndNotify(newBundle *CertificateBundle) {
 	r.mu.Lock()
 	r.currentBundle = newBundle
 	callbacks := r.onRotateCallbacks
 	r.mu.Unlock()
 
-	// Update metrics
 	updateCertExpiry(newBundle.ExpiresAt)
 
-	// Notify callbacks
 	for _, callback := range callbacks {
 		callback(newBundle)
 	}
@@ -297,7 +287,37 @@ func (r *Rotator) RotateIfNeeded(ctx context.Context) (bool, error) {
 	r.logger.Info("certificates rotated successfully",
 		zap.Time("newExpiresAt", newBundle.ExpiresAt),
 	)
+}
 
+// RotateIfNeeded checks if certificates need rotation and rotates them if necessary.
+// Returns true if certificates were rotated.
+func (r *Rotator) RotateIfNeeded(ctx context.Context) (bool, error) {
+	r.mu.RLock()
+	bundle := r.currentBundle
+	r.mu.RUnlock()
+
+	if bundle == nil {
+		if err := r.EnsureCertificates(ctx); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	needsRotation, err := r.checkRotationNeeded(bundle)
+	if err != nil {
+		return false, err
+	}
+
+	if !needsRotation {
+		return false, nil
+	}
+
+	newBundle, err := r.performRotation(ctx, bundle.ExpiresAt)
+	if err != nil {
+		return false, err
+	}
+
+	r.updateBundleAndNotify(newBundle)
 	return true, nil
 }
 

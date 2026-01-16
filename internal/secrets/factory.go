@@ -73,8 +73,49 @@ func NewProvider(ctx context.Context, cfg *ProviderConfig) (Provider, error) {
 	}
 }
 
+// determineProviderType determines the provider type from config.
+func determineProviderType(cfg *config.Config) (ProviderType, error) {
+	if cfg.SecretsProvider != "" {
+		return ValidateProviderType(cfg.SecretsProvider)
+	}
+	if cfg.VaultEnabled {
+		return ProviderTypeVault, nil
+	}
+	return ProviderTypeKubernetes, nil
+}
+
+// buildVaultConfig builds the Vault provider configuration from the main config.
+func buildVaultConfig(cfg *config.Config, logger *zap.Logger) *VaultProviderConfig {
+	vaultCfg := &VaultProviderConfig{
+		Address:          cfg.VaultAddress,
+		Namespace:        cfg.VaultNamespace,
+		AuthMethod:       cfg.VaultAuthMethod,
+		Role:             cfg.VaultRole,
+		MountPath:        cfg.VaultMountPath,
+		SecretMountPoint: cfg.VaultSecretMountPoint,
+		Timeout:          cfg.VaultTimeout,
+		MaxRetries:       cfg.VaultMaxRetries,
+		RetryWaitMin:     cfg.VaultRetryWaitMin,
+		RetryWaitMax:     cfg.VaultRetryWaitMax,
+		Logger:           logger,
+	}
+
+	if cfg.VaultCACert != "" || cfg.VaultClientCert != "" || cfg.VaultTLSSkipVerify {
+		vaultCfg.TLSConfig = &vault.TLSConfig{
+			InsecureSkipVerify: cfg.VaultTLSSkipVerify,
+		}
+	}
+
+	return vaultCfg
+}
+
 // NewProviderFromConfig creates a provider from the main application config
-func NewProviderFromConfig(ctx context.Context, cfg *config.Config, kubeClient client.Client, logger *zap.Logger) (Provider, error) {
+func NewProviderFromConfig(
+	ctx context.Context,
+	cfg *config.Config,
+	kubeClient client.Client,
+	logger *zap.Logger,
+) (Provider, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("%w: config is required", ErrProviderNotConfigured)
 	}
@@ -83,17 +124,9 @@ func NewProviderFromConfig(ctx context.Context, cfg *config.Config, kubeClient c
 		logger = zap.NewNop()
 	}
 
-	// Determine provider type
-	providerType := ProviderTypeKubernetes // default
-	if cfg.SecretsProvider != "" {
-		pt, err := ValidateProviderType(cfg.SecretsProvider)
-		if err != nil {
-			return nil, err
-		}
-		providerType = pt
-	} else if cfg.VaultEnabled {
-		// Backward compatibility: if Vault is enabled and no provider specified, use Vault
-		providerType = ProviderTypeVault
+	providerType, err := determineProviderType(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	logger.Info("Creating secrets provider",
@@ -109,30 +142,8 @@ func NewProviderFromConfig(ctx context.Context, cfg *config.Config, kubeClient c
 		Logger:        logger,
 	}
 
-	// Configure Vault if needed
 	if providerType == ProviderTypeVault {
-		providerCfg.VaultConfig = &VaultProviderConfig{
-			Address:          cfg.VaultAddress,
-			Namespace:        cfg.VaultNamespace,
-			AuthMethod:       cfg.VaultAuthMethod,
-			Role:             cfg.VaultRole,
-			MountPath:        cfg.VaultMountPath,
-			SecretMountPoint: cfg.VaultSecretMountPoint,
-			Timeout:          cfg.VaultTimeout,
-			MaxRetries:       cfg.VaultMaxRetries,
-			RetryWaitMin:     cfg.VaultRetryWaitMin,
-			RetryWaitMax:     cfg.VaultRetryWaitMax,
-			Logger:           logger,
-		}
-
-		// Configure TLS if needed
-		if cfg.VaultCACert != "" || cfg.VaultClientCert != "" || cfg.VaultTLSSkipVerify {
-			providerCfg.VaultConfig.TLSConfig = &vault.TLSConfig{
-				InsecureSkipVerify: cfg.VaultTLSSkipVerify,
-			}
-			// Note: For file-based certs, they would need to be loaded here
-			// This is a simplified version - in production, you'd load the cert files
-		}
+		providerCfg.VaultConfig = buildVaultConfig(cfg, logger)
 	}
 
 	return NewProvider(ctx, providerCfg)
@@ -257,7 +268,11 @@ func (pm *ProviderManager) GetSecret(ctx context.Context, path string) (*Secret,
 }
 
 // GetSecretFromProvider retrieves a secret from a specific provider
-func (pm *ProviderManager) GetSecretFromProvider(ctx context.Context, providerType ProviderType, path string) (*Secret, error) {
+func (pm *ProviderManager) GetSecretFromProvider(
+	ctx context.Context,
+	providerType ProviderType,
+	path string,
+) (*Secret, error) {
 	provider, ok := pm.providers[providerType]
 	if !ok {
 		return nil, fmt.Errorf("%w: provider %s not found", ErrProviderNotConfigured, providerType)

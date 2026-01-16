@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/vyrodovalexey/avapigw/internal/circuitbreaker"
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -33,42 +34,28 @@ func UnaryCircuitBreakerInterceptor(registry *circuitbreaker.Registry) grpc.Unar
 
 // UnaryCircuitBreakerInterceptorWithConfig returns a unary circuit breaker interceptor with custom configuration.
 func UnaryCircuitBreakerInterceptorWithConfig(config CircuitBreakerConfig) grpc.UnaryServerInterceptor {
-	if config.Registry == nil {
-		config.Registry = circuitbreaker.NewRegistry(nil, nil)
-	}
-	if config.Logger == nil {
-		config.Logger = zap.NewNop()
-	}
-	if config.NameFunc == nil {
-		config.NameFunc = func(method string) string {
-			return method
-		}
-	}
+	cbCore := core.NewCircuitBreakerCore(core.CircuitBreakerCoreConfig{
+		BaseConfig: core.BaseConfig{
+			Logger:    config.Logger,
+			SkipPaths: config.SkipMethods,
+		},
+		Registry: config.Registry,
+		NameFunc: config.NameFunc,
+	})
 
-	skipMethods := make(map[string]bool)
-	for _, method := range config.SkipMethods {
-		skipMethods[method] = true
-	}
-
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
 		// Skip circuit breaker for certain methods
-		if skipMethods[info.FullMethod] {
+		if cbCore.ShouldSkip(info.FullMethod) {
 			return handler(ctx, req)
 		}
 
-		// Get circuit breaker name
-		name := config.NameFunc(info.FullMethod)
-
-		// Get or create circuit breaker
-		cb := config.Registry.GetOrCreate(name)
-
 		// Check if circuit allows the request
-		if !cb.Allow() {
-			config.Logger.Debug("circuit breaker open",
-				zap.String("method", info.FullMethod),
-				zap.String("name", name),
-				zap.String("state", cb.State().String()),
-			)
+		if !cbCore.Allow(info.FullMethod) {
 			return nil, status.Error(codes.Unavailable, "circuit breaker is open")
 		}
 
@@ -76,16 +63,7 @@ func UnaryCircuitBreakerInterceptorWithConfig(config CircuitBreakerConfig) grpc.
 		resp, err := handler(ctx, req)
 
 		// Record result
-		if err != nil {
-			st, ok := status.FromError(err)
-			if ok && isCircuitBreakerFailure(st.Code()) {
-				cb.RecordFailure()
-			} else {
-				cb.RecordSuccess()
-			}
-		} else {
-			cb.RecordSuccess()
-		}
+		cbCore.RecordResult(info.FullMethod, err)
 
 		return resp, err
 	}
@@ -98,42 +76,28 @@ func StreamCircuitBreakerInterceptor(registry *circuitbreaker.Registry) grpc.Str
 
 // StreamCircuitBreakerInterceptorWithConfig returns a stream circuit breaker interceptor with custom configuration.
 func StreamCircuitBreakerInterceptorWithConfig(config CircuitBreakerConfig) grpc.StreamServerInterceptor {
-	if config.Registry == nil {
-		config.Registry = circuitbreaker.NewRegistry(nil, nil)
-	}
-	if config.Logger == nil {
-		config.Logger = zap.NewNop()
-	}
-	if config.NameFunc == nil {
-		config.NameFunc = func(method string) string {
-			return method
-		}
-	}
+	cbCore := core.NewCircuitBreakerCore(core.CircuitBreakerCoreConfig{
+		BaseConfig: core.BaseConfig{
+			Logger:    config.Logger,
+			SkipPaths: config.SkipMethods,
+		},
+		Registry: config.Registry,
+		NameFunc: config.NameFunc,
+	})
 
-	skipMethods := make(map[string]bool)
-	for _, method := range config.SkipMethods {
-		skipMethods[method] = true
-	}
-
-	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	return func(
+		srv interface{},
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
 		// Skip circuit breaker for certain methods
-		if skipMethods[info.FullMethod] {
+		if cbCore.ShouldSkip(info.FullMethod) {
 			return handler(srv, ss)
 		}
 
-		// Get circuit breaker name
-		name := config.NameFunc(info.FullMethod)
-
-		// Get or create circuit breaker
-		cb := config.Registry.GetOrCreate(name)
-
 		// Check if circuit allows the request
-		if !cb.Allow() {
-			config.Logger.Debug("circuit breaker open",
-				zap.String("method", info.FullMethod),
-				zap.String("name", name),
-				zap.String("state", cb.State().String()),
-			)
+		if !cbCore.Allow(info.FullMethod) {
 			return status.Error(codes.Unavailable, "circuit breaker is open")
 		}
 
@@ -141,23 +105,122 @@ func StreamCircuitBreakerInterceptorWithConfig(config CircuitBreakerConfig) grpc
 		err := handler(srv, ss)
 
 		// Record result
-		if err != nil {
-			st, ok := status.FromError(err)
-			if ok && isCircuitBreakerFailure(st.Code()) {
-				cb.RecordFailure()
-			} else {
-				cb.RecordSuccess()
-			}
-		} else {
-			cb.RecordSuccess()
-		}
+		cbCore.RecordResult(info.FullMethod, err)
 
 		return err
 	}
 }
 
-// isCircuitBreakerFailure determines if a gRPC status code should count as a failure.
-func isCircuitBreakerFailure(code codes.Code) bool {
+// UnaryCircuitBreakerInterceptorWithCore returns a unary interceptor using the core circuit breaker.
+func UnaryCircuitBreakerInterceptorWithCore(coreConfig core.CircuitBreakerCoreConfig) grpc.UnaryServerInterceptor {
+	cbCore := core.NewCircuitBreakerCore(coreConfig)
+
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		// Skip circuit breaker for certain methods
+		if cbCore.ShouldSkip(info.FullMethod) {
+			return handler(ctx, req)
+		}
+
+		// Check if circuit allows the request
+		if !cbCore.Allow(info.FullMethod) {
+			return nil, status.Error(codes.Unavailable, "circuit breaker is open")
+		}
+
+		// Execute handler
+		resp, err := handler(ctx, req)
+
+		// Record result
+		cbCore.RecordResult(info.FullMethod, err)
+
+		return resp, err
+	}
+}
+
+// StreamCircuitBreakerInterceptorWithCore returns a stream interceptor using the core circuit breaker.
+func StreamCircuitBreakerInterceptorWithCore(coreConfig core.CircuitBreakerCoreConfig) grpc.StreamServerInterceptor {
+	cbCore := core.NewCircuitBreakerCore(coreConfig)
+
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		// Skip circuit breaker for certain methods
+		if cbCore.ShouldSkip(info.FullMethod) {
+			return handler(srv, ss)
+		}
+
+		// Check if circuit allows the request
+		if !cbCore.Allow(info.FullMethod) {
+			return status.Error(codes.Unavailable, "circuit breaker is open")
+		}
+
+		// Execute handler
+		err := handler(srv, ss)
+
+		// Record result
+		cbCore.RecordResult(info.FullMethod, err)
+
+		return err
+	}
+}
+
+// UnaryClientCircuitBreakerInterceptor returns a unary client interceptor with circuit breaker.
+func UnaryClientCircuitBreakerInterceptor(registry *circuitbreaker.Registry) grpc.UnaryClientInterceptor {
+	cbCore := core.NewCircuitBreakerCore(core.CircuitBreakerCoreConfig{
+		Registry: registry,
+	})
+
+	return func(
+		ctx context.Context,
+		method string,
+		req, reply interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		if !cbCore.Allow(method) {
+			return status.Error(codes.Unavailable, "circuit breaker is open")
+		}
+
+		err := invoker(ctx, method, req, reply, cc, opts...)
+
+		cbCore.RecordResult(method, err)
+
+		return err
+	}
+}
+
+// StreamClientCircuitBreakerInterceptor returns a stream client interceptor with circuit breaker.
+func StreamClientCircuitBreakerInterceptor(registry *circuitbreaker.Registry) grpc.StreamClientInterceptor {
+	cbCore := core.NewCircuitBreakerCore(core.CircuitBreakerCoreConfig{
+		Registry: registry,
+	})
+
+	return func(
+		ctx context.Context,
+		desc *grpc.StreamDesc,
+		cc *grpc.ClientConn,
+		method string,
+		streamer grpc.Streamer,
+		opts ...grpc.CallOption,
+	) (grpc.ClientStream, error) {
+		if !cbCore.Allow(method) {
+			return nil, status.Error(codes.Unavailable, "circuit breaker is open")
+		}
+
+		stream, err := streamer(ctx, desc, cc, method, opts...)
+
+		cbCore.RecordResult(method, err)
+
+		return stream, err
+	}
+}
+
+// IsCircuitBreakerFailure determines if a gRPC status code should count as a failure.
+// This is exported for testing and external use.
+func IsCircuitBreakerFailure(code codes.Code) bool {
 	switch code {
 	case codes.Unavailable,
 		codes.ResourceExhausted,
@@ -167,57 +230,5 @@ func isCircuitBreakerFailure(code codes.Code) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-// UnaryClientCircuitBreakerInterceptor returns a unary client interceptor with circuit breaker.
-func UnaryClientCircuitBreakerInterceptor(registry *circuitbreaker.Registry) grpc.UnaryClientInterceptor {
-	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		cb := registry.GetOrCreate(method)
-
-		if !cb.Allow() {
-			return status.Error(codes.Unavailable, "circuit breaker is open")
-		}
-
-		err := invoker(ctx, method, req, reply, cc, opts...)
-
-		if err != nil {
-			st, ok := status.FromError(err)
-			if ok && isCircuitBreakerFailure(st.Code()) {
-				cb.RecordFailure()
-			} else {
-				cb.RecordSuccess()
-			}
-		} else {
-			cb.RecordSuccess()
-		}
-
-		return err
-	}
-}
-
-// StreamClientCircuitBreakerInterceptor returns a stream client interceptor with circuit breaker.
-func StreamClientCircuitBreakerInterceptor(registry *circuitbreaker.Registry) grpc.StreamClientInterceptor {
-	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-		cb := registry.GetOrCreate(method)
-
-		if !cb.Allow() {
-			return nil, status.Error(codes.Unavailable, "circuit breaker is open")
-		}
-
-		stream, err := streamer(ctx, desc, cc, method, opts...)
-
-		if err != nil {
-			st, ok := status.FromError(err)
-			if ok && isCircuitBreakerFailure(st.Code()) {
-				cb.RecordFailure()
-			} else {
-				cb.RecordSuccess()
-			}
-		} else {
-			cb.RecordSuccess()
-		}
-
-		return stream, err
 	}
 }

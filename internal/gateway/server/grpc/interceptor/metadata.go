@@ -24,7 +24,12 @@ func UnaryMetadataInterceptor(config *MetadataConfig) grpc.UnaryServerIntercepto
 		config = &MetadataConfig{}
 	}
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
 		// Modify incoming metadata
 		ctx = modifyIncomingMetadata(ctx, config)
 
@@ -107,7 +112,12 @@ func UnaryResponseMetadataInterceptor(config *ResponseMetadataConfig) grpc.Unary
 		config = &ResponseMetadataConfig{}
 	}
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
 		// Send headers
 		if len(config.Headers) > 0 {
 			md := metadata.MD{}

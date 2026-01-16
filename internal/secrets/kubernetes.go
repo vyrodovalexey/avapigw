@@ -81,6 +81,29 @@ func (p *KubernetesProvider) parsePath(path string) (namespace, name string, err
 	return parts[0], parts[1], nil
 }
 
+// convertK8sSecretToSecret converts a Kubernetes secret to our Secret type.
+func (p *KubernetesProvider) convertK8sSecretToSecret(secret *corev1.Secret, namespace, name string) *Secret {
+	result := &Secret{
+		Name:      name,
+		Namespace: namespace,
+		Data:      secret.Data,
+		Metadata:  make(map[string]string),
+	}
+
+	for k, v := range secret.Labels {
+		result.Metadata["label."+k] = v
+	}
+	for k, v := range secret.Annotations {
+		result.Metadata["annotation."+k] = v
+	}
+
+	createdAt := secret.CreationTimestamp.Time
+	result.CreatedAt = &createdAt
+	result.Version = secret.ResourceVersion
+
+	return result
+}
+
 // GetSecret retrieves a secret by path
 func (p *KubernetesProvider) GetSecret(ctx context.Context, path string) (*Secret, error) {
 	start := time.Now()
@@ -118,28 +141,7 @@ func (p *KubernetesProvider) GetSecret(ctx context.Context, path string) (*Secre
 		return nil, fmt.Errorf("failed to get secret %s/%s: %w", namespace, name, err)
 	}
 
-	// Convert to our Secret type
-	result := &Secret{
-		Name:      name,
-		Namespace: namespace,
-		Data:      secret.Data,
-		Metadata:  make(map[string]string),
-	}
-
-	// Copy labels and annotations to metadata
-	for k, v := range secret.Labels {
-		result.Metadata["label."+k] = v
-	}
-	for k, v := range secret.Annotations {
-		result.Metadata["annotation."+k] = v
-	}
-
-	// Set timestamps
-	createdAt := secret.CreationTimestamp.Time
-	result.CreatedAt = &createdAt
-
-	// Set version from resource version
-	result.Version = secret.ResourceVersion
+	result := p.convertK8sSecretToSecret(secret, namespace, name)
 
 	p.logger.Debug("Successfully retrieved secret",
 		zap.String("namespace", namespace),
@@ -190,6 +192,51 @@ func (p *KubernetesProvider) ListSecrets(ctx context.Context, path string) ([]st
 	return names, nil
 }
 
+// createOrUpdateK8sSecret creates or updates a Kubernetes secret.
+func (p *KubernetesProvider) createOrUpdateK8sSecret(
+	ctx context.Context,
+	secret *corev1.Secret,
+	namespace, name string,
+	start time.Time,
+) error {
+	existingSecret := &corev1.Secret{}
+	err := p.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, existingSecret)
+	secretExists := err == nil
+
+	if secretExists {
+		secret.ResourceVersion = existingSecret.ResourceVersion
+		if err := p.client.Update(ctx, secret); err != nil {
+			p.logger.Error("Failed to update secret",
+				zap.String("namespace", namespace),
+				zap.String("name", name),
+				zap.Error(err),
+			)
+			RecordOperation(p.Type(), "write", time.Since(start), err)
+			return fmt.Errorf("failed to update secret %s/%s: %w", namespace, name, err)
+		}
+		p.logger.Info("Updated secret",
+			zap.String("namespace", namespace),
+			zap.String("name", name),
+		)
+	} else {
+		if err := p.client.Create(ctx, secret); err != nil {
+			p.logger.Error("Failed to create secret",
+				zap.String("namespace", namespace),
+				zap.String("name", name),
+				zap.Error(err),
+			)
+			RecordOperation(p.Type(), "write", time.Since(start), err)
+			return fmt.Errorf("failed to create secret %s/%s: %w", namespace, name, err)
+		}
+		p.logger.Info("Created secret",
+			zap.String("namespace", namespace),
+			zap.String("name", name),
+		)
+	}
+
+	return nil
+}
+
 // WriteSecret creates or updates a secret
 func (p *KubernetesProvider) WriteSecret(ctx context.Context, path string, data map[string][]byte) error {
 	start := time.Now()
@@ -208,11 +255,6 @@ func (p *KubernetesProvider) WriteSecret(ctx context.Context, path string, data 
 		zap.String("name", name),
 	)
 
-	// Check if secret exists
-	existingSecret := &corev1.Secret{}
-	err = p.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, existingSecret)
-	secretExists := err == nil
-
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -222,40 +264,7 @@ func (p *KubernetesProvider) WriteSecret(ctx context.Context, path string, data 
 		Data: data,
 	}
 
-	if secretExists {
-		// Update existing secret
-		secret.ResourceVersion = existingSecret.ResourceVersion
-		if err := p.client.Update(ctx, secret); err != nil {
-			p.logger.Error("Failed to update secret",
-				zap.String("namespace", namespace),
-				zap.String("name", name),
-				zap.Error(err),
-			)
-			RecordOperation(p.Type(), "write", time.Since(start), err)
-			return fmt.Errorf("failed to update secret %s/%s: %w", namespace, name, err)
-		}
-		p.logger.Info("Updated secret",
-			zap.String("namespace", namespace),
-			zap.String("name", name),
-		)
-	} else {
-		// Create new secret
-		if err := p.client.Create(ctx, secret); err != nil {
-			p.logger.Error("Failed to create secret",
-				zap.String("namespace", namespace),
-				zap.String("name", name),
-				zap.Error(err),
-			)
-			RecordOperation(p.Type(), "write", time.Since(start), err)
-			return fmt.Errorf("failed to create secret %s/%s: %w", namespace, name, err)
-		}
-		p.logger.Info("Created secret",
-			zap.String("namespace", namespace),
-			zap.String("name", name),
-		)
-	}
-
-	return nil
+	return p.createOrUpdateK8sSecret(ctx, secret, namespace, name, start)
 }
 
 // DeleteSecret deletes a secret

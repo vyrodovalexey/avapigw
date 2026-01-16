@@ -67,7 +67,13 @@ func NewTokenBucketLimiter(s store.Store, rate float64, burst int, logger *zap.L
 }
 
 // NewTokenBucketLimiterWithTTL creates a new token bucket rate limiter with custom TTL settings.
-func NewTokenBucketLimiterWithTTL(s store.Store, rate float64, burst int, cleanupInterval, bucketTTL time.Duration, logger *zap.Logger) *TokenBucketLimiter {
+func NewTokenBucketLimiterWithTTL(
+	s store.Store,
+	rate float64,
+	burst int,
+	cleanupInterval, bucketTTL time.Duration,
+	logger *zap.Logger,
+) *TokenBucketLimiter {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -191,85 +197,102 @@ func (l *TokenBucketLimiter) allowLocal(key string, n int) (*Result, error) {
 // allowDistributed performs rate limiting using distributed storage.
 // Properly checks context cancellation between store operations.
 func (l *TokenBucketLimiter) allowDistributed(ctx context.Context, key string, n int) (*Result, error) {
-	// For distributed rate limiting with Redis, we use a simplified approach
-	// that stores tokens and last update time
-
 	now := time.Now()
 	nowMs := now.UnixMilli()
-
-	// Try to get current state
 	stateKey := "tb:" + key
-	tokens := float64(l.burst)
-	lastUpdate := nowMs
 
-	// Check context cancellation before first store operation
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	// Get current tokens
-	currentTokens, err := l.store.Get(ctx, stateKey+":tokens")
-	if err == nil {
-		tokens = float64(currentTokens) / 1000.0 // Store as millis for precision
-	} else if !store.IsKeyNotFound(err) {
+	tokens, lastUpdate, err := l.fetchDistributedState(ctx, stateKey, nowMs)
+	if err != nil {
 		return nil, err
 	}
 
-	// Check context cancellation between store operations
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	// Get last update time
-	lastUpdateVal, err := l.store.Get(ctx, stateKey+":time")
-	if err == nil {
-		lastUpdate = lastUpdateVal
-	} else if !store.IsKeyNotFound(err) {
-		return nil, err
-	}
-
-	// Calculate tokens to add based on elapsed time
-	elapsed := float64(nowMs-lastUpdate) / 1000.0
-	tokens += elapsed * l.rate
-	if tokens > float64(l.burst) {
-		tokens = float64(l.burst)
-	}
-
-	// Check if we have enough tokens
+	tokens = l.calculateTokens(tokens, lastUpdate, nowMs)
 	allowed := tokens >= float64(n)
 	if allowed {
 		tokens -= float64(n)
 	}
 
-	// Check context cancellation before write operations
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+	if err := l.storeDistributedState(ctx, stateKey, tokens, nowMs); err != nil {
+		return nil, err
 	}
 
-	// Store updated state
+	return l.buildDistributedResult(tokens, n, allowed), nil
+}
+
+// fetchDistributedState retrieves current tokens and last update time from store.
+func (l *TokenBucketLimiter) fetchDistributedState(
+	ctx context.Context,
+	stateKey string,
+	defaultTime int64,
+) (tokens float64, lastUpdate int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+
+	tokens = float64(l.burst)
+	lastUpdate = defaultTime
+
+	currentTokens, getErr := l.store.Get(ctx, stateKey+":tokens")
+	if getErr == nil {
+		tokens = float64(currentTokens) / 1000.0
+	} else if !store.IsKeyNotFound(getErr) {
+		return 0, 0, getErr
+	}
+
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+
+	lastUpdateVal, getErr := l.store.Get(ctx, stateKey+":time")
+	if getErr == nil {
+		lastUpdate = lastUpdateVal
+	} else if !store.IsKeyNotFound(getErr) {
+		return 0, 0, getErr
+	}
+
+	return tokens, lastUpdate, nil
+}
+
+// calculateTokens computes current token count based on elapsed time.
+func (l *TokenBucketLimiter) calculateTokens(tokens float64, lastUpdate, nowMs int64) float64 {
+	elapsed := float64(nowMs-lastUpdate) / 1000.0
+	tokens += elapsed * l.rate
+	if tokens > float64(l.burst) {
+		tokens = float64(l.burst)
+	}
+	return tokens
+}
+
+// storeDistributedState saves the updated token state to the store.
+func (l *TokenBucketLimiter) storeDistributedState(
+	ctx context.Context,
+	stateKey string,
+	tokens float64,
+	nowMs int64,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	expiration := time.Duration(float64(l.burst)/l.rate+1) * time.Second
+
 	if err := l.store.Set(ctx, stateKey+":tokens", int64(tokens*1000), expiration); err != nil {
 		l.logger.Warn("failed to store tokens", zap.Error(err))
 	}
 
-	// Check context cancellation between write operations
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if err := l.store.Set(ctx, stateKey+":time", nowMs, expiration); err != nil {
 		l.logger.Warn("failed to store time", zap.Error(err))
 	}
 
-	// Calculate remaining and reset time
+	return nil
+}
+
+// buildDistributedResult constructs the rate limit result.
+func (l *TokenBucketLimiter) buildDistributedResult(tokens float64, n int, allowed bool) *Result {
 	remaining := int(tokens)
 	if remaining < 0 {
 		remaining = 0
@@ -290,7 +313,7 @@ func (l *TokenBucketLimiter) allowDistributed(ctx context.Context, key string, n
 		Remaining:  remaining,
 		ResetAfter: resetAfter,
 		RetryAfter: retryAfter,
-	}, nil
+	}
 }
 
 // GetLimit implements Limiter.

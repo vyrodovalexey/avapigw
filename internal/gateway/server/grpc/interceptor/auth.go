@@ -2,8 +2,10 @@ package interceptor
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -40,7 +42,12 @@ func UnaryAuthInterceptorWithConfig(config AuthConfig) grpc.UnaryServerIntercept
 		skipMethods[method] = true
 	}
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
 		// Skip auth for certain methods
 		if skipMethods[info.FullMethod] {
 			return handler(ctx, req)
@@ -116,6 +123,126 @@ func StreamAuthInterceptorWithConfig(config AuthConfig) grpc.StreamServerInterce
 
 		return handler(srv, ss)
 	}
+}
+
+// UnaryAuthInterceptorWithCore returns a unary interceptor using the core auth.
+func UnaryAuthInterceptorWithCore(authCore *core.AuthCore) grpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		// Skip auth for certain methods
+		if authCore.ShouldSkip(info.FullMethod) {
+			return handler(ctx, req)
+		}
+
+		// Check if anonymous access is allowed for this path
+		if authCore.IsAnonymousPath(info.FullMethod) {
+			return handler(ctx, req)
+		}
+
+		// Get metadata
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			md = metadata.MD{}
+		}
+
+		// Extract credentials from metadata
+		credentials := extractCredentialsFromMetadata(md)
+
+		// Authenticate
+		result := authCore.Authenticate(ctx, credentials)
+
+		// Check if authentication is required
+		if authCore.RequireAuth() && !result.Authenticated {
+			return nil, status.Error(codes.Unauthenticated, "authentication required")
+		}
+
+		return handler(ctx, req)
+	}
+}
+
+// StreamAuthInterceptorWithCore returns a stream interceptor using the core auth.
+func StreamAuthInterceptorWithCore(authCore *core.AuthCore) grpc.StreamServerInterceptor {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		// Skip auth for certain methods
+		if authCore.ShouldSkip(info.FullMethod) {
+			return handler(srv, ss)
+		}
+
+		// Check if anonymous access is allowed for this path
+		if authCore.IsAnonymousPath(info.FullMethod) {
+			return handler(srv, ss)
+		}
+
+		ctx := ss.Context()
+
+		// Get metadata
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			md = metadata.MD{}
+		}
+
+		// Extract credentials from metadata
+		credentials := extractCredentialsFromMetadata(md)
+
+		// Authenticate
+		result := authCore.Authenticate(ctx, credentials)
+
+		// Check if authentication is required
+		if authCore.RequireAuth() && !result.Authenticated {
+			return status.Error(codes.Unauthenticated, "authentication required")
+		}
+
+		return handler(srv, ss)
+	}
+}
+
+// extractCredentialsFromMetadata extracts authentication credentials from gRPC metadata.
+func extractCredentialsFromMetadata(md metadata.MD) core.AuthCredentials {
+	credentials := core.AuthCredentials{}
+
+	// Extract bearer token
+	if authHeaders := md.Get("authorization"); len(authHeaders) > 0 {
+		auth := authHeaders[0]
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			credentials.BearerToken = strings.TrimPrefix(auth, "Bearer ")
+			credentials.BearerToken = strings.TrimPrefix(credentials.BearerToken, "bearer ")
+		} else if strings.HasPrefix(strings.ToLower(auth), "basic ") {
+			// Basic auth - decode and extract
+			basicAuth := strings.TrimPrefix(auth, "Basic ")
+			basicAuth = strings.TrimPrefix(basicAuth, "basic ")
+			if username, password, ok := decodeBasicAuth(basicAuth); ok {
+				credentials.BasicAuth = &core.BasicCredentials{
+					Username: username,
+					Password: password,
+				}
+			}
+		}
+	}
+
+	// Extract API key
+	if apiKeys := md.Get("x-api-key"); len(apiKeys) > 0 {
+		credentials.APIKey = apiKeys[0]
+	}
+
+	return credentials
+}
+
+// decodeBasicAuth decodes a base64 encoded basic auth string.
+func decodeBasicAuth(encoded string) (username, password string, ok bool) {
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", "", false
+	}
+	credentials := string(decoded)
+	idx := strings.IndexByte(credentials, ':')
+	if idx < 0 {
+		return "", "", false
+	}
+	return credentials[:idx], credentials[idx+1:], true
 }
 
 // BearerTokenValidator validates bearer tokens.

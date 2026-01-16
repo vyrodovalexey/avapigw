@@ -49,7 +49,8 @@ func SetupTCPRouteWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-tcproute,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tcproutes,verbs=create;update,versions=v1alpha1,name=mtcproute.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-tcproute,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tcproutes,verbs=create;update,versions=v1alpha1,name=mtcproute.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &TCPRouteWebhook{}
 
@@ -66,7 +67,8 @@ func (w *TCPRouteWebhook) Default(ctx context.Context, obj runtime.Object) error
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-tcproute,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tcproutes,verbs=create;update;delete,versions=v1alpha1,name=vtcproute.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-tcproute,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tcproutes,verbs=create;update;delete,versions=v1alpha1,name=vtcproute.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomValidator = &TCPRouteWebhook{}
 
@@ -115,7 +117,10 @@ func (w *TCPRouteWebhook) ValidateCreate(ctx context.Context, obj runtime.Object
 }
 
 // ValidateUpdate implements webhook.CustomValidator
-func (w *TCPRouteWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *TCPRouteWebhook) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+) (admission.Warnings, error) {
 	route, ok := newObj.(*avapigwv1alpha1.TCPRoute)
 	if !ok {
 		return nil, fmt.Errorf("expected a TCPRoute but got %T", newObj)
@@ -205,33 +210,48 @@ func (w *TCPRouteWebhook) validateBackendRefs(ctx context.Context, route *avapig
 
 	for i, rule := range route.Spec.Rules {
 		for j, backendRef := range rule.BackendRefs {
-			namespace := route.Namespace
-			if backendRef.Namespace != nil {
-				namespace = *backendRef.Namespace
-			}
-
-			kind := tcpRouteBackendKindService
-			if backendRef.Kind != nil {
-				kind = *backendRef.Kind
-			}
-
-			group := ""
-			if backendRef.Group != nil {
-				group = *backendRef.Group
-			}
-
-			switch {
-			case group == "" && kind == tcpRouteBackendKindService:
-				if err := w.ReferenceValidator.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
-					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
-				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == tcpRouteBackendKindBackend:
-				if err := w.ReferenceValidator.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
-					errs.Add(fmt.Sprintf("spec.rules[%d].backendRefs[%d]", i, j), err.Error())
-				}
-			}
+			w.validateSingleBackendRef(ctx, route.Namespace, backendRef, i, j, errs)
 		}
 	}
 
 	return errs.ToError()
+}
+
+// validateSingleBackendRef validates a single backend reference
+func (w *TCPRouteWebhook) validateSingleBackendRef(
+	ctx context.Context,
+	routeNamespace string,
+	backendRef avapigwv1alpha1.TCPBackendRef,
+	ruleIdx, refIdx int,
+	errs *validator.ValidationErrors,
+) {
+	namespace := routeNamespace
+	if backendRef.Namespace != nil {
+		namespace = *backendRef.Namespace
+	}
+
+	kind := tcpRouteBackendKindService
+	if backendRef.Kind != nil {
+		kind = *backendRef.Kind
+	}
+
+	group := ""
+	if backendRef.Group != nil {
+		group = *backendRef.Group
+	}
+
+	fieldPath := fmt.Sprintf("spec.rules[%d].backendRefs[%d]", ruleIdx, refIdx)
+
+	if group == "" && kind == tcpRouteBackendKindService {
+		if err := w.ReferenceValidator.ValidateServiceExists(ctx, namespace, backendRef.Name); err != nil {
+			errs.Add(fieldPath, err.Error())
+		}
+		return
+	}
+
+	if group == avapigwv1alpha1.GroupVersion.Group && kind == tcpRouteBackendKindBackend {
+		if err := w.ReferenceValidator.ValidateBackendExists(ctx, namespace, backendRef.Name); err != nil {
+			errs.Add(fieldPath, err.Error())
+		}
+	}
 }

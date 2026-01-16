@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,52 +14,29 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/controller/base"
+	"github.com/vyrodovalexey/avapigw/internal/controller/route"
 )
 
+// Compile-time check that HTTPRoute implements route.RouteWithParentRefs
+var _ route.RouteWithParentRefs = &avapigwv1alpha1.HTTPRoute{}
+
+// Local aliases for constants to maintain backward compatibility.
+// These reference the centralized constants from constants.go.
 const (
-	httpRouteFinalizer = "avapigw.vyrodovalexey.github.com/httproute-finalizer"
+	httpRouteFinalizer = HTTPRouteFinalizerName
 
 	// HTTPRouteControllerName is the name of the HTTPRoute controller.
 	// Used in RouteParentStatus to identify which controller accepted the route.
-	HTTPRouteControllerName = "avapigw.vyrodovalexey.github.com/gateway-controller"
+	HTTPRouteControllerName = GatewayControllerName
 
-	// httpRouteReconcileTimeout is the maximum duration for a single HTTPRoute reconciliation
-	httpRouteReconcileTimeout = 30 * time.Second
+	httpRouteReconcileTimeout = HTTPRouteReconcileTimeout
 )
-
-// Prometheus metrics for HTTPRoute controller
-var (
-	httpRouteReconcileDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "httproute_reconcile_duration_seconds",
-			Help:      "Duration of HTTPRoute reconciliation in seconds",
-			Buckets:   prometheus.DefBuckets,
-		},
-		[]string{"result"},
-	)
-
-	httpRouteReconcileTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "httproute_reconcile_total",
-			Help:      "Total number of HTTPRoute reconciliations",
-		},
-		[]string{"result"},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(httpRouteReconcileDuration, httpRouteReconcileTotal)
-}
 
 // HTTPRouteReconciler reconciles a HTTPRoute object
 type HTTPRouteReconciler struct {
@@ -69,6 +45,10 @@ type HTTPRouteReconciler struct {
 	Recorder            record.EventRecorder
 	RequeueStrategy     *RequeueStrategy
 	requeueStrategyOnce sync.Once // Ensures thread-safe initialization of RequeueStrategy
+
+	// Base reconciler components
+	metrics          *base.ControllerMetrics
+	finalizerHandler *base.FinalizerHandler
 }
 
 // getRequeueStrategy returns the requeue strategy, initializing with defaults if needed.
@@ -83,7 +63,26 @@ func (r *HTTPRouteReconciler) getRequeueStrategy() *RequeueStrategy {
 	return r.RequeueStrategy
 }
 
-// +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+// initBaseComponents initializes the base controller components.
+// This is called automatically during reconciliation but can also be called
+// explicitly for testing purposes.
+func (r *HTTPRouteReconciler) initBaseComponents() {
+	if r.metrics == nil {
+		r.metrics = base.DefaultMetricsRegistry.RegisterController("httproute")
+	}
+	if r.finalizerHandler == nil {
+		r.finalizerHandler = base.NewFinalizerHandler(r.Client, httpRouteFinalizer)
+	}
+}
+
+// ensureInitialized ensures base components are initialized.
+// This is a helper for methods that may be called directly in tests.
+func (r *HTTPRouteReconciler) ensureInitialized() {
+	r.initBaseComponents()
+}
+
+//nolint:lll // kubebuilder RBAC marker cannot be shortened
+//+kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=httproutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=httproutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=get;list;watch
@@ -93,7 +92,8 @@ func (r *HTTPRouteReconciler) getRequeueStrategy() *RequeueStrategy {
 
 // Reconcile handles HTTPRoute reconciliation
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// Add timeout to prevent hanging reconciliations
+	r.initBaseComponents()
+
 	ctx, cancel := context.WithTimeout(ctx, httpRouteReconcileTimeout)
 	defer cancel()
 
@@ -101,17 +101,10 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	strategy := r.getRequeueStrategy()
 	resourceKey := req.String()
 
-	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
-		duration := time.Since(start).Seconds()
-		result := MetricResultSuccess
-		if reconcileErr != nil {
-			result = MetricResultError
-		}
-		httpRouteReconcileDuration.WithLabelValues(result).Observe(duration)
-		httpRouteReconcileTotal.WithLabelValues(result).Inc()
+		r.metrics.ObserveReconcile(time.Since(start).Seconds(), reconcileErr == nil)
 	}()
 
 	logger.Info("Reconciling HTTPRoute",
@@ -121,19 +114,13 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	)
 
 	// Fetch the HTTPRoute instance
-	httpRoute := &avapigwv1alpha1.HTTPRoute{}
-	if err := r.Get(ctx, req.NamespacedName, httpRoute); err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("HTTPRoute not found, ignoring")
-			strategy.ResetFailureCount(resourceKey)
-			return ctrl.Result{}, nil
-		}
-		reconcileErr = ClassifyError("getHTTPRoute", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to get HTTPRoute",
-			"errorType", reconcileErr.Type,
-			"retryable", reconcileErr.Retryable,
-		)
-		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	httpRoute, result, err := r.fetchHTTPRoute(ctx, req, strategy, resourceKey)
+	if err != nil {
+		reconcileErr = err
+		return result, reconcileErr
+	}
+	if httpRoute == nil {
+		return result, nil
 	}
 
 	// Handle deletion
@@ -145,55 +132,107 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return result, err
 	}
 
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(httpRoute, httpRouteFinalizer) {
-		controllerutil.AddFinalizer(httpRoute, httpRouteFinalizer)
-		if err := r.Update(ctx, httpRoute); err != nil {
-			reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
-			logger.Error(reconcileErr, "Failed to add finalizer",
-				"errorType", reconcileErr.Type,
-			)
-			r.Recorder.Event(httpRoute, corev1.EventTypeWarning, "FinalizerError", err.Error())
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	// Ensure finalizer and reconcile
+	return r.ensureFinalizerAndReconcileHTTPRoute(ctx, httpRoute, strategy, resourceKey, &reconcileErr)
+}
+
+// fetchHTTPRoute fetches the HTTPRoute instance and handles not-found errors.
+func (r *HTTPRouteReconciler) fetchHTTPRoute(
+	ctx context.Context,
+	req ctrl.Request,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (*avapigwv1alpha1.HTTPRoute, ctrl.Result, *ReconcileError) {
+	logger := log.FromContext(ctx)
+	httpRoute := &avapigwv1alpha1.HTTPRoute{}
+	if err := r.Get(ctx, req.NamespacedName, httpRoute); err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("HTTPRoute not found, ignoring")
+			strategy.ResetFailureCount(resourceKey)
+			return nil, ctrl.Result{}, nil
 		}
-		return strategy.ForImmediateRequeue(), nil
+		reconcileErr := ClassifyError("getHTTPRoute", resourceKey, err)
+		logger.Error(reconcileErr, "Failed to get HTTPRoute",
+			"errorType", reconcileErr.Type,
+			"retryable", reconcileErr.Retryable,
+		)
+		return nil, strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	}
+	return httpRoute, ctrl.Result{}, nil
+}
+
+// ensureFinalizerAndReconcileHTTPRoute ensures the finalizer is present and performs reconciliation.
+func (r *HTTPRouteReconciler) ensureFinalizerAndReconcileHTTPRoute(
+	ctx context.Context,
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+	strategy *RequeueStrategy,
+	resourceKey string,
+	reconcileErr **ReconcileError,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Add finalizer if not present
+	if !r.finalizerHandler.HasFinalizer(httpRoute) {
+		added, err := r.finalizerHandler.EnsureFinalizer(ctx, httpRoute)
+		if err != nil {
+			*reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
+			logger.Error(*reconcileErr, "Failed to add finalizer", "errorType", (*reconcileErr).Type)
+			r.Recorder.Event(httpRoute, corev1.EventTypeWarning, "FinalizerError", err.Error())
+			return strategy.ForTransientErrorWithBackoff(resourceKey), *reconcileErr
+		}
+		if added {
+			return strategy.ForImmediateRequeue(), nil
+		}
 	}
 
 	// Reconcile the HTTPRoute
 	if err := r.reconcileHTTPRoute(ctx, httpRoute); err != nil {
-		reconcileErr = ClassifyError("reconcileHTTPRoute", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to reconcile HTTPRoute",
-			"errorType", reconcileErr.Type,
-			"retryable", reconcileErr.Retryable,
-			"userActionRequired", reconcileErr.UserActionRequired,
+		*reconcileErr = ClassifyError("reconcileHTTPRoute", resourceKey, err)
+		logger.Error(*reconcileErr, "Failed to reconcile HTTPRoute",
+			"errorType", (*reconcileErr).Type,
+			"retryable", (*reconcileErr).Retryable,
+			"userActionRequired", (*reconcileErr).UserActionRequired,
 		)
-		r.Recorder.Event(httpRoute, corev1.EventTypeWarning, string(reconcileErr.Type)+"Error", err.Error())
-
-		switch reconcileErr.Type {
-		case ErrorTypeValidation:
-			return strategy.ForValidationError(), reconcileErr
-		case ErrorTypePermanent:
-			return strategy.ForPermanentError(), reconcileErr
-		case ErrorTypeDependency:
-			return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
-		default:
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
-		}
+		r.Recorder.Event(httpRoute, corev1.EventTypeWarning, string((*reconcileErr).Type)+"Error", err.Error())
+		return r.handleHTTPRouteReconcileError(*reconcileErr, strategy, resourceKey)
 	}
 
-	// Success - reset failure count
 	strategy.ResetFailureCount(resourceKey)
-	logger.Info("HTTPRoute reconciled successfully", "name", req.Name, "namespace", req.Namespace)
+	logger.Info("HTTPRoute reconciled successfully", "name", httpRoute.Name, "namespace", httpRoute.Namespace)
 	return strategy.ForSuccess(), nil
 }
 
+// handleHTTPRouteReconcileError returns the appropriate result based on error type.
+func (r *HTTPRouteReconciler) handleHTTPRouteReconcileError(
+	reconcileErr *ReconcileError,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (ctrl.Result, error) {
+	switch reconcileErr.Type {
+	case ErrorTypeValidation:
+		return strategy.ForValidationError(), reconcileErr
+	case ErrorTypePermanent:
+		return strategy.ForPermanentError(), reconcileErr
+	case ErrorTypeDependency:
+		return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
+	default:
+		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	}
+}
+
 // handleDeletion handles HTTPRoute deletion
-func (r *HTTPRouteReconciler) handleDeletion(ctx context.Context, httpRoute *avapigwv1alpha1.HTTPRoute) (ctrl.Result, error) {
+func (r *HTTPRouteReconciler) handleDeletion(
+	ctx context.Context,
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+) (ctrl.Result, error) {
+	// Ensure base components are initialized (needed when called directly in tests)
+	r.ensureInitialized()
+
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
 	resourceKey := client.ObjectKeyFromObject(httpRoute).String()
 
-	if controllerutil.ContainsFinalizer(httpRoute, httpRouteFinalizer) {
+	if r.finalizerHandler.HasFinalizer(httpRoute) {
 		// Perform cleanup
 		logger.Info("Performing cleanup for HTTPRoute deletion",
 			"name", httpRoute.Name,
@@ -204,8 +243,7 @@ func (r *HTTPRouteReconciler) handleDeletion(ctx context.Context, httpRoute *ava
 		r.Recorder.Event(httpRoute, corev1.EventTypeNormal, "Deleting", "HTTPRoute is being deleted")
 
 		// Remove finalizer
-		controllerutil.RemoveFinalizer(httpRoute, httpRouteFinalizer)
-		if err := r.Update(ctx, httpRoute); err != nil {
+		if _, err := r.finalizerHandler.RemoveFinalizer(ctx, httpRoute); err != nil {
 			reconcileErr := ClassifyError("removeFinalizer", resourceKey, err)
 			logger.Error(reconcileErr, "Failed to remove finalizer",
 				"errorType", reconcileErr.Type,
@@ -260,223 +298,191 @@ func (r *HTTPRouteReconciler) reconcileHTTPRoute(ctx context.Context, httpRoute 
 }
 
 // validateParentRefs validates parent references and returns parent statuses
-func (r *HTTPRouteReconciler) validateParentRefs(ctx context.Context, httpRoute *avapigwv1alpha1.HTTPRoute) ([]avapigwv1alpha1.RouteParentStatus, error) {
-	logger := log.FromContext(ctx)
+func (r *HTTPRouteReconciler) validateParentRefs(
+	ctx context.Context,
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+) ([]avapigwv1alpha1.RouteParentStatus, error) {
 	parentStatuses := make([]avapigwv1alpha1.RouteParentStatus, 0, len(httpRoute.Spec.ParentRefs))
 
 	for _, parentRef := range httpRoute.Spec.ParentRefs {
-		parentStatus := avapigwv1alpha1.RouteParentStatus{
-			ParentRef:      parentRef,
-			ControllerName: HTTPRouteControllerName,
-		}
-
-		// Determine namespace
-		namespace := httpRoute.Namespace
-		if parentRef.Namespace != nil {
-			namespace = *parentRef.Namespace
-		}
-
-		// Get the Gateway
-		gateway := &avapigwv1alpha1.Gateway{}
-		err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: parentRef.Name}, gateway)
+		parentStatus, err := r.validateSingleHTTPParentRef(ctx, httpRoute, parentRef)
 		if err != nil {
-			if errors.IsNotFound(err) {
-				logger.Info("Parent Gateway not found", "gateway", parentRef.Name, "namespace", namespace)
-				parentStatus.Conditions = []avapigwv1alpha1.Condition{
-					{
-						Type:               avapigwv1alpha1.ConditionTypeAccepted,
-						Status:             metav1.ConditionFalse,
-						LastTransitionTime: metav1.Now(),
-						Reason:             string(avapigwv1alpha1.ReasonNoMatchingParent),
-						Message:            fmt.Sprintf("Gateway %s/%s not found", namespace, parentRef.Name),
-					},
-				}
-				parentStatuses = append(parentStatuses, parentStatus)
-				continue
-			}
-			return nil, fmt.Errorf("failed to get Gateway %s/%s: %w", namespace, parentRef.Name, err)
+			return nil, err
 		}
-
-		// Validate listener match
-		accepted, message := r.validateListenerMatch(httpRoute, gateway, parentRef)
-		if accepted {
-			parentStatus.Conditions = []avapigwv1alpha1.Condition{
-				{
-					Type:               avapigwv1alpha1.ConditionTypeAccepted,
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonAccepted),
-					Message:            "Route accepted by Gateway",
-				},
-				{
-					Type:               avapigwv1alpha1.ConditionTypeResolvedRefs,
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonResolvedRefs),
-					Message:            "All references resolved",
-				},
-			}
-		} else {
-			parentStatus.Conditions = []avapigwv1alpha1.Condition{
-				{
-					Type:               avapigwv1alpha1.ConditionTypeAccepted,
-					Status:             metav1.ConditionFalse,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonNotAllowedByListeners),
-					Message:            message,
-				},
-			}
-		}
-
 		parentStatuses = append(parentStatuses, parentStatus)
 	}
 
 	return parentStatuses, nil
 }
 
+// validateSingleHTTPParentRef validates a single parent reference and returns its status.
+func (r *HTTPRouteReconciler) validateSingleHTTPParentRef(
+	ctx context.Context,
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+	parentRef avapigwv1alpha1.ParentRef,
+) (avapigwv1alpha1.RouteParentStatus, error) {
+	logger := log.FromContext(ctx)
+	parentStatus := avapigwv1alpha1.RouteParentStatus{
+		ParentRef:      parentRef,
+		ControllerName: HTTPRouteControllerName,
+	}
+
+	namespace := httpRoute.Namespace
+	if parentRef.Namespace != nil {
+		namespace = *parentRef.Namespace
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: parentRef.Name}, gateway)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("Parent Gateway not found", "gateway", parentRef.Name, "namespace", namespace)
+			parentStatus.Conditions = r.buildHTTPNotFoundConditions(namespace, parentRef.Name)
+			return parentStatus, nil
+		}
+		return parentStatus, fmt.Errorf("failed to get Gateway %s/%s: %w", namespace, parentRef.Name, err)
+	}
+
+	parentStatus.Conditions = r.buildHTTPListenerMatchConditions(httpRoute, gateway, parentRef)
+	return parentStatus, nil
+}
+
+// buildHTTPNotFoundConditions builds conditions for a not-found gateway.
+func (r *HTTPRouteReconciler) buildHTTPNotFoundConditions(namespace, name string) []avapigwv1alpha1.Condition {
+	return []avapigwv1alpha1.Condition{
+		{
+			Type:               avapigwv1alpha1.ConditionTypeAccepted,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             string(avapigwv1alpha1.ReasonNoMatchingParent),
+			Message:            fmt.Sprintf("Gateway %s/%s not found", namespace, name),
+		},
+	}
+}
+
+// buildHTTPListenerMatchConditions builds conditions based on listener match validation.
+func (r *HTTPRouteReconciler) buildHTTPListenerMatchConditions(
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+	gateway *avapigwv1alpha1.Gateway,
+	parentRef avapigwv1alpha1.ParentRef,
+) []avapigwv1alpha1.Condition {
+	accepted, message := r.validateListenerMatch(httpRoute, gateway, parentRef)
+	if accepted {
+		return []avapigwv1alpha1.Condition{
+			{
+				Type:               avapigwv1alpha1.ConditionTypeAccepted,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(avapigwv1alpha1.ReasonAccepted),
+				Message:            "Route accepted by Gateway",
+			},
+			{
+				Type:               avapigwv1alpha1.ConditionTypeResolvedRefs,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(avapigwv1alpha1.ReasonResolvedRefs),
+				Message:            "All references resolved",
+			},
+		}
+	}
+	return []avapigwv1alpha1.Condition{
+		{
+			Type:               avapigwv1alpha1.ConditionTypeAccepted,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             string(avapigwv1alpha1.ReasonNotAllowedByListeners),
+			Message:            message,
+		},
+	}
+}
+
 // validateListenerMatch validates that the route matches a listener on the gateway
-func (r *HTTPRouteReconciler) validateListenerMatch(httpRoute *avapigwv1alpha1.HTTPRoute, gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (matches bool, reason string) {
+func (r *HTTPRouteReconciler) validateListenerMatch(
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+	gateway *avapigwv1alpha1.Gateway,
+	parentRef avapigwv1alpha1.ParentRef,
+) (matches bool, reason string) {
 	// If a specific section (listener) is specified, validate it
 	if parentRef.SectionName != nil {
-		listenerName := *parentRef.SectionName
-		for _, listener := range gateway.Spec.Listeners {
-			if listener.Name == listenerName {
-				// Check protocol compatibility
-				if listener.Protocol != avapigwv1alpha1.ProtocolHTTP && listener.Protocol != avapigwv1alpha1.ProtocolHTTPS {
-					return false, fmt.Sprintf("Listener %s does not support HTTP protocol", listenerName)
-				}
-				// Check hostname match
-				if !r.hostnameMatches(httpRoute.Spec.Hostnames, listener.Hostname) {
-					return false, fmt.Sprintf("No matching hostname for listener %s", listenerName)
-				}
-				return true, ""
-			}
-		}
-		return false, fmt.Sprintf("Listener %s not found on Gateway", listenerName)
+		return r.validateSpecificListener(httpRoute, gateway, *parentRef.SectionName)
 	}
 
 	// No specific listener, check if any HTTP/HTTPS listener matches
+	return r.findMatchingHTTPListener(httpRoute, gateway)
+}
+
+// validateSpecificListener validates a specific named listener for HTTP protocol compatibility.
+func (r *HTTPRouteReconciler) validateSpecificListener(
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+	gateway *avapigwv1alpha1.Gateway,
+	listenerName string,
+) (matches bool, reason string) {
 	for _, listener := range gateway.Spec.Listeners {
-		if listener.Protocol == avapigwv1alpha1.ProtocolHTTP || listener.Protocol == avapigwv1alpha1.ProtocolHTTPS {
-			if r.hostnameMatches(httpRoute.Spec.Hostnames, listener.Hostname) {
-				return true, ""
-			}
+		if listener.Name != listenerName {
+			continue
+		}
+		// Check protocol compatibility
+		if !r.isHTTPProtocol(listener.Protocol) {
+			return false, fmt.Sprintf("Listener %s does not support HTTP protocol", listenerName)
+		}
+		// Check hostname match
+		if !r.hostnameMatches(httpRoute.Spec.Hostnames, listener.Hostname) {
+			return false, fmt.Sprintf("No matching hostname for listener %s", listenerName)
+		}
+		return true, ""
+	}
+	return false, fmt.Sprintf("Listener %s not found on Gateway", listenerName)
+}
+
+// findMatchingHTTPListener finds any HTTP/HTTPS listener that matches the route.
+func (r *HTTPRouteReconciler) findMatchingHTTPListener(
+	httpRoute *avapigwv1alpha1.HTTPRoute,
+	gateway *avapigwv1alpha1.Gateway,
+) (matches bool, reason string) {
+	for _, listener := range gateway.Spec.Listeners {
+		if r.isHTTPProtocol(listener.Protocol) && r.hostnameMatches(httpRoute.Spec.Hostnames, listener.Hostname) {
+			return true, ""
 		}
 	}
-
 	return false, "No matching HTTP/HTTPS listener found on Gateway"
 }
 
-// hostnameMatches checks if route hostnames match the listener hostname
-func (r *HTTPRouteReconciler) hostnameMatches(routeHostnames []avapigwv1alpha1.Hostname, listenerHostname *avapigwv1alpha1.Hostname) bool {
-	// If listener has no hostname, it matches all
-	if listenerHostname == nil {
-		return true
-	}
-
-	// If route has no hostnames, it matches all listeners
-	if len(routeHostnames) == 0 {
-		return true
-	}
-
-	listenerHost := string(*listenerHostname)
-	for _, routeHostname := range routeHostnames {
-		routeHost := string(routeHostname)
-		if r.hostnameMatch(routeHost, listenerHost) {
-			return true
-		}
-	}
-
-	return false
+// isHTTPProtocol checks if the protocol is HTTP or HTTPS.
+func (r *HTTPRouteReconciler) isHTTPProtocol(protocol avapigwv1alpha1.ProtocolType) bool {
+	return protocol == avapigwv1alpha1.ProtocolHTTP || protocol == avapigwv1alpha1.ProtocolHTTPS
 }
 
-// hostnameMatch checks if two hostnames match (supporting wildcards)
-func (r *HTTPRouteReconciler) hostnameMatch(routeHost, listenerHost string) bool {
-	// Exact match
-	if routeHost == listenerHost {
-		return true
-	}
-
-	// Wildcard matching
-	if listenerHost != "" && listenerHost[0] == '*' {
-		// Listener has wildcard, e.g., *.example.com
-		suffix := listenerHost[1:] // .example.com
-		if routeHost != "" && routeHost[0] == '*' {
-			// Both have wildcards
-			return routeHost[1:] == suffix
-		}
-		// Route is specific, check if it matches the wildcard
-		if len(routeHost) > len(suffix) {
-			return routeHost[len(routeHost)-len(suffix):] == suffix
-		}
-	}
-
-	if routeHost != "" && routeHost[0] == '*' {
-		// Route has wildcard, e.g., *.example.com
-		suffix := routeHost[1:] // .example.com
-		// Listener is specific, check if it matches the wildcard
-		if len(listenerHost) > len(suffix) {
-			return listenerHost[len(listenerHost)-len(suffix):] == suffix
-		}
-	}
-
-	return false
+// hostnameMatches checks if route hostnames match the listener hostname.
+// This method delegates to the shared route.HostnameMatches function.
+func (r *HTTPRouteReconciler) hostnameMatches(
+	routeHostnames []avapigwv1alpha1.Hostname,
+	listenerHostname *avapigwv1alpha1.Hostname,
+) bool {
+	return route.HostnameMatches(routeHostnames, listenerHostname)
 }
 
-// validateBackendRefs validates backend references
+// validateBackendRefs validates backend references for the HTTPRoute.
+// It extracts backend refs from all rules and delegates validation to the shared validator.
 func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, httpRoute *avapigwv1alpha1.HTTPRoute) error {
-	logger := log.FromContext(ctx)
+	backendRefs := r.extractBackendRefs(httpRoute)
+	validator := route.NewBackendRefValidator(r.Client, r.Recorder)
+	return validator.ValidateBackendRefs(ctx, httpRoute, backendRefs)
+}
 
+// extractBackendRefs extracts all backend references from an HTTPRoute's rules.
+func (r *HTTPRouteReconciler) extractBackendRefs(httpRoute *avapigwv1alpha1.HTTPRoute) []route.BackendRefInfo {
+	var refs []route.BackendRefInfo
 	for _, rule := range httpRoute.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
-			namespace := httpRoute.Namespace
-			if backendRef.Namespace != nil {
-				namespace = *backendRef.Namespace
-			}
-
-			kind := BackendKindService
-			if backendRef.Kind != nil {
-				kind = *backendRef.Kind
-			}
-
-			group := ""
-			if backendRef.Group != nil {
-				group = *backendRef.Group
-			}
-
-			// Check based on kind
-			switch {
-			case group == "" && kind == BackendKindService:
-				// Kubernetes Service
-				svc := &corev1.Service{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, svc); err != nil {
-					if errors.IsNotFound(err) {
-						logger.Info("Backend Service not found", "service", backendRef.Name, "namespace", namespace)
-						r.Recorder.Event(httpRoute, corev1.EventTypeWarning, "BackendNotFound",
-							fmt.Sprintf("Service %s/%s not found", namespace, backendRef.Name))
-						continue
-					}
-					return fmt.Errorf("failed to get Service %s/%s: %w", namespace, backendRef.Name, err)
-				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == BackendKindBackend:
-				// Custom Backend resource
-				backend := &avapigwv1alpha1.Backend{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, backend); err != nil {
-					if errors.IsNotFound(err) {
-						logger.Info("Backend not found", "backend", backendRef.Name, "namespace", namespace)
-						r.Recorder.Event(httpRoute, corev1.EventTypeWarning, "BackendNotFound",
-							fmt.Sprintf("Backend %s/%s not found", namespace, backendRef.Name))
-						continue
-					}
-					return fmt.Errorf("failed to get Backend %s/%s: %w", namespace, backendRef.Name, err)
-				}
-			default:
-				logger.Info("Unsupported backend kind", "group", group, "kind", kind)
-			}
+			refs = append(refs, route.BackendRefInfo{
+				Name:      backendRef.Name,
+				Namespace: backendRef.Namespace,
+				Kind:      backendRef.Kind,
+				Group:     backendRef.Group,
+			})
 		}
 	}
-
-	return nil
+	return refs
 }
 
 // SetupWithManager sets up the controller with the Manager

@@ -479,7 +479,11 @@ func (c *VaultClientCache) Get(key string) (*Client, bool) {
 // GetOrCreate retrieves a Vault client from the cache or creates a new one.
 // The createFunc is called if the client is not in the cache.
 // Returns the client and any error from createFunc.
-func (c *VaultClientCache) GetOrCreate(key string, address string, createFunc func() (*Client, error)) (*Client, error) {
+func (c *VaultClientCache) GetOrCreate(
+	key string,
+	address string,
+	createFunc func() (*Client, error),
+) (*Client, error) {
 	// Try to get existing client first
 	if client, ok := c.Get(key); ok {
 		return client, nil

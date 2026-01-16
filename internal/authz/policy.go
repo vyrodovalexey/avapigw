@@ -511,7 +511,11 @@ func (a *CompositeAuthorizer) Authorize(ctx context.Context, subject *Subject, r
 	}
 }
 
-func (a *CompositeAuthorizer) authorizeAll(ctx context.Context, subject *Subject, resource *Resource) (*Decision, error) {
+func (a *CompositeAuthorizer) authorizeAll(
+	ctx context.Context,
+	subject *Subject,
+	resource *Resource,
+) (*Decision, error) {
 	for _, authorizer := range a.authorizers {
 		decision, err := authorizer.Authorize(ctx, subject, resource)
 		if err != nil {
@@ -524,7 +528,11 @@ func (a *CompositeAuthorizer) authorizeAll(ctx context.Context, subject *Subject
 	return &Decision{Allowed: true, Reason: "all authorizers allowed"}, nil
 }
 
-func (a *CompositeAuthorizer) authorizeAny(ctx context.Context, subject *Subject, resource *Resource) (*Decision, error) {
+func (a *CompositeAuthorizer) authorizeAny(
+	ctx context.Context,
+	subject *Subject,
+	resource *Resource,
+) (*Decision, error) {
 	var lastDecision *Decision
 	for _, authorizer := range a.authorizers {
 		decision, err := authorizer.Authorize(ctx, subject, resource)
@@ -542,7 +550,11 @@ func (a *CompositeAuthorizer) authorizeAny(ctx context.Context, subject *Subject
 	return &Decision{Allowed: false, Reason: "no authorizer allowed"}, nil
 }
 
-func (a *CompositeAuthorizer) authorizeFirst(ctx context.Context, subject *Subject, resource *Resource) (*Decision, error) {
+func (a *CompositeAuthorizer) authorizeFirst(
+	ctx context.Context,
+	subject *Subject,
+	resource *Resource,
+) (*Decision, error) {
 	if len(a.authorizers) > 0 {
 		return a.authorizers[0].Authorize(ctx, subject, resource)
 	}

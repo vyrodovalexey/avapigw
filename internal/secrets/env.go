@@ -73,6 +73,36 @@ func (p *EnvProvider) normalizeEnvName(path string) string {
 	return p.prefix + name
 }
 
+// parseEnvValueToData parses an environment variable value into secret data.
+// If the value is valid JSON, it's parsed as a map. Otherwise, it's stored under "value".
+func (p *EnvProvider) parseEnvValueToData(value string) map[string][]byte {
+	data := make(map[string][]byte)
+
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal([]byte(value), &jsonData); err == nil {
+		for k, v := range jsonData {
+			switch val := v.(type) {
+			case string:
+				data[k] = []byte(val)
+			default:
+				jsonBytes, err := json.Marshal(val)
+				if err != nil {
+					p.logger.Warn("Failed to marshal value to JSON",
+						zap.String("key", k),
+						zap.Error(err),
+					)
+					continue
+				}
+				data[k] = jsonBytes
+			}
+		}
+	} else {
+		data["value"] = []byte(value)
+	}
+
+	return data
+}
+
 // GetSecret retrieves a secret from environment variables
 // The path is converted to an environment variable name using the configured prefix.
 // If the value is valid JSON, it's parsed as a map of key-value pairs.
@@ -104,33 +134,7 @@ func (p *EnvProvider) GetSecret(ctx context.Context, path string) (*Secret, erro
 		return nil, fmt.Errorf("%w: environment variable %s not set", ErrSecretNotFound, envName)
 	}
 
-	data := make(map[string][]byte)
-
-	// Try to parse as JSON for complex secrets
-	var jsonData map[string]interface{}
-	if err := json.Unmarshal([]byte(value), &jsonData); err == nil {
-		// Successfully parsed as JSON
-		for k, v := range jsonData {
-			switch val := v.(type) {
-			case string:
-				data[k] = []byte(val)
-			default:
-				// Convert other types to JSON
-				jsonBytes, err := json.Marshal(val)
-				if err != nil {
-					p.logger.Warn("Failed to marshal value to JSON",
-						zap.String("key", k),
-						zap.Error(err),
-					)
-					continue
-				}
-				data[k] = jsonBytes
-			}
-		}
-	} else {
-		// Not JSON, store as single value
-		data["value"] = []byte(value)
-	}
+	data := p.parseEnvValueToData(value)
 
 	p.logger.Debug("Successfully retrieved secret from environment",
 		zap.String("path", path),

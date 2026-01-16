@@ -382,61 +382,75 @@ func compileRule(rule *RouteRule, index int) *CompiledRule {
 		Priority:       index,
 	}
 
-	// Compile matches
 	for _, match := range rule.Matches {
-		// Compile path matcher
-		if match.Path != nil {
-			switch match.Path.Type {
-			case PathMatchExact:
-				compiled.PathExact = match.Path.Value
-			case PathMatchPrefix:
-				compiled.PathPrefix = match.Path.Value
-			case PathMatchRegularExpression:
-				if regex, err := regexp.Compile(match.Path.Value); err == nil {
-					compiled.PathRegex = regex
-				}
-			}
-		}
-
-		// Set method matcher
-		if match.Method != nil {
-			compiled.MethodMatcher = match.Method
-		}
-
-		// Compile header matchers
-		for _, header := range match.Headers {
-			headerMatcher := &CompiledHeaderMatcher{
-				Name: strings.ToLower(header.Name),
-			}
-			switch header.Type {
-			case HeaderMatchExact:
-				headerMatcher.Exact = header.Value
-			case HeaderMatchRegularExpression:
-				if regex, err := regexp.Compile(header.Value); err == nil {
-					headerMatcher.Regex = regex
-				}
-			}
-			compiled.HeaderMatchers = append(compiled.HeaderMatchers, headerMatcher)
-		}
-
-		// Compile query matchers
-		for _, query := range match.QueryParams {
-			queryMatcher := &CompiledQueryMatcher{
-				Name: query.Name,
-			}
-			switch query.Type {
-			case QueryParamMatchExact:
-				queryMatcher.Exact = query.Value
-			case QueryParamMatchRegularExpression:
-				if regex, err := regexp.Compile(query.Value); err == nil {
-					queryMatcher.Regex = regex
-				}
-			}
-			compiled.QueryMatchers = append(compiled.QueryMatchers, queryMatcher)
-		}
+		compilePathMatcher(compiled, match.Path)
+		compileMethodMatcher(compiled, match.Method)
+		compileHeaderMatchers(compiled, match.Headers)
+		compileQueryMatchers(compiled, match.QueryParams)
 	}
 
 	return compiled
+}
+
+// compilePathMatcher compiles the path matcher for a route match.
+func compilePathMatcher(compiled *CompiledRule, path *PathMatch) {
+	if path == nil {
+		return
+	}
+
+	switch path.Type {
+	case PathMatchExact:
+		compiled.PathExact = path.Value
+	case PathMatchPrefix:
+		compiled.PathPrefix = path.Value
+	case PathMatchRegularExpression:
+		if regex, err := regexp.Compile(path.Value); err == nil {
+			compiled.PathRegex = regex
+		}
+	}
+}
+
+// compileMethodMatcher sets the method matcher for a route match.
+func compileMethodMatcher(compiled *CompiledRule, method *string) {
+	if method != nil {
+		compiled.MethodMatcher = method
+	}
+}
+
+// compileHeaderMatchers compiles header matchers for a route match.
+func compileHeaderMatchers(compiled *CompiledRule, headers []HeaderMatch) {
+	for _, header := range headers {
+		headerMatcher := &CompiledHeaderMatcher{
+			Name: strings.ToLower(header.Name),
+		}
+		switch header.Type {
+		case HeaderMatchExact:
+			headerMatcher.Exact = header.Value
+		case HeaderMatchRegularExpression:
+			if regex, err := regexp.Compile(header.Value); err == nil {
+				headerMatcher.Regex = regex
+			}
+		}
+		compiled.HeaderMatchers = append(compiled.HeaderMatchers, headerMatcher)
+	}
+}
+
+// compileQueryMatchers compiles query parameter matchers for a route match.
+func compileQueryMatchers(compiled *CompiledRule, queryParams []QueryParamMatch) {
+	for _, query := range queryParams {
+		queryMatcher := &CompiledQueryMatcher{
+			Name: query.Name,
+		}
+		switch query.Type {
+		case QueryParamMatchExact:
+			queryMatcher.Exact = query.Value
+		case QueryParamMatchRegularExpression:
+			if regex, err := regexp.Compile(query.Value); err == nil {
+				queryMatcher.Regex = regex
+			}
+		}
+		compiled.QueryMatchers = append(compiled.QueryMatchers, queryMatcher)
+	}
 }
 
 // hostnameToRegex converts a hostname pattern to a regex.
@@ -510,49 +524,77 @@ func (m *RouteMatcher) matchHostname(compiled *CompiledRoute, host string) bool 
 
 // matchRule checks if the request matches the rule.
 func (m *RouteMatcher) matchRule(rule *CompiledRule, path, method string, headers, query map[string]string) bool {
-	// If no matches defined, match all
 	if len(rule.Rule.Matches) == 0 {
 		return true
 	}
 
-	// Check path
 	if !m.matchPath(rule, path) {
 		return false
 	}
 
-	// Check method
-	if rule.MethodMatcher != nil && *rule.MethodMatcher != method {
+	if !m.matchMethod(rule, method) {
 		return false
 	}
 
-	// Check headers
-	for _, headerMatcher := range rule.HeaderMatchers {
-		value, exists := headers[headerMatcher.Name]
-		if !exists {
-			return false
-		}
-		if headerMatcher.Exact != "" && value != headerMatcher.Exact {
-			return false
-		}
-		if headerMatcher.Regex != nil && !headerMatcher.Regex.MatchString(value) {
+	if !m.matchHeaders(rule.HeaderMatchers, headers) {
+		return false
+	}
+
+	return m.matchQueryParams(rule.QueryMatchers, query)
+}
+
+// matchMethod checks if the method matches the rule's method criteria.
+func (m *RouteMatcher) matchMethod(rule *CompiledRule, method string) bool {
+	return rule.MethodMatcher == nil || *rule.MethodMatcher == method
+}
+
+// matchHeaders checks if all header matchers are satisfied.
+func (m *RouteMatcher) matchHeaders(matchers []*CompiledHeaderMatcher, headers map[string]string) bool {
+	for _, matcher := range matchers {
+		if !m.matchSingleHeader(matcher, headers) {
 			return false
 		}
 	}
+	return true
+}
 
-	// Check query parameters
-	for _, queryMatcher := range rule.QueryMatchers {
-		value, exists := query[queryMatcher.Name]
-		if !exists {
-			return false
-		}
-		if queryMatcher.Exact != "" && value != queryMatcher.Exact {
-			return false
-		}
-		if queryMatcher.Regex != nil && !queryMatcher.Regex.MatchString(value) {
+// matchSingleHeader checks if a single header matcher is satisfied.
+func (m *RouteMatcher) matchSingleHeader(matcher *CompiledHeaderMatcher, headers map[string]string) bool {
+	value, exists := headers[matcher.Name]
+	if !exists {
+		return false
+	}
+	if matcher.Exact != "" && value != matcher.Exact {
+		return false
+	}
+	if matcher.Regex != nil && !matcher.Regex.MatchString(value) {
+		return false
+	}
+	return true
+}
+
+// matchQueryParams checks if all query parameter matchers are satisfied.
+func (m *RouteMatcher) matchQueryParams(matchers []*CompiledQueryMatcher, query map[string]string) bool {
+	for _, matcher := range matchers {
+		if !m.matchSingleQueryParam(matcher, query) {
 			return false
 		}
 	}
+	return true
+}
 
+// matchSingleQueryParam checks if a single query parameter matcher is satisfied.
+func (m *RouteMatcher) matchSingleQueryParam(matcher *CompiledQueryMatcher, query map[string]string) bool {
+	value, exists := query[matcher.Name]
+	if !exists {
+		return false
+	}
+	if matcher.Exact != "" && value != matcher.Exact {
+		return false
+	}
+	if matcher.Regex != nil && !matcher.Regex.MatchString(value) {
+		return false
+	}
 	return true
 }
 

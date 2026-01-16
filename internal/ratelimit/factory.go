@@ -104,7 +104,9 @@ func NewLimiter(config *FactoryConfig) (Limiter, error) {
 		return NewTokenBucketLimiter(s, rate, config.Burst, config.Logger), nil
 
 	case AlgorithmSlidingWindow:
-		return NewSlidingWindowLimiterWithPrecision(s, config.Requests, config.Window, config.Precision, config.Logger), nil
+		limiter := NewSlidingWindowLimiterWithPrecision(
+			s, config.Requests, config.Window, config.Precision, config.Logger)
+		return limiter, nil
 
 	case AlgorithmFixedWindow:
 		return NewFixedWindowLimiter(s, config.Requests, config.Window, config.Logger), nil

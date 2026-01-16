@@ -256,7 +256,7 @@ func TestExtractBackendRefs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractBackendRefs(tt.routeNamespace, tt.rules)
+			result := extractHTTPBackendRefs(tt.routeNamespace, tt.rules)
 			assert.Equal(t, tt.want, result)
 		})
 	}
@@ -273,4 +273,313 @@ func TestIndexFieldConstants(t *testing.T) {
 	assert.Equal(t, ".spec.parentRefs.gateway", TCPRouteGatewayIndexField)
 	assert.Equal(t, ".spec.parentRefs.gateway", TLSRouteGatewayIndexField)
 	assert.Equal(t, ".spec.rules.backendRefs.backend", HTTPRouteBackendIndexField)
+}
+
+// ============================================================================
+// extractGRPCBackendRefs Tests
+// ============================================================================
+
+func TestExtractGRPCBackendRefs(t *testing.T) {
+	tests := []struct {
+		name           string
+		routeNamespace string
+		rules          []avapigwv1alpha1.GRPCRouteRule
+		want           []string
+	}{
+		{
+			name:           "empty rules",
+			routeNamespace: "default",
+			rules:          []avapigwv1alpha1.GRPCRouteRule{},
+			want:           nil,
+		},
+		{
+			name:           "rule with no backend refs",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.GRPCRouteRule{
+				{BackendRefs: []avapigwv1alpha1.GRPCBackendRef{}},
+			},
+			want: nil,
+		},
+		{
+			name:           "Service backend (not indexed)",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.GRPCRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.GRPCBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{Name: "my-service"}},
+					},
+				},
+			},
+			want: nil, // Services are not indexed, only Backend kind
+		},
+		{
+			name:           "Backend kind without namespace",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.GRPCRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.GRPCBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "my-backend",
+							Kind: ptrString("Backend"),
+						}},
+					},
+				},
+			},
+			want: []string{"default/my-backend"},
+		},
+		{
+			name:           "Backend kind with namespace",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.GRPCRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.GRPCBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name:      "my-backend",
+							Kind:      ptrString("Backend"),
+							Namespace: ptrString("other-ns"),
+						}},
+					},
+				},
+			},
+			want: []string{"other-ns/my-backend"},
+		},
+		{
+			name:           "multiple rules with mixed backends",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.GRPCRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.GRPCBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{Name: "service-1"}}, // Service, not indexed
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "backend-1",
+							Kind: ptrString("Backend"),
+						}},
+					},
+				},
+				{
+					BackendRefs: []avapigwv1alpha1.GRPCBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name:      "backend-2",
+							Kind:      ptrString("Backend"),
+							Namespace: ptrString("prod"),
+						}},
+					},
+				},
+			},
+			want: []string{"default/backend-1", "prod/backend-2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractGRPCBackendRefs(tt.routeNamespace, tt.rules)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+// ============================================================================
+// extractTCPBackendRefs Tests
+// ============================================================================
+
+func TestExtractTCPBackendRefs(t *testing.T) {
+	tests := []struct {
+		name           string
+		routeNamespace string
+		rules          []avapigwv1alpha1.TCPRouteRule
+		want           []string
+	}{
+		{
+			name:           "empty rules",
+			routeNamespace: "default",
+			rules:          []avapigwv1alpha1.TCPRouteRule{},
+			want:           nil,
+		},
+		{
+			name:           "rule with no backend refs",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TCPRouteRule{
+				{BackendRefs: []avapigwv1alpha1.TCPBackendRef{}},
+			},
+			want: nil,
+		},
+		{
+			name:           "Service backend (not indexed)",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TCPRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{Name: "my-service"}},
+					},
+				},
+			},
+			want: nil, // Services are not indexed, only Backend kind
+		},
+		{
+			name:           "Backend kind without namespace",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TCPRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "my-backend",
+							Kind: ptrString("Backend"),
+						}},
+					},
+				},
+			},
+			want: []string{"default/my-backend"},
+		},
+		{
+			name:           "Backend kind with namespace",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TCPRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name:      "my-backend",
+							Kind:      ptrString("Backend"),
+							Namespace: ptrString("other-ns"),
+						}},
+					},
+				},
+			},
+			want: []string{"other-ns/my-backend"},
+		},
+		{
+			name:           "multiple rules with mixed backends",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TCPRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{Name: "service-1"}}, // Service, not indexed
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "backend-1",
+							Kind: ptrString("Backend"),
+						}},
+					},
+				},
+				{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name:      "backend-2",
+							Kind:      ptrString("Backend"),
+							Namespace: ptrString("prod"),
+						}},
+					},
+				},
+			},
+			want: []string{"default/backend-1", "prod/backend-2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractTCPBackendRefs(tt.routeNamespace, tt.rules)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+// ============================================================================
+// extractTLSBackendRefs Tests
+// ============================================================================
+
+func TestExtractTLSBackendRefs(t *testing.T) {
+	tests := []struct {
+		name           string
+		routeNamespace string
+		rules          []avapigwv1alpha1.TLSRouteRule
+		want           []string
+	}{
+		{
+			name:           "empty rules",
+			routeNamespace: "default",
+			rules:          []avapigwv1alpha1.TLSRouteRule{},
+			want:           nil,
+		},
+		{
+			name:           "rule with no backend refs",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TLSRouteRule{
+				{BackendRefs: []avapigwv1alpha1.TLSBackendRef{}},
+			},
+			want: nil,
+		},
+		{
+			name:           "Service backend (not indexed)",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TLSRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{Name: "my-service"}},
+					},
+				},
+			},
+			want: nil, // Services are not indexed, only Backend kind
+		},
+		{
+			name:           "Backend kind without namespace",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TLSRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "my-backend",
+							Kind: ptrString("Backend"),
+						}},
+					},
+				},
+			},
+			want: []string{"default/my-backend"},
+		},
+		{
+			name:           "Backend kind with namespace",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TLSRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name:      "my-backend",
+							Kind:      ptrString("Backend"),
+							Namespace: ptrString("other-ns"),
+						}},
+					},
+				},
+			},
+			want: []string{"other-ns/my-backend"},
+		},
+		{
+			name:           "multiple rules with mixed backends",
+			routeNamespace: "default",
+			rules: []avapigwv1alpha1.TLSRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{Name: "service-1"}}, // Service, not indexed
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "backend-1",
+							Kind: ptrString("Backend"),
+						}},
+					},
+				},
+				{
+					BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+						{BackendRef: avapigwv1alpha1.BackendRef{
+							Name:      "backend-2",
+							Kind:      ptrString("Backend"),
+							Namespace: ptrString("prod"),
+						}},
+					},
+				},
+			},
+			want: []string{"default/backend-1", "prod/backend-2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractTLSBackendRefs(tt.routeNamespace, tt.rules)
+			assert.Equal(t, tt.want, result)
+		})
+	}
 }

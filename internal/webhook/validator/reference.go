@@ -40,7 +40,10 @@ func (r *ReferenceValidator) ValidateGatewayExists(ctx context.Context, namespac
 }
 
 // ValidateGatewayListenerExists validates that a Gateway listener exists
-func (r *ReferenceValidator) ValidateGatewayListenerExists(ctx context.Context, namespace, name, listenerName string) error {
+func (r *ReferenceValidator) ValidateGatewayListenerExists(
+	ctx context.Context,
+	namespace, name, listenerName string,
+) error {
 	gateway := &avapigwv1alpha1.Gateway{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, gateway); err != nil {
 		return fmt.Errorf("gateway %s/%s not found: %w", namespace, name, err)
@@ -56,7 +59,11 @@ func (r *ReferenceValidator) ValidateGatewayListenerExists(ctx context.Context, 
 }
 
 // ValidateGatewayHasProtocol validates that a Gateway has a listener with the specified protocol
-func (r *ReferenceValidator) ValidateGatewayHasProtocol(ctx context.Context, namespace, name string, protocol avapigwv1alpha1.ProtocolType) error {
+func (r *ReferenceValidator) ValidateGatewayHasProtocol(
+	ctx context.Context,
+	namespace, name string,
+	protocol avapigwv1alpha1.ProtocolType,
+) error {
 	gateway := &avapigwv1alpha1.Gateway{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, gateway); err != nil {
 		return fmt.Errorf("gateway %s/%s not found: %w", namespace, name, err)
@@ -72,7 +79,11 @@ func (r *ReferenceValidator) ValidateGatewayHasProtocol(ctx context.Context, nam
 }
 
 // ValidateGatewayListenerHasProtocol validates that a specific Gateway listener has the specified protocol
-func (r *ReferenceValidator) ValidateGatewayListenerHasProtocol(ctx context.Context, namespace, name, listenerName string, protocols ...avapigwv1alpha1.ProtocolType) error {
+func (r *ReferenceValidator) ValidateGatewayListenerHasProtocol(
+	ctx context.Context,
+	namespace, name, listenerName string,
+	protocols ...avapigwv1alpha1.ProtocolType,
+) error {
 	gateway := &avapigwv1alpha1.Gateway{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, gateway); err != nil {
 		return fmt.Errorf("gateway %s/%s not found: %w", namespace, name, err)
@@ -94,7 +105,10 @@ func (r *ReferenceValidator) ValidateGatewayListenerHasProtocol(ctx context.Cont
 }
 
 // ValidateGatewayListenerHasTLSPassthrough validates that a Gateway listener has TLS passthrough mode
-func (r *ReferenceValidator) ValidateGatewayListenerHasTLSPassthrough(ctx context.Context, namespace, name, listenerName string) error {
+func (r *ReferenceValidator) ValidateGatewayListenerHasTLSPassthrough(
+	ctx context.Context,
+	namespace, name, listenerName string,
+) error {
 	gateway := &avapigwv1alpha1.Gateway{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, gateway); err != nil {
 		return fmt.Errorf("gateway %s/%s not found: %w", namespace, name, err)
@@ -103,14 +117,20 @@ func (r *ReferenceValidator) ValidateGatewayListenerHasTLSPassthrough(ctx contex
 	for _, listener := range gateway.Spec.Listeners {
 		if listener.Name == listenerName {
 			if listener.Protocol != avapigwv1alpha1.ProtocolTLS {
-				return fmt.Errorf("listener %q in gateway %s/%s has protocol %s, expected TLS for passthrough",
-					listenerName, namespace, name, listener.Protocol)
+				return fmt.Errorf(
+					"listener %q in gateway %s/%s has protocol %s, expected TLS for passthrough",
+					listenerName, namespace, name, listener.Protocol,
+				)
 			}
-			if listener.TLS != nil && listener.TLS.Mode != nil && *listener.TLS.Mode == avapigwv1alpha1.TLSModePassthrough {
+			hasTLSPassthrough := listener.TLS != nil && listener.TLS.Mode != nil &&
+				*listener.TLS.Mode == avapigwv1alpha1.TLSModePassthrough
+			if hasTLSPassthrough {
 				return nil
 			}
-			return fmt.Errorf("listener %q in gateway %s/%s is not configured for TLS passthrough",
-				listenerName, namespace, name)
+			return fmt.Errorf(
+				"listener %q in gateway %s/%s is not configured for TLS passthrough",
+				listenerName, namespace, name,
+			)
 		}
 	}
 
@@ -154,7 +174,11 @@ func (r *ReferenceValidator) ValidateTLSConfigExists(ctx context.Context, namesp
 }
 
 // ValidateParentRefs validates parent references for routes
-func (r *ReferenceValidator) ValidateParentRefs(ctx context.Context, parentRefs []avapigwv1alpha1.ParentRef, routeNamespace string) error {
+func (r *ReferenceValidator) ValidateParentRefs(
+	ctx context.Context,
+	parentRefs []avapigwv1alpha1.ParentRef,
+	routeNamespace string,
+) error {
 	errs := NewValidationErrors()
 
 	for i, parentRef := range parentRefs {
@@ -171,7 +195,8 @@ func (r *ReferenceValidator) ValidateParentRefs(ctx context.Context, parentRefs 
 
 		// If sectionName is specified, check if the listener exists
 		if parentRef.SectionName != nil {
-			if err := r.ValidateGatewayListenerExists(ctx, namespace, parentRef.Name, *parentRef.SectionName); err != nil {
+			err := r.ValidateGatewayListenerExists(ctx, namespace, parentRef.Name, *parentRef.SectionName)
+			if err != nil {
 				errs.Add(fmt.Sprintf("spec.parentRefs[%d].sectionName", i), err.Error())
 			}
 		}
@@ -181,7 +206,11 @@ func (r *ReferenceValidator) ValidateParentRefs(ctx context.Context, parentRefs 
 }
 
 // ValidateBackendRefs validates backend references
-func (r *ReferenceValidator) ValidateBackendRefs(ctx context.Context, backendRefs []avapigwv1alpha1.BackendRef, routeNamespace string) error {
+func (r *ReferenceValidator) ValidateBackendRefs(
+	ctx context.Context,
+	backendRefs []avapigwv1alpha1.BackendRef,
+	routeNamespace string,
+) error {
 	errs := NewValidationErrors()
 
 	for i, backendRef := range backendRefs {
@@ -218,7 +247,11 @@ func (r *ReferenceValidator) ValidateBackendRefs(ctx context.Context, backendRef
 }
 
 // ValidateTargetRef validates a policy target reference
-func (r *ReferenceValidator) ValidateTargetRef(ctx context.Context, targetRef *avapigwv1alpha1.TargetRef, policyNamespace string) error {
+func (r *ReferenceValidator) ValidateTargetRef(
+	ctx context.Context,
+	targetRef *avapigwv1alpha1.TargetRef,
+	policyNamespace string,
+) error {
 	namespace := policyNamespace
 	if targetRef.Namespace != nil {
 		namespace = *targetRef.Namespace
@@ -229,22 +262,26 @@ func (r *ReferenceValidator) ValidateTargetRef(ctx context.Context, targetRef *a
 		return r.ValidateGatewayExists(ctx, namespace, targetRef.Name)
 	case "HTTPRoute":
 		route := &avapigwv1alpha1.HTTPRoute{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: targetRef.Name}, route); err != nil {
+		key := types.NamespacedName{Namespace: namespace, Name: targetRef.Name}
+		if err := r.Client.Get(ctx, key, route); err != nil {
 			return fmt.Errorf("HTTPRoute %s/%s not found: %w", namespace, targetRef.Name, err)
 		}
 	case "GRPCRoute":
 		route := &avapigwv1alpha1.GRPCRoute{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: targetRef.Name}, route); err != nil {
+		key := types.NamespacedName{Namespace: namespace, Name: targetRef.Name}
+		if err := r.Client.Get(ctx, key, route); err != nil {
 			return fmt.Errorf("GRPCRoute %s/%s not found: %w", namespace, targetRef.Name, err)
 		}
 	case "TCPRoute":
 		route := &avapigwv1alpha1.TCPRoute{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: targetRef.Name}, route); err != nil {
+		key := types.NamespacedName{Namespace: namespace, Name: targetRef.Name}
+		if err := r.Client.Get(ctx, key, route); err != nil {
 			return fmt.Errorf("TCPRoute %s/%s not found: %w", namespace, targetRef.Name, err)
 		}
 	case "TLSRoute":
 		route := &avapigwv1alpha1.TLSRoute{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: targetRef.Name}, route); err != nil {
+		key := types.NamespacedName{Namespace: namespace, Name: targetRef.Name}
+		if err := r.Client.Get(ctx, key, route); err != nil {
 			return fmt.Errorf("TLSRoute %s/%s not found: %w", namespace, targetRef.Name, err)
 		}
 	default:
@@ -255,7 +292,11 @@ func (r *ReferenceValidator) ValidateTargetRef(ctx context.Context, targetRef *a
 }
 
 // ValidateSecretObjectReference validates a SecretObjectReference
-func (r *ReferenceValidator) ValidateSecretObjectReference(ctx context.Context, ref *avapigwv1alpha1.SecretObjectReference, defaultNamespace string) error {
+func (r *ReferenceValidator) ValidateSecretObjectReference(
+	ctx context.Context,
+	ref *avapigwv1alpha1.SecretObjectReference,
+	defaultNamespace string,
+) error {
 	if ref == nil {
 		return nil
 	}
@@ -277,107 +318,178 @@ func (r *ReferenceValidator) ValidateServiceAccountExists(ctx context.Context, n
 	return nil
 }
 
-// CheckGatewayHasAttachedRoutes checks if a Gateway has any attached routes
-func (r *ReferenceValidator) CheckGatewayHasAttachedRoutes(ctx context.Context, gatewayNamespace, gatewayName string) (bool, error) {
-	// Check HTTPRoutes
+// parentRefMatchesGateway checks if a parent reference matches the specified gateway
+func parentRefMatchesGateway(
+	routeNamespace string,
+	parentRef avapigwv1alpha1.ParentRef,
+	gatewayNamespace, gatewayName string,
+) bool {
+	ns := routeNamespace
+	if parentRef.Namespace != nil {
+		ns = *parentRef.Namespace
+	}
+	return ns == gatewayNamespace && parentRef.Name == gatewayName
+}
+
+// checkHTTPRoutesForGateway checks if any HTTPRoute references the gateway
+func (r *ReferenceValidator) checkHTTPRoutesForGateway(
+	ctx context.Context,
+	gatewayNamespace, gatewayName string,
+) (bool, error) {
 	var httpRoutes avapigwv1alpha1.HTTPRouteList
 	if err := r.Client.List(ctx, &httpRoutes); err != nil {
 		return false, fmt.Errorf("failed to list HTTPRoutes: %w", err)
 	}
 	for _, route := range httpRoutes.Items {
 		for _, parentRef := range route.Spec.ParentRefs {
-			ns := route.Namespace
-			if parentRef.Namespace != nil {
-				ns = *parentRef.Namespace
-			}
-			if ns == gatewayNamespace && parentRef.Name == gatewayName {
+			if parentRefMatchesGateway(route.Namespace, parentRef, gatewayNamespace, gatewayName) {
 				return true, nil
 			}
 		}
 	}
+	return false, nil
+}
 
-	// Check GRPCRoutes
+// checkGRPCRoutesForGateway checks if any GRPCRoute references the gateway
+func (r *ReferenceValidator) checkGRPCRoutesForGateway(
+	ctx context.Context,
+	gatewayNamespace, gatewayName string,
+) (bool, error) {
 	var grpcRoutes avapigwv1alpha1.GRPCRouteList
 	if err := r.Client.List(ctx, &grpcRoutes); err != nil {
 		return false, fmt.Errorf("failed to list GRPCRoutes: %w", err)
 	}
 	for _, route := range grpcRoutes.Items {
 		for _, parentRef := range route.Spec.ParentRefs {
-			ns := route.Namespace
-			if parentRef.Namespace != nil {
-				ns = *parentRef.Namespace
-			}
-			if ns == gatewayNamespace && parentRef.Name == gatewayName {
+			if parentRefMatchesGateway(route.Namespace, parentRef, gatewayNamespace, gatewayName) {
 				return true, nil
 			}
 		}
 	}
+	return false, nil
+}
 
-	// Check TCPRoutes
+// checkTCPRoutesForGateway checks if any TCPRoute references the gateway
+func (r *ReferenceValidator) checkTCPRoutesForGateway(
+	ctx context.Context,
+	gatewayNamespace, gatewayName string,
+) (bool, error) {
 	var tcpRoutes avapigwv1alpha1.TCPRouteList
 	if err := r.Client.List(ctx, &tcpRoutes); err != nil {
 		return false, fmt.Errorf("failed to list TCPRoutes: %w", err)
 	}
 	for _, route := range tcpRoutes.Items {
 		for _, parentRef := range route.Spec.ParentRefs {
-			ns := route.Namespace
-			if parentRef.Namespace != nil {
-				ns = *parentRef.Namespace
-			}
-			if ns == gatewayNamespace && parentRef.Name == gatewayName {
+			if parentRefMatchesGateway(route.Namespace, parentRef, gatewayNamespace, gatewayName) {
 				return true, nil
 			}
 		}
 	}
+	return false, nil
+}
 
-	// Check TLSRoutes
+// checkTLSRoutesForGateway checks if any TLSRoute references the gateway
+func (r *ReferenceValidator) checkTLSRoutesForGateway(
+	ctx context.Context,
+	gatewayNamespace, gatewayName string,
+) (bool, error) {
 	var tlsRoutes avapigwv1alpha1.TLSRouteList
 	if err := r.Client.List(ctx, &tlsRoutes); err != nil {
 		return false, fmt.Errorf("failed to list TLSRoutes: %w", err)
 	}
 	for _, route := range tlsRoutes.Items {
 		for _, parentRef := range route.Spec.ParentRefs {
-			ns := route.Namespace
-			if parentRef.Namespace != nil {
-				ns = *parentRef.Namespace
-			}
-			if ns == gatewayNamespace && parentRef.Name == gatewayName {
+			if parentRefMatchesGateway(route.Namespace, parentRef, gatewayNamespace, gatewayName) {
 				return true, nil
 			}
 		}
+	}
+	return false, nil
+}
+
+// CheckGatewayHasAttachedRoutes checks if a Gateway has any attached routes
+func (r *ReferenceValidator) CheckGatewayHasAttachedRoutes(
+	ctx context.Context,
+	gatewayNamespace, gatewayName string,
+) (bool, error) {
+	if found, err := r.checkHTTPRoutesForGateway(ctx, gatewayNamespace, gatewayName); err != nil || found {
+		return found, err
+	}
+
+	if found, err := r.checkGRPCRoutesForGateway(ctx, gatewayNamespace, gatewayName); err != nil || found {
+		return found, err
+	}
+
+	if found, err := r.checkTCPRoutesForGateway(ctx, gatewayNamespace, gatewayName); err != nil || found {
+		return found, err
+	}
+
+	if found, err := r.checkTLSRoutesForGateway(ctx, gatewayNamespace, gatewayName); err != nil || found {
+		return found, err
 	}
 
 	return false, nil
 }
 
 // CheckTLSConfigHasReferences checks if a TLSConfig is referenced by any Gateway
-func (r *ReferenceValidator) CheckTLSConfigHasReferences(ctx context.Context, tlsConfigNamespace, tlsConfigName string) (bool, error) {
+func (r *ReferenceValidator) CheckTLSConfigHasReferences(
+	ctx context.Context,
+	tlsConfigNamespace, tlsConfigName string,
+) (bool, error) {
 	var gateways avapigwv1alpha1.GatewayList
 	if err := r.Client.List(ctx, &gateways); err != nil {
 		return false, fmt.Errorf("failed to list Gateways: %w", err)
 	}
 
 	for _, gateway := range gateways.Items {
-		for _, listener := range gateway.Spec.Listeners {
-			if listener.TLS != nil {
-				for _, certRef := range listener.TLS.CertificateRefs {
-					ns := gateway.Namespace
-					if certRef.Namespace != nil {
-						ns = *certRef.Namespace
-					}
-					if ns == tlsConfigNamespace && certRef.Name == tlsConfigName {
-						return true, nil
-					}
-				}
-			}
+		if r.gatewayReferencesTLSConfig(&gateway, tlsConfigNamespace, tlsConfigName) {
+			return true, nil
 		}
 	}
 
 	return false, nil
 }
 
+// gatewayReferencesTLSConfig checks if a Gateway references a specific TLSConfig
+func (r *ReferenceValidator) gatewayReferencesTLSConfig(
+	gateway *avapigwv1alpha1.Gateway,
+	tlsConfigNamespace, tlsConfigName string,
+) bool {
+	for _, listener := range gateway.Spec.Listeners {
+		if r.listenerReferencesTLSConfig(gateway.Namespace, listener, tlsConfigNamespace, tlsConfigName) {
+			return true
+		}
+	}
+	return false
+}
+
+// listenerReferencesTLSConfig checks if a listener references a specific TLSConfig
+func (r *ReferenceValidator) listenerReferencesTLSConfig(
+	gatewayNamespace string,
+	listener avapigwv1alpha1.Listener,
+	tlsConfigNamespace, tlsConfigName string,
+) bool {
+	if listener.TLS == nil {
+		return false
+	}
+
+	for _, certRef := range listener.TLS.CertificateRefs {
+		ns := gatewayNamespace
+		if certRef.Namespace != nil {
+			ns = *certRef.Namespace
+		}
+		if ns == tlsConfigNamespace && certRef.Name == tlsConfigName {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckBackendHasReferences checks if a Backend is referenced by any route
-func (r *ReferenceValidator) CheckBackendHasReferences(ctx context.Context, backendNamespace, backendName string) (bool, error) {
+func (r *ReferenceValidator) CheckBackendHasReferences(
+	ctx context.Context,
+	backendNamespace, backendName string,
+) (bool, error) {
 	// Check HTTPRoutes
 	var httpRoutes avapigwv1alpha1.HTTPRouteList
 	if err := r.Client.List(ctx, &httpRoutes); err != nil {

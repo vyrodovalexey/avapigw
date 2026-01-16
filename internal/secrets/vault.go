@@ -52,6 +52,80 @@ type VaultProvider struct {
 	logger           *zap.Logger
 }
 
+// vaultProviderDefaults holds the default values for Vault provider configuration.
+type vaultProviderDefaults struct {
+	secretMountPoint string
+	timeout          time.Duration
+	maxRetries       int
+	retryWaitMin     time.Duration
+	retryWaitMax     time.Duration
+}
+
+// applyVaultProviderDefaults applies default values to the configuration.
+func applyVaultProviderDefaults(cfg *VaultProviderConfig) vaultProviderDefaults {
+	defaults := vaultProviderDefaults{
+		secretMountPoint: cfg.SecretMountPoint,
+		timeout:          cfg.Timeout,
+		maxRetries:       cfg.MaxRetries,
+		retryWaitMin:     cfg.RetryWaitMin,
+		retryWaitMax:     cfg.RetryWaitMax,
+	}
+
+	if defaults.secretMountPoint == "" {
+		defaults.secretMountPoint = "secret"
+	}
+	if defaults.timeout == 0 {
+		defaults.timeout = 30 * time.Second
+	}
+	if defaults.maxRetries == 0 {
+		defaults.maxRetries = 3
+	}
+	if defaults.retryWaitMin == 0 {
+		defaults.retryWaitMin = 500 * time.Millisecond
+	}
+	if defaults.retryWaitMax == 0 {
+		defaults.retryWaitMax = 5 * time.Second
+	}
+
+	return defaults
+}
+
+// createVaultClientFromConfig creates a Vault client from the configuration.
+func createVaultClientFromConfig(
+	ctx context.Context,
+	cfg *VaultProviderConfig,
+	defaults vaultProviderDefaults,
+	logger *zap.Logger,
+) (*vault.Client, error) {
+	clientConfig := &vault.Config{
+		Address:      cfg.Address,
+		Namespace:    cfg.Namespace,
+		TLSConfig:    cfg.TLSConfig,
+		Timeout:      defaults.timeout,
+		MaxRetries:   defaults.maxRetries,
+		RetryWaitMin: defaults.retryWaitMin,
+		RetryWaitMax: defaults.retryWaitMax,
+	}
+
+	client, err := vault.NewClient(clientConfig, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create vault client: %w", err)
+	}
+
+	authMethod, err := createVaultAuthMethod(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create auth method: %w", err)
+	}
+
+	client.SetAuthMethod(authMethod)
+
+	if err := client.Authenticate(ctx); err != nil {
+		return nil, fmt.Errorf("failed to authenticate with vault: %w", err)
+	}
+
+	return client, nil
+}
+
 // NewVaultProvider creates a new Vault secrets provider
 func NewVaultProvider(ctx context.Context, cfg *VaultProviderConfig) (*VaultProvider, error) {
 	if cfg == nil {
@@ -66,75 +140,25 @@ func NewVaultProvider(ctx context.Context, cfg *VaultProviderConfig) (*VaultProv
 		logger = zap.NewNop()
 	}
 
-	// Set defaults
-	secretMountPoint := cfg.SecretMountPoint
-	if secretMountPoint == "" {
-		secretMountPoint = "secret"
-	}
+	defaults := applyVaultProviderDefaults(cfg)
 
-	timeout := cfg.Timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-
-	maxRetries := cfg.MaxRetries
-	if maxRetries == 0 {
-		maxRetries = 3
-	}
-
-	retryWaitMin := cfg.RetryWaitMin
-	if retryWaitMin == 0 {
-		retryWaitMin = 500 * time.Millisecond
-	}
-
-	retryWaitMax := cfg.RetryWaitMax
-	if retryWaitMax == 0 {
-		retryWaitMax = 5 * time.Second
-	}
-
-	// Create Vault client config
-	clientConfig := &vault.Config{
-		Address:      cfg.Address,
-		Namespace:    cfg.Namespace,
-		TLSConfig:    cfg.TLSConfig,
-		Timeout:      timeout,
-		MaxRetries:   maxRetries,
-		RetryWaitMin: retryWaitMin,
-		RetryWaitMax: retryWaitMax,
-	}
-
-	// Create Vault client
-	client, err := vault.NewClient(clientConfig, logger)
+	client, err := createVaultClientFromConfig(ctx, cfg, defaults, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create vault client: %w", err)
+		return nil, err
 	}
 
-	// Create auth method
-	authMethod, err := createVaultAuthMethod(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create auth method: %w", err)
-	}
-
-	client.SetAuthMethod(authMethod)
-
-	// Authenticate
-	if err := client.Authenticate(ctx); err != nil {
-		return nil, fmt.Errorf("failed to authenticate with vault: %w", err)
-	}
-
-	// Create KV2 client
-	kv2Client := vault.NewKV2Client(client, secretMountPoint, logger)
+	kv2Client := vault.NewKV2Client(client, defaults.secretMountPoint, logger)
 
 	logger.Info("Vault secrets provider initialized",
 		zap.String("address", cfg.Address),
 		zap.String("authMethod", cfg.AuthMethod),
-		zap.String("mountPoint", secretMountPoint),
+		zap.String("mountPoint", defaults.secretMountPoint),
 	)
 
 	return &VaultProvider{
 		client:           client,
 		kv2Client:        kv2Client,
-		secretMountPoint: secretMountPoint,
+		secretMountPoint: defaults.secretMountPoint,
 		logger:           logger,
 	}, nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/basic"
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/authz"
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 )
 
 // AuthConfig holds configuration for the auth middleware.
@@ -59,143 +60,186 @@ func DefaultAuthConfig() *AuthConfig {
 	}
 }
 
-// Auth returns a middleware that handles authentication.
-func Auth(config *AuthConfig) gin.HandlerFunc {
+// authMiddlewareContext holds the context for auth middleware processing.
+type authMiddlewareContext struct {
+	config         *AuthConfig
+	authCore       *core.AuthCore
+	authzSkipPaths map[string]bool
+}
+
+// newAuthMiddlewareContext creates and initializes the auth middleware context.
+func newAuthMiddlewareContext(config *AuthConfig) *authMiddlewareContext {
 	if config == nil {
 		config = DefaultAuthConfig()
 	}
-
 	if config.Logger == nil {
 		config.Logger = zap.NewNop()
 	}
 
-	// Build skip paths maps
-	jwtSkipPaths := make(map[string]bool)
-	for _, path := range config.JWTSkipPaths {
-		jwtSkipPaths[path] = true
+	// Create core auth configuration
+	coreConfig := core.AuthCoreConfig{
+		BaseConfig: core.BaseConfig{
+			Logger: config.Logger,
+		},
+		JWTEnabled:     config.JWTEnabled,
+		APIKeyEnabled:  config.APIKeyEnabled,
+		BasicEnabled:   config.BasicEnabled,
+		RequireAuth:    config.RequireAuth,
+		AllowAnonymous: config.AllowAnonymous,
+		AnonymousPaths: config.AnonymousPaths,
 	}
 
-	apiKeySkipPaths := make(map[string]bool)
-	for _, path := range config.APIKeySkipPaths {
-		apiKeySkipPaths[path] = true
+	authCore := core.NewAuthCore(coreConfig)
+	configureAuthValidators(authCore, config)
+
+	return &authMiddlewareContext{
+		config:         config,
+		authCore:       authCore,
+		authzSkipPaths: buildSkipPathsMap(config.AuthzSkipPaths),
+	}
+}
+
+// configureAuthValidators sets up validators on the auth core.
+func configureAuthValidators(authCore *core.AuthCore, config *AuthConfig) {
+	if config.JWTValidator != nil {
+		authCore.WithJWTValidator(config.JWTValidator)
+	}
+	if config.APIKeyValidator != nil {
+		authCore.WithAPIKeyValidator(config.APIKeyValidator)
+	}
+	if config.BasicValidator != nil {
+		authCore.WithBasicValidator(config.BasicValidator)
+	}
+}
+
+// buildSkipPathsMap creates a map from a slice of paths for O(1) lookup.
+func buildSkipPathsMap(paths []string) map[string]bool {
+	skipPaths := make(map[string]bool)
+	for _, path := range paths {
+		skipPaths[path] = true
+	}
+	return skipPaths
+}
+
+// storeAuthResultInContext stores authentication results in the gin and request context.
+func storeAuthResultInContext(c *gin.Context, result *core.AuthResult, config *AuthConfig) context.Context {
+	ctx := c.Request.Context()
+	if !result.Authenticated {
+		return ctx
 	}
 
-	basicSkipPaths := make(map[string]bool)
-	for _, path := range config.BasicSkipPaths {
-		basicSkipPaths[path] = true
+	switch result.Method {
+	case "jwt":
+		if result.JWTClaims != nil {
+			c.Set(config.JWTClaimsKey, result.JWTClaims)
+			ctx = context.WithValue(ctx, jwt.ClaimsContextKey{}, result.JWTClaims)
+		}
+	case "apikey":
+		if result.APIKey != nil {
+			c.Set(config.APIKeyKey, result.APIKey)
+			ctx = apikey.ContextWithAPIKey(ctx, result.APIKey)
+		}
+	case "basic":
+		if result.User != nil {
+			ctx = basic.ContextWithUser(ctx, result.User)
+		}
+	}
+	return ctx
+}
+
+// handleAuthRequired handles the case when authentication is required but not provided.
+func handleAuthRequired(c *gin.Context, authCore *core.AuthCore, logger *zap.Logger, path string) {
+	if authCore.IsOnlyBasicAuth() {
+		c.Header("WWW-Authenticate", `Basic realm="`+authCore.BasicRealm()+`"`)
 	}
 
-	authzSkipPaths := make(map[string]bool)
-	for _, path := range config.AuthzSkipPaths {
-		authzSkipPaths[path] = true
+	logger.Debug("authentication required but not provided",
+		zap.String("path", path),
+		zap.String("method", c.Request.Method),
+	)
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+		"error":   "unauthorized",
+		"message": "authentication required",
+	})
+}
+
+// performAuthorization performs authorization check and returns true if request should continue.
+func performAuthorization(
+	c *gin.Context,
+	ctx context.Context,
+	authorizer authz.Authorizer,
+	subject *authz.Subject,
+	logger *zap.Logger,
+) bool {
+	resource := authz.NewResourceFromRequest(c.Request)
+	path := c.Request.URL.Path
+
+	decision, err := authorizer.Authorize(ctx, subject, resource)
+	if err != nil {
+		logger.Error("authorization error",
+			zap.Error(err),
+			zap.String("path", path),
+		)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "authorization error",
+		})
+		return false
 	}
 
-	anonymousPaths := make(map[string]bool)
-	for _, path := range config.AnonymousPaths {
-		anonymousPaths[path] = true
+	if !decision.Allowed {
+		logger.Debug("authorization denied",
+			zap.String("path", path),
+			zap.String("method", c.Request.Method),
+			zap.String("reason", decision.Reason),
+			zap.String("rule", decision.Rule),
+		)
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "access denied",
+		})
+		return false
 	}
+	return true
+}
+
+// Auth returns a middleware that handles authentication.
+func Auth(config *AuthConfig) gin.HandlerFunc {
+	mctx := newAuthMiddlewareContext(config)
 
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 		ctx := c.Request.Context()
 
 		// Check if path allows anonymous access
-		if config.AllowAnonymous && anonymousPaths[path] {
+		if mctx.authCore.IsAnonymousPath(path) {
 			c.Next()
 			return
 		}
 
-		var authenticated bool
-		var subject *authz.Subject
+		// Extract credentials and authenticate
+		credentials := extractCredentialsFromRequest(c.Request, mctx.config)
+		result := mctx.authCore.Authenticate(ctx, credentials)
 
-		// Try JWT authentication
-		if config.JWTEnabled && config.JWTValidator != nil && !jwtSkipPaths[path] {
-			if claims, err := authenticateJWT(ctx, c.Request, config); err == nil {
-				authenticated = true
-				subject = claimsToSubject(claims)
-				c.Set(config.JWTClaimsKey, claims)
-
-				// Store claims in context
-				ctx = context.WithValue(ctx, jwt.ClaimsContextKey{}, claims)
-				c.Request = c.Request.WithContext(ctx)
-			}
-		}
-
-		// Try API Key authentication if JWT didn't succeed
-		if !authenticated && config.APIKeyEnabled && config.APIKeyValidator != nil && !apiKeySkipPaths[path] {
-			if apiKey, err := authenticateAPIKey(ctx, c.Request, config); err == nil {
-				authenticated = true
-				subject = apiKeyToSubject(apiKey)
-				c.Set(config.APIKeyKey, apiKey)
-
-				// Store API key in context
-				ctx = apikey.ContextWithAPIKey(ctx, apiKey)
-				c.Request = c.Request.WithContext(ctx)
-			}
-		}
-
-		// Try Basic authentication if others didn't succeed
-		if !authenticated && config.BasicEnabled && config.BasicValidator != nil && !basicSkipPaths[path] {
-			if user, err := authenticateBasic(ctx, c.Request, config); err == nil {
-				authenticated = true
-				subject = userToSubject(user)
-
-				// Store user in context
-				ctx = basic.ContextWithUser(ctx, user)
-				c.Request = c.Request.WithContext(ctx)
-			} else if config.RequireAuth && !config.APIKeyEnabled && !config.JWTEnabled {
-				// Only send WWW-Authenticate if basic auth is the only method
-				c.Header("WWW-Authenticate", `Basic realm="`+config.BasicValidator.Realm()+`"`)
-			}
-		}
+		// Store authentication results in context
+		ctx = storeAuthResultInContext(c, result, mctx.config)
+		c.Request = c.Request.WithContext(ctx)
 
 		// Check if authentication is required
-		if config.RequireAuth && !authenticated {
-			config.Logger.Debug("authentication required but not provided",
-				zap.String("path", path),
-				zap.String("method", c.Request.Method),
-			)
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error":   "unauthorized",
-				"message": "authentication required",
-			})
+		if mctx.authCore.RequireAuth() && !result.Authenticated {
+			handleAuthRequired(c, mctx.authCore, mctx.config.Logger, path)
 			return
 		}
 
 		// Store subject in context for authorization
-		if subject != nil {
-			ctx = authz.ContextWithSubject(ctx, subject)
+		if result.Subject != nil {
+			ctx = authz.ContextWithSubject(ctx, result.Subject)
 			c.Request = c.Request.WithContext(ctx)
 		}
 
 		// Perform authorization if enabled
-		if config.AuthzEnabled && config.Authorizer != nil && !authzSkipPaths[path] {
-			resource := authz.NewResourceFromRequest(c.Request)
-
-			decision, err := config.Authorizer.Authorize(ctx, subject, resource)
-			if err != nil {
-				config.Logger.Error("authorization error",
-					zap.Error(err),
-					zap.String("path", path),
-				)
-				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-					"error":   "internal_error",
-					"message": "authorization error",
-				})
-				return
-			}
-
-			if !decision.Allowed {
-				config.Logger.Debug("authorization denied",
-					zap.String("path", path),
-					zap.String("method", c.Request.Method),
-					zap.String("reason", decision.Reason),
-					zap.String("rule", decision.Rule),
-				)
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-					"error":   "forbidden",
-					"message": "access denied",
-				})
+		if mctx.config.AuthzEnabled && mctx.config.Authorizer != nil && !mctx.authzSkipPaths[path] {
+			if !performAuthorization(c, ctx, mctx.config.Authorizer, result.Subject, mctx.config.Logger) {
 				return
 			}
 		}
@@ -204,73 +248,130 @@ func Auth(config *AuthConfig) gin.HandlerFunc {
 	}
 }
 
-// authenticateJWT authenticates using JWT.
-func authenticateJWT(ctx context.Context, r *http.Request, config *AuthConfig) (*jwt.Claims, error) {
-	extractor := config.JWTExtractor
-	if extractor == nil {
-		extractor = jwt.DefaultExtractor()
+// extractCredentialsFromRequest extracts authentication credentials from an HTTP request.
+func extractCredentialsFromRequest(r *http.Request, config *AuthConfig) core.AuthCredentials {
+	credentials := core.AuthCredentials{}
+
+	// Extract JWT token
+	if config.JWTEnabled {
+		extractor := config.JWTExtractor
+		if extractor == nil {
+			extractor = jwt.DefaultExtractor()
+		}
+		if token, err := extractor.Extract(r); err == nil {
+			credentials.BearerToken = token
+		}
 	}
 
-	token, err := extractor.Extract(r)
-	if err != nil {
-		return nil, err
+	// Extract API key
+	if config.APIKeyEnabled {
+		extractor := config.APIKeyExtractor
+		if extractor == nil {
+			extractor = apikey.DefaultExtractor()
+		}
+		if key, err := extractor.Extract(r); err == nil {
+			credentials.APIKey = key
+		}
 	}
 
-	return config.JWTValidator.Validate(ctx, token)
+	// Extract basic auth
+	if config.BasicEnabled {
+		if username, password, ok := r.BasicAuth(); ok {
+			credentials.BasicAuth = &core.BasicCredentials{
+				Username: username,
+				Password: password,
+			}
+		}
+	}
+
+	return credentials
 }
 
-// authenticateAPIKey authenticates using API key.
-func authenticateAPIKey(ctx context.Context, r *http.Request, config *AuthConfig) (*apikey.APIKey, error) {
-	extractor := config.APIKeyExtractor
-	if extractor == nil {
-		extractor = apikey.DefaultExtractor()
+// authenticateWithCore performs authentication and returns the result with updated context.
+func authenticateWithCore(c *gin.Context, authCore *core.AuthCore, logger *zap.Logger) (*core.AuthResult, bool) {
+	path := c.Request.URL.Path
+	ctx := c.Request.Context()
+
+	// Check if path allows anonymous access
+	if authCore.IsAnonymousPath(path) {
+		return nil, true
 	}
 
-	key, err := extractor.Extract(r)
-	if err != nil {
-		return nil, err
+	// Extract credentials and authenticate
+	credentials := extractCredentialsFromHTTPRequest(c.Request)
+	result := authCore.Authenticate(ctx, credentials)
+
+	// Check if authentication is required
+	if authCore.RequireAuth() && !result.Authenticated {
+		handleAuthRequired(c, authCore, logger, path)
+		return nil, false
 	}
 
-	return config.APIKeyValidator.Validate(ctx, key)
+	// Store subject in context for authorization
+	if result.Subject != nil {
+		ctx = authz.ContextWithSubject(ctx, result.Subject)
+		c.Request = c.Request.WithContext(ctx)
+	}
+
+	return result, true
 }
 
-// authenticateBasic authenticates using basic auth.
-func authenticateBasic(ctx context.Context, r *http.Request, config *AuthConfig) (*basic.User, error) {
-	return config.BasicValidator.ValidateRequest(ctx, r)
-}
-
-// claimsToSubject converts JWT claims to an authorization subject.
-func claimsToSubject(claims *jwt.Claims) *authz.Subject {
-	subject := &authz.Subject{
-		User:   claims.Subject,
-		Groups: claims.Groups,
-		Roles:  claims.Roles,
-		Scopes: claims.GetScopes(),
-		Claims: claims.Raw(),
+// AuthWithCore returns a middleware that handles authentication using the core package directly.
+func AuthWithCore(authCore *core.AuthCore, authorizer authz.Authorizer, logger *zap.Logger) gin.HandlerFunc {
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 
-	return subject
-}
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
 
-// apiKeyToSubject converts an API key to an authorization subject.
-func apiKeyToSubject(key *apikey.APIKey) *authz.Subject {
-	return &authz.Subject{
-		User:   key.ID,
-		Scopes: key.Scopes,
-		Metadata: map[string]string{
-			"api_key_name": key.Name,
-		},
+		result, shouldContinue := authenticateWithCore(c, authCore, logger)
+		if !shouldContinue {
+			return
+		}
+		// Anonymous path - continue without authorization
+		if result == nil {
+			c.Next()
+			return
+		}
+
+		// Perform authorization if enabled
+		if authorizer != nil && !authCore.ShouldSkip(path) {
+			if !performAuthorization(c, c.Request.Context(), authorizer, result.Subject, logger) {
+				return
+			}
+		}
+
+		c.Next()
 	}
 }
 
-// userToSubject converts a basic auth user to an authorization subject.
-func userToSubject(user *basic.User) *authz.Subject {
-	return &authz.Subject{
-		User:     user.Username,
-		Groups:   user.Groups,
-		Roles:    user.Roles,
-		Metadata: user.Metadata,
+// extractCredentialsFromHTTPRequest extracts authentication credentials from an HTTP request.
+func extractCredentialsFromHTTPRequest(r *http.Request) core.AuthCredentials {
+	credentials := core.AuthCredentials{}
+
+	// Extract bearer token
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			credentials.BearerToken = strings.TrimPrefix(auth, "Bearer ")
+			credentials.BearerToken = strings.TrimPrefix(credentials.BearerToken, "bearer ")
+		}
 	}
+
+	// Extract API key
+	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+		credentials.APIKey = apiKey
+	}
+
+	// Extract basic auth
+	if username, password, ok := r.BasicAuth(); ok {
+		credentials.BasicAuth = &core.BasicCredentials{
+			Username: username,
+			Password: password,
+		}
+	}
+
+	return credentials
 }
 
 // JWTAuth returns a middleware that handles JWT authentication only.

@@ -71,7 +71,12 @@ func WithCritical(critical bool) DependencyCheckOption {
 }
 
 // NewDependencyCheck creates a new dependency check.
-func NewDependencyCheck(name string, depType DependencyType, checkFn func(ctx context.Context) error, opts ...DependencyCheckOption) *DependencyCheck {
+func NewDependencyCheck(
+	name string,
+	depType DependencyType,
+	checkFn func(ctx context.Context) error,
+	opts ...DependencyCheckOption,
+) *DependencyCheck {
 	d := &DependencyCheck{
 		name:     name,
 		depType:  depType,
@@ -159,7 +164,11 @@ func SQLHealthCheck(name string, db *sql.DB, opts ...DependencyCheckOption) *Dep
 }
 
 // CustomHealthCheck creates a custom health check.
-func CustomHealthCheck(name string, checkFn func(ctx context.Context) error, opts ...DependencyCheckOption) *DependencyCheck {
+func CustomHealthCheck(
+	name string,
+	checkFn func(ctx context.Context) error,
+	opts ...DependencyCheckOption,
+) *DependencyCheck {
 	return NewDependencyCheck(name, DependencyTypeCustom, checkFn, opts...)
 }
 

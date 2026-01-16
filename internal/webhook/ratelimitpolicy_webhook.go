@@ -43,7 +43,8 @@ func SetupRateLimitPolicyWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-ratelimitpolicy,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=ratelimitpolicies,verbs=create;update,versions=v1alpha1,name=mratelimitpolicy.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-ratelimitpolicy,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=ratelimitpolicies,verbs=create;update,versions=v1alpha1,name=mratelimitpolicy.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &RateLimitPolicyWebhook{}
 
@@ -60,7 +61,8 @@ func (w *RateLimitPolicyWebhook) Default(ctx context.Context, obj runtime.Object
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-ratelimitpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=ratelimitpolicies,verbs=create;update;delete,versions=v1alpha1,name=vratelimitpolicy.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-ratelimitpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=ratelimitpolicies,verbs=create;update;delete,versions=v1alpha1,name=vratelimitpolicy.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomValidator = &RateLimitPolicyWebhook{}
 
@@ -105,7 +107,10 @@ func (w *RateLimitPolicyWebhook) ValidateCreate(ctx context.Context, obj runtime
 }
 
 // ValidateUpdate implements webhook.CustomValidator
-func (w *RateLimitPolicyWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *RateLimitPolicyWebhook) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+) (admission.Warnings, error) {
 	policy, ok := newObj.(*avapigwv1alpha1.RateLimitPolicy)
 	if !ok {
 		return nil, fmt.Errorf("expected a RateLimitPolicy but got %T", newObj)
@@ -122,7 +127,10 @@ func (w *RateLimitPolicyWebhook) ValidateUpdate(ctx context.Context, oldObj, new
 }
 
 // ValidateDelete implements webhook.CustomValidator
-func (w *RateLimitPolicyWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (w *RateLimitPolicyWebhook) ValidateDelete(
+	ctx context.Context,
+	obj runtime.Object,
+) (admission.Warnings, error) {
 	policy, ok := obj.(*avapigwv1alpha1.RateLimitPolicy)
 	if !ok {
 		return nil, fmt.Errorf("expected a RateLimitPolicy but got %T", obj)
@@ -133,11 +141,11 @@ func (w *RateLimitPolicyWebhook) ValidateDelete(ctx context.Context, obj runtime
 	return nil, nil
 }
 
-// validateSyntax performs syntax validation
-func (w *RateLimitPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.RateLimitPolicy) error {
-	errs := validator.NewValidationErrors()
-
-	// Validate target ref kind
+// validateRateLimitTargetRef validates the target reference kind
+func (w *RateLimitPolicyWebhook) validateRateLimitTargetRef(
+	policy *avapigwv1alpha1.RateLimitPolicy,
+	errs *validator.ValidationErrors,
+) {
 	validKinds := map[string]bool{
 		"Gateway":   true,
 		"HTTPRoute": true,
@@ -148,74 +156,103 @@ func (w *RateLimitPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.RateLimi
 			fmt.Sprintf("invalid target kind: %s (must be Gateway, HTTPRoute, or GRPCRoute)",
 				policy.Spec.TargetRef.Kind))
 	}
+}
 
-	// Validate rules
+// validateRateLimitClientIdentifier validates client identifier configuration
+func (w *RateLimitPolicyWebhook) validateRateLimitClientIdentifier(
+	ci *avapigwv1alpha1.ClientIdentifierConfig,
+	ruleIdx int,
+	errs *validator.ValidationErrors,
+) {
+	switch ci.Type {
+	case avapigwv1alpha1.ClientIdentifierHeader:
+		if ci.Header == nil || *ci.Header == "" {
+			errs.Add(fmt.Sprintf("spec.rules[%d].clientIdentifier.header", ruleIdx),
+				"header is required for Header client identifier type")
+		}
+	case avapigwv1alpha1.ClientIdentifierJWTClaim:
+		if ci.Claim == nil || *ci.Claim == "" {
+			errs.Add(fmt.Sprintf("spec.rules[%d].clientIdentifier.claim", ruleIdx),
+				"claim is required for JWTClaim client identifier type")
+		}
+	case avapigwv1alpha1.ClientIdentifierCookie:
+		if ci.Cookie == nil || *ci.Cookie == "" {
+			errs.Add(fmt.Sprintf("spec.rules[%d].clientIdentifier.cookie", ruleIdx),
+				"cookie is required for Cookie client identifier type")
+		}
+	}
+}
+
+// validateRateLimitRule validates a single rate limit rule
+func (w *RateLimitPolicyWebhook) validateRateLimitRule(
+	rule *avapigwv1alpha1.RateLimitRule,
+	ruleIdx int,
+	errs *validator.ValidationErrors,
+) {
+	if rule.Limit.Requests < 1 {
+		errs.Add(fmt.Sprintf("spec.rules[%d].limit.requests", ruleIdx), "requests must be at least 1")
+	}
+
+	if rule.Algorithm != nil && *rule.Algorithm == avapigwv1alpha1.RateLimitAlgorithmTokenBucket {
+		if rule.TokenBucket != nil && rule.TokenBucket.Tokens < 1 {
+			errs.Add(fmt.Sprintf("spec.rules[%d].tokenBucket.tokens", ruleIdx), "tokens must be at least 1")
+		}
+	}
+
+	if rule.ClientIdentifier != nil {
+		w.validateRateLimitClientIdentifier(rule.ClientIdentifier, ruleIdx, errs)
+	}
+
+	for j, tier := range rule.Tiers {
+		if tier.Limit.Requests < 1 {
+			errs.Add(fmt.Sprintf("spec.rules[%d].tiers[%d].limit.requests", ruleIdx, j),
+				"requests must be at least 1")
+		}
+	}
+}
+
+// validateRateLimitStorage validates storage configuration
+func (w *RateLimitPolicyWebhook) validateRateLimitStorage(
+	storage *avapigwv1alpha1.RateLimitStorageConfig,
+	errs *validator.ValidationErrors,
+) {
+	if storage.Type != avapigwv1alpha1.RateLimitStorageRedis {
+		return
+	}
+
+	if storage.Redis == nil {
+		errs.Add("spec.storage.redis", "redis configuration is required for Redis storage type")
+	} else if storage.Redis.Address == "" {
+		errs.Add("spec.storage.redis.address", "address is required")
+	}
+}
+
+// validateSyntax performs syntax validation
+func (w *RateLimitPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.RateLimitPolicy) error {
+	errs := validator.NewValidationErrors()
+
+	w.validateRateLimitTargetRef(policy, errs)
+
 	if len(policy.Spec.Rules) == 0 {
 		errs.Add("spec.rules", "at least one rule is required")
 	}
 
 	for i, rule := range policy.Spec.Rules {
-		// Validate limit values
-		if rule.Limit.Requests < 1 {
-			errs.Add(fmt.Sprintf("spec.rules[%d].limit.requests", i), "requests must be at least 1")
-		}
-
-		// Validate algorithm-specific configuration
-		if rule.Algorithm != nil && *rule.Algorithm == avapigwv1alpha1.RateLimitAlgorithmTokenBucket {
-			if rule.TokenBucket != nil {
-				if rule.TokenBucket.Tokens < 1 {
-					errs.Add(fmt.Sprintf("spec.rules[%d].tokenBucket.tokens", i), "tokens must be at least 1")
-				}
-			}
-		}
-
-		// Validate client identifier
-		if rule.ClientIdentifier != nil {
-			ci := rule.ClientIdentifier
-			switch ci.Type {
-			case avapigwv1alpha1.ClientIdentifierHeader:
-				if ci.Header == nil || *ci.Header == "" {
-					errs.Add(fmt.Sprintf("spec.rules[%d].clientIdentifier.header", i),
-						"header is required for Header client identifier type")
-				}
-			case avapigwv1alpha1.ClientIdentifierJWTClaim:
-				if ci.Claim == nil || *ci.Claim == "" {
-					errs.Add(fmt.Sprintf("spec.rules[%d].clientIdentifier.claim", i),
-						"claim is required for JWTClaim client identifier type")
-				}
-			case avapigwv1alpha1.ClientIdentifierCookie:
-				if ci.Cookie == nil || *ci.Cookie == "" {
-					errs.Add(fmt.Sprintf("spec.rules[%d].clientIdentifier.cookie", i),
-						"cookie is required for Cookie client identifier type")
-				}
-			}
-		}
-
-		// Validate tiers
-		for j, tier := range rule.Tiers {
-			if tier.Limit.Requests < 1 {
-				errs.Add(fmt.Sprintf("spec.rules[%d].tiers[%d].limit.requests", i, j),
-					"requests must be at least 1")
-			}
-		}
+		w.validateRateLimitRule(&rule, i, errs)
 	}
 
-	// Validate storage configuration
 	if policy.Spec.Storage != nil {
-		if policy.Spec.Storage.Type == avapigwv1alpha1.RateLimitStorageRedis {
-			if policy.Spec.Storage.Redis == nil {
-				errs.Add("spec.storage.redis", "redis configuration is required for Redis storage type")
-			} else if policy.Spec.Storage.Redis.Address == "" {
-				errs.Add("spec.storage.redis.address", "address is required")
-			}
-		}
+		w.validateRateLimitStorage(policy.Spec.Storage, errs)
 	}
 
 	return errs.ToError()
 }
 
 // validateReferences validates cross-resource references
-func (w *RateLimitPolicyWebhook) validateReferences(ctx context.Context, policy *avapigwv1alpha1.RateLimitPolicy) error {
+func (w *RateLimitPolicyWebhook) validateReferences(
+	ctx context.Context,
+	policy *avapigwv1alpha1.RateLimitPolicy,
+) error {
 	errs := validator.NewValidationErrors()
 
 	// Validate Redis secret reference

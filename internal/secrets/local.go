@@ -68,6 +68,57 @@ func (p *LocalProvider) Type() ProviderType {
 	return ProviderTypeLocal
 }
 
+// validateAndCleanPath validates the path and returns a cleaned version.
+func (p *LocalProvider) validateAndCleanPath(path string, start time.Time) (string, error) {
+	if path == "" {
+		RecordOperation(p.Type(), "get", time.Since(start), ErrInvalidPath)
+		return "", ErrInvalidPath
+	}
+
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		RecordOperation(p.Type(), "get", time.Since(start), ErrInvalidPath)
+		return "", fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
+	}
+
+	return cleanPath, nil
+}
+
+// tryReadSecretFromFormats attempts to read a secret from various file formats.
+func (p *LocalProvider) tryReadSecretFromFormats(cleanPath string) (*Secret, bool) {
+	// Try directory format first
+	dirPath := filepath.Join(p.basePath, cleanPath)
+	if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
+		if secret, err := p.readSecretFromDirectory(dirPath, cleanPath); err == nil {
+			return secret, true
+		}
+		p.logger.Debug("Failed to read secret from directory, trying file formats",
+			zap.String("path", dirPath),
+		)
+	}
+
+	// Try YAML, YML, and JSON files
+	formats := []struct {
+		ext    string
+		reader func(string, string) (*Secret, error)
+	}{
+		{".yaml", p.readSecretFromYAML},
+		{".yml", p.readSecretFromYAML},
+		{".json", p.readSecretFromJSON},
+	}
+
+	for _, format := range formats {
+		filePath := filepath.Join(p.basePath, cleanPath+format.ext)
+		if _, err := os.Stat(filePath); err == nil {
+			if secret, err := format.reader(filePath, cleanPath); err == nil {
+				return secret, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
 // GetSecret retrieves a secret by path
 // Tries multiple formats:
 // 1. Directory with individual key files: base-path/secret-name/key
@@ -79,16 +130,9 @@ func (p *LocalProvider) GetSecret(ctx context.Context, path string) (*Secret, er
 		RecordOperation(p.Type(), "get", time.Since(start), nil)
 	}()
 
-	if path == "" {
-		RecordOperation(p.Type(), "get", time.Since(start), ErrInvalidPath)
-		return nil, ErrInvalidPath
-	}
-
-	// Clean the path to prevent directory traversal
-	cleanPath := filepath.Clean(path)
-	if strings.Contains(cleanPath, "..") {
-		RecordOperation(p.Type(), "get", time.Since(start), ErrInvalidPath)
-		return nil, fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
+	cleanPath, err := p.validateAndCleanPath(path, start)
+	if err != nil {
+		return nil, err
 	}
 
 	p.logger.Debug("Getting local secret",
@@ -96,56 +140,8 @@ func (p *LocalProvider) GetSecret(ctx context.Context, path string) (*Secret, er
 		zap.String("basePath", p.basePath),
 	)
 
-	// Try directory format first
-	dirPath := filepath.Join(p.basePath, cleanPath)
-	if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
-		secret, err := p.readSecretFromDirectory(dirPath, cleanPath)
-		if err == nil {
-			return secret, nil
-		}
-		p.logger.Debug("Failed to read secret from directory, trying file formats",
-			zap.String("path", dirPath),
-			zap.Error(err),
-		)
-	}
-
-	// Try YAML file
-	yamlPath := filepath.Join(p.basePath, cleanPath+".yaml")
-	if _, err := os.Stat(yamlPath); err == nil {
-		secret, err := p.readSecretFromYAML(yamlPath, cleanPath)
-		if err == nil {
-			return secret, nil
-		}
-		p.logger.Debug("Failed to read secret from YAML",
-			zap.String("path", yamlPath),
-			zap.Error(err),
-		)
-	}
-
-	// Try YML file
-	ymlPath := filepath.Join(p.basePath, cleanPath+".yml")
-	if _, err := os.Stat(ymlPath); err == nil {
-		secret, err := p.readSecretFromYAML(ymlPath, cleanPath)
-		if err == nil {
-			return secret, nil
-		}
-		p.logger.Debug("Failed to read secret from YML",
-			zap.String("path", ymlPath),
-			zap.Error(err),
-		)
-	}
-
-	// Try JSON file
-	jsonPath := filepath.Join(p.basePath, cleanPath+".json")
-	if _, err := os.Stat(jsonPath); err == nil {
-		secret, err := p.readSecretFromJSON(jsonPath, cleanPath)
-		if err == nil {
-			return secret, nil
-		}
-		p.logger.Debug("Failed to read secret from JSON",
-			zap.String("path", jsonPath),
-			zap.Error(err),
-		)
+	if secret, found := p.tryReadSecretFromFormats(cleanPath); found {
+		return secret, nil
 	}
 
 	p.logger.Debug("Secret not found in any format",
@@ -296,6 +292,46 @@ func (p *LocalProvider) readSecretFromJSON(filePath, name string) (*Secret, erro
 	}, nil
 }
 
+// resolveListSearchPath resolves the search path for listing secrets.
+func (p *LocalProvider) resolveListSearchPath(path string, start time.Time) (string, error) {
+	if path == "" {
+		return p.basePath, nil
+	}
+
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		RecordOperation(p.Type(), "list", time.Since(start), ErrInvalidPath)
+		return "", fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
+	}
+	return filepath.Join(p.basePath, cleanPath), nil
+}
+
+// extractSecretNamesFromEntries extracts secret names from directory entries.
+func (p *LocalProvider) extractSecretNamesFromEntries(entries []os.DirEntry) []string {
+	secrets := make(map[string]bool)
+	for _, entry := range entries {
+		name := entry.Name()
+
+		if entry.IsDir() {
+			secrets[name] = true
+		} else {
+			for _, ext := range []string{".yaml", ".yml", ".json"} {
+				if strings.HasSuffix(name, ext) {
+					secretName := strings.TrimSuffix(name, ext)
+					secrets[secretName] = true
+					break
+				}
+			}
+		}
+	}
+
+	result := make([]string, 0, len(secrets))
+	for name := range secrets {
+		result = append(result, name)
+	}
+	return result
+}
+
 // ListSecrets lists secrets in the base path
 func (p *LocalProvider) ListSecrets(ctx context.Context, path string) ([]string, error) {
 	start := time.Now()
@@ -303,14 +339,9 @@ func (p *LocalProvider) ListSecrets(ctx context.Context, path string) ([]string,
 		RecordOperation(p.Type(), "list", time.Since(start), nil)
 	}()
 
-	searchPath := p.basePath
-	if path != "" {
-		cleanPath := filepath.Clean(path)
-		if strings.Contains(cleanPath, "..") {
-			RecordOperation(p.Type(), "list", time.Since(start), ErrInvalidPath)
-			return nil, fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
-		}
-		searchPath = filepath.Join(p.basePath, cleanPath)
+	searchPath, err := p.resolveListSearchPath(path, start)
+	if err != nil {
+		return nil, err
 	}
 
 	p.logger.Debug("Listing local secrets",
@@ -330,29 +361,7 @@ func (p *LocalProvider) ListSecrets(ctx context.Context, path string) ([]string,
 		return nil, fmt.Errorf("failed to list secrets: %w", err)
 	}
 
-	secrets := make(map[string]bool)
-	for _, entry := range entries {
-		name := entry.Name()
-
-		if entry.IsDir() {
-			// Directory is a secret
-			secrets[name] = true
-		} else {
-			// Check for supported file extensions
-			for _, ext := range []string{".yaml", ".yml", ".json"} {
-				if strings.HasSuffix(name, ext) {
-					secretName := strings.TrimSuffix(name, ext)
-					secrets[secretName] = true
-					break
-				}
-			}
-		}
-	}
-
-	result := make([]string, 0, len(secrets))
-	for name := range secrets {
-		result = append(result, name)
-	}
+	result := p.extractSecretNamesFromEntries(entries)
 
 	p.logger.Debug("Successfully listed secrets",
 		zap.String("path", searchPath),
@@ -362,6 +371,22 @@ func (p *LocalProvider) ListSecrets(ctx context.Context, path string) ([]string,
 	return result, nil
 }
 
+// validateWritePath validates the path for writing and returns the cleaned path.
+func (p *LocalProvider) validateWritePath(path string, start time.Time) (string, error) {
+	if path == "" {
+		RecordOperation(p.Type(), "write", time.Since(start), ErrInvalidPath)
+		return "", ErrInvalidPath
+	}
+
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		RecordOperation(p.Type(), "write", time.Since(start), ErrInvalidPath)
+		return "", fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
+	}
+
+	return cleanPath, nil
+}
+
 // WriteSecret writes a secret to a YAML file
 func (p *LocalProvider) WriteSecret(ctx context.Context, path string, data map[string][]byte) error {
 	start := time.Now()
@@ -369,22 +394,15 @@ func (p *LocalProvider) WriteSecret(ctx context.Context, path string, data map[s
 		RecordOperation(p.Type(), "write", time.Since(start), nil)
 	}()
 
-	if path == "" {
-		RecordOperation(p.Type(), "write", time.Since(start), ErrInvalidPath)
-		return ErrInvalidPath
-	}
-
-	cleanPath := filepath.Clean(path)
-	if strings.Contains(cleanPath, "..") {
-		RecordOperation(p.Type(), "write", time.Since(start), ErrInvalidPath)
-		return fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
+	cleanPath, err := p.validateWritePath(path, start)
+	if err != nil {
+		return err
 	}
 
 	p.logger.Debug("Writing local secret",
 		zap.String("path", path),
 	)
 
-	// Convert data to string map for YAML
 	stringData := make(map[string]string)
 	for k, v := range data {
 		stringData[k] = string(v)
@@ -401,9 +419,8 @@ func (p *LocalProvider) WriteSecret(ctx context.Context, path string, data map[s
 	}
 
 	filePath := filepath.Join(p.basePath, cleanPath+".yaml")
-
-	// Ensure parent directory exists
 	parentDir := filepath.Dir(filePath)
+
 	if err := os.MkdirAll(parentDir, 0o750); err != nil {
 		p.logger.Error("Failed to create parent directory",
 			zap.String("path", parentDir),
@@ -413,7 +430,6 @@ func (p *LocalProvider) WriteSecret(ctx context.Context, path string, data map[s
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Write file with restricted permissions
 	if err := os.WriteFile(filePath, yamlContent, 0o600); err != nil {
 		p.logger.Error("Failed to write secret file",
 			zap.String("path", filePath),
@@ -430,31 +446,26 @@ func (p *LocalProvider) WriteSecret(ctx context.Context, path string, data map[s
 	return nil
 }
 
-// DeleteSecret deletes a secret
-func (p *LocalProvider) DeleteSecret(ctx context.Context, path string) error {
-	start := time.Now()
-	defer func() {
-		RecordOperation(p.Type(), "delete", time.Since(start), nil)
-	}()
-
+// validateDeletePath validates the path for deletion and returns the cleaned path.
+func (p *LocalProvider) validateDeletePath(path string, start time.Time) (string, error) {
 	if path == "" {
 		RecordOperation(p.Type(), "delete", time.Since(start), ErrInvalidPath)
-		return ErrInvalidPath
+		return "", ErrInvalidPath
 	}
 
 	cleanPath := filepath.Clean(path)
 	if strings.Contains(cleanPath, "..") {
 		RecordOperation(p.Type(), "delete", time.Since(start), ErrInvalidPath)
-		return fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
+		return "", fmt.Errorf("%w: path contains invalid characters", ErrInvalidPath)
 	}
 
-	p.logger.Debug("Deleting local secret",
-		zap.String("path", path),
-	)
+	return cleanPath, nil
+}
 
+// deleteSecretFiles attempts to delete all secret files and directories.
+func (p *LocalProvider) deleteSecretFiles(cleanPath string, start time.Time) (bool, error) {
 	deleted := false
 
-	// Try to delete directory
 	dirPath := filepath.Join(p.basePath, cleanPath)
 	if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
 		if err := os.RemoveAll(dirPath); err != nil {
@@ -463,12 +474,11 @@ func (p *LocalProvider) DeleteSecret(ctx context.Context, path string) error {
 				zap.Error(err),
 			)
 			RecordOperation(p.Type(), "delete", time.Since(start), err)
-			return fmt.Errorf("failed to delete secret directory: %w", err)
+			return false, fmt.Errorf("failed to delete secret directory: %w", err)
 		}
 		deleted = true
 	}
 
-	// Try to delete files
 	for _, ext := range []string{".yaml", ".yml", ".json"} {
 		filePath := filepath.Join(p.basePath, cleanPath+ext)
 		if _, err := os.Stat(filePath); err == nil {
@@ -478,10 +488,34 @@ func (p *LocalProvider) DeleteSecret(ctx context.Context, path string) error {
 					zap.Error(err),
 				)
 				RecordOperation(p.Type(), "delete", time.Since(start), err)
-				return fmt.Errorf("failed to delete secret file: %w", err)
+				return false, fmt.Errorf("failed to delete secret file: %w", err)
 			}
 			deleted = true
 		}
+	}
+
+	return deleted, nil
+}
+
+// DeleteSecret deletes a secret
+func (p *LocalProvider) DeleteSecret(ctx context.Context, path string) error {
+	start := time.Now()
+	defer func() {
+		RecordOperation(p.Type(), "delete", time.Since(start), nil)
+	}()
+
+	cleanPath, err := p.validateDeletePath(path, start)
+	if err != nil {
+		return err
+	}
+
+	p.logger.Debug("Deleting local secret",
+		zap.String("path", path),
+	)
+
+	deleted, err := p.deleteSecretFiles(cleanPath, start)
+	if err != nil {
+		return err
 	}
 
 	if !deleted {

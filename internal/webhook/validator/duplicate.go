@@ -80,74 +80,76 @@ func (d *DuplicateChecker) CheckGatewayListenerDuplicates(ctx context.Context, g
 	return errs.ToError()
 }
 
+// httpRouteKey represents a unique key for HTTP route matching
+type httpRouteKey struct {
+	hostname string
+	path     string
+	method   string
+}
+
+// buildExistingHTTPRouteKeys builds a map of existing HTTP route keys from the route list
+func (d *DuplicateChecker) buildExistingHTTPRouteKeys(
+	routeList *avapigwv1alpha1.HTTPRouteList,
+	currentRoute *avapigwv1alpha1.HTTPRoute,
+) map[httpRouteKey]string {
+	existingRoutes := make(map[httpRouteKey]string)
+
+	for _, existingRoute := range routeList.Items {
+		// Skip the current route (for updates)
+		if existingRoute.Namespace == currentRoute.Namespace && existingRoute.Name == currentRoute.Name {
+			continue
+		}
+
+		for _, hostname := range existingRoute.Spec.Hostnames {
+			for _, rule := range existingRoute.Spec.Rules {
+				for _, match := range rule.Matches {
+					key := d.extractHTTPRouteKey(string(hostname), &match)
+					existingRoutes[key] = fmt.Sprintf("%s/%s", existingRoute.Namespace, existingRoute.Name)
+				}
+			}
+		}
+	}
+
+	return existingRoutes
+}
+
+// extractHTTPRouteKey extracts the route key from a match
+func (d *DuplicateChecker) extractHTTPRouteKey(hostname string, match *avapigwv1alpha1.HTTPRouteMatch) httpRouteKey {
+	path := "/"
+	if match.Path != nil && match.Path.Value != nil {
+		path = *match.Path.Value
+	}
+	method := "*"
+	if match.Method != nil {
+		method = string(*match.Method)
+	}
+	return httpRouteKey{
+		hostname: hostname,
+		path:     path,
+		method:   method,
+	}
+}
+
 // CheckHTTPRouteDuplicates checks for duplicate hostname+path+method combinations
 func (d *DuplicateChecker) CheckHTTPRouteDuplicates(ctx context.Context, route *avapigwv1alpha1.HTTPRoute) error {
-	// List all HTTPRoutes
 	var routeList avapigwv1alpha1.HTTPRouteList
 	if err := d.Client.List(ctx, &routeList); err != nil {
 		return fmt.Errorf("failed to list HTTPRoutes: %w", err)
 	}
 
-	// Build a map of existing hostname+path+method combinations
-	type routeKey struct {
-		hostname string
-		path     string
-		method   string
-	}
-	existingRoutes := make(map[routeKey]string) // key -> route name
+	existingRoutes := d.buildExistingHTTPRouteKeys(&routeList, route)
 
-	for _, existingRoute := range routeList.Items {
-		// Skip the current route (for updates)
-		if existingRoute.Namespace == route.Namespace && existingRoute.Name == route.Name {
-			continue
-		}
-
-		for _, hostname := range existingRoute.Spec.Hostnames {
-			for _, rule := range existingRoute.Spec.Rules {
-				for _, match := range rule.Matches {
-					path := "/"
-					if match.Path != nil && match.Path.Value != nil {
-						path = *match.Path.Value
-					}
-					method := "*"
-					if match.Method != nil {
-						method = string(*match.Method)
-					}
-					key := routeKey{
-						hostname: string(hostname),
-						path:     path,
-						method:   method,
-					}
-					existingRoutes[key] = fmt.Sprintf("%s/%s", existingRoute.Namespace, existingRoute.Name)
-				}
-			}
-		}
-	}
-
-	// Check for duplicates in the new route
 	errs := NewValidationErrors()
 	for _, hostname := range route.Spec.Hostnames {
 		for ruleIdx, rule := range route.Spec.Rules {
 			for matchIdx, match := range rule.Matches {
-				path := "/"
-				if match.Path != nil && match.Path.Value != nil {
-					path = *match.Path.Value
-				}
-				method := "*"
-				if match.Method != nil {
-					method = string(*match.Method)
-				}
-				key := routeKey{
-					hostname: string(hostname),
-					path:     path,
-					method:   method,
-				}
+				key := d.extractHTTPRouteKey(string(hostname), &match)
 
 				if existingRoute, exists := existingRoutes[key]; exists {
 					errs.Add(
 						fmt.Sprintf("spec.rules[%d].matches[%d]", ruleIdx, matchIdx),
 						fmt.Sprintf("route with hostname %q, path %q, and method %q already exists in HTTPRoute %s",
-							hostname, path, method, existingRoute),
+							hostname, key.path, key.method, existingRoute),
 					)
 				}
 			}
@@ -157,78 +159,78 @@ func (d *DuplicateChecker) CheckHTTPRouteDuplicates(ctx context.Context, route *
 	return errs.ToError()
 }
 
-// CheckGRPCRouteDuplicates checks for duplicate hostname+service+method combinations
-func (d *DuplicateChecker) CheckGRPCRouteDuplicates(ctx context.Context, route *avapigwv1alpha1.GRPCRoute) error {
-	// List all GRPCRoutes
-	var routeList avapigwv1alpha1.GRPCRouteList
-	if err := d.Client.List(ctx, &routeList); err != nil {
-		return fmt.Errorf("failed to list GRPCRoutes: %w", err)
-	}
+// grpcRouteKey represents a unique key for GRPC route matching
+type grpcRouteKey struct {
+	hostname string
+	service  string
+	method   string
+}
 
-	// Build a map of existing hostname+service+method combinations
-	type routeKey struct {
-		hostname string
-		service  string
-		method   string
-	}
-	existingRoutes := make(map[routeKey]string) // key -> route name
+// buildExistingGRPCRouteKeys builds a map of existing GRPC route keys from the route list
+func (d *DuplicateChecker) buildExistingGRPCRouteKeys(
+	routeList *avapigwv1alpha1.GRPCRouteList,
+	currentRoute *avapigwv1alpha1.GRPCRoute,
+) map[grpcRouteKey]string {
+	existingRoutes := make(map[grpcRouteKey]string)
 
 	for _, existingRoute := range routeList.Items {
 		// Skip the current route (for updates)
-		if existingRoute.Namespace == route.Namespace && existingRoute.Name == route.Name {
+		if existingRoute.Namespace == currentRoute.Namespace && existingRoute.Name == currentRoute.Name {
 			continue
 		}
 
 		for _, hostname := range existingRoute.Spec.Hostnames {
 			for _, rule := range existingRoute.Spec.Rules {
 				for _, match := range rule.Matches {
-					service := "*"
-					method := "*"
-					if match.Method != nil {
-						if match.Method.Service != nil {
-							service = *match.Method.Service
-						}
-						if match.Method.Method != nil {
-							method = *match.Method.Method
-						}
-					}
-					key := routeKey{
-						hostname: string(hostname),
-						service:  service,
-						method:   method,
-					}
+					key := d.extractGRPCRouteKey(string(hostname), &match)
 					existingRoutes[key] = fmt.Sprintf("%s/%s", existingRoute.Namespace, existingRoute.Name)
 				}
 			}
 		}
 	}
 
-	// Check for duplicates in the new route
+	return existingRoutes
+}
+
+// extractGRPCRouteKey extracts the route key from a GRPC match
+func (d *DuplicateChecker) extractGRPCRouteKey(hostname string, match *avapigwv1alpha1.GRPCRouteMatch) grpcRouteKey {
+	service := "*"
+	method := "*"
+	if match.Method != nil {
+		if match.Method.Service != nil {
+			service = *match.Method.Service
+		}
+		if match.Method.Method != nil {
+			method = *match.Method.Method
+		}
+	}
+	return grpcRouteKey{
+		hostname: hostname,
+		service:  service,
+		method:   method,
+	}
+}
+
+// CheckGRPCRouteDuplicates checks for duplicate hostname+service+method combinations
+func (d *DuplicateChecker) CheckGRPCRouteDuplicates(ctx context.Context, route *avapigwv1alpha1.GRPCRoute) error {
+	var routeList avapigwv1alpha1.GRPCRouteList
+	if err := d.Client.List(ctx, &routeList); err != nil {
+		return fmt.Errorf("failed to list GRPCRoutes: %w", err)
+	}
+
+	existingRoutes := d.buildExistingGRPCRouteKeys(&routeList, route)
+
 	errs := NewValidationErrors()
 	for _, hostname := range route.Spec.Hostnames {
 		for ruleIdx, rule := range route.Spec.Rules {
 			for matchIdx, match := range rule.Matches {
-				service := "*"
-				method := "*"
-				if match.Method != nil {
-					if match.Method.Service != nil {
-						service = *match.Method.Service
-					}
-					if match.Method.Method != nil {
-						method = *match.Method.Method
-					}
-				}
-				key := routeKey{
-					hostname: string(hostname),
-					service:  service,
-					method:   method,
-				}
+				key := d.extractGRPCRouteKey(string(hostname), &match)
 
 				if existingRoute, exists := existingRoutes[key]; exists {
 					errs.Add(
 						fmt.Sprintf("spec.rules[%d].matches[%d]", ruleIdx, matchIdx),
 						fmt.Sprintf("route with hostname %q, service %q, and method %q already exists in GRPCRoute %s",
-							hostname, service, method, existingRoute),
+							hostname, key.service, key.method, existingRoute),
 					)
 				}
 			}
@@ -238,80 +240,79 @@ func (d *DuplicateChecker) CheckGRPCRouteDuplicates(ctx context.Context, route *
 	return errs.ToError()
 }
 
+// tcpParentKey represents a unique key for TCP route parent reference
+type tcpParentKey struct {
+	namespace   string
+	name        string
+	sectionName string
+	port        int32
+}
+
+// buildExistingTCPParentKeys builds a map of existing TCP parent keys from the route list
+func (d *DuplicateChecker) buildExistingTCPParentKeys(
+	routeList *avapigwv1alpha1.TCPRouteList,
+	currentRoute *avapigwv1alpha1.TCPRoute,
+) map[tcpParentKey]string {
+	existingParents := make(map[tcpParentKey]string)
+
+	for _, existingRoute := range routeList.Items {
+		// Skip the current route (for updates)
+		if existingRoute.Namespace == currentRoute.Namespace && existingRoute.Name == currentRoute.Name {
+			continue
+		}
+
+		for _, parentRef := range existingRoute.Spec.ParentRefs {
+			key := d.extractTCPParentKey(existingRoute.Namespace, &parentRef)
+			existingParents[key] = fmt.Sprintf("%s/%s", existingRoute.Namespace, existingRoute.Name)
+		}
+	}
+
+	return existingParents
+}
+
+// extractTCPParentKey extracts the parent key from a parent reference
+func (d *DuplicateChecker) extractTCPParentKey(
+	defaultNamespace string,
+	parentRef *avapigwv1alpha1.ParentRef,
+) tcpParentKey {
+	ns := defaultNamespace
+	if parentRef.Namespace != nil {
+		ns = *parentRef.Namespace
+	}
+	sectionName := ""
+	if parentRef.SectionName != nil {
+		sectionName = *parentRef.SectionName
+	}
+	port := int32(0)
+	if parentRef.Port != nil {
+		port = *parentRef.Port
+	}
+	return tcpParentKey{
+		namespace:   ns,
+		name:        parentRef.Name,
+		sectionName: sectionName,
+		port:        port,
+	}
+}
+
 // CheckTCPRoutePortConflicts checks for port conflicts in TCPRoutes
 func (d *DuplicateChecker) CheckTCPRoutePortConflicts(ctx context.Context, route *avapigwv1alpha1.TCPRoute) error {
-	// TCPRoutes are bound to specific gateway listeners by port
-	// Check if any other TCPRoute is bound to the same listener
 	var routeList avapigwv1alpha1.TCPRouteList
 	if err := d.Client.List(ctx, &routeList); err != nil {
 		return fmt.Errorf("failed to list TCPRoutes: %w", err)
 	}
 
-	// Build a map of existing parent refs
-	type parentKey struct {
-		namespace   string
-		name        string
-		sectionName string
-		port        int32
-	}
-	existingParents := make(map[parentKey]string) // key -> route name
+	existingParents := d.buildExistingTCPParentKeys(&routeList, route)
 
-	for _, existingRoute := range routeList.Items {
-		// Skip the current route (for updates)
-		if existingRoute.Namespace == route.Namespace && existingRoute.Name == route.Name {
-			continue
-		}
-
-		for _, parentRef := range existingRoute.Spec.ParentRefs {
-			ns := existingRoute.Namespace
-			if parentRef.Namespace != nil {
-				ns = *parentRef.Namespace
-			}
-			sectionName := ""
-			if parentRef.SectionName != nil {
-				sectionName = *parentRef.SectionName
-			}
-			port := int32(0)
-			if parentRef.Port != nil {
-				port = *parentRef.Port
-			}
-			key := parentKey{
-				namespace:   ns,
-				name:        parentRef.Name,
-				sectionName: sectionName,
-				port:        port,
-			}
-			existingParents[key] = fmt.Sprintf("%s/%s", existingRoute.Namespace, existingRoute.Name)
-		}
-	}
-
-	// Check for conflicts in the new route
 	errs := NewValidationErrors()
 	for i, parentRef := range route.Spec.ParentRefs {
-		ns := route.Namespace
-		if parentRef.Namespace != nil {
-			ns = *parentRef.Namespace
-		}
-		sectionName := ""
-		if parentRef.SectionName != nil {
-			sectionName = *parentRef.SectionName
-		}
-		port := int32(0)
-		if parentRef.Port != nil {
-			port = *parentRef.Port
-		}
-		key := parentKey{
-			namespace:   ns,
-			name:        parentRef.Name,
-			sectionName: sectionName,
-			port:        port,
-		}
+		key := d.extractTCPParentKey(route.Namespace, &parentRef)
 
 		if existingRoute, exists := existingParents[key]; exists {
 			errs.Add(
 				fmt.Sprintf("spec.parentRefs[%d]", i),
 				fmt.Sprintf("TCPRoute already bound to gateway %s/%s listener %s by route %s",
-					ns, parentRef.Name, sectionName, existingRoute),
+					key.namespace, parentRef.Name, key.sectionName, existingRoute),
 			)
 		}
 	}
@@ -319,25 +320,23 @@ func (d *DuplicateChecker) CheckTCPRoutePortConflicts(ctx context.Context, route
 	return errs.ToError()
 }
 
-// CheckTLSRouteHostnameDuplicates checks for duplicate hostname configurations
-func (d *DuplicateChecker) CheckTLSRouteHostnameDuplicates(ctx context.Context, route *avapigwv1alpha1.TLSRoute) error {
-	// List all TLSRoutes
-	var routeList avapigwv1alpha1.TLSRouteList
-	if err := d.Client.List(ctx, &routeList); err != nil {
-		return fmt.Errorf("failed to list TLSRoutes: %w", err)
-	}
+// tlsRouteKey represents a unique key for TLS route hostname matching
+type tlsRouteKey struct {
+	parentNS   string
+	parentName string
+	hostname   string
+}
 
-	// Build a map of existing hostnames per parent
-	type routeKey struct {
-		parentNS   string
-		parentName string
-		hostname   string
-	}
-	existingRoutes := make(map[routeKey]string) // key -> route name
+// buildExistingTLSRouteKeys builds a map of existing TLS route keys from the route list
+func (d *DuplicateChecker) buildExistingTLSRouteKeys(
+	routeList *avapigwv1alpha1.TLSRouteList,
+	currentRoute *avapigwv1alpha1.TLSRoute,
+) map[tlsRouteKey]string {
+	existingRoutes := make(map[tlsRouteKey]string)
 
 	for _, existingRoute := range routeList.Items {
 		// Skip the current route (for updates)
-		if existingRoute.Namespace == route.Namespace && existingRoute.Name == route.Name {
+		if existingRoute.Namespace == currentRoute.Namespace && existingRoute.Name == currentRoute.Name {
 			continue
 		}
 
@@ -347,7 +346,7 @@ func (d *DuplicateChecker) CheckTLSRouteHostnameDuplicates(ctx context.Context, 
 				parentNS = *parentRef.Namespace
 			}
 			for _, hostname := range existingRoute.Spec.Hostnames {
-				key := routeKey{
+				key := tlsRouteKey{
 					parentNS:   parentNS,
 					parentName: parentRef.Name,
 					hostname:   string(hostname),
@@ -357,7 +356,18 @@ func (d *DuplicateChecker) CheckTLSRouteHostnameDuplicates(ctx context.Context, 
 		}
 	}
 
-	// Check for duplicates in the new route
+	return existingRoutes
+}
+
+// CheckTLSRouteHostnameDuplicates checks for duplicate hostname configurations
+func (d *DuplicateChecker) CheckTLSRouteHostnameDuplicates(ctx context.Context, route *avapigwv1alpha1.TLSRoute) error {
+	var routeList avapigwv1alpha1.TLSRouteList
+	if err := d.Client.List(ctx, &routeList); err != nil {
+		return fmt.Errorf("failed to list TLSRoutes: %w", err)
+	}
+
+	existingRoutes := d.buildExistingTLSRouteKeys(&routeList, route)
+
 	errs := NewValidationErrors()
 	for _, parentRef := range route.Spec.ParentRefs {
 		parentNS := route.Namespace
@@ -365,7 +375,7 @@ func (d *DuplicateChecker) CheckTLSRouteHostnameDuplicates(ctx context.Context, 
 			parentNS = *parentRef.Namespace
 		}
 		for i, hostname := range route.Spec.Hostnames {
-			key := routeKey{
+			key := tlsRouteKey{
 				parentNS:   parentNS,
 				parentName: parentRef.Name,
 				hostname:   string(hostname),
@@ -385,7 +395,11 @@ func (d *DuplicateChecker) CheckTLSRouteHostnameDuplicates(ctx context.Context, 
 }
 
 // CheckPolicyTargetDuplicates checks for duplicate policy targetRefs
-func (d *DuplicateChecker) CheckPolicyTargetDuplicates(ctx context.Context, targetRef *avapigwv1alpha1.TargetRef, policyNamespace, policyName, policyKind string) error {
+func (d *DuplicateChecker) CheckPolicyTargetDuplicates(
+	ctx context.Context,
+	targetRef *avapigwv1alpha1.TargetRef,
+	policyNamespace, policyName, policyKind string,
+) error {
 	targetNS := policyNamespace
 	if targetRef.Namespace != nil {
 		targetNS = *targetRef.Namespace
@@ -393,57 +407,78 @@ func (d *DuplicateChecker) CheckPolicyTargetDuplicates(ctx context.Context, targ
 
 	switch policyKind {
 	case "RateLimitPolicy":
-		var policyList avapigwv1alpha1.RateLimitPolicyList
-		if err := d.Client.List(ctx, &policyList); err != nil {
-			return fmt.Errorf("failed to list RateLimitPolicies: %w", err)
-		}
-
-		for _, policy := range policyList.Items {
-			if policy.Namespace == policyNamespace && policy.Name == policyName {
-				continue
-			}
-
-			existingTargetNS := policy.Namespace
-			if policy.Spec.TargetRef.Namespace != nil {
-				existingTargetNS = *policy.Spec.TargetRef.Namespace
-			}
-
-			if policy.Spec.TargetRef.Group == targetRef.Group &&
-				policy.Spec.TargetRef.Kind == targetRef.Kind &&
-				policy.Spec.TargetRef.Name == targetRef.Name &&
-				existingTargetNS == targetNS {
-				return NewValidationError("spec.targetRef",
-					fmt.Sprintf("RateLimitPolicy %s/%s already targets %s/%s %s",
-						policy.Namespace, policy.Name, targetNS, targetRef.Kind, targetRef.Name))
-			}
-		}
-
+		return d.checkRateLimitPolicyDuplicates(ctx, targetRef, policyNamespace, policyName, targetNS)
 	case "AuthPolicy":
-		var policyList avapigwv1alpha1.AuthPolicyList
-		if err := d.Client.List(ctx, &policyList); err != nil {
-			return fmt.Errorf("failed to list AuthPolicies: %w", err)
+		return d.checkAuthPolicyDuplicates(ctx, targetRef, policyNamespace, policyName, targetNS)
+	}
+
+	return nil
+}
+
+// checkRateLimitPolicyDuplicates checks for duplicate RateLimitPolicy targetRefs
+func (d *DuplicateChecker) checkRateLimitPolicyDuplicates(
+	ctx context.Context,
+	targetRef *avapigwv1alpha1.TargetRef,
+	policyNamespace, policyName, targetNS string,
+) error {
+	var policyList avapigwv1alpha1.RateLimitPolicyList
+	if err := d.Client.List(ctx, &policyList); err != nil {
+		return fmt.Errorf("failed to list RateLimitPolicies: %w", err)
+	}
+
+	for _, policy := range policyList.Items {
+		if policy.Namespace == policyNamespace && policy.Name == policyName {
+			continue
 		}
 
-		for _, policy := range policyList.Items {
-			if policy.Namespace == policyNamespace && policy.Name == policyName {
-				continue
-			}
-
-			existingTargetNS := policy.Namespace
-			if policy.Spec.TargetRef.Namespace != nil {
-				existingTargetNS = *policy.Spec.TargetRef.Namespace
-			}
-
-			if policy.Spec.TargetRef.Group == targetRef.Group &&
-				policy.Spec.TargetRef.Kind == targetRef.Kind &&
-				policy.Spec.TargetRef.Name == targetRef.Name &&
-				existingTargetNS == targetNS {
-				return NewValidationError("spec.targetRef",
-					fmt.Sprintf("AuthPolicy %s/%s already targets %s/%s %s",
-						policy.Namespace, policy.Name, targetNS, targetRef.Kind, targetRef.Name))
-			}
+		if d.targetRefMatches(&policy.Spec.TargetRef, targetRef, policy.Namespace, targetNS) {
+			return NewValidationError("spec.targetRef",
+				fmt.Sprintf("RateLimitPolicy %s/%s already targets %s/%s %s",
+					policy.Namespace, policy.Name, targetNS, targetRef.Kind, targetRef.Name))
 		}
 	}
 
 	return nil
+}
+
+// checkAuthPolicyDuplicates checks for duplicate AuthPolicy targetRefs
+func (d *DuplicateChecker) checkAuthPolicyDuplicates(
+	ctx context.Context,
+	targetRef *avapigwv1alpha1.TargetRef,
+	policyNamespace, policyName, targetNS string,
+) error {
+	var policyList avapigwv1alpha1.AuthPolicyList
+	if err := d.Client.List(ctx, &policyList); err != nil {
+		return fmt.Errorf("failed to list AuthPolicies: %w", err)
+	}
+
+	for _, policy := range policyList.Items {
+		if policy.Namespace == policyNamespace && policy.Name == policyName {
+			continue
+		}
+
+		if d.targetRefMatches(&policy.Spec.TargetRef, targetRef, policy.Namespace, targetNS) {
+			return NewValidationError("spec.targetRef",
+				fmt.Sprintf("AuthPolicy %s/%s already targets %s/%s %s",
+					policy.Namespace, policy.Name, targetNS, targetRef.Kind, targetRef.Name))
+		}
+	}
+
+	return nil
+}
+
+// targetRefMatches checks if an existing policy's targetRef matches the new targetRef
+func (d *DuplicateChecker) targetRefMatches(
+	existingRef, newRef *avapigwv1alpha1.TargetRef,
+	existingPolicyNS, targetNS string,
+) bool {
+	existingTargetNS := existingPolicyNS
+	if existingRef.Namespace != nil {
+		existingTargetNS = *existingRef.Namespace
+	}
+
+	return existingRef.Group == newRef.Group &&
+		existingRef.Kind == newRef.Kind &&
+		existingRef.Name == newRef.Name &&
+		existingTargetNS == targetNS
 }

@@ -16,6 +16,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
+
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 )
 
 // Common errors for OAuth2 client.
@@ -217,7 +219,7 @@ func (c *Client) GetToken(ctx context.Context) (*TokenResponse, error) {
 // FetchToken fetches a new access token from the token endpoint.
 func (c *Client) FetchToken(ctx context.Context) (*TokenResponse, error) {
 	start := time.Now()
-	result := "success"
+	result := auth.MetricResultSuccess
 
 	defer func() {
 		duration := time.Since(start).Seconds()
@@ -225,7 +227,27 @@ func (c *Client) FetchToken(ctx context.Context) (*TokenResponse, error) {
 		oauth2TokenRequestDuration.WithLabelValues(result).Observe(duration)
 	}()
 
-	// Build request body
+	req, result, err := c.buildTokenRequest(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	body, result, err := c.executeTokenRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	tokenResp, result, err := c.parseTokenResponse(body)
+	if err != nil {
+		return nil, err
+	}
+
+	c.cacheToken(tokenResp)
+	return tokenResp, nil
+}
+
+// buildTokenRequest creates the HTTP request for token fetch.
+func (c *Client) buildTokenRequest(ctx context.Context) (*http.Request, string, error) {
 	data := url.Values{}
 	data.Set("grant_type", "client_credentials")
 	data.Set("client_id", c.clientID)
@@ -235,67 +257,67 @@ func (c *Client) FetchToken(ctx context.Context) (*TokenResponse, error) {
 		data.Set("scope", strings.Join(c.scopes, " "))
 	}
 
-	// Create request
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
-		result = "request_error"
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, "request_error", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	// Send request
+	return req, auth.MetricResultSuccess, nil
+}
+
+// executeTokenRequest sends the token request and reads the response body.
+func (c *Client) executeTokenRequest(req *http.Request) (body []byte, metricResult string, err error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		result = "network_error"
-		return nil, fmt.Errorf("%w: %v", ErrTokenRequestFailed, err)
+		return nil, "network_error", fmt.Errorf("%w: %v", ErrTokenRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	body, err = io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
 	if err != nil {
-		result = "read_error"
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, "read_error", fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		result = "token_error"
 		c.logger.Error("token request failed",
 			zap.Int("status", resp.StatusCode),
 			zap.String("body", string(body)),
 		)
-		return nil, fmt.Errorf("%w: status %d", ErrTokenRequestFailed, resp.StatusCode)
+		return nil, "token_error", fmt.Errorf("%w: status %d", ErrTokenRequestFailed, resp.StatusCode)
 	}
 
-	// Parse response
+	return body, auth.MetricResultSuccess, nil
+}
+
+// parseTokenResponse parses the token response body and sets expiration.
+func (c *Client) parseTokenResponse(body []byte) (*TokenResponse, string, error) {
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		result = "parse_error"
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, "parse_error", fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
 
-	// Calculate expiration time
 	if tokenResp.ExpiresIn > 0 {
 		tokenResp.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	} else {
-		// Default to 1 hour if not specified
 		tokenResp.ExpiresAt = time.Now().Add(time.Hour)
 	}
 
-	// Cache the token
+	return &tokenResp, auth.MetricResultSuccess, nil
+}
+
+// cacheToken stores the token in the client cache.
+func (c *Client) cacheToken(tokenResp *TokenResponse) {
 	c.mu.Lock()
-	c.token = &tokenResp
+	c.token = tokenResp
 	c.mu.Unlock()
 
 	c.logger.Debug("fetched new OAuth2 token",
 		zap.String("tokenType", tokenResp.TokenType),
 		zap.Time("expiresAt", tokenResp.ExpiresAt),
 	)
-
-	return &tokenResp, nil
 }
 
 // GetAccessToken returns just the access token string.
@@ -316,42 +338,61 @@ func (c *Client) InvalidateToken() {
 
 // StartAutoRefresh starts automatic token refresh.
 func (c *Client) StartAutoRefresh(ctx context.Context) {
-	go func() {
-		for {
-			// Wait until token needs refresh
-			c.mu.RLock()
-			token := c.token
-			c.mu.RUnlock()
+	go c.autoRefreshLoop(ctx)
+}
 
-			var waitDuration time.Duration
-			if token != nil && !token.IsExpired() {
-				// Wait until refresh buffer before expiry
-				waitDuration = time.Until(token.ExpiresAt) - c.refreshBuffer
-				if waitDuration < 0 {
-					waitDuration = 0
-				}
-			} else {
-				// No valid token, fetch immediately
-				waitDuration = 0
-			}
+// autoRefreshLoop is the main loop for automatic token refresh.
+func (c *Client) autoRefreshLoop(ctx context.Context) {
+	for {
+		waitDuration := c.calculateRefreshWaitDuration()
 
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(waitDuration):
-				if _, err := c.FetchToken(ctx); err != nil {
-					c.logger.Error("auto-refresh token failed", zap.Error(err))
-					// Retry after a short delay
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(5 * time.Second):
-						continue
-					}
-				}
-			}
+		if !c.waitAndRefresh(ctx, waitDuration) {
+			return
 		}
-	}()
+	}
+}
+
+// calculateRefreshWaitDuration calculates how long to wait before the next token refresh.
+func (c *Client) calculateRefreshWaitDuration() time.Duration {
+	c.mu.RLock()
+	token := c.token
+	c.mu.RUnlock()
+
+	if token == nil || token.IsExpired() {
+		return 0
+	}
+
+	waitDuration := time.Until(token.ExpiresAt) - c.refreshBuffer
+	if waitDuration < 0 {
+		return 0
+	}
+	return waitDuration
+}
+
+// waitAndRefresh waits for the specified duration and then refreshes the token.
+// Returns false if the context is cancelled.
+func (c *Client) waitAndRefresh(ctx context.Context, waitDuration time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(waitDuration):
+		if _, err := c.FetchToken(ctx); err != nil {
+			c.logger.Error("auto-refresh token failed", zap.Error(err))
+			return c.waitForRetry(ctx)
+		}
+		return true
+	}
+}
+
+// waitForRetry waits for a short delay before retrying token refresh.
+// Returns false if the context is cancelled.
+func (c *Client) waitForRetry(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(5 * time.Second):
+		return true
+	}
 }
 
 // RoundTripper returns an http.RoundTripper that adds the OAuth2 token to requests.
@@ -539,7 +580,8 @@ func (c *IntrospectionClient) Introspect(ctx context.Context, token string) (*To
 	data.Set("token", token)
 
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.introspectionEndpoint, strings.NewReader(data.Encode()))
+	reqBody := strings.NewReader(data.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.introspectionEndpoint, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

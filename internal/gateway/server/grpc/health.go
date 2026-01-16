@@ -27,7 +27,10 @@ func NewHealthServer() *HealthServer {
 }
 
 // Check implements the Health.Check RPC.
-func (s *HealthServer) Check(ctx context.Context, req *healthpb.HealthCheckRequest) (*healthpb.HealthCheckResponse, error) {
+func (s *HealthServer) Check(
+	ctx context.Context,
+	req *healthpb.HealthCheckRequest,
+) (*healthpb.HealthCheckResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

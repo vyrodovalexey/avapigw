@@ -280,23 +280,51 @@ func (m *Manager) AddBackend(config BackendConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	key := config.Name
-	if config.Namespace != "" {
-		key = fmt.Sprintf("%s/%s", config.Namespace, config.Name)
-	}
+	key := m.buildBackendKey(config.Namespace, config.Name)
 
 	if _, exists := m.backends[key]; exists {
 		return fmt.Errorf("backend %s already exists", key)
 	}
 
+	backend := m.createBackendFromConfig(config)
+	m.backends[key] = backend
+
+	m.logger.Info("backend added",
+		zap.String("name", key),
+		zap.Int("endpoints", len(backend.Endpoints)),
+	)
+
+	return nil
+}
+
+// buildBackendKey constructs the backend key from namespace and name.
+func (m *Manager) buildBackendKey(namespace, name string) string {
+	if namespace != "" {
+		return fmt.Sprintf("%s/%s", namespace, name)
+	}
+	return name
+}
+
+// createBackendFromConfig creates a Backend instance from the given configuration.
+func (m *Manager) createBackendFromConfig(config BackendConfig) *Backend {
 	backend := &Backend{
 		Name:      config.Name,
 		Namespace: config.Namespace,
-		Endpoints: make([]*Endpoint, 0, len(config.Endpoints)),
+		Endpoints: m.createEndpoints(config.Endpoints),
 	}
 
-	// Create endpoints
-	for _, epConfig := range config.Endpoints {
+	backend.LoadBalancer = m.createLoadBalancer(config.LoadBalancing)
+	m.setupHealthChecker(backend, config.HealthCheck)
+	m.setupCircuitBreaker(backend, config.CircuitBreaker)
+	m.setupConnectionPool(backend, config.ConnectionPool)
+
+	return backend
+}
+
+// createEndpoints creates endpoint instances from endpoint configurations.
+func (m *Manager) createEndpoints(configs []EndpointConfig) []*Endpoint {
+	endpoints := make([]*Endpoint, 0, len(configs))
+	for _, epConfig := range configs {
 		endpoint := &Endpoint{
 			Address:  epConfig.Address,
 			Port:     epConfig.Port,
@@ -307,40 +335,40 @@ func (m *Manager) AddBackend(config BackendConfig) error {
 		if endpoint.Weight <= 0 {
 			endpoint.Weight = 1
 		}
-		backend.Endpoints = append(backend.Endpoints, endpoint)
+		endpoints = append(endpoints, endpoint)
 	}
+	return endpoints
+}
 
-	// Create load balancer
-	if config.LoadBalancing != nil {
-		backend.LoadBalancer = NewLoadBalancer(config.LoadBalancing.Algorithm, &LBConfig{
-			ConsistentHash: config.LoadBalancing.ConsistentHash,
+// createLoadBalancer creates a load balancer from the configuration.
+func (m *Manager) createLoadBalancer(config *LoadBalancingConfig) LoadBalancer {
+	if config != nil {
+		return NewLoadBalancer(config.Algorithm, &LBConfig{
+			ConsistentHash: config.ConsistentHash,
 		})
-	} else {
-		backend.LoadBalancer = NewLoadBalancer("RoundRobin", nil)
 	}
+	return NewLoadBalancer("RoundRobin", nil)
+}
 
-	// Create health checker
-	if config.HealthCheck != nil && config.HealthCheck.Enabled {
-		backend.HealthChecker = NewHealthChecker(config.HealthCheck, m.logger)
+// setupHealthChecker configures the health checker for the backend if enabled.
+func (m *Manager) setupHealthChecker(backend *Backend, config *HealthCheckConfig) {
+	if config != nil && config.Enabled {
+		backend.HealthChecker = NewHealthChecker(config, m.logger)
 	}
+}
 
-	// Create circuit breaker
-	if config.CircuitBreaker != nil && config.CircuitBreaker.Enabled {
-		backend.CircuitBreaker = NewCircuitBreaker(config.CircuitBreaker)
+// setupCircuitBreaker configures the circuit breaker for the backend if enabled.
+func (m *Manager) setupCircuitBreaker(backend *Backend, config *CircuitBreakerConfig) {
+	if config != nil && config.Enabled {
+		backend.CircuitBreaker = NewCircuitBreaker(config)
 	}
+}
 
-	// Create connection pool
-	if config.ConnectionPool != nil {
-		backend.ConnectionPool = NewConnectionPool(config.ConnectionPool)
+// setupConnectionPool configures the connection pool for the backend if provided.
+func (m *Manager) setupConnectionPool(backend *Backend, config *ConnectionPoolConfig) {
+	if config != nil {
+		backend.ConnectionPool = NewConnectionPool(config)
 	}
-
-	m.backends[key] = backend
-	m.logger.Info("backend added",
-		zap.String("name", key),
-		zap.Int("endpoints", len(backend.Endpoints)),
-	)
-
-	return nil
 }
 
 // RemoveBackend removes a backend by name.

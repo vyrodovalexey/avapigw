@@ -13,6 +13,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/basic"
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/authz"
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 	"go.uber.org/zap"
 )
 
@@ -817,7 +818,7 @@ func TestClaimsToSubject(t *testing.T) {
 		Scope:   "read write",
 	}
 
-	subject := claimsToSubject(claims)
+	subject := core.ClaimsToSubject(claims)
 
 	assert.Equal(t, "user-123", subject.User)
 	assert.Equal(t, []string{"group1", "group2"}, subject.Groups)
@@ -832,7 +833,7 @@ func TestAPIKeyToSubject(t *testing.T) {
 		Scopes: []string{"read", "write"},
 	}
 
-	subject := apiKeyToSubject(key)
+	subject := core.APIKeyToSubject(key)
 
 	assert.Equal(t, "key-123", subject.User)
 	assert.Equal(t, []string{"read", "write"}, subject.Scopes)
@@ -847,7 +848,7 @@ func TestUserToSubject(t *testing.T) {
 		Metadata: map[string]string{"department": "engineering"},
 	}
 
-	subject := userToSubject(user)
+	subject := core.UserToSubject(user)
 
 	assert.Equal(t, "testuser", subject.User)
 	assert.Equal(t, []string{"developers"}, subject.Groups)

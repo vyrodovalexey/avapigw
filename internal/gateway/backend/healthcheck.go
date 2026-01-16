@@ -196,35 +196,51 @@ func (hc *HealthChecker) checkEndpoint(endpoint *Endpoint) {
 	result.Error = err
 
 	if healthy {
-		result.ConsecutiveOK++
-		result.ConsecutiveFail = 0
-		result.LastHealthy = time.Now()
-
-		if result.ConsecutiveOK >= hc.config.HealthyThreshold {
-			if !result.Healthy {
-				hc.logger.Info("endpoint became healthy",
-					zap.String("endpoint", addr),
-				)
-			}
-			result.Healthy = true
-			endpoint.SetHealthy(true)
-		}
+		hc.handleHealthyResult(result, endpoint, addr)
 	} else {
-		result.ConsecutiveFail++
-		result.ConsecutiveOK = 0
-
-		if result.ConsecutiveFail >= hc.config.UnhealthyThreshold {
-			if result.Healthy {
-				hc.logger.Warn("endpoint became unhealthy",
-					zap.String("endpoint", addr),
-					zap.Error(err),
-				)
-			}
-			result.Healthy = false
-			endpoint.SetHealthy(false)
-		}
+		hc.handleUnhealthyResult(result, endpoint, addr, err)
 	}
 	hc.resultsMu.Unlock()
+}
+
+// handleHealthyResult processes a healthy check result.
+// Caller must hold resultsMu lock.
+func (hc *HealthChecker) handleHealthyResult(result *HealthCheckResult, endpoint *Endpoint, addr string) {
+	result.ConsecutiveOK++
+	result.ConsecutiveFail = 0
+	result.LastHealthy = time.Now()
+
+	if result.ConsecutiveOK < hc.config.HealthyThreshold {
+		return
+	}
+
+	if !result.Healthy {
+		hc.logger.Info("endpoint became healthy",
+			zap.String("endpoint", addr),
+		)
+	}
+	result.Healthy = true
+	endpoint.SetHealthy(true)
+}
+
+// handleUnhealthyResult processes an unhealthy check result.
+// Caller must hold resultsMu lock.
+func (hc *HealthChecker) handleUnhealthyResult(result *HealthCheckResult, endpoint *Endpoint, addr string, err error) {
+	result.ConsecutiveFail++
+	result.ConsecutiveOK = 0
+
+	if result.ConsecutiveFail < hc.config.UnhealthyThreshold {
+		return
+	}
+
+	if result.Healthy {
+		hc.logger.Warn("endpoint became unhealthy",
+			zap.String("endpoint", addr),
+			zap.Error(err),
+		)
+	}
+	result.Healthy = false
+	endpoint.SetHealthy(false)
 }
 
 func (hc *HealthChecker) httpCheck(endpoint *Endpoint) (bool, error) {

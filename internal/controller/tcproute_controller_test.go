@@ -659,9 +659,14 @@ func TestTCPRouteReconciler_findTCPRoutesForGateway(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Build client with indexer
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tt.objects...).
+				WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, func(obj client.Object) []string {
+					route := obj.(*avapigwv1alpha1.TCPRoute)
+					return extractGatewayRefs(route.Namespace, route.Spec.ParentRefs)
+				}).
 				Build()
 
 			r := newTCPRouteReconciler(cl, scheme)
@@ -711,4 +716,129 @@ func TestTCPRouteReconciler_getRequeueStrategy_InitializesDefault(t *testing.T) 
 
 	require.NotNil(t, strategy)
 	assert.NotNil(t, strategy.config)
+}
+
+// ============================================================================
+// TCPRouteReconciler.findTCPRoutesForBackend Tests
+// ============================================================================
+
+func TestTCPRouteReconciler_findTCPRoutesForBackend(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name         string
+		objects      []client.Object
+		backend      *avapigwv1alpha1.Backend
+		wantRequests int
+	}{
+		{
+			name: "finds routes referencing backend",
+			objects: []client.Object{
+				&avapigwv1alpha1.TCPRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "route-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.TCPRouteSpec{
+						Rules: []avapigwv1alpha1.TCPRouteRule{
+							{
+								BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+									{BackendRef: avapigwv1alpha1.BackendRef{
+										Name:  "test-backend",
+										Kind:  ptrString("Backend"),
+										Group: ptrString(avapigwv1alpha1.GroupVersion.Group),
+									}},
+								},
+							},
+						},
+					},
+				},
+				&avapigwv1alpha1.TCPRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "route-2",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.TCPRouteSpec{
+						Rules: []avapigwv1alpha1.TCPRouteRule{
+							{
+								BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+									{BackendRef: avapigwv1alpha1.BackendRef{
+										Name:  "test-backend",
+										Kind:  ptrString("Backend"),
+										Group: ptrString(avapigwv1alpha1.GroupVersion.Group),
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			backend: &avapigwv1alpha1.Backend{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-backend",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 2,
+		},
+		{
+			name: "returns empty for no matches",
+			objects: []client.Object{
+				&avapigwv1alpha1.TCPRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "route-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.TCPRouteSpec{
+						Rules: []avapigwv1alpha1.TCPRouteRule{
+							{
+								BackendRefs: []avapigwv1alpha1.TCPBackendRef{
+									{BackendRef: avapigwv1alpha1.BackendRef{
+										Name:  "other-backend",
+										Kind:  ptrString("Backend"),
+										Group: ptrString(avapigwv1alpha1.GroupVersion.Group),
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			backend: &avapigwv1alpha1.Backend{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-backend",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build client with indexer
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteBackendIndexField, func(obj client.Object) []string {
+					route := obj.(*avapigwv1alpha1.TCPRoute)
+					var keys []string
+					for _, rule := range route.Spec.Rules {
+						for _, ref := range rule.BackendRefs {
+							if ref.Kind != nil && *ref.Kind == "Backend" {
+								keys = append(keys, BackendIndexKey(route.Namespace, ref.Name))
+							}
+						}
+					}
+					return keys
+				}).
+				Build()
+
+			r := newTCPRouteReconciler(cl, scheme)
+
+			requests := r.findTCPRoutesForBackend(context.Background(), tt.backend)
+
+			assert.Len(t, requests, tt.wantRequests)
+		})
+	}
 }

@@ -177,70 +177,90 @@ func (g *Generator) GenerateCA() (caCertPEM []byte, caKeyPEM []byte, err error) 
 	return certPEM, keyPEM, nil
 }
 
-// GenerateServerCert generates a server certificate signed by the CA.
-// Returns the server certificate PEM, server private key PEM, expiration time, and any error.
-func (g *Generator) GenerateServerCert(caCertPEM, caKeyPEM []byte) (serverCertPEM []byte, serverKeyPEM []byte, expiresAt time.Time, err error) {
-	// Parse CA certificate
+// serverCertParams holds the parsed parameters needed for server certificate generation.
+type serverCertParams struct {
+	caCert       *x509.Certificate
+	caKey        *rsa.PrivateKey
+	serverKey    *rsa.PrivateKey
+	serialNumber *big.Int
+}
+
+// parseServerCertParams parses and validates the CA certificate and key, and generates server key and serial number.
+func (g *Generator) parseServerCertParams(caCertPEM, caKeyPEM []byte) (*serverCertParams, error) {
 	caCert, err := ParseCertificate(caCertPEM)
 	if err != nil {
-		return nil, nil, time.Time{}, fmt.Errorf("failed to parse CA certificate: %w", err)
+		return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
 	}
 
-	// Parse CA private key
 	caKey, err := parsePrivateKey(caKeyPEM)
 	if err != nil {
-		return nil, nil, time.Time{}, fmt.Errorf("failed to parse CA private key: %w", err)
+		return nil, fmt.Errorf("failed to parse CA private key: %w", err)
 	}
 
-	// Generate server private key
 	serverKey, err := rsa.GenerateKey(rand.Reader, g.config.KeySize)
 	if err != nil {
-		return nil, nil, time.Time{}, fmt.Errorf("failed to generate server private key: %w", err)
+		return nil, fmt.Errorf("failed to generate server private key: %w", err)
 	}
 
-	// Generate serial number
 	serialNumber, err := generateSerialNumber()
 	if err != nil {
-		return nil, nil, time.Time{}, fmt.Errorf("failed to generate serial number: %w", err)
+		return nil, fmt.Errorf("failed to generate serial number: %w", err)
 	}
 
-	// Build DNS names for the certificate
-	dnsNames := g.buildDNSNames()
+	return &serverCertParams{
+		caCert:       caCert,
+		caKey:        caKey,
+		serverKey:    serverKey,
+		serialNumber: serialNumber,
+	}, nil
+}
 
-	now := time.Now()
-	expiresAt = now.Add(g.config.Validity)
-
-	template := &x509.Certificate{
+// buildServerCertTemplate creates the x509 certificate template for the server certificate.
+func (g *Generator) buildServerCertTemplate(serialNumber *big.Int, expiresAt time.Time) *x509.Certificate {
+	return &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName:   g.config.ServiceName,
 			Organization: []string{CAOrganization},
 		},
-		NotBefore:             now,
+		NotBefore:             time.Now(),
 		NotAfter:              expiresAt,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  false,
-		DNSNames:              dnsNames,
+		DNSNames:              g.buildDNSNames(),
+	}
+}
+
+// GenerateServerCert generates a server certificate signed by the CA.
+// Returns the server certificate PEM, server private key PEM, expiration time, and any error.
+func (g *Generator) GenerateServerCert(
+	caCertPEM, caKeyPEM []byte,
+) (serverCertPEM []byte, serverKeyPEM []byte, expiresAt time.Time, err error) {
+	params, err := g.parseServerCertParams(caCertPEM, caKeyPEM)
+	if err != nil {
+		return nil, nil, time.Time{}, err
 	}
 
-	// Sign the server certificate with the CA
-	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &serverKey.PublicKey, caKey)
+	expiresAt = time.Now().Add(g.config.Validity)
+	template := g.buildServerCertTemplate(params.serialNumber, expiresAt)
+
+	certDER, err := x509.CreateCertificate(
+		rand.Reader, template, params.caCert, &params.serverKey.PublicKey, params.caKey,
+	)
 	if err != nil {
 		return nil, nil, time.Time{}, fmt.Errorf("failed to create server certificate: %w", err)
 	}
 
-	// Encode certificate to PEM
 	certPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE",
 		Bytes: certDER,
 	})
 
-	// Encode private key to PEM
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(serverKey),
+		Bytes: x509.MarshalPKCS1PrivateKey(params.serverKey),
 	})
 
 	return certPEM, keyPEM, expiresAt, nil

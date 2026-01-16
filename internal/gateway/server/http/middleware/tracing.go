@@ -32,8 +32,15 @@ func Tracing(serviceName string) gin.HandlerFunc {
 	})
 }
 
-// TracingWithConfig returns a tracing middleware with custom configuration.
-func TracingWithConfig(config TracingConfig) gin.HandlerFunc {
+// tracingContext holds pre-computed values for tracing middleware.
+type tracingContext struct {
+	config    TracingConfig
+	tracer    trace.Tracer
+	skipPaths map[string]bool
+}
+
+// newTracingContext creates and initializes the tracing context.
+func newTracingContext(config TracingConfig) *tracingContext {
 	if config.TracerProvider == nil {
 		config.TracerProvider = otel.GetTracerProvider()
 	}
@@ -44,50 +51,75 @@ func TracingWithConfig(config TracingConfig) gin.HandlerFunc {
 		config.ServiceName = TracerName
 	}
 
-	tracer := config.TracerProvider.Tracer(config.ServiceName)
-
 	skipPaths := make(map[string]bool)
 	for _, path := range config.SkipPaths {
 		skipPaths[path] = true
 	}
 
+	return &tracingContext{
+		config:    config,
+		tracer:    config.TracerProvider.Tracer(config.ServiceName),
+		skipPaths: skipPaths,
+	}
+}
+
+// setRequestSpanAttributes sets span attributes from the incoming request.
+func setRequestSpanAttributes(span trace.Span, c *gin.Context, path string) {
+	span.SetAttributes(
+		attribute.String("http.method", c.Request.Method),
+		attribute.String("http.url", c.Request.URL.String()),
+		attribute.String("http.target", path),
+		attribute.String("http.host", c.Request.Host),
+		attribute.String("http.scheme", c.Request.URL.Scheme),
+		attribute.String("http.user_agent", c.Request.UserAgent()),
+		attribute.String("net.peer.ip", c.ClientIP()),
+	)
+
+	// Add request ID if available
+	if requestID := GetRequestID(c); requestID != "" {
+		span.SetAttributes(attribute.String("request.id", requestID))
+	}
+}
+
+// setResponseSpanAttributes sets span attributes from the response.
+func setResponseSpanAttributes(span trace.Span, c *gin.Context) {
+	status := c.Writer.Status()
+	span.SetAttributes(
+		attribute.Int("http.status_code", status),
+		attribute.Int("http.response_content_length", c.Writer.Size()),
+	)
+
+	// Record errors
+	if len(c.Errors) > 0 {
+		span.SetAttributes(attribute.String("error", c.Errors.String()))
+		span.RecordError(fmt.Errorf("%s", c.Errors.String()))
+	}
+
+	// Set span status based on HTTP status code
+	if status >= 500 {
+		span.SetAttributes(attribute.Bool("error", true))
+	}
+}
+
+// TracingWithConfig returns a tracing middleware with custom configuration.
+func TracingWithConfig(config TracingConfig) gin.HandlerFunc {
+	tctx := newTracingContext(config)
+
 	return func(c *gin.Context) {
-		// Skip tracing for certain paths
 		path := c.Request.URL.Path
-		if skipPaths[path] {
+		if tctx.skipPaths[path] {
 			c.Next()
 			return
 		}
 
-		// Extract trace context from incoming request
-		ctx := config.Propagators.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
-
-		// Create span name
+		// Extract trace context and create span
+		ctx := tctx.config.Propagators.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
 		spanName := fmt.Sprintf("%s %s", c.Request.Method, path)
-
-		// Start span
-		ctx, span := tracer.Start(ctx, spanName,
-			trace.WithSpanKind(trace.SpanKindServer),
-		)
+		ctx, span := tctx.tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
 		defer span.End()
 
-		// Set span attributes
-		span.SetAttributes(
-			attribute.String("http.method", c.Request.Method),
-			attribute.String("http.url", c.Request.URL.String()),
-			attribute.String("http.target", path),
-			attribute.String("http.host", c.Request.Host),
-			attribute.String("http.scheme", c.Request.URL.Scheme),
-			attribute.String("http.user_agent", c.Request.UserAgent()),
-			attribute.String("net.peer.ip", c.ClientIP()),
-		)
-
-		// Add request ID if available
-		if requestID := GetRequestID(c); requestID != "" {
-			span.SetAttributes(attribute.String("request.id", requestID))
-		}
-
-		// Store span in context
+		// Set request attributes and store span in context
+		setRequestSpanAttributes(span, c, path)
 		c.Set(SpanKey, span)
 		c.Request = c.Request.WithContext(ctx)
 
@@ -95,22 +127,7 @@ func TracingWithConfig(config TracingConfig) gin.HandlerFunc {
 		c.Next()
 
 		// Set response attributes
-		status := c.Writer.Status()
-		span.SetAttributes(
-			attribute.Int("http.status_code", status),
-			attribute.Int("http.response_content_length", c.Writer.Size()),
-		)
-
-		// Record errors
-		if len(c.Errors) > 0 {
-			span.SetAttributes(attribute.String("error", c.Errors.String()))
-			span.RecordError(fmt.Errorf("%s", c.Errors.String()))
-		}
-
-		// Set span status based on HTTP status code
-		if status >= 500 {
-			span.SetAttributes(attribute.Bool("error", true))
-		}
+		setResponseSpanAttributes(span, c)
 	}
 }
 

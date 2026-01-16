@@ -93,7 +93,10 @@ func (m *GRPCRouteMatcher) Match(service, method string, headers map[string]stri
 }
 
 // MatchWithHost finds a matching route considering the host.
-func (m *GRPCRouteMatcher) MatchWithHost(host, service, method string, headers map[string]string) (*GRPCMatchResult, bool) {
+func (m *GRPCRouteMatcher) MatchWithHost(
+	host, service, method string,
+	headers map[string]string,
+) (*GRPCMatchResult, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 

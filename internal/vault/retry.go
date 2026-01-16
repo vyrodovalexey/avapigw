@@ -106,113 +106,132 @@ func ExternalServiceRetryConfig() *RetryConfig {
 
 // WithRetry executes a function with retry logic.
 func WithRetry(ctx context.Context, config *RetryConfig, fn func() error) error {
-	if config == nil {
-		config = DefaultRetryConfig()
-	}
-
-	backoff := config.BackoffFunc
-	if backoff == nil {
-		backoff = createBackoffFunc(config)
-	}
-
-	retryIf := config.RetryIf
-	if retryIf == nil {
-		retryIf = IsRetryable
-	}
-
-	operationName := config.OperationName
-	if operationName == "" {
-		operationName = "vault_operation"
-	}
-
-	logger := config.Logger
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-
-	var lastErr error
+	rc := normalizeRetryConfig(config)
 	startTime := time.Now()
 
-	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
-		// Check context before attempting
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	var lastErr error
+	for attempt := 0; attempt <= rc.maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
-		// Execute the function
-		attemptStart := time.Now()
 		err := fn()
-		attemptDuration := time.Since(attemptStart)
-
 		if err == nil {
-			// Log success after retries
-			if attempt > 0 {
-				logger.Info("operation succeeded after retry",
-					zap.String("operation", operationName),
-					zap.Int("attempt", attempt+1),
-					zap.Duration("total_duration", time.Since(startTime)),
-				)
-			}
+			logRetrySuccess(rc.logger, rc.operationName, attempt, startTime)
 			return nil
 		}
 
 		lastErr = err
-
-		// Check if we should retry
-		if !retryIf(err) {
-			logger.Debug("error is not retryable",
-				zap.String("operation", operationName),
-				zap.Error(err),
-			)
+		if !rc.retryIf(err) {
+			rc.logger.Debug("error is not retryable", zap.String("operation", rc.operationName), zap.Error(err))
 			return err
 		}
 
-		// Check if we've exhausted retries
-		if attempt >= config.MaxRetries {
-			logger.Warn("retry attempts exhausted",
-				zap.String("operation", operationName),
-				zap.Int("max_retries", config.MaxRetries),
-				zap.Duration("total_duration", time.Since(startTime)),
-				zap.Error(lastErr),
-			)
+		if attempt >= rc.maxRetries {
+			logRetryExhausted(rc.logger, rc.operationName, rc.maxRetries, startTime, lastErr)
 			break
 		}
 
-		// Calculate backoff duration
-		wait := backoff(attempt)
-
-		// Log retry attempt
-		logger.Debug("retrying operation",
-			zap.String("operation", operationName),
-			zap.Int("attempt", attempt+1),
-			zap.Int("max_retries", config.MaxRetries),
-			zap.Duration("backoff", wait),
-			zap.Duration("attempt_duration", attemptDuration),
-			zap.Error(err),
-		)
-
-		// Record retry metric
-		RecordRetry(operationName, attempt+1)
-
-		// Wait before retrying
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
+		if err := waitForRetryBackoff(ctx, rc, attempt, lastErr); err != nil {
+			return err
 		}
 	}
 
+	return buildRetryExhaustedError(lastErr)
+}
+
+// retryContext holds normalized retry configuration.
+type retryContext struct {
+	backoff       BackoffFunc
+	retryIf       func(error) bool
+	operationName string
+	logger        *zap.Logger
+	maxRetries    int
+}
+
+// normalizeRetryConfig creates a normalized retry context from config.
+func normalizeRetryConfig(config *RetryConfig) *retryContext {
+	if config == nil {
+		config = DefaultRetryConfig()
+	}
+
+	rc := &retryContext{
+		backoff:       config.BackoffFunc,
+		retryIf:       config.RetryIf,
+		operationName: config.OperationName,
+		logger:        config.Logger,
+		maxRetries:    config.MaxRetries,
+	}
+
+	if rc.backoff == nil {
+		rc.backoff = createBackoffFunc(config)
+	}
+	if rc.retryIf == nil {
+		rc.retryIf = IsRetryable
+	}
+	if rc.operationName == "" {
+		rc.operationName = "vault_operation"
+	}
+	if rc.logger == nil {
+		rc.logger = zap.NewNop()
+	}
+
+	return rc
+}
+
+// logRetrySuccess logs successful operation after retries.
+func logRetrySuccess(logger *zap.Logger, operationName string, attempt int, startTime time.Time) {
+	if attempt > 0 {
+		logger.Info("operation succeeded after retry",
+			zap.String("operation", operationName),
+			zap.Int("attempt", attempt+1),
+			zap.Duration("total_duration", time.Since(startTime)),
+		)
+	}
+}
+
+// logRetryExhausted logs when all retry attempts are exhausted.
+func logRetryExhausted(logger *zap.Logger, operationName string, maxRetries int, startTime time.Time, lastErr error) {
+	logger.Warn("retry attempts exhausted",
+		zap.String("operation", operationName),
+		zap.Int("max_retries", maxRetries),
+		zap.Duration("total_duration", time.Since(startTime)),
+		zap.Error(lastErr),
+	)
+}
+
+// waitForRetryBackoff waits for the backoff duration before retrying.
+func waitForRetryBackoff(ctx context.Context, rc *retryContext, attempt int, err error) error {
+	wait := rc.backoff(attempt)
+
+	rc.logger.Debug("retrying operation",
+		zap.String("operation", rc.operationName),
+		zap.Int("attempt", attempt+1),
+		zap.Int("max_retries", rc.maxRetries),
+		zap.Duration("backoff", wait),
+		zap.Error(err),
+	)
+
+	RecordRetry(rc.operationName, attempt+1)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(wait):
+		return nil
+	}
+}
+
+// buildRetryExhaustedError creates the final error when retries are exhausted.
+func buildRetryExhaustedError(lastErr error) error {
+	msg := ""
+	if lastErr != nil {
+		msg = lastErr.Error()
+	}
 	return &VaultError{
-		Op:  "retry",
-		Err: ErrRetryExhausted,
-		Message: func() string {
-			if lastErr != nil {
-				return lastErr.Error()
-			}
-			return ""
-		}(),
+		Op:      "retry",
+		Err:     ErrRetryExhausted,
+		Message: msg,
 	}
 }
 

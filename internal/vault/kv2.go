@@ -258,58 +258,72 @@ func parseKV2Metadata(secret *Secret) (*KV2Metadata, error) {
 		CustomMetadata: make(map[string]string),
 	}
 
-	// Parse created_time
-	if createdTime, ok := secret.Data["created_time"].(string); ok {
+	parseKV2TimeFields(secret.Data, metadata)
+	parseKV2VersionFields(secret.Data, metadata)
+	parseKV2ConfigFields(secret.Data, metadata)
+	parseKV2CustomMetadata(secret.Data, metadata)
+	parseKV2Versions(secret.Data, metadata)
+
+	return metadata, nil
+}
+
+// parseKV2TimeFields parses time-related fields from metadata.
+func parseKV2TimeFields(data map[string]interface{}, metadata *KV2Metadata) {
+	if createdTime, ok := data["created_time"].(string); ok {
 		if t, err := time.Parse(time.RFC3339Nano, createdTime); err == nil {
 			metadata.CreatedTime = t
 		}
 	}
 
-	// Parse current_version
-	if currentVersion, ok := secret.Data["current_version"].(float64); ok {
-		metadata.CurrentVersion = int(currentVersion)
-	}
-
-	// Parse max_versions
-	if maxVersions, ok := secret.Data["max_versions"].(float64); ok {
-		metadata.MaxVersions = int(maxVersions)
-	}
-
-	// Parse oldest_version
-	if oldestVersion, ok := secret.Data["oldest_version"].(float64); ok {
-		metadata.OldestVersion = int(oldestVersion)
-	}
-
-	// Parse updated_time
-	if updatedTime, ok := secret.Data["updated_time"].(string); ok {
+	if updatedTime, ok := data["updated_time"].(string); ok {
 		if t, err := time.Parse(time.RFC3339Nano, updatedTime); err == nil {
 			metadata.UpdatedTime = t
 		}
 	}
+}
 
-	// Parse cas_required
-	if casRequired, ok := secret.Data["cas_required"].(bool); ok {
+// parseKV2VersionFields parses version number fields from metadata.
+func parseKV2VersionFields(data map[string]interface{}, metadata *KV2Metadata) {
+	if currentVersion, ok := data["current_version"].(float64); ok {
+		metadata.CurrentVersion = int(currentVersion)
+	}
+
+	if maxVersions, ok := data["max_versions"].(float64); ok {
+		metadata.MaxVersions = int(maxVersions)
+	}
+
+	if oldestVersion, ok := data["oldest_version"].(float64); ok {
+		metadata.OldestVersion = int(oldestVersion)
+	}
+}
+
+// parseKV2ConfigFields parses configuration fields from metadata.
+func parseKV2ConfigFields(data map[string]interface{}, metadata *KV2Metadata) {
+	if casRequired, ok := data["cas_required"].(bool); ok {
 		metadata.CASRequired = casRequired
 	}
 
-	// Parse delete_version_after
-	if deleteAfter, ok := secret.Data["delete_version_after"].(string); ok {
+	if deleteAfter, ok := data["delete_version_after"].(string); ok {
 		if d, err := time.ParseDuration(deleteAfter); err == nil {
 			metadata.DeleteVersionAfter = d
 		}
 	}
+}
 
-	// Parse custom_metadata
-	if customMeta, ok := secret.Data["custom_metadata"].(map[string]interface{}); ok {
+// parseKV2CustomMetadata parses custom metadata map.
+func parseKV2CustomMetadata(data map[string]interface{}, metadata *KV2Metadata) {
+	if customMeta, ok := data["custom_metadata"].(map[string]interface{}); ok {
 		for k, v := range customMeta {
 			if s, ok := v.(string); ok {
 				metadata.CustomMetadata[k] = s
 			}
 		}
 	}
+}
 
-	// Parse versions
-	if versions, ok := secret.Data["versions"].(map[string]interface{}); ok {
+// parseKV2Versions parses version metadata entries.
+func parseKV2Versions(data map[string]interface{}, metadata *KV2Metadata) {
+	if versions, ok := data["versions"].(map[string]interface{}); ok {
 		for versionStr, versionData := range versions {
 			versionMeta := parseVersionMetadata(versionStr, versionData)
 			if versionMeta != nil {
@@ -317,8 +331,6 @@ func parseKV2Metadata(secret *Secret) (*KV2Metadata, error) {
 			}
 		}
 	}
-
-	return metadata, nil
 }
 
 // parseVersionMetadata parses a single version's metadata.

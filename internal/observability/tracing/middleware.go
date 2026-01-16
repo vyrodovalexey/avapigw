@@ -63,8 +63,106 @@ func HTTPMiddleware(serviceName string) func(http.Handler) http.Handler {
 	})
 }
 
+// httpMiddlewareContext holds pre-computed values for HTTP middleware.
+type httpMiddlewareContext struct {
+	tracer            trace.Tracer
+	propagators       propagation.TextMapPropagator
+	skipPaths         map[string]bool
+	filter            func(*http.Request) bool
+	spanNameFormatter func(*http.Request) string
+}
+
+// newHTTPMiddlewareContext creates a new httpMiddlewareContext from config.
+func newHTTPMiddlewareContext(config *HTTPMiddlewareConfig) *httpMiddlewareContext {
+	skipPaths := make(map[string]bool)
+	for _, path := range config.SkipPaths {
+		skipPaths[path] = true
+	}
+	return &httpMiddlewareContext{
+		tracer:            config.TracerProvider.Tracer(config.ServiceName),
+		propagators:       config.Propagators,
+		skipPaths:         skipPaths,
+		filter:            config.Filter,
+		spanNameFormatter: config.SpanNameFormatter,
+	}
+}
+
+// shouldSkip returns true if the request should skip tracing.
+func (c *httpMiddlewareContext) shouldSkip(r *http.Request) bool {
+	if c.skipPaths[r.URL.Path] {
+		return true
+	}
+	if c.filter != nil && !c.filter(r) {
+		return true
+	}
+	return false
+}
+
+// startSpan starts a new span for the request.
+func (c *httpMiddlewareContext) startSpan(r *http.Request) (context.Context, trace.Span) {
+	ctx := c.propagators.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	spanName := c.spanNameFormatter(r)
+	return c.tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
+}
+
+// setRequestAttributes sets span attributes from the request.
+func setRequestAttributes(span trace.Span, r *http.Request) {
+	span.SetAttributes(
+		attribute.String("http.method", r.Method),
+		attribute.String("http.url", r.URL.String()),
+		attribute.String("http.target", r.URL.Path),
+		attribute.String("http.host", r.Host),
+		attribute.String("http.scheme", r.URL.Scheme),
+		attribute.String("http.user_agent", r.UserAgent()),
+		attribute.String("net.peer.ip", getClientIP(r)),
+	)
+}
+
+// setResponseAttributes sets span attributes from the response.
+func setResponseAttributes(span trace.Span, statusCode, size int) {
+	span.SetAttributes(
+		attribute.Int("http.status_code", statusCode),
+		attribute.Int("http.response_content_length", size),
+	)
+}
+
+// setSpanStatus sets the span status based on HTTP status code.
+func setSpanStatus(span trace.Span, statusCode int) {
+	if statusCode >= 400 {
+		span.SetStatus(codes.Error, http.StatusText(statusCode))
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+}
+
 // HTTPMiddlewareWithConfig returns an HTTP middleware with custom configuration.
 func HTTPMiddlewareWithConfig(config *HTTPMiddlewareConfig) func(http.Handler) http.Handler {
+	config = normalizeHTTPMiddlewareConfig(config)
+	mctx := newHTTPMiddlewareContext(config)
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if mctx.shouldSkip(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			ctx, span := mctx.startSpan(r)
+			defer span.End()
+
+			setRequestAttributes(span, r)
+
+			wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+			next.ServeHTTP(wrapped, r.WithContext(ctx))
+
+			setResponseAttributes(span, wrapped.statusCode, wrapped.size)
+			setSpanStatus(span, wrapped.statusCode)
+		})
+	}
+}
+
+// normalizeHTTPMiddlewareConfig ensures all config fields have valid values.
+func normalizeHTTPMiddlewareConfig(config *HTTPMiddlewareConfig) *HTTPMiddlewareConfig {
 	if config == nil {
 		config = DefaultHTTPMiddlewareConfig()
 	}
@@ -82,76 +180,7 @@ func HTTPMiddlewareWithConfig(config *HTTPMiddlewareConfig) func(http.Handler) h
 			return fmt.Sprintf("%s %s", r.Method, r.URL.Path)
 		}
 	}
-
-	tracer := config.TracerProvider.Tracer(config.ServiceName)
-	skipPaths := make(map[string]bool)
-	for _, path := range config.SkipPaths {
-		skipPaths[path] = true
-	}
-
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip tracing for certain paths
-			if skipPaths[r.URL.Path] {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Apply filter if provided
-			if config.Filter != nil && !config.Filter(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Extract trace context from incoming request
-			ctx := config.Propagators.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-
-			// Create span name
-			spanName := config.SpanNameFormatter(r)
-
-			// Start span
-			ctx, span := tracer.Start(ctx, spanName,
-				trace.WithSpanKind(trace.SpanKindServer),
-			)
-			defer span.End()
-
-			// Set span attributes
-			span.SetAttributes(
-				attribute.String("http.method", r.Method),
-				attribute.String("http.url", r.URL.String()),
-				attribute.String("http.target", r.URL.Path),
-				attribute.String("http.host", r.Host),
-				attribute.String("http.scheme", r.URL.Scheme),
-				attribute.String("http.user_agent", r.UserAgent()),
-				attribute.String("net.peer.ip", getClientIP(r)),
-			)
-
-			// Wrap response writer to capture status code
-			wrapped := &responseWriter{
-				ResponseWriter: w,
-				statusCode:     http.StatusOK,
-			}
-
-			// Process request with updated context
-			next.ServeHTTP(wrapped, r.WithContext(ctx))
-
-			// Set response attributes
-			span.SetAttributes(
-				attribute.Int("http.status_code", wrapped.statusCode),
-				attribute.Int("http.response_content_length", wrapped.size),
-			)
-
-			// Set span status based on HTTP status code
-			switch {
-			case wrapped.statusCode >= 500:
-				span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
-			case wrapped.statusCode >= 400:
-				span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
-			default:
-				span.SetStatus(codes.Ok, "")
-			}
-		})
-	}
+	return config
 }
 
 // GinMiddleware returns a Gin middleware that creates spans for requests.
@@ -161,96 +190,92 @@ func GinMiddleware(serviceName string) gin.HandlerFunc {
 	})
 }
 
-// GinMiddlewareWithConfig returns a Gin middleware with custom configuration.
-func GinMiddlewareWithConfig(config *HTTPMiddlewareConfig) gin.HandlerFunc {
-	if config == nil {
-		config = DefaultHTTPMiddlewareConfig()
-	}
-	if config.TracerProvider == nil {
-		config.TracerProvider = otel.GetTracerProvider()
-	}
-	if config.Propagators == nil {
-		config.Propagators = otel.GetTextMapPropagator()
-	}
-	if config.ServiceName == "" {
-		config.ServiceName = TracerName
-	}
-	if config.SpanNameFormatter == nil {
-		config.SpanNameFormatter = func(r *http.Request) string {
-			return fmt.Sprintf("%s %s", r.Method, r.URL.Path)
-		}
-	}
+// ginMiddlewareContext holds pre-computed values for Gin middleware.
+type ginMiddlewareContext struct {
+	tracer            trace.Tracer
+	propagators       propagation.TextMapPropagator
+	skipPaths         map[string]bool
+	filter            func(*http.Request) bool
+	spanNameFormatter func(*http.Request) string
+}
 
-	tracer := config.TracerProvider.Tracer(config.ServiceName)
+// newGinMiddlewareContext creates a new ginMiddlewareContext from config.
+func newGinMiddlewareContext(config *HTTPMiddlewareConfig) *ginMiddlewareContext {
 	skipPaths := make(map[string]bool)
 	for _, path := range config.SkipPaths {
 		skipPaths[path] = true
 	}
+	return &ginMiddlewareContext{
+		tracer:            config.TracerProvider.Tracer(config.ServiceName),
+		propagators:       config.Propagators,
+		skipPaths:         skipPaths,
+		filter:            config.Filter,
+		spanNameFormatter: config.SpanNameFormatter,
+	}
+}
+
+// shouldSkip returns true if the request should skip tracing.
+func (c *ginMiddlewareContext) shouldSkip(gc *gin.Context) bool {
+	if c.skipPaths[gc.Request.URL.Path] {
+		return true
+	}
+	if c.filter != nil && !c.filter(gc.Request) {
+		return true
+	}
+	return false
+}
+
+// startSpan starts a new span for the Gin request.
+func (c *ginMiddlewareContext) startSpan(gc *gin.Context) (context.Context, trace.Span) {
+	ctx := c.propagators.Extract(gc.Request.Context(), propagation.HeaderCarrier(gc.Request.Header))
+	spanName := c.spanNameFormatter(gc.Request)
+	return c.tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
+}
+
+// setGinRequestAttributes sets span attributes from the Gin request.
+func setGinRequestAttributes(span trace.Span, c *gin.Context) {
+	span.SetAttributes(
+		attribute.String("http.method", c.Request.Method),
+		attribute.String("http.url", c.Request.URL.String()),
+		attribute.String("http.target", c.Request.URL.Path),
+		attribute.String("http.host", c.Request.Host),
+		attribute.String("http.user_agent", c.Request.UserAgent()),
+		attribute.String("net.peer.ip", c.ClientIP()),
+	)
+}
+
+// recordGinErrors records any errors from the Gin context.
+func recordGinErrors(span trace.Span, c *gin.Context) {
+	if len(c.Errors) > 0 {
+		span.SetAttributes(attribute.String("error", c.Errors.String()))
+		span.RecordError(fmt.Errorf("%s", c.Errors.String()))
+	}
+}
+
+// GinMiddlewareWithConfig returns a Gin middleware with custom configuration.
+func GinMiddlewareWithConfig(config *HTTPMiddlewareConfig) gin.HandlerFunc {
+	config = normalizeHTTPMiddlewareConfig(config)
+	mctx := newGinMiddlewareContext(config)
 
 	return func(c *gin.Context) {
-		// Skip tracing for certain paths
-		if skipPaths[c.Request.URL.Path] {
+		if mctx.shouldSkip(c) {
 			c.Next()
 			return
 		}
 
-		// Apply filter if provided
-		if config.Filter != nil && !config.Filter(c.Request) {
-			c.Next()
-			return
-		}
-
-		// Extract trace context from incoming request
-		ctx := config.Propagators.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
-
-		// Create span name
-		spanName := config.SpanNameFormatter(c.Request)
-
-		// Start span
-		ctx, span := tracer.Start(ctx, spanName,
-			trace.WithSpanKind(trace.SpanKindServer),
-		)
+		ctx, span := mctx.startSpan(c)
 		defer span.End()
 
-		// Set span attributes
-		span.SetAttributes(
-			attribute.String("http.method", c.Request.Method),
-			attribute.String("http.url", c.Request.URL.String()),
-			attribute.String("http.target", c.Request.URL.Path),
-			attribute.String("http.host", c.Request.Host),
-			attribute.String("http.user_agent", c.Request.UserAgent()),
-			attribute.String("net.peer.ip", c.ClientIP()),
-		)
+		setGinRequestAttributes(span, c)
 
-		// Store span in context
 		c.Set(SpanContextKey, span)
 		c.Request = c.Request.WithContext(ctx)
 
-		// Process request
 		c.Next()
 
-		// Set response attributes
-		span.SetAttributes(
-			attribute.Int("http.status_code", c.Writer.Status()),
-			attribute.Int("http.response_content_length", c.Writer.Size()),
-		)
-
-		// Record errors
-		if len(c.Errors) > 0 {
-			span.SetAttributes(attribute.String("error", c.Errors.String()))
-			span.RecordError(fmt.Errorf("%s", c.Errors.String()))
-		}
-
-		// Set span status based on HTTP status code
-		statusCode := c.Writer.Status()
-		switch {
-		case statusCode >= 500:
-			span.SetStatus(codes.Error, http.StatusText(statusCode))
-		case statusCode >= 400:
-			span.SetStatus(codes.Error, http.StatusText(statusCode))
-		default:
-			span.SetStatus(codes.Ok, "")
-		}
+		setResponseAttributes(span, c.Writer.Status(), c.Writer.Size())
+		recordGinErrors(span, c)
+		setSpanStatus(span, c.Writer.Status())
 	}
 }
 
@@ -271,7 +296,12 @@ func UnaryServerInterceptor(serviceName string) grpc.UnaryServerInterceptor {
 	tracer := otel.GetTracerProvider().Tracer(serviceName)
 	propagators := otel.GetTextMapPropagator()
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
 		// Extract metadata from context
 		md, ok := metadata.FromIncomingContext(ctx)
 		if !ok {
@@ -375,7 +405,14 @@ func UnaryClientInterceptor(serviceName string) grpc.UnaryClientInterceptor {
 	tracer := otel.GetTracerProvider().Tracer(serviceName)
 	propagators := otel.GetTextMapPropagator()
 
-	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	return func(
+		ctx context.Context,
+		method string,
+		req, reply interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
 		// Parse service and method from full method name
 		service, methodName := parseFullMethod(method)
 
@@ -421,7 +458,14 @@ func StreamClientInterceptor(serviceName string) grpc.StreamClientInterceptor {
 	tracer := otel.GetTracerProvider().Tracer(serviceName)
 	propagators := otel.GetTextMapPropagator()
 
-	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	return func(
+		ctx context.Context,
+		desc *grpc.StreamDesc,
+		cc *grpc.ClientConn,
+		method string,
+		streamer grpc.Streamer,
+		opts ...grpc.CallOption,
+	) (grpc.ClientStream, error) {
 		// Parse service and method from full method name
 		service, methodName := parseFullMethod(method)
 

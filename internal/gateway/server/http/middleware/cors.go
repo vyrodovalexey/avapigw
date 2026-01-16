@@ -59,8 +59,18 @@ func CORS() gin.HandlerFunc {
 	return CORSWithConfig(DefaultCORSConfig())
 }
 
-// CORSWithConfig returns a CORS middleware with custom configuration.
-func CORSWithConfig(config CORSConfig) gin.HandlerFunc {
+// corsContext holds pre-computed values for CORS middleware.
+type corsContext struct {
+	config           CORSConfig
+	allowAllOrigins  bool
+	allowMethodsStr  string
+	allowHeadersStr  string
+	exposeHeadersStr string
+	maxAgeStr        string
+}
+
+// newCORSContext creates and initializes the CORS context with pre-computed values.
+func newCORSContext(config CORSConfig) *corsContext {
 	// Normalize configuration
 	if len(config.AllowOrigins) == 0 {
 		config.AllowOrigins = []string{"*"}
@@ -80,11 +90,43 @@ func CORSWithConfig(config CORSConfig) gin.HandlerFunc {
 		}
 	}
 
-	// Pre-compute header values
-	allowMethodsStr := strings.Join(config.AllowMethods, ", ")
-	allowHeadersStr := strings.Join(config.AllowHeaders, ", ")
-	exposeHeadersStr := strings.Join(config.ExposeHeaders, ", ")
-	maxAgeStr := strconv.Itoa(config.MaxAge)
+	return &corsContext{
+		config:           config,
+		allowAllOrigins:  allowAllOrigins,
+		allowMethodsStr:  strings.Join(config.AllowMethods, ", "),
+		allowHeadersStr:  strings.Join(config.AllowHeaders, ", "),
+		exposeHeadersStr: strings.Join(config.ExposeHeaders, ", "),
+		maxAgeStr:        strconv.Itoa(config.MaxAge),
+	}
+}
+
+// setCommonCORSHeaders sets the common CORS headers for both preflight and actual requests.
+func (ctx *corsContext) setCommonCORSHeaders(c *gin.Context, origin string) {
+	if ctx.allowAllOrigins && !ctx.config.AllowCredentials {
+		c.Header("Access-Control-Allow-Origin", "*")
+	} else {
+		c.Header("Access-Control-Allow-Origin", origin)
+	}
+
+	if ctx.config.AllowCredentials {
+		c.Header("Access-Control-Allow-Credentials", "true")
+	}
+
+	if ctx.exposeHeadersStr != "" {
+		c.Header("Access-Control-Expose-Headers", ctx.exposeHeadersStr)
+	}
+}
+
+// setPreflightHeaders sets headers specific to preflight (OPTIONS) requests.
+func (ctx *corsContext) setPreflightHeaders(c *gin.Context) {
+	c.Header("Access-Control-Allow-Methods", ctx.allowMethodsStr)
+	c.Header("Access-Control-Allow-Headers", ctx.allowHeadersStr)
+	c.Header("Access-Control-Max-Age", ctx.maxAgeStr)
+}
+
+// CORSWithConfig returns a CORS middleware with custom configuration.
+func CORSWithConfig(config CORSConfig) gin.HandlerFunc {
+	ctx := newCORSContext(config)
 
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
@@ -96,9 +138,9 @@ func CORSWithConfig(config CORSConfig) gin.HandlerFunc {
 		}
 
 		// Check if origin is allowed
-		allowed := allowAllOrigins
+		allowed := ctx.allowAllOrigins
 		if !allowed {
-			allowed = isOriginAllowed(origin, config.AllowOrigins, config.AllowWildcard)
+			allowed = isOriginAllowed(origin, ctx.config.AllowOrigins, ctx.config.AllowWildcard)
 		}
 
 		if !allowed {
@@ -106,26 +148,12 @@ func CORSWithConfig(config CORSConfig) gin.HandlerFunc {
 			return
 		}
 
-		// Set CORS headers
-		if allowAllOrigins && !config.AllowCredentials {
-			c.Header("Access-Control-Allow-Origin", "*")
-		} else {
-			c.Header("Access-Control-Allow-Origin", origin)
-		}
-
-		if config.AllowCredentials {
-			c.Header("Access-Control-Allow-Credentials", "true")
-		}
-
-		if exposeHeadersStr != "" {
-			c.Header("Access-Control-Expose-Headers", exposeHeadersStr)
-		}
+		// Set common CORS headers
+		ctx.setCommonCORSHeaders(c, origin)
 
 		// Handle preflight request
 		if c.Request.Method == http.MethodOptions {
-			c.Header("Access-Control-Allow-Methods", allowMethodsStr)
-			c.Header("Access-Control-Allow-Headers", allowHeadersStr)
-			c.Header("Access-Control-Max-Age", maxAgeStr)
+			ctx.setPreflightHeaders(c)
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}

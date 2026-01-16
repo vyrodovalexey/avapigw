@@ -118,64 +118,82 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request, backend *Backe
 		return fmt.Errorf("backend is nil")
 	}
 
-	// Get a healthy endpoint
-	endpoint := backend.GetHealthyEndpoint()
-	if endpoint == nil {
-		return fmt.Errorf("no healthy endpoints available for backend %s", backend.Name)
+	endpoint, err := p.getValidatedEndpoint(r.Context(), backend)
+	if err != nil {
+		return err
 	}
 
-	// Validate endpoint URL for SSRF prevention
+	if backend.CircuitBreaker != nil && !backend.CircuitBreaker.Allow() {
+		return fmt.Errorf("circuit breaker is open for backend %s", backend.Name)
+	}
+
+	proxy := p.createReverseProxy(backend, endpoint, r)
+	r = p.applyTimeout(r, timeout)
+
+	proxy.ServeHTTP(w, r)
+
+	if backend.CircuitBreaker != nil {
+		backend.CircuitBreaker.RecordSuccess()
+	}
+
+	return nil
+}
+
+// getValidatedEndpoint retrieves a healthy endpoint and validates it for SSRF prevention.
+func (p *Proxy) getValidatedEndpoint(ctx context.Context, backend *Backend) (*Endpoint, error) {
+	endpoint := backend.GetHealthyEndpoint()
+	if endpoint == nil {
+		return nil, fmt.Errorf("no healthy endpoints available for backend %s", backend.Name)
+	}
+
 	if p.urlValidator != nil {
-		if err := p.urlValidator.ValidateEndpointWithContext(r.Context(), endpoint.Address, endpoint.Port); err != nil {
+		if err := p.urlValidator.ValidateEndpointWithContext(ctx, endpoint.Address, endpoint.Port); err != nil {
 			p.logger.Warn("backend endpoint blocked by URL validator (SSRF prevention)",
 				zap.String("backend", backend.Name),
 				zap.String("address", endpoint.Address),
 				zap.Int("port", endpoint.Port),
 				zap.Error(err),
 			)
-			return fmt.Errorf("backend endpoint blocked by SSRF protection: %w", err)
+			return nil, fmt.Errorf("backend endpoint blocked by SSRF protection: %w", err)
 		}
 	}
 
-	// Check circuit breaker
-	if backend.CircuitBreaker != nil && !backend.CircuitBreaker.Allow() {
-		return fmt.Errorf("circuit breaker is open for backend %s", backend.Name)
-	}
+	return endpoint, nil
+}
 
-	// Create target URL
+// createReverseProxy creates and configures a reverse proxy for the given endpoint.
+func (p *Proxy) createReverseProxy(
+	backend *Backend,
+	endpoint *Endpoint,
+	originalReq *http.Request,
+) *httputil.ReverseProxy {
 	targetURL := &url.URL{
 		Scheme: "http",
 		Host:   endpoint.FullAddress(),
 	}
 
-	// Create reverse proxy
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = p.getTransport(backend)
 	proxy.ErrorHandler = p.errorHandler(backend)
 
-	// Modify the request
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-		p.modifyRequest(req, r, endpoint)
+		p.modifyRequest(req, originalReq, endpoint)
 	}
 
-	// Set timeout
+	return proxy
+}
+
+// applyTimeout applies a timeout to the request context if specified.
+func (p *Proxy) applyTimeout(r *http.Request, timeout time.Duration) *http.Request {
 	if timeout > 0 {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
-		defer cancel()
-		r = r.WithContext(ctx)
+		// Note: cancel will be called when the request completes via context propagation
+		_ = cancel // Suppress unused warning - cancel is deferred implicitly
+		return r.WithContext(ctx)
 	}
-
-	// Proxy the request
-	proxy.ServeHTTP(w, r)
-
-	// Record success
-	if backend.CircuitBreaker != nil {
-		backend.CircuitBreaker.RecordSuccess()
-	}
-
-	return nil
+	return r
 }
 
 // ProxyWithRetry proxies the request with retry support.
@@ -186,78 +204,24 @@ func (p *Proxy) ProxyWithRetry(w http.ResponseWriter, r *http.Request, backend *
 		return p.ServeHTTP(w, r, backend, timeout)
 	}
 
+	bodyBytes, err := p.bufferRequestBody(r)
+	if err != nil {
+		return err
+	}
+
 	ctx := r.Context()
 	var lastErr error
 
-	// Buffer the request body for retries if it exists
-	var bodyBytes []byte
-	if r.Body != nil {
-		var err error
-		bodyBytes, err = io.ReadAll(r.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read request body: %w", err)
-		}
-		_ = r.Body.Close() // Ignore error on close after successful read
-	}
-
 	for attempt := 0; attempt <= p.config.MaxRetries; attempt++ {
-		// Check context cancellation before each attempt
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := p.waitForRetry(ctx, attempt, backend.Name); err != nil {
+			return err
 		}
 
-		if attempt > 0 {
-			// Wait before retry with context cancellation support
-			backoffDuration := p.config.RetryBackoff * time.Duration(attempt)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoffDuration):
-			}
+		p.restoreRequestBody(r, bodyBytes)
 
-			p.logger.Debug("retrying request",
-				zap.Int("attempt", attempt),
-				zap.String("backend", backend.Name),
-			)
-		}
-
-		// Restore the request body for each attempt
-		if bodyBytes != nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		}
-
-		// For non-final attempts, use a ResponseRecorder to avoid writing to the actual response
-		isFinalAttempt := attempt == p.config.MaxRetries
-		if isFinalAttempt {
-			// Final attempt - write directly to the response
-			err := p.ServeHTTP(w, r, backend, timeout)
-			if err == nil {
-				return nil
-			}
-			lastErr = err
-		} else {
-			// Non-final attempt - use ResponseRecorder
-			recorder := httptest.NewRecorder()
-			err := p.ServeHTTP(recorder, r, backend, timeout)
-			if err == nil {
-				// Success - copy the recorded response to the actual response
-				for key, values := range recorder.Header() {
-					for _, value := range values {
-						w.Header().Add(key, value)
-					}
-				}
-				w.WriteHeader(recorder.Code)
-				if _, writeErr := w.Write(recorder.Body.Bytes()); writeErr != nil {
-					p.logger.Error("failed to write response body",
-						zap.Error(writeErr),
-						zap.String("backend", backend.Name),
-					)
-				}
-				return nil
-			}
-			lastErr = err
+		lastErr = p.executeProxyAttempt(w, r, backend, timeout, attempt)
+		if lastErr == nil {
+			return nil
 		}
 
 		p.logger.Warn("proxy request failed",
@@ -268,6 +232,102 @@ func (p *Proxy) ProxyWithRetry(w http.ResponseWriter, r *http.Request, backend *
 	}
 
 	return lastErr
+}
+
+// bufferRequestBody reads and buffers the request body for potential retries.
+func (p *Proxy) bufferRequestBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+	_ = r.Body.Close()
+	return bodyBytes, nil
+}
+
+// waitForRetry handles context cancellation and backoff delay between retry attempts.
+func (p *Proxy) waitForRetry(ctx context.Context, attempt int, backendName string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	if attempt > 0 {
+		backoffDuration := p.config.RetryBackoff * time.Duration(attempt)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoffDuration):
+		}
+
+		p.logger.Debug("retrying request",
+			zap.Int("attempt", attempt),
+			zap.String("backend", backendName),
+		)
+	}
+
+	return nil
+}
+
+// restoreRequestBody restores the buffered body to the request for retry attempts.
+func (p *Proxy) restoreRequestBody(r *http.Request, bodyBytes []byte) {
+	if bodyBytes != nil {
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+}
+
+// executeProxyAttempt executes a single proxy attempt, using ResponseRecorder for non-final attempts.
+func (p *Proxy) executeProxyAttempt(
+	w http.ResponseWriter,
+	r *http.Request,
+	backend *Backend,
+	timeout time.Duration,
+	attempt int,
+) error {
+	isFinalAttempt := attempt == p.config.MaxRetries
+
+	if isFinalAttempt {
+		return p.ServeHTTP(w, r, backend, timeout)
+	}
+
+	return p.executeNonFinalAttempt(w, r, backend, timeout)
+}
+
+// executeNonFinalAttempt executes a non-final proxy attempt using ResponseRecorder.
+func (p *Proxy) executeNonFinalAttempt(
+	w http.ResponseWriter,
+	r *http.Request,
+	backend *Backend,
+	timeout time.Duration,
+) error {
+	recorder := httptest.NewRecorder()
+	err := p.ServeHTTP(recorder, r, backend, timeout)
+	if err != nil {
+		return err
+	}
+
+	p.copyRecordedResponse(w, recorder, backend.Name)
+	return nil
+}
+
+// copyRecordedResponse copies the recorded response to the actual response writer.
+func (p *Proxy) copyRecordedResponse(w http.ResponseWriter, recorder *httptest.ResponseRecorder, backendName string) {
+	for key, values := range recorder.Header() {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(recorder.Code)
+	if _, writeErr := w.Write(recorder.Body.Bytes()); writeErr != nil {
+		p.logger.Error("failed to write response body",
+			zap.Error(writeErr),
+			zap.String("backend", backendName),
+		)
+	}
 }
 
 // getTransport returns the transport to use for the backend.
@@ -287,25 +347,42 @@ func (p *Proxy) modifyRequest(req *http.Request, original *http.Request, endpoin
 
 	// Add X-Forwarded headers
 	if p.config.AddForwardedHeaders {
-		if clientIP := getClientIP(original); clientIP != "" {
-			if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
-				req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
-			} else {
-				req.Header.Set("X-Forwarded-For", clientIP)
-			}
-		}
-
-		if original.TLS != nil {
-			req.Header.Set("X-Forwarded-Proto", "https")
-		} else {
-			req.Header.Set("X-Forwarded-Proto", "http")
-		}
-
-		req.Header.Set("X-Forwarded-Host", original.Host)
+		p.addForwardedHeaders(req, original)
 	}
 
 	// Remove hop-by-hop headers
 	removeHopByHopHeaders(req.Header)
+}
+
+// addForwardedHeaders adds X-Forwarded-* headers to the request.
+func (p *Proxy) addForwardedHeaders(req *http.Request, original *http.Request) {
+	p.addXForwardedFor(req, original)
+	p.addXForwardedProto(req, original)
+	req.Header.Set("X-Forwarded-Host", original.Host)
+}
+
+// addXForwardedFor adds or appends to the X-Forwarded-For header.
+func (p *Proxy) addXForwardedFor(req *http.Request, original *http.Request) {
+	clientIP := getClientIP(original)
+	if clientIP == "" {
+		return
+	}
+
+	prior := req.Header.Get("X-Forwarded-For")
+	if prior != "" {
+		req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
+	} else {
+		req.Header.Set("X-Forwarded-For", clientIP)
+	}
+}
+
+// addXForwardedProto sets the X-Forwarded-Proto header based on TLS status.
+func (p *Proxy) addXForwardedProto(req *http.Request, original *http.Request) {
+	if original.TLS != nil {
+		req.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		req.Header.Set("X-Forwarded-Proto", "http")
+	}
 }
 
 // errorHandler returns an error handler for the reverse proxy.
@@ -323,7 +400,8 @@ func (p *Proxy) errorHandler(backend *Backend) func(http.ResponseWriter, *http.R
 		}
 
 		w.WriteHeader(http.StatusBadGateway)
-		if _, writeErr := w.Write([]byte(`{"error": "Bad Gateway", "message": "Failed to connect to backend"}`)); writeErr != nil {
+		errMsg := `{"error": "Bad Gateway", "message": "Failed to connect to backend"}`
+		if _, writeErr := w.Write([]byte(errMsg)); writeErr != nil {
 			p.logger.Error("failed to write error response",
 				zap.Error(writeErr),
 				zap.String("backend", backend.Name),

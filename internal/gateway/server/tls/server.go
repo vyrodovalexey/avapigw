@@ -188,51 +188,28 @@ func (s *Server) GetConnectionTracker() *tcp.ConnectionTracker {
 	return s.connections
 }
 
-// Start starts the TLS server.
-// The server will gracefully shut down when the context is cancelled.
-func (s *Server) Start(ctx context.Context) error {
-	s.mu.Lock()
-	if s.running {
-		s.mu.Unlock()
-		return fmt.Errorf("server already running")
-	}
-
-	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
-
-	// Create listener based on mode
-	var listener net.Listener
-	var err error
-
+// createListener creates the appropriate listener based on the TLS mode.
+func (s *Server) createListener(addr string) (net.Listener, error) {
 	if s.config.Mode == TLSModeTerminate {
-		// For TLS termination, create a TLS listener
 		tlsConfig := s.buildTLSConfig()
-		listener, err = tls.Listen("tcp", addr, tlsConfig)
-	} else {
-		// For passthrough, create a raw TCP listener
-		lc := &net.ListenConfig{}
-		listener, err = lc.Listen(context.Background(), "tcp", addr)
+		return tls.Listen("tcp", addr, tlsConfig)
 	}
+	lc := &net.ListenConfig{}
+	return lc.Listen(context.Background(), "tcp", addr)
+}
 
-	if err != nil {
-		s.mu.Unlock()
-		return fmt.Errorf("failed to listen on %s: %w", addr, err)
-	}
-
-	// Create a cancellable context for the server
+// initializeServerState initializes the server state for starting.
+func (s *Server) initializeServerState(ctx context.Context, listener net.Listener) context.Context {
 	serverCtx, cancel := context.WithCancel(ctx)
 	s.cancelFunc = cancel
-
 	s.listener = listener
 	s.running = true
 	s.stopCh = make(chan struct{})
-	s.mu.Unlock()
+	return serverCtx
+}
 
-	// Get accept deadline from config or use default
-	acceptDeadline := s.config.AcceptDeadline
-	if acceptDeadline <= 0 {
-		acceptDeadline = DefaultTLSAcceptDeadline
-	}
-
+// logServerStart logs the server start information.
+func (s *Server) logServerStart(addr string, acceptDeadline time.Duration) {
 	s.logger.Info("starting TLS server",
 		zap.String("address", addr),
 		zap.String("mode", string(s.config.Mode)),
@@ -243,10 +220,11 @@ func (s *Server) Start(ctx context.Context) error {
 		zap.Duration("acceptDeadline", acceptDeadline),
 		zap.Duration("shutdownTimeout", s.config.ShutdownTimeout),
 	)
+}
 
-	// Accept connections loop with proper context cancellation handling
+// acceptLoop runs the main accept loop for incoming connections.
+func (s *Server) acceptLoop(serverCtx context.Context, acceptDeadline time.Duration) error {
 	for {
-		// Check for context cancellation or stop signal first
 		select {
 		case <-serverCtx.Done():
 			s.logger.Debug("server context cancelled, stopping accept loop")
@@ -255,47 +233,78 @@ func (s *Server) Start(ctx context.Context) error {
 			s.logger.Debug("stop signal received, stopping accept loop")
 			return nil
 		default:
-			// Continue to accept
 		}
 
-		// Set accept deadline to allow periodic context checks
-		// This ensures we respond to context cancellation within acceptDeadline
 		if err := s.setAcceptDeadline(acceptDeadline); err != nil {
 			s.logger.Warn("failed to set accept deadline", zap.Error(err))
 		}
 
 		conn, err := s.listener.Accept()
 		if err != nil {
-			// Check if it's a timeout - this is expected for context checking
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue // Timeout, loop back to check context
-			}
-
-			// Check if we're shutting down
-			select {
-			case <-serverCtx.Done():
-				return serverCtx.Err()
-			case <-s.stopCh:
-				return nil
-			default:
-				// Log unexpected errors but continue accepting
-				s.logger.Error("accept error", zap.Error(err))
+			if s.handleAcceptError(err, serverCtx) {
 				continue
 			}
+			return nil
 		}
 
-		// Create a connection-scoped context that will be cancelled when
-		// the server context is cancelled
-		connCtx, connCancel := context.WithCancel(serverCtx)
-
-		// Handle connection in a goroutine
-		s.wg.Add(1)
-		go func(ctx context.Context, cancel context.CancelFunc, c net.Conn) {
-			defer s.wg.Done()
-			defer cancel() // Ensure connection context is cancelled when handler exits
-			s.handleConnection(ctx, c)
-		}(connCtx, connCancel, conn)
+		s.spawnConnectionHandler(serverCtx, conn)
 	}
+}
+
+// handleAcceptError handles errors from Accept(). Returns true if the loop should continue.
+func (s *Server) handleAcceptError(err error, serverCtx context.Context) bool {
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true
+	}
+
+	select {
+	case <-serverCtx.Done():
+		return false
+	case <-s.stopCh:
+		return false
+	default:
+		s.logger.Error("accept error", zap.Error(err))
+		return true
+	}
+}
+
+// spawnConnectionHandler spawns a goroutine to handle a connection.
+func (s *Server) spawnConnectionHandler(serverCtx context.Context, conn net.Conn) {
+	connCtx, connCancel := context.WithCancel(serverCtx)
+	s.wg.Add(1)
+	go func(ctx context.Context, cancel context.CancelFunc, c net.Conn) {
+		defer s.wg.Done()
+		defer cancel()
+		s.handleConnection(ctx, c)
+	}(connCtx, connCancel, conn)
+}
+
+// Start starts the TLS server.
+// The server will gracefully shut down when the context is cancelled.
+func (s *Server) Start(ctx context.Context) error {
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return fmt.Errorf("server already running")
+	}
+
+	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
+	listener, err := s.createListener(addr)
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to listen on %s: %w", addr, err)
+	}
+
+	serverCtx := s.initializeServerState(ctx, listener)
+	s.mu.Unlock()
+
+	acceptDeadline := s.config.AcceptDeadline
+	if acceptDeadline <= 0 {
+		acceptDeadline = DefaultTLSAcceptDeadline
+	}
+
+	s.logServerStart(addr, acceptDeadline)
+	return s.acceptLoop(serverCtx, acceptDeadline)
 }
 
 // setAcceptDeadline sets the accept deadline on the listener.
@@ -312,61 +321,38 @@ func (s *Server) setAcceptDeadline(deadline time.Duration) error {
 	}
 }
 
-// Stop stops the TLS server gracefully.
-// It will wait for active connections to complete up to the shutdown timeout.
-func (s *Server) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
-		return nil
-	}
-
-	// Get shutdown timeout from config
+// getShutdownTimeout returns the shutdown timeout from config or default.
+func (s *Server) getShutdownTimeout() time.Duration {
 	shutdownTimeout := s.config.ShutdownTimeout
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = DefaultTLSShutdownTimeout
 	}
-	s.mu.Unlock()
+	return shutdownTimeout
+}
 
-	s.logger.Info("stopping TLS server",
-		zap.Duration("shutdownTimeout", shutdownTimeout),
-		zap.Int("activeConnections", s.connections.Count()),
-	)
-
-	// Cancel the server context to signal all connection handlers
+// signalShutdown cancels the server context and closes the stop channel.
+func (s *Server) signalShutdown() {
 	if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
 
-	// Signal to stop accepting new connections
 	s.mu.Lock()
 	select {
 	case <-s.stopCh:
-		// Already closed
 	default:
 		close(s.stopCh)
 	}
 	s.mu.Unlock()
 
-	// Close the listener to unblock Accept()
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil {
 			s.logger.Debug("error closing listener", zap.Error(err))
 		}
 	}
+}
 
-	// Create a timeout context for shutdown if not provided
-	var shutdownCtx context.Context
-	var cancel context.CancelFunc
-	if ctx == nil {
-		shutdownCtx, cancel = context.WithTimeout(context.Background(), shutdownTimeout)
-	} else {
-		// Use the shorter of the provided context or shutdown timeout
-		shutdownCtx, cancel = context.WithTimeout(ctx, shutdownTimeout)
-	}
-	defer cancel()
-
-	// Wait for all connections to finish with timeout
+// waitForConnectionsWithTimeout waits for connections to close with a timeout.
+func (s *Server) waitForConnectionsWithTimeout(shutdownCtx context.Context) {
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -379,31 +365,36 @@ func (s *Server) Stop(ctx context.Context) error {
 			zap.Int("remainingConnections", s.connections.Count()),
 		)
 	case <-shutdownCtx.Done():
-		remainingConns := s.connections.Count()
-		s.logger.Warn("graceful shutdown timed out, force closing remaining connections",
-			zap.Int("remainingConnections", remainingConns),
-		)
-		// Force close all remaining connections
-		s.connections.CloseAll()
-
-		// Wait a short time for goroutines to exit after force close
-		forceCloseWait := make(chan struct{})
-		go func() {
-			s.wg.Wait()
-			close(forceCloseWait)
-		}()
-
-		select {
-		case <-forceCloseWait:
-			s.logger.Debug("all connection handlers exited after force close")
-		case <-time.After(1 * time.Second):
-			s.logger.Warn("some connection handlers may still be running")
-		}
+		s.handleShutdownTimeout()
 	}
+}
 
-	// Close certificate manager
+// handleShutdownTimeout handles the case when graceful shutdown times out.
+func (s *Server) handleShutdownTimeout() {
+	remainingConns := s.connections.Count()
+	s.logger.Warn("graceful shutdown timed out, force closing remaining connections",
+		zap.Int("remainingConnections", remainingConns),
+	)
+	s.connections.CloseAll()
+
+	forceCloseWait := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(forceCloseWait)
+	}()
+
+	select {
+	case <-forceCloseWait:
+		s.logger.Debug("all connection handlers exited after force close")
+	case <-time.After(1 * time.Second):
+		s.logger.Warn("some connection handlers may still be running")
+	}
+}
+
+// cleanupServerState cleans up the server state after shutdown.
+func (s *Server) cleanupServerState() {
 	if s.certManager != nil {
-		_ = s.certManager.Close() // Ignore error on cleanup
+		_ = s.certManager.Close()
 	}
 
 	s.mu.Lock()
@@ -412,6 +403,37 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.mu.Unlock()
 
 	s.logger.Info("TLS server stopped")
+}
+
+// Stop stops the TLS server gracefully.
+// It will wait for active connections to complete up to the shutdown timeout.
+func (s *Server) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return nil
+	}
+	shutdownTimeout := s.getShutdownTimeout()
+	s.mu.Unlock()
+
+	s.logger.Info("stopping TLS server",
+		zap.Duration("shutdownTimeout", shutdownTimeout),
+		zap.Int("activeConnections", s.connections.Count()),
+	)
+
+	s.signalShutdown()
+
+	var shutdownCtx context.Context
+	var cancel context.CancelFunc
+	if ctx == nil {
+		shutdownCtx, cancel = context.WithTimeout(context.Background(), shutdownTimeout)
+	} else {
+		shutdownCtx, cancel = context.WithTimeout(ctx, shutdownTimeout)
+	}
+	defer cancel()
+
+	s.waitForConnectionsWithTimeout(shutdownCtx)
+	s.cleanupServerState()
 	return nil
 }
 
@@ -473,31 +495,20 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// handlePassthroughConnection handles a TLS passthrough connection.
-func (s *Server) handlePassthroughConnection(ctx context.Context, conn net.Conn, tracked *tcp.TrackedConnection) {
-	// Check context before processing
-	select {
-	case <-ctx.Done():
-		s.logger.Debug("context cancelled before handling passthrough connection",
-			zap.String("id", tracked.ID),
-		)
-		return
-	default:
-	}
-
-	s.logger.Debug("handling TLS passthrough connection",
-		zap.String("id", tracked.ID),
-		zap.String("remoteAddr", tracked.RemoteAddr),
-	)
-
-	// Extract SNI from ClientHello
+// extractSNIAndValidate extracts SNI from the connection and validates context.
+// Returns the SNI, clientHello bytes, and whether to continue processing.
+func (s *Server) extractSNIAndValidate(
+	ctx context.Context,
+	conn net.Conn,
+	tracked *tcp.TrackedConnection,
+) (sni string, clientHello []byte, ok bool) {
 	sni, clientHello, err := ExtractSNI(conn)
 	if err != nil {
 		s.logger.Debug("failed to extract SNI",
 			zap.String("id", tracked.ID),
 			zap.Error(err),
 		)
-		return
+		return "", nil, false
 	}
 
 	s.logger.Debug("SNI extracted",
@@ -505,69 +516,68 @@ func (s *Server) handlePassthroughConnection(ctx context.Context, conn net.Conn,
 		zap.String("sni", sni),
 	)
 
-	// Check context again after SNI extraction
 	select {
 	case <-ctx.Done():
 		s.logger.Debug("context cancelled after SNI extraction",
 			zap.String("id", tracked.ID),
 		)
-		return
+		return "", nil, false
 	default:
+		return sni, clientHello, true
 	}
+}
 
-	// Find matching route
-	route, err := s.router.Match(sni)
-	if err != nil {
-		s.logger.Debug("no matching route for SNI",
-			zap.String("id", tracked.ID),
-			zap.String("sni", sni),
-			zap.Error(err),
-		)
-		return
-	}
-
-	// Check if proxy is available
+// resolveBackendForRoute resolves the backend service for a route.
+func (s *Server) resolveBackendForRoute(route *TLSRoute, tracked *tcp.TrackedConnection) *backend.Backend {
 	if s.proxy == nil {
 		s.logger.Error("proxy not configured",
 			zap.String("id", tracked.ID),
 			zap.String("route", route.Name),
 		)
-		return
+		return nil
 	}
 
-	// Get backend from route
 	if len(route.BackendRefs) == 0 {
 		s.logger.Error("no backends configured for route",
 			zap.String("id", tracked.ID),
 			zap.String("route", route.Name),
 		)
-		return
+		return nil
 	}
 
-	// Use the first backend
 	backendRef := route.BackendRefs[0]
 	backendKey := backendRef.Name
 	if backendRef.Namespace != "" {
 		backendKey = fmt.Sprintf("%s/%s", backendRef.Namespace, backendRef.Name)
 	}
 
-	// Get backend from manager
 	backendSvc := s.proxy.backendManager.GetBackend(backendKey)
 	if backendSvc == nil {
 		s.logger.Error("backend not found",
 			zap.String("id", tracked.ID),
 			zap.String("backend", backendKey),
 		)
-		return
 	}
+	return backendSvc
+}
 
-	// Create a context with timeout - the context will handle cancellation
+// proxyPassthroughConnection proxies the connection to the backend.
+func (s *Server) proxyPassthroughConnection(
+	ctx context.Context,
+	conn net.Conn,
+	clientHello []byte,
+	backendSvc *backend.Backend,
+	route *TLSRoute,
+	sni string,
+	tracked *tcp.TrackedConnection,
+) {
 	proxyCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Proxy the connection - the context will handle cancellation
-	if err := s.proxy.ProxyWithIdleTimeout(proxyCtx, conn, clientHello, backendSvc, s.config.ConnectTimeout, s.config.IdleTimeout); err != nil {
-		// Don't log context cancellation as an error - it's expected during shutdown
+	err := s.proxy.ProxyWithIdleTimeout(
+		proxyCtx, conn, clientHello, backendSvc, s.config.ConnectTimeout, s.config.IdleTimeout,
+	)
+	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Debug("proxy error",
 				zap.String("id", tracked.ID),
@@ -589,9 +599,78 @@ func (s *Server) handlePassthroughConnection(ctx context.Context, conn net.Conn,
 	)
 }
 
+// handlePassthroughConnection handles a TLS passthrough connection.
+func (s *Server) handlePassthroughConnection(ctx context.Context, conn net.Conn, tracked *tcp.TrackedConnection) {
+	select {
+	case <-ctx.Done():
+		s.logger.Debug("context cancelled before handling passthrough connection",
+			zap.String("id", tracked.ID),
+		)
+		return
+	default:
+	}
+
+	s.logger.Debug("handling TLS passthrough connection",
+		zap.String("id", tracked.ID),
+		zap.String("remoteAddr", tracked.RemoteAddr),
+	)
+
+	sni, clientHello, ok := s.extractSNIAndValidate(ctx, conn, tracked)
+	if !ok {
+		return
+	}
+
+	route, err := s.router.Match(sni)
+	if err != nil {
+		s.logger.Debug("no matching route for SNI",
+			zap.String("id", tracked.ID),
+			zap.String("sni", sni),
+			zap.Error(err),
+		)
+		return
+	}
+
+	backendSvc := s.resolveBackendForRoute(route, tracked)
+	if backendSvc == nil {
+		return
+	}
+
+	s.proxyPassthroughConnection(ctx, conn, clientHello, backendSvc, route, sni, tracked)
+}
+
+// performTLSHandshake performs the TLS handshake and returns the connection state.
+// Returns nil if the handshake failed or context was cancelled.
+func (s *Server) performTLSHandshake(
+	ctx context.Context,
+	tlsConn *tls.Conn,
+	tracked *tcp.TrackedConnection,
+) *tls.ConnectionState {
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		if ctx.Err() != nil {
+			s.logger.Debug("context cancelled during TLS handshake",
+				zap.String("id", tracked.ID),
+			)
+		} else {
+			s.logger.Debug("TLS handshake failed",
+				zap.String("id", tracked.ID),
+				zap.Error(err),
+			)
+		}
+		return nil
+	}
+
+	state := tlsConn.ConnectionState()
+	s.logger.Debug("TLS handshake completed",
+		zap.String("id", tracked.ID),
+		zap.String("sni", state.ServerName),
+		zap.String("protocol", state.NegotiatedProtocol),
+		zap.Uint16("version", state.Version),
+	)
+	return &state
+}
+
 // handleTerminateConnection handles a TLS termination connection.
 func (s *Server) handleTerminateConnection(ctx context.Context, conn net.Conn, tracked *tcp.TrackedConnection) {
-	// Check context before processing
 	select {
 	case <-ctx.Done():
 		s.logger.Debug("context cancelled before handling terminate connection",
@@ -606,7 +685,6 @@ func (s *Server) handleTerminateConnection(ctx context.Context, conn net.Conn, t
 		zap.String("remoteAddr", tracked.RemoteAddr),
 	)
 
-	// For TLS termination, the connection is already a tls.Conn
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
 		s.logger.Error("expected TLS connection for termination mode",
@@ -615,33 +693,11 @@ func (s *Server) handleTerminateConnection(ctx context.Context, conn net.Conn, t
 		return
 	}
 
-	// Complete the TLS handshake with context awareness
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		if ctx.Err() != nil {
-			s.logger.Debug("context cancelled during TLS handshake",
-				zap.String("id", tracked.ID),
-			)
-		} else {
-			s.logger.Debug("TLS handshake failed",
-				zap.String("id", tracked.ID),
-				zap.Error(err),
-			)
-		}
+	state := s.performTLSHandshake(ctx, tlsConn, tracked)
+	if state == nil {
 		return
 	}
 
-	// Get the SNI from the connection state
-	state := tlsConn.ConnectionState()
-	sni := state.ServerName
-
-	s.logger.Debug("TLS handshake completed",
-		zap.String("id", tracked.ID),
-		zap.String("sni", sni),
-		zap.String("protocol", state.NegotiatedProtocol),
-		zap.Uint16("version", state.Version),
-	)
-
-	// Check context again after handshake
 	select {
 	case <-ctx.Done():
 		s.logger.Debug("context cancelled after TLS handshake",
@@ -651,23 +707,20 @@ func (s *Server) handleTerminateConnection(ctx context.Context, conn net.Conn, t
 	default:
 	}
 
-	// Find matching route
-	route, err := s.router.Match(sni)
+	route, err := s.router.Match(state.ServerName)
 	if err != nil {
 		s.logger.Debug("no matching route for SNI",
 			zap.String("id", tracked.ID),
-			zap.String("sni", sni),
+			zap.String("sni", state.ServerName),
 			zap.Error(err),
 		)
 		return
 	}
 
-	// For termination mode, we would typically hand off to an HTTP handler
-	// This is a placeholder for the actual implementation
 	s.logger.Debug("route matched for TLS termination",
 		zap.String("id", tracked.ID),
 		zap.String("route", route.Name),
-		zap.String("sni", sni),
+		zap.String("sni", state.ServerName),
 	)
 
 	// TODO: Hand off to HTTP/gRPC handler based on ALPN

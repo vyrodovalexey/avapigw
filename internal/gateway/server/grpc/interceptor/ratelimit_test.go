@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vyrodovalexey/avapigw/internal/ratelimit"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -299,147 +300,160 @@ func TestDefaultKeyFunc(t *testing.T) {
 	})
 }
 
-// TestTokenBucketLimiter tests the token bucket rate limiter
-func TestTokenBucketLimiter(t *testing.T) {
+// TestTokenBucketLimiterWithAdapter tests the token bucket rate limiter via adapter
+func TestTokenBucketLimiterWithAdapter(t *testing.T) {
 	t.Parallel()
 
 	t.Run("allows requests within rate", func(t *testing.T) {
-		limiter := NewTokenBucketLimiter(10, 10) // 10 requests/sec, burst of 10
+		// Use the internal ratelimit package with nil store for local rate limiting
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 10, 10, nil) // 10 requests/sec, burst of 10
+		defer limiter.Close()
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		// Should allow burst
 		for i := 0; i < 10; i++ {
-			allowed, err := limiter.Allow(ctx, "test-key")
+			allowed, err := adapter.Allow(ctx, "test-key")
 			assert.NoError(t, err)
 			assert.True(t, allowed)
 		}
 	})
 
 	t.Run("denies requests over limit", func(t *testing.T) {
-		limiter := NewTokenBucketLimiter(1, 1) // 1 request/sec, burst of 1
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 1, 1, nil) // 1 request/sec, burst of 1
+		defer limiter.Close()
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		// First request should be allowed
-		allowed, err := limiter.Allow(ctx, "test-key")
+		allowed, err := adapter.Allow(ctx, "test-key")
 		assert.NoError(t, err)
 		assert.True(t, allowed)
 
 		// Second request should be denied
-		allowed, err = limiter.Allow(ctx, "test-key")
+		allowed, err = adapter.Allow(ctx, "test-key")
 		assert.NoError(t, err)
 		assert.False(t, allowed)
 	})
 
 	t.Run("refills tokens over time", func(t *testing.T) {
-		limiter := NewTokenBucketLimiter(100, 1) // 100 requests/sec, burst of 1
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 100, 1, nil) // 100 requests/sec, burst of 1
+		defer limiter.Close()
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		// Use the token
-		allowed, _ := limiter.Allow(ctx, "test-key")
+		allowed, _ := adapter.Allow(ctx, "test-key")
 		assert.True(t, allowed)
 
 		// Should be denied immediately
-		allowed, _ = limiter.Allow(ctx, "test-key")
+		allowed, _ = adapter.Allow(ctx, "test-key")
 		assert.False(t, allowed)
 
 		// Wait for refill
 		time.Sleep(20 * time.Millisecond)
 
 		// Should be allowed again
-		allowed, _ = limiter.Allow(ctx, "test-key")
+		allowed, _ = adapter.Allow(ctx, "test-key")
 		assert.True(t, allowed)
 	})
 
 	t.Run("tracks different keys separately", func(t *testing.T) {
-		limiter := NewTokenBucketLimiter(1, 1)
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 1, 1, nil)
+		defer limiter.Close()
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		// Use token for key1
-		allowed, _ := limiter.Allow(ctx, "key1")
+		allowed, _ := adapter.Allow(ctx, "key1")
 		assert.True(t, allowed)
 
 		// key1 should be denied
-		allowed, _ = limiter.Allow(ctx, "key1")
+		allowed, _ = adapter.Allow(ctx, "key1")
 		assert.False(t, allowed)
 
 		// key2 should still be allowed
-		allowed, _ = limiter.Allow(ctx, "key2")
+		allowed, _ = adapter.Allow(ctx, "key2")
 		assert.True(t, allowed)
 	})
 }
 
-// TestSlidingWindowLimiter tests the sliding window rate limiter
-func TestSlidingWindowLimiter(t *testing.T) {
+// TestSlidingWindowLimiterWithAdapter tests the sliding window rate limiter via adapter
+func TestSlidingWindowLimiterWithAdapter(t *testing.T) {
 	t.Parallel()
 
 	t.Run("allows requests within limit", func(t *testing.T) {
-		limiter := NewSlidingWindowLimiter(10, time.Second)
+		limiter := ratelimit.NewSlidingWindowLimiter(nil, 10, time.Second, nil)
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		for i := 0; i < 10; i++ {
-			allowed, err := limiter.Allow(ctx, "test-key")
+			allowed, err := adapter.Allow(ctx, "test-key")
 			assert.NoError(t, err)
 			assert.True(t, allowed)
 		}
 	})
 
 	t.Run("denies requests over limit", func(t *testing.T) {
-		limiter := NewSlidingWindowLimiter(2, time.Second)
+		limiter := ratelimit.NewSlidingWindowLimiter(nil, 2, time.Second, nil)
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		// First two requests should be allowed
-		allowed, _ := limiter.Allow(ctx, "test-key")
+		allowed, _ := adapter.Allow(ctx, "test-key")
 		assert.True(t, allowed)
-		allowed, _ = limiter.Allow(ctx, "test-key")
+		allowed, _ = adapter.Allow(ctx, "test-key")
 		assert.True(t, allowed)
 
 		// Third request should be denied
-		allowed, _ = limiter.Allow(ctx, "test-key")
+		allowed, _ = adapter.Allow(ctx, "test-key")
 		assert.False(t, allowed)
 	})
 
 	t.Run("allows requests after window expires", func(t *testing.T) {
-		limiter := NewSlidingWindowLimiter(1, 50*time.Millisecond)
+		limiter := ratelimit.NewSlidingWindowLimiter(nil, 1, 50*time.Millisecond, nil)
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		// Use the limit
-		allowed, _ := limiter.Allow(ctx, "test-key")
+		allowed, _ := adapter.Allow(ctx, "test-key")
 		assert.True(t, allowed)
 
 		// Should be denied
-		allowed, _ = limiter.Allow(ctx, "test-key")
+		allowed, _ = adapter.Allow(ctx, "test-key")
 		assert.False(t, allowed)
 
 		// Wait for window to expire
 		time.Sleep(60 * time.Millisecond)
 
 		// Should be allowed again
-		allowed, _ = limiter.Allow(ctx, "test-key")
+		allowed, _ = adapter.Allow(ctx, "test-key")
 		assert.True(t, allowed)
 	})
 
 	t.Run("tracks different keys separately", func(t *testing.T) {
-		limiter := NewSlidingWindowLimiter(1, time.Second)
+		limiter := ratelimit.NewSlidingWindowLimiter(nil, 1, time.Second, nil)
+		adapter := NewLimiterFromRatelimit(limiter)
 
 		ctx := context.Background()
 
 		// Use limit for key1
-		allowed, _ := limiter.Allow(ctx, "key1")
+		allowed, _ := adapter.Allow(ctx, "key1")
 		assert.True(t, allowed)
 
 		// key1 should be denied
-		allowed, _ = limiter.Allow(ctx, "key1")
+		allowed, _ = adapter.Allow(ctx, "key1")
 		assert.False(t, allowed)
 
 		// key2 should still be allowed
-		allowed, _ = limiter.Allow(ctx, "key2")
+		allowed, _ = adapter.Allow(ctx, "key2")
 		assert.True(t, allowed)
 	})
 }
@@ -518,5 +532,33 @@ func TestRateLimitConfig(t *testing.T) {
 		assert.NotNil(t, config.Logger)
 		assert.NotNil(t, config.KeyFunc)
 		assert.Len(t, config.SkipMethods, 1)
+	})
+}
+
+// TestNewLimiterFromRatelimit tests the adapter creation
+func TestNewLimiterFromRatelimit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates adapter from limiter", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 10, 10, nil)
+		defer limiter.Close()
+		adapter := NewLimiterFromRatelimit(limiter)
+
+		assert.NotNil(t, adapter)
+
+		allowed, err := adapter.Allow(context.Background(), "test")
+		assert.NoError(t, err)
+		assert.True(t, allowed)
+	})
+
+	t.Run("handles nil limiter", func(t *testing.T) {
+		adapter := NewLimiterFromRatelimit(nil)
+
+		assert.NotNil(t, adapter)
+
+		// Should use noop limiter
+		allowed, err := adapter.Allow(context.Background(), "test")
+		assert.NoError(t, err)
+		assert.True(t, allowed)
 	})
 }

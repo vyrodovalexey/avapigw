@@ -67,171 +67,73 @@ func MergeConfigs(base *Config, local *LocalConfig) *Config {
 		return base
 	}
 
-	// Merge gateway configuration
+	mergeGatewayConfig(base, local)
+	mergeListenerConfigs(base, local)
+	mergeRateLimitConfigs(base, local)
+	mergeAuthPolicyConfigs(base, local)
+	mergeBackendConfigs(base, local)
+
+	return base
+}
+
+// mergeGatewayConfig merges gateway configuration from local config.
+func mergeGatewayConfig(base *Config, local *LocalConfig) {
 	if local.Gateway.Name != "" {
 		// Gateway name can be used for service identification
 		if base.ServiceName == "" || base.ServiceName == "avapigw" {
 			base.ServiceName = local.Gateway.Name
 		}
 	}
-
-	// Merge listener configurations
-	for _, listener := range local.Gateway.Listeners {
-		switch listener.Protocol {
-		case "HTTP", "http":
-			if listener.Port > 0 {
-				base.HTTPPort = listener.Port
-			}
-		case "HTTPS", "https":
-			if listener.Port > 0 {
-				base.HTTPPort = listener.Port
-				base.TLSEnabled = true
-			}
-			if listener.TLS != nil {
-				mergeTLSConfig(base, listener.TLS)
-			}
-		case "GRPC", "grpc":
-			if listener.Port > 0 {
-				base.GRPCPort = listener.Port
-				base.GRPCEnabled = true
-			}
-		case "GRPCS", "grpcs":
-			if listener.Port > 0 {
-				base.GRPCPort = listener.Port
-				base.GRPCEnabled = true
-				base.TLSEnabled = true
-			}
-		case "TCP", "tcp":
-			if listener.Port > 0 {
-				base.TCPPort = listener.Port
-				base.TCPEnabled = true
-			}
-		case "TLS", "tls":
-			if listener.Port > 0 {
-				base.TLSPassthroughPort = listener.Port
-				base.TLSPassthroughEnabled = true
-			}
-		}
-	}
-
-	// Merge rate limit configurations from the first rate limit policy
-	// (global rate limiting settings)
-	if len(local.RateLimits) > 0 {
-		firstRateLimit := local.RateLimits[0]
-		base.RateLimitEnabled = true
-		base.RateLimitAlgorithm = firstRateLimit.Algorithm
-		base.RateLimitRequests = firstRateLimit.Requests
-		base.RateLimitWindow = firstRateLimit.Window
-		if firstRateLimit.Burst > 0 {
-			base.RateLimitBurst = firstRateLimit.Burst
-		}
-	}
-
-	// Merge auth policy configurations from the first auth policy
-	// (global auth settings)
-	if len(local.AuthPolicies) > 0 {
-		firstAuthPolicy := local.AuthPolicies[0]
-
-		if firstAuthPolicy.JWT != nil {
-			base.JWTEnabled = true
-			if firstAuthPolicy.JWT.Issuer != "" {
-				base.JWTIssuer = firstAuthPolicy.JWT.Issuer
-			}
-			if firstAuthPolicy.JWT.JWKSURL != "" {
-				base.JWKSURL = firstAuthPolicy.JWT.JWKSURL
-			}
-			if len(firstAuthPolicy.JWT.Audiences) > 0 {
-				base.JWTAudiences = firstAuthPolicy.JWT.Audiences
-			}
-			if len(firstAuthPolicy.JWT.Algorithms) > 0 {
-				base.JWTAlgorithms = firstAuthPolicy.JWT.Algorithms
-			}
-			if firstAuthPolicy.JWT.TokenSource != nil {
-				if firstAuthPolicy.JWT.TokenSource.Header != "" {
-					base.JWTTokenHeader = firstAuthPolicy.JWT.TokenSource.Header
-				}
-				if firstAuthPolicy.JWT.TokenSource.Prefix != "" {
-					base.JWTTokenPrefix = firstAuthPolicy.JWT.TokenSource.Prefix
-				}
-				if firstAuthPolicy.JWT.TokenSource.Cookie != "" {
-					base.JWTTokenCookie = firstAuthPolicy.JWT.TokenSource.Cookie
-				}
-				if firstAuthPolicy.JWT.TokenSource.Query != "" {
-					base.JWTTokenQuery = firstAuthPolicy.JWT.TokenSource.Query
-				}
-			}
-		}
-
-		if firstAuthPolicy.APIKey != nil {
-			base.APIKeyEnabled = true
-			if firstAuthPolicy.APIKey.Header != "" {
-				base.APIKeyHeader = firstAuthPolicy.APIKey.Header
-			}
-			if firstAuthPolicy.APIKey.Query != "" {
-				base.APIKeyQueryParam = firstAuthPolicy.APIKey.Query
-			}
-		}
-
-		if firstAuthPolicy.BasicAuth != nil {
-			base.BasicAuthEnabled = true
-			if firstAuthPolicy.BasicAuth.Realm != "" {
-				base.BasicAuthRealm = firstAuthPolicy.BasicAuth.Realm
-			}
-		}
-
-		if firstAuthPolicy.OAuth2 != nil {
-			base.OAuth2Enabled = true
-			if firstAuthPolicy.OAuth2.TokenEndpoint != "" {
-				base.OAuth2TokenEndpoint = firstAuthPolicy.OAuth2.TokenEndpoint
-			}
-			if firstAuthPolicy.OAuth2.ClientID != "" {
-				base.OAuth2ClientID = firstAuthPolicy.OAuth2.ClientID
-			}
-			if len(firstAuthPolicy.OAuth2.Scopes) > 0 {
-				base.OAuth2Scopes = firstAuthPolicy.OAuth2.Scopes
-			}
-		}
-	}
-
-	// Merge backend configurations
-	// Extract common settings from the first backend
-	if len(local.Backends) > 0 {
-		firstBackend := local.Backends[0]
-
-		if firstBackend.HealthCheck != nil {
-			base.HealthCheckInterval = firstBackend.HealthCheck.Interval
-			base.HealthCheckTimeout = firstBackend.HealthCheck.Timeout
-		}
-
-		if firstBackend.CircuitBreaker != nil {
-			base.CircuitBreakerEnabled = true
-			if firstBackend.CircuitBreaker.ConsecutiveErrors > 0 {
-				base.CircuitBreakerMaxFailures = firstBackend.CircuitBreaker.ConsecutiveErrors
-			}
-			if firstBackend.CircuitBreaker.Interval > 0 {
-				base.CircuitBreakerTimeout = firstBackend.CircuitBreaker.Interval
-			}
-		}
-
-		if firstBackend.ConnectionPool != nil {
-			if firstBackend.ConnectionPool.HTTP != nil {
-				if firstBackend.ConnectionPool.HTTP.IdleTimeout > 0 {
-					base.IdleConnTimeout = firstBackend.ConnectionPool.HTTP.IdleTimeout
-				}
-			}
-			if firstBackend.ConnectionPool.TCP != nil {
-				if firstBackend.ConnectionPool.TCP.MaxConnections > 0 {
-					base.MaxConnsPerHost = firstBackend.ConnectionPool.TCP.MaxConnections
-				}
-			}
-		}
-	}
-
-	return base
 }
 
-// mergeTLSConfig merges TLS configuration from listener to base config.
-func mergeTLSConfig(base *Config, tlsCfg *ListenerTLSConfig) {
+// mergeListenerConfigs merges listener configurations from local config.
+func mergeListenerConfigs(base *Config, local *LocalConfig) {
+	for _, listener := range local.Gateway.Listeners {
+		mergeListenerConfig(base, &listener)
+	}
+}
+
+// mergeListenerConfig merges a single listener configuration.
+func mergeListenerConfig(base *Config, listener *ListenerConfig) {
+	switch listener.Protocol {
+	case "HTTP", "http":
+		if listener.Port > 0 {
+			base.HTTPPort = listener.Port
+		}
+	case "HTTPS", "https":
+		if listener.Port > 0 {
+			base.HTTPPort = listener.Port
+			base.TLSEnabled = true
+		}
+		if listener.TLS != nil {
+			mergeListenerTLSConfig(base, listener.TLS)
+		}
+	case "GRPC", "grpc":
+		if listener.Port > 0 {
+			base.GRPCPort = listener.Port
+			base.GRPCEnabled = true
+		}
+	case "GRPCS", "grpcs":
+		if listener.Port > 0 {
+			base.GRPCPort = listener.Port
+			base.GRPCEnabled = true
+			base.TLSEnabled = true
+		}
+	case "TCP", "tcp":
+		if listener.Port > 0 {
+			base.TCPPort = listener.Port
+			base.TCPEnabled = true
+		}
+	case "TLS", "tls":
+		if listener.Port > 0 {
+			base.TLSPassthroughPort = listener.Port
+			base.TLSPassthroughEnabled = true
+		}
+	}
+}
+
+// mergeListenerTLSConfig merges TLS configuration from listener to base config.
+func mergeListenerTLSConfig(base *Config, tlsCfg *ListenerTLSConfig) {
 	if tlsCfg == nil {
 		return
 	}
@@ -243,6 +145,167 @@ func mergeTLSConfig(base *Config, tlsCfg *ListenerTLSConfig) {
 	// Certificate references would typically be resolved by the controller
 	// For local config, we might store the reference for later resolution
 	// Note: tlsCfg.CertificateRef is intentionally not processed here
+}
+
+// mergeRateLimitConfigs merges rate limit configurations from local config.
+// Uses the first rate limit policy for global rate limiting settings.
+func mergeRateLimitConfigs(base *Config, local *LocalConfig) {
+	if len(local.RateLimits) == 0 {
+		return
+	}
+	firstRateLimit := local.RateLimits[0]
+	base.RateLimitEnabled = true
+	base.RateLimitAlgorithm = firstRateLimit.Algorithm
+	base.RateLimitRequests = firstRateLimit.Requests
+	base.RateLimitWindow = firstRateLimit.Window
+	if firstRateLimit.Burst > 0 {
+		base.RateLimitBurst = firstRateLimit.Burst
+	}
+}
+
+// mergeAuthPolicyConfigs merges auth policy configurations from local config.
+// Uses the first auth policy for global auth settings.
+func mergeAuthPolicyConfigs(base *Config, local *LocalConfig) {
+	if len(local.AuthPolicies) == 0 {
+		return
+	}
+	firstAuthPolicy := local.AuthPolicies[0]
+
+	mergeJWTAuthConfig(base, firstAuthPolicy.JWT)
+	mergeAPIKeyAuthConfig(base, firstAuthPolicy.APIKey)
+	mergeBasicAuthConfig(base, firstAuthPolicy.BasicAuth)
+	mergeOAuth2AuthConfig(base, firstAuthPolicy.OAuth2)
+}
+
+// mergeJWTAuthConfig merges JWT authentication configuration.
+func mergeJWTAuthConfig(base *Config, jwt *JWTAuthConfig) {
+	if jwt == nil {
+		return
+	}
+	base.JWTEnabled = true
+	if jwt.Issuer != "" {
+		base.JWTIssuer = jwt.Issuer
+	}
+	if jwt.JWKSURL != "" {
+		base.JWKSURL = jwt.JWKSURL
+	}
+	if len(jwt.Audiences) > 0 {
+		base.JWTAudiences = jwt.Audiences
+	}
+	if len(jwt.Algorithms) > 0 {
+		base.JWTAlgorithms = jwt.Algorithms
+	}
+	mergeJWTTokenSourceConfig(base, jwt.TokenSource)
+}
+
+// mergeJWTTokenSourceConfig merges JWT token source configuration.
+func mergeJWTTokenSourceConfig(base *Config, tokenSource *TokenSourceConfig) {
+	if tokenSource == nil {
+		return
+	}
+	if tokenSource.Header != "" {
+		base.JWTTokenHeader = tokenSource.Header
+	}
+	if tokenSource.Prefix != "" {
+		base.JWTTokenPrefix = tokenSource.Prefix
+	}
+	if tokenSource.Cookie != "" {
+		base.JWTTokenCookie = tokenSource.Cookie
+	}
+	if tokenSource.Query != "" {
+		base.JWTTokenQuery = tokenSource.Query
+	}
+}
+
+// mergeAPIKeyAuthConfig merges API key authentication configuration.
+func mergeAPIKeyAuthConfig(base *Config, apiKey *APIKeyAuthConfig) {
+	if apiKey == nil {
+		return
+	}
+	base.APIKeyEnabled = true
+	if apiKey.Header != "" {
+		base.APIKeyHeader = apiKey.Header
+	}
+	if apiKey.Query != "" {
+		base.APIKeyQueryParam = apiKey.Query
+	}
+}
+
+// mergeBasicAuthConfig merges basic authentication configuration.
+func mergeBasicAuthConfig(base *Config, basicAuth *BasicAuthConfig) {
+	if basicAuth == nil {
+		return
+	}
+	base.BasicAuthEnabled = true
+	if basicAuth.Realm != "" {
+		base.BasicAuthRealm = basicAuth.Realm
+	}
+}
+
+// mergeOAuth2AuthConfig merges OAuth2 authentication configuration.
+func mergeOAuth2AuthConfig(base *Config, oauth2 *OAuth2AuthConfig) {
+	if oauth2 == nil {
+		return
+	}
+	base.OAuth2Enabled = true
+	if oauth2.TokenEndpoint != "" {
+		base.OAuth2TokenEndpoint = oauth2.TokenEndpoint
+	}
+	if oauth2.ClientID != "" {
+		base.OAuth2ClientID = oauth2.ClientID
+	}
+	if len(oauth2.Scopes) > 0 {
+		base.OAuth2Scopes = oauth2.Scopes
+	}
+}
+
+// mergeBackendConfigs merges backend configurations from local config.
+// Extracts common settings from the first backend.
+func mergeBackendConfigs(base *Config, local *LocalConfig) {
+	if len(local.Backends) == 0 {
+		return
+	}
+	firstBackend := local.Backends[0]
+
+	mergeBackendHealthCheckConfig(base, firstBackend.HealthCheck)
+	mergeBackendCircuitBreakerConfig(base, firstBackend.CircuitBreaker)
+	mergeBackendConnectionPoolConfig(base, firstBackend.ConnectionPool)
+}
+
+// mergeBackendHealthCheckConfig merges backend health check configuration.
+func mergeBackendHealthCheckConfig(base *Config, healthCheck *HealthCheckConfig) {
+	if healthCheck == nil {
+		return
+	}
+	base.HealthCheckInterval = healthCheck.Interval
+	base.HealthCheckTimeout = healthCheck.Timeout
+}
+
+// mergeBackendCircuitBreakerConfig merges backend circuit breaker configuration.
+func mergeBackendCircuitBreakerConfig(base *Config, cb *CircuitBreakerConfig) {
+	if cb == nil {
+		return
+	}
+	base.CircuitBreakerEnabled = true
+	if cb.ConsecutiveErrors > 0 {
+		base.CircuitBreakerMaxFailures = cb.ConsecutiveErrors
+	}
+	if cb.Interval > 0 {
+		base.CircuitBreakerTimeout = cb.Interval
+	}
+}
+
+// mergeBackendConnectionPoolConfig merges backend connection pool configuration.
+func mergeBackendConnectionPoolConfig(base *Config, pool *ConnectionPoolConfig) {
+	if pool == nil {
+		return
+	}
+	if pool.HTTP != nil && pool.HTTP.IdleTimeout > 0 {
+		base.IdleConnTimeout = pool.HTTP.IdleTimeout
+	}
+	if pool.TCP != nil && pool.TCP.MaxConnections > 0 {
+		base.MaxConnsPerHost = pool.TCP.MaxConnections
+	}
 }
 
 // LoadAndValidateYAMLConfig loads a YAML config file and validates it.
@@ -277,7 +340,8 @@ func SaveYAMLConfig(cfg *LocalConfig, path string) error {
 	}
 
 	// G306: Config files need to be readable by other processes, 0o644 is intentional
-	if err := os.WriteFile(filepath.Clean(path), data, 0o644); err != nil { //nolint:gosec // config files need broader read permissions
+	//nolint:gosec // config files need broader read permissions
+	if err := os.WriteFile(filepath.Clean(path), data, 0o644); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

@@ -44,7 +44,8 @@ func SetupAuthPolicyWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-authpolicy,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=authpolicies,verbs=create;update,versions=v1alpha1,name=mauthpolicy.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-authpolicy,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=authpolicies,verbs=create;update,versions=v1alpha1,name=mauthpolicy.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &AuthPolicyWebhook{}
 
@@ -61,7 +62,8 @@ func (w *AuthPolicyWebhook) Default(ctx context.Context, obj runtime.Object) err
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-authpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=authpolicies,verbs=create;update;delete,versions=v1alpha1,name=vauthpolicy.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-authpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=authpolicies,verbs=create;update;delete,versions=v1alpha1,name=vauthpolicy.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomValidator = &AuthPolicyWebhook{}
 
@@ -106,7 +108,10 @@ func (w *AuthPolicyWebhook) ValidateCreate(ctx context.Context, obj runtime.Obje
 }
 
 // ValidateUpdate implements webhook.CustomValidator
-func (w *AuthPolicyWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *AuthPolicyWebhook) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+) (admission.Warnings, error) {
 	policy, ok := newObj.(*avapigwv1alpha1.AuthPolicy)
 	if !ok {
 		return nil, fmt.Errorf("expected an AuthPolicy but got %T", newObj)
@@ -152,71 +157,7 @@ func (w *AuthPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.AuthPolicy) e
 
 	// Validate authentication configuration
 	if policy.Spec.Authentication != nil {
-		auth := policy.Spec.Authentication
-
-		// Validate JWT configuration
-		if auth.JWT != nil && auth.JWT.Enabled != nil && *auth.JWT.Enabled {
-			jwt := auth.JWT
-
-			// Validate issuer URL format
-			if jwt.Issuer != nil && *jwt.Issuer != "" {
-				if _, err := url.Parse(*jwt.Issuer); err != nil {
-					errs.Add("spec.authentication.jwt.issuer", fmt.Sprintf("invalid URL format: %v", err))
-				}
-			}
-
-			// Validate JWKS URI format
-			if jwt.JWKSUri != nil && *jwt.JWKSUri != "" {
-				if _, err := url.Parse(*jwt.JWKSUri); err != nil {
-					errs.Add("spec.authentication.jwt.jwksUri", fmt.Sprintf("invalid URL format: %v", err))
-				}
-			}
-
-			// Either JWKS URI or JWKS secret must be specified
-			if (jwt.JWKSUri == nil || *jwt.JWKSUri == "") && jwt.JWKS == nil {
-				errs.Add("spec.authentication.jwt", "either jwksUri or jwks must be specified")
-			}
-		}
-
-		// Validate API key configuration
-		if auth.APIKey != nil && auth.APIKey.Enabled != nil && *auth.APIKey.Enabled {
-			apiKey := auth.APIKey
-
-			if apiKey.Validation != nil {
-				switch apiKey.Validation.Type {
-				case avapigwv1alpha1.APIKeyValidationSecret:
-					if apiKey.Validation.SecretRef == nil {
-						errs.Add("spec.authentication.apiKey.validation.secretRef",
-							"secretRef is required for Secret validation type")
-					}
-				case avapigwv1alpha1.APIKeyValidationExternal:
-					switch {
-					case apiKey.Validation.External == nil:
-						errs.Add("spec.authentication.apiKey.validation.external",
-							"external configuration is required for External validation type")
-					case apiKey.Validation.External.URL == "":
-						errs.Add("spec.authentication.apiKey.validation.external.url", "URL is required")
-					default:
-						if _, err := url.Parse(apiKey.Validation.External.URL); err != nil {
-							errs.Add("spec.authentication.apiKey.validation.external.url",
-								fmt.Sprintf("invalid URL format: %v", err))
-						}
-					}
-				}
-			}
-		}
-
-		// Validate OAuth2 configuration
-		if auth.OAuth2 != nil && auth.OAuth2.Enabled != nil && *auth.OAuth2.Enabled {
-			oauth2 := auth.OAuth2
-
-			if oauth2.TokenEndpoint != nil && *oauth2.TokenEndpoint != "" {
-				if _, err := url.Parse(*oauth2.TokenEndpoint); err != nil {
-					errs.Add("spec.authentication.oauth2.tokenEndpoint",
-						fmt.Sprintf("invalid URL format: %v", err))
-				}
-			}
-		}
+		w.validateAuthenticationSyntax(policy.Spec.Authentication, errs)
 	}
 
 	// Validate authorization rules
@@ -229,61 +170,187 @@ func (w *AuthPolicyWebhook) validateSyntax(policy *avapigwv1alpha1.AuthPolicy) e
 	}
 
 	// Validate CORS configuration
-	if policy.Spec.SecurityHeaders != nil && policy.Spec.SecurityHeaders.CORS != nil {
-		cors := policy.Spec.SecurityHeaders.CORS
-
-		for i, origin := range cors.AllowOrigins {
-			if origin.Exact != nil && *origin.Exact != "" {
-				if _, err := url.Parse(*origin.Exact); err != nil {
-					errs.Add(fmt.Sprintf("spec.securityHeaders.cors.allowOrigins[%d].exact", i),
-						fmt.Sprintf("invalid URL format: %v", err))
-				}
-			}
-		}
-	}
+	w.validateCORSSyntax(policy, errs)
 
 	return errs.ToError()
 }
 
-// validateReferences validates cross-resource references
-func (w *AuthPolicyWebhook) validateReferences(ctx context.Context, policy *avapigwv1alpha1.AuthPolicy) error {
-	errs := validator.NewValidationErrors()
+// validateAuthenticationSyntax validates authentication configuration syntax
+func (w *AuthPolicyWebhook) validateAuthenticationSyntax(
+	auth *avapigwv1alpha1.AuthenticationConfig,
+	errs *validator.ValidationErrors,
+) {
+	// Validate JWT configuration
+	if auth.JWT != nil && auth.JWT.Enabled != nil && *auth.JWT.Enabled {
+		w.validateJWTSyntax(auth.JWT, errs)
+	}
 
-	if policy.Spec.Authentication != nil {
-		auth := policy.Spec.Authentication
+	// Validate API key configuration
+	if auth.APIKey != nil && auth.APIKey.Enabled != nil && *auth.APIKey.Enabled {
+		w.validateAPIKeySyntax(auth.APIKey, errs)
+	}
 
-		// Validate JWT JWKS secret reference
-		if auth.JWT != nil && auth.JWT.JWKS != nil {
-			if err := w.ReferenceValidator.ValidateSecretObjectReference(
-				ctx, auth.JWT.JWKS, policy.Namespace); err != nil {
-				errs.Add("spec.authentication.jwt.jwks", err.Error())
-			}
-		}
+	// Validate OAuth2 configuration
+	if auth.OAuth2 != nil && auth.OAuth2.Enabled != nil && *auth.OAuth2.Enabled {
+		w.validateOAuth2Syntax(auth.OAuth2, errs)
+	}
+}
 
-		// Validate API key secret reference
-		if auth.APIKey != nil && auth.APIKey.Validation != nil && auth.APIKey.Validation.SecretRef != nil {
-			if err := w.ReferenceValidator.ValidateSecretObjectReference(
-				ctx, auth.APIKey.Validation.SecretRef, policy.Namespace); err != nil {
-				errs.Add("spec.authentication.apiKey.validation.secretRef", err.Error())
-			}
-		}
-
-		// Validate basic auth secret reference
-		if auth.Basic != nil && auth.Basic.SecretRef != nil {
-			if err := w.ReferenceValidator.ValidateSecretObjectReference(
-				ctx, auth.Basic.SecretRef, policy.Namespace); err != nil {
-				errs.Add("spec.authentication.basic.secretRef", err.Error())
-			}
-		}
-
-		// Validate OAuth2 client secret reference
-		if auth.OAuth2 != nil && auth.OAuth2.ClientSecretRef != nil {
-			if err := w.ReferenceValidator.ValidateSecretObjectReference(
-				ctx, auth.OAuth2.ClientSecretRef, policy.Namespace); err != nil {
-				errs.Add("spec.authentication.oauth2.clientSecretRef", err.Error())
-			}
+// validateJWTSyntax validates JWT configuration syntax
+func (w *AuthPolicyWebhook) validateJWTSyntax(jwt *avapigwv1alpha1.JWTAuthConfig, errs *validator.ValidationErrors) {
+	// Validate issuer URL format
+	if jwt.Issuer != nil && *jwt.Issuer != "" {
+		if _, err := url.Parse(*jwt.Issuer); err != nil {
+			errs.Add("spec.authentication.jwt.issuer", fmt.Sprintf("invalid URL format: %v", err))
 		}
 	}
 
+	// Validate JWKS URI format
+	if jwt.JWKSUri != nil && *jwt.JWKSUri != "" {
+		if _, err := url.Parse(*jwt.JWKSUri); err != nil {
+			errs.Add("spec.authentication.jwt.jwksUri", fmt.Sprintf("invalid URL format: %v", err))
+		}
+	}
+
+	// Either JWKS URI or JWKS secret must be specified
+	if (jwt.JWKSUri == nil || *jwt.JWKSUri == "") && jwt.JWKS == nil {
+		errs.Add("spec.authentication.jwt", "either jwksUri or jwks must be specified")
+	}
+}
+
+// validateAPIKeySyntax validates API key configuration syntax
+func (w *AuthPolicyWebhook) validateAPIKeySyntax(
+	apiKey *avapigwv1alpha1.APIKeyAuthConfig,
+	errs *validator.ValidationErrors,
+) {
+	if apiKey.Validation == nil {
+		return
+	}
+
+	switch apiKey.Validation.Type {
+	case avapigwv1alpha1.APIKeyValidationSecret:
+		if apiKey.Validation.SecretRef == nil {
+			errs.Add("spec.authentication.apiKey.validation.secretRef",
+				"secretRef is required for Secret validation type")
+		}
+	case avapigwv1alpha1.APIKeyValidationExternal:
+		w.validateAPIKeyExternalConfig(apiKey.Validation.External, errs)
+	}
+}
+
+// validateAPIKeyExternalConfig validates external API key validation configuration
+func (w *AuthPolicyWebhook) validateAPIKeyExternalConfig(
+	external *avapigwv1alpha1.ExternalValidationConfig,
+	errs *validator.ValidationErrors,
+) {
+	if external == nil {
+		errs.Add("spec.authentication.apiKey.validation.external",
+			"external configuration is required for External validation type")
+		return
+	}
+
+	if external.URL == "" {
+		errs.Add("spec.authentication.apiKey.validation.external.url", "URL is required")
+		return
+	}
+
+	if _, err := url.Parse(external.URL); err != nil {
+		errs.Add("spec.authentication.apiKey.validation.external.url",
+			fmt.Sprintf("invalid URL format: %v", err))
+	}
+}
+
+// validateOAuth2Syntax validates OAuth2 configuration syntax
+func (w *AuthPolicyWebhook) validateOAuth2Syntax(
+	oauth2 *avapigwv1alpha1.OAuth2Config,
+	errs *validator.ValidationErrors,
+) {
+	if oauth2.TokenEndpoint == nil || *oauth2.TokenEndpoint == "" {
+		return
+	}
+
+	if _, err := url.Parse(*oauth2.TokenEndpoint); err != nil {
+		errs.Add("spec.authentication.oauth2.tokenEndpoint",
+			fmt.Sprintf("invalid URL format: %v", err))
+	}
+}
+
+// validateCORSSyntax validates CORS configuration syntax
+func (w *AuthPolicyWebhook) validateCORSSyntax(policy *avapigwv1alpha1.AuthPolicy, errs *validator.ValidationErrors) {
+	if policy.Spec.SecurityHeaders == nil || policy.Spec.SecurityHeaders.CORS == nil {
+		return
+	}
+
+	cors := policy.Spec.SecurityHeaders.CORS
+	for i, origin := range cors.AllowOrigins {
+		if origin.Exact == nil || *origin.Exact == "" {
+			continue
+		}
+
+		if _, err := url.Parse(*origin.Exact); err != nil {
+			errs.Add(fmt.Sprintf("spec.securityHeaders.cors.allowOrigins[%d].exact", i),
+				fmt.Sprintf("invalid URL format: %v", err))
+		}
+	}
+}
+
+// validateReferences validates cross-resource references
+func (w *AuthPolicyWebhook) validateReferences(ctx context.Context, policy *avapigwv1alpha1.AuthPolicy) error {
+	if policy.Spec.Authentication == nil {
+		return nil
+	}
+
+	errs := validator.NewValidationErrors()
+	w.validateAuthenticationReferences(ctx, policy.Spec.Authentication, policy.Namespace, errs)
 	return errs.ToError()
+}
+
+// validateAuthenticationReferences validates authentication-related secret references
+func (w *AuthPolicyWebhook) validateAuthenticationReferences(
+	ctx context.Context,
+	auth *avapigwv1alpha1.AuthenticationConfig,
+	namespace string,
+	errs *validator.ValidationErrors,
+) {
+	// Validate JWT JWKS secret reference
+	if auth.JWT != nil && auth.JWT.JWKS != nil {
+		if err := w.ReferenceValidator.ValidateSecretObjectReference(ctx, auth.JWT.JWKS, namespace); err != nil {
+			errs.Add("spec.authentication.jwt.jwks", err.Error())
+		}
+	}
+
+	// Validate API key secret reference
+	w.validateAPIKeySecretReference(ctx, auth.APIKey, namespace, errs)
+
+	// Validate basic auth secret reference
+	if auth.Basic != nil && auth.Basic.SecretRef != nil {
+		if err := w.ReferenceValidator.ValidateSecretObjectReference(ctx, auth.Basic.SecretRef, namespace); err != nil {
+			errs.Add("spec.authentication.basic.secretRef", err.Error())
+		}
+	}
+
+	// Validate OAuth2 client secret reference
+	if auth.OAuth2 != nil && auth.OAuth2.ClientSecretRef != nil {
+		err := w.ReferenceValidator.ValidateSecretObjectReference(ctx, auth.OAuth2.ClientSecretRef, namespace)
+		if err != nil {
+			errs.Add("spec.authentication.oauth2.clientSecretRef", err.Error())
+		}
+	}
+}
+
+// validateAPIKeySecretReference validates API key secret reference
+func (w *AuthPolicyWebhook) validateAPIKeySecretReference(
+	ctx context.Context,
+	apiKey *avapigwv1alpha1.APIKeyAuthConfig,
+	namespace string,
+	errs *validator.ValidationErrors,
+) {
+	if apiKey == nil || apiKey.Validation == nil || apiKey.Validation.SecretRef == nil {
+		return
+	}
+
+	err := w.ReferenceValidator.ValidateSecretObjectReference(ctx, apiKey.Validation.SecretRef, namespace)
+	if err != nil {
+		errs.Add("spec.authentication.apiKey.validation.secretRef", err.Error())
+	}
 }

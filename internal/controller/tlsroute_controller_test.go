@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/controller/route"
 )
 
 // ============================================================================
@@ -592,9 +593,7 @@ func TestTLSRouteReconciler_hostnameMatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &TLSRouteReconciler{}
-
-			result := r.hostnameMatch(tt.routeHost, tt.listenerHost)
+			result := route.HostnameMatch(tt.routeHost, tt.listenerHost)
 
 			assert.Equal(t, tt.wantMatch, result)
 		})
@@ -788,9 +787,14 @@ func TestTLSRouteReconciler_findTLSRoutesForGateway(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Build client with indexer
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tt.objects...).
+				WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, func(obj client.Object) []string {
+					route := obj.(*avapigwv1alpha1.TLSRoute)
+					return extractGatewayRefs(route.Namespace, route.Spec.ParentRefs)
+				}).
 				Build()
 
 			r := newTLSRouteReconciler(cl, scheme)
@@ -840,4 +844,129 @@ func TestTLSRouteReconciler_getRequeueStrategy_InitializesDefault(t *testing.T) 
 
 	require.NotNil(t, strategy)
 	assert.NotNil(t, strategy.config)
+}
+
+// ============================================================================
+// TLSRouteReconciler.findTLSRoutesForBackend Tests
+// ============================================================================
+
+func TestTLSRouteReconciler_findTLSRoutesForBackend(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name         string
+		objects      []client.Object
+		backend      *avapigwv1alpha1.Backend
+		wantRequests int
+	}{
+		{
+			name: "finds routes referencing backend",
+			objects: []client.Object{
+				&avapigwv1alpha1.TLSRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "route-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.TLSRouteSpec{
+						Rules: []avapigwv1alpha1.TLSRouteRule{
+							{
+								BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+									{BackendRef: avapigwv1alpha1.BackendRef{
+										Name:  "test-backend",
+										Kind:  ptrString("Backend"),
+										Group: ptrString(avapigwv1alpha1.GroupVersion.Group),
+									}},
+								},
+							},
+						},
+					},
+				},
+				&avapigwv1alpha1.TLSRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "route-2",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.TLSRouteSpec{
+						Rules: []avapigwv1alpha1.TLSRouteRule{
+							{
+								BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+									{BackendRef: avapigwv1alpha1.BackendRef{
+										Name:  "test-backend",
+										Kind:  ptrString("Backend"),
+										Group: ptrString(avapigwv1alpha1.GroupVersion.Group),
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			backend: &avapigwv1alpha1.Backend{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-backend",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 2,
+		},
+		{
+			name: "returns empty for no matches",
+			objects: []client.Object{
+				&avapigwv1alpha1.TLSRoute{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "route-1",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.TLSRouteSpec{
+						Rules: []avapigwv1alpha1.TLSRouteRule{
+							{
+								BackendRefs: []avapigwv1alpha1.TLSBackendRef{
+									{BackendRef: avapigwv1alpha1.BackendRef{
+										Name:  "other-backend",
+										Kind:  ptrString("Backend"),
+										Group: ptrString(avapigwv1alpha1.GroupVersion.Group),
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			backend: &avapigwv1alpha1.Backend{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-backend",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build client with indexer
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteBackendIndexField, func(obj client.Object) []string {
+					route := obj.(*avapigwv1alpha1.TLSRoute)
+					var keys []string
+					for _, rule := range route.Spec.Rules {
+						for _, ref := range rule.BackendRefs {
+							if ref.Kind != nil && *ref.Kind == "Backend" {
+								keys = append(keys, BackendIndexKey(route.Namespace, ref.Name))
+							}
+						}
+					}
+					return keys
+				}).
+				Build()
+
+			r := newTLSRouteReconciler(cl, scheme)
+
+			requests := r.findTLSRoutesForBackend(context.Background(), tt.backend)
+
+			assert.Len(t, requests, tt.wantRequests)
+		})
+	}
 }

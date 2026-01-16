@@ -92,10 +92,14 @@ func setupTLSConfigScheme(t *testing.T) *runtime.Scheme {
 
 // createTLSConfigReconciler creates a TLSConfigReconciler with the given client
 func createTLSConfigReconciler(cl client.Client, scheme *runtime.Scheme) *TLSConfigReconciler {
+	// Use a RequeueStrategy with no jitter for deterministic testing
+	config := DefaultRequeueConfig()
+	config.JitterPercent = 0
 	return &TLSConfigReconciler{
-		Client:   cl,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(100),
+		Client:          cl,
+		Scheme:          scheme,
+		Recorder:        record.NewFakeRecorder(100),
+		RequeueStrategy: NewRequeueStrategy(config),
 	}
 }
 

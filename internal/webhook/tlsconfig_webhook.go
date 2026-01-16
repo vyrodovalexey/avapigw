@@ -41,7 +41,8 @@ func SetupTLSConfigWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsconfig,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tlsconfigs,verbs=create;update,versions=v1alpha1,name=mtlsconfig.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/mutate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsconfig,mutating=true,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tlsconfigs,verbs=create;update,versions=v1alpha1,name=mtlsconfig.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomDefaulter = &TLSConfigWebhook{}
 
@@ -58,7 +59,8 @@ func (w *TLSConfigWebhook) Default(ctx context.Context, obj runtime.Object) erro
 	return nil
 }
 
-// +kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tlsconfigs,verbs=create;update;delete,versions=v1alpha1,name=vtlsconfig.kb.io,admissionReviewVersions=v1
+//nolint:lll // kubebuilder webhook annotation cannot be shortened
+//+kubebuilder:webhook:path=/validate-avapigw-vyrodovalexey-github-com-v1alpha1-tlsconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=avapigw.vyrodovalexey.github.com,resources=tlsconfigs,verbs=create;update;delete,versions=v1alpha1,name=vtlsconfig.kb.io,admissionReviewVersions=v1
 
 var _ webhook.CustomValidator = &TLSConfigWebhook{}
 
@@ -92,7 +94,10 @@ func (w *TLSConfigWebhook) ValidateCreate(ctx context.Context, obj runtime.Objec
 }
 
 // ValidateUpdate implements webhook.CustomValidator
-func (w *TLSConfigWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (w *TLSConfigWebhook) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+) (admission.Warnings, error) {
 	config, ok := newObj.(*avapigwv1alpha1.TLSConfig)
 	if !ok {
 		return nil, fmt.Errorf("expected a TLSConfig but got %T", newObj)
@@ -131,11 +136,40 @@ func (w *TLSConfigWebhook) ValidateDelete(ctx context.Context, obj runtime.Objec
 	return nil, nil
 }
 
-// validateSyntax performs syntax validation
-func (w *TLSConfigWebhook) validateSyntax(config *avapigwv1alpha1.TLSConfig) error {
-	errs := validator.NewValidationErrors()
+// validCipherSuites contains the list of valid TLS cipher suites
+var validCipherSuites = map[string]bool{
+	"TLS_RSA_WITH_AES_128_CBC_SHA":                true,
+	"TLS_RSA_WITH_AES_256_CBC_SHA":                true,
+	"TLS_RSA_WITH_AES_128_GCM_SHA256":             true,
+	"TLS_RSA_WITH_AES_256_GCM_SHA384":             true,
+	"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA":        true,
+	"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA":        true,
+	"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA":          true,
+	"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA":          true,
+	"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256":     true,
+	"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384":     true,
+	"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256":       true,
+	"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384":       true,
+	"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305":        true,
+	"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305":      true,
+	"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256": true,
+}
 
-	// Validate certificate source - either Secret or Vault must be specified
+// validALPNProtocols contains the list of valid ALPN protocols
+var validALPNProtocols = map[string]bool{
+	"h2":       true,
+	"http/1.1": true,
+	"http/1.0": true,
+	"spdy/3.1": true,
+	"grpc-exp": true,
+	"h2c":      true,
+}
+
+// validateTLSCertificateSource validates certificate source configuration
+func (w *TLSConfigWebhook) validateTLSCertificateSource(
+	config *avapigwv1alpha1.TLSConfig,
+	errs *validator.ValidationErrors,
+) {
 	hasSecret := config.Spec.CertificateSource.Secret != nil
 	hasVault := config.Spec.CertificateSource.Vault != nil
 
@@ -146,78 +180,82 @@ func (w *TLSConfigWebhook) validateSyntax(config *avapigwv1alpha1.TLSConfig) err
 	if hasSecret && hasVault {
 		errs.Add("spec.certificateSource", "secret and vault are mutually exclusive")
 	}
+}
 
-	// Validate TLS version compatibility
-	if config.Spec.MinVersion != nil && config.Spec.MaxVersion != nil {
-		minVersion := tlsVersionToInt(*config.Spec.MinVersion)
-		maxVersion := tlsVersionToInt(*config.Spec.MaxVersion)
-
-		if minVersion > maxVersion {
-			errs.Add("spec.minVersion", "minVersion cannot be greater than maxVersion")
-		}
+// validateTLSVersions validates TLS version compatibility
+func (w *TLSConfigWebhook) validateTLSVersions(
+	config *avapigwv1alpha1.TLSConfig,
+	errs *validator.ValidationErrors,
+) {
+	if config.Spec.MinVersion == nil || config.Spec.MaxVersion == nil {
+		return
 	}
 
-	// Validate cipher suites
-	validCipherSuites := map[string]bool{
-		"TLS_RSA_WITH_AES_128_CBC_SHA":                true,
-		"TLS_RSA_WITH_AES_256_CBC_SHA":                true,
-		"TLS_RSA_WITH_AES_128_GCM_SHA256":             true,
-		"TLS_RSA_WITH_AES_256_GCM_SHA384":             true,
-		"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA":        true,
-		"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA":        true,
-		"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA":          true,
-		"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA":          true,
-		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256":     true,
-		"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384":     true,
-		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256":       true,
-		"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384":       true,
-		"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305":        true,
-		"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305":      true,
-		"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256": true,
-	}
+	minVersion := tlsVersionToInt(*config.Spec.MinVersion)
+	maxVersion := tlsVersionToInt(*config.Spec.MaxVersion)
 
+	if minVersion > maxVersion {
+		errs.Add("spec.minVersion", "minVersion cannot be greater than maxVersion")
+	}
+}
+
+// validateTLSCipherSuites validates cipher suites
+func (w *TLSConfigWebhook) validateTLSCipherSuites(
+	config *avapigwv1alpha1.TLSConfig,
+	errs *validator.ValidationErrors,
+) {
 	for i, suite := range config.Spec.CipherSuites {
 		if !validCipherSuites[suite] {
 			errs.Add(fmt.Sprintf("spec.cipherSuites[%d]", i),
 				fmt.Sprintf("unknown cipher suite: %s", suite))
 		}
 	}
+}
 
-	// Validate ALPN protocols
-	validALPNProtocols := map[string]bool{
-		"h2":       true,
-		"http/1.1": true,
-		"http/1.0": true,
-		"spdy/3.1": true,
-		"grpc-exp": true,
-		"h2c":      true,
-	}
-
+// validateTLSALPNProtocols validates ALPN protocols
+func (w *TLSConfigWebhook) validateTLSALPNProtocols(
+	config *avapigwv1alpha1.TLSConfig,
+	errs *validator.ValidationErrors,
+) {
 	for i, protocol := range config.Spec.ALPNProtocols {
 		if !validALPNProtocols[protocol] {
 			errs.Add(fmt.Sprintf("spec.alpnProtocols[%d]", i),
 				fmt.Sprintf("unknown ALPN protocol: %s", protocol))
 		}
 	}
+}
 
-	// Validate client validation configuration
-	if config.Spec.ClientValidation != nil {
-		cv := config.Spec.ClientValidation
-
-		if cv.Enabled != nil && *cv.Enabled {
-			if cv.CACertificateRef == nil && len(cv.TrustedCAs) == 0 {
-				errs.Add("spec.clientValidation",
-					"caCertificateRef or trustedCAs is required when client validation is enabled")
-			}
-		}
+// validateTLSClientValidation validates client validation configuration
+func (w *TLSConfigWebhook) validateTLSClientValidation(
+	config *avapigwv1alpha1.TLSConfig,
+	errs *validator.ValidationErrors,
+) {
+	if config.Spec.ClientValidation == nil {
+		return
 	}
 
-	// Validate rotation configuration
-	if config.Spec.Rotation != nil {
-		if config.Spec.Rotation.CheckInterval != nil {
-			if err := validateDuration(string(*config.Spec.Rotation.CheckInterval)); err != nil {
-				errs.Add("spec.rotation.checkInterval", err.Error())
-			}
+	cv := config.Spec.ClientValidation
+	if cv.Enabled != nil && *cv.Enabled {
+		if cv.CACertificateRef == nil && len(cv.TrustedCAs) == 0 {
+			errs.Add("spec.clientValidation",
+				"caCertificateRef or trustedCAs is required when client validation is enabled")
+		}
+	}
+}
+
+// validateSyntax performs syntax validation
+func (w *TLSConfigWebhook) validateSyntax(config *avapigwv1alpha1.TLSConfig) error {
+	errs := validator.NewValidationErrors()
+
+	w.validateTLSCertificateSource(config, errs)
+	w.validateTLSVersions(config, errs)
+	w.validateTLSCipherSuites(config, errs)
+	w.validateTLSALPNProtocols(config, errs)
+	w.validateTLSClientValidation(config, errs)
+
+	if config.Spec.Rotation != nil && config.Spec.Rotation.CheckInterval != nil {
+		if err := validateDuration(string(*config.Spec.Rotation.CheckInterval)); err != nil {
+			errs.Add("spec.rotation.checkInterval", err.Error())
 		}
 	}
 

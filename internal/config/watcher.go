@@ -118,20 +118,54 @@ func NewConfigWatcher(path string, callback ConfigCallback, opts ...ConfigWatche
 // Start begins watching the configuration file for changes.
 // It blocks until the context is cancelled or Stop is called.
 func (w *ConfigWatcher) Start(ctx context.Context) error {
+	if err := w.markRunning(); err != nil {
+		return err
+	}
+
+	if err := w.initializeWatcher(); err != nil {
+		w.resetRunning()
+		return err
+	}
+
+	// Load initial configuration
+	if err := w.reload(); err != nil {
+		w.logger.Warn("failed to load initial configuration",
+			zap.String("path", w.path),
+			zap.Error(err),
+		)
+	}
+
+	// Start watching
+	go w.watch(ctx)
+
+	// Wait for context cancellation or stop signal
+	w.waitForShutdown(ctx)
+
+	return w.cleanup()
+}
+
+// markRunning marks the watcher as running, returning an error if already running.
+func (w *ConfigWatcher) markRunning() error {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.running {
-		w.mu.Unlock()
 		return ErrWatcherAlreadyRunning
 	}
 	w.running = true
-	w.mu.Unlock()
+	return nil
+}
 
-	// Create fsnotify watcher
+// resetRunning resets the running state to false.
+func (w *ConfigWatcher) resetRunning() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.running = false
+}
+
+// initializeWatcher creates and configures the fsnotify watcher.
+func (w *ConfigWatcher) initializeWatcher() error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		w.mu.Lock()
-		w.running = false
-		w.mu.Unlock()
 		return &ConfigError{
 			Op:   "create_watcher",
 			Path: w.path,
@@ -146,9 +180,6 @@ func (w *ConfigWatcher) Start(ctx context.Context) error {
 	dir := filepath.Dir(w.path)
 	if err := watcher.Add(dir); err != nil {
 		_ = watcher.Close() // Ignore error on cleanup
-		w.mu.Lock()
-		w.running = false
-		w.mu.Unlock()
 		return &ConfigError{
 			Op:   "watch_directory",
 			Path: dir,
@@ -162,26 +193,17 @@ func (w *ConfigWatcher) Start(ctx context.Context) error {
 		zap.Duration("debounce", w.debounce),
 	)
 
-	// Load initial configuration
-	if err := w.reload(); err != nil {
-		w.logger.Warn("failed to load initial configuration",
-			zap.String("path", w.path),
-			zap.Error(err),
-		)
-	}
+	return nil
+}
 
-	// Start watching
-	go w.watch(ctx)
-
-	// Wait for context cancellation or stop signal
+// waitForShutdown waits for context cancellation or stop signal.
+func (w *ConfigWatcher) waitForShutdown(ctx context.Context) {
 	select {
 	case <-ctx.Done():
 		w.logger.Info("config watcher stopping due to context cancellation")
 	case <-w.stopCh:
 		w.logger.Info("config watcher stopping due to stop signal")
 	}
-
-	return w.cleanup()
 }
 
 // Stop stops the configuration watcher.
@@ -223,76 +245,113 @@ func (w *ConfigWatcher) IsRunning() bool {
 	return w.running
 }
 
+// debounceState holds the state for debouncing file system events.
+type debounceState struct {
+	timer *time.Timer
+	ch    <-chan time.Time
+}
+
+// reset resets the debounce timer with the given duration.
+func (d *debounceState) reset(duration time.Duration) {
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+	d.timer = time.NewTimer(duration)
+	d.ch = d.timer.C
+}
+
+// clear clears the debounce channel after processing.
+func (d *debounceState) clear() {
+	d.ch = nil
+}
+
 // watch is the main watch loop that handles file system events.
 func (w *ConfigWatcher) watch(ctx context.Context) {
-	var debounceTimer *time.Timer
-	var debounceCh <-chan time.Time
-
-	filename := filepath.Base(w.path)
-
-	// Get a local reference to the watcher channels to avoid race conditions
-	// The watcher is set before this goroutine starts and only cleared after it exits
-	w.mu.RLock()
-	watcher := w.watcher
-	w.mu.RUnlock()
-
+	watcher := w.getWatcher()
 	if watcher == nil {
 		return
 	}
 
+	filename := filepath.Base(w.path)
+	debounce := &debounceState{}
+
 	for {
-		select {
-		case <-ctx.Done():
+		if done := w.processWatchEvent(ctx, watcher, filename, debounce); done {
 			return
-		case <-w.stopCh:
-			return
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-
-			// Only process events for our config file
-			if filepath.Base(event.Name) != filename {
-				continue
-			}
-
-			w.logger.Debug("received file system event",
-				zap.String("name", event.Name),
-				zap.String("op", event.Op.String()),
-			)
-
-			// Handle relevant events
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
-				// Reset debounce timer
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-				debounceTimer = time.NewTimer(w.debounce)
-				debounceCh = debounceTimer.C
-			}
-
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			w.logger.Error("watcher error",
-				zap.Error(err),
-			)
-			configWatcherErrors.Inc()
-
-		case <-debounceCh:
-			// Debounce timer expired, reload configuration
-			w.logger.Info("reloading configuration after debounce",
-				zap.String("path", w.path),
-			)
-			if err := w.reload(); err != nil {
-				w.logger.Error("failed to reload configuration",
-					zap.String("path", w.path),
-					zap.Error(err),
-				)
-			}
-			debounceCh = nil
 		}
+	}
+}
+
+// getWatcher safely retrieves the watcher reference.
+func (w *ConfigWatcher) getWatcher() *fsnotify.Watcher {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.watcher
+}
+
+// processWatchEvent processes a single watch event and returns true if the loop should exit.
+func (w *ConfigWatcher) processWatchEvent(
+	ctx context.Context,
+	watcher *fsnotify.Watcher,
+	filename string,
+	debounce *debounceState,
+) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-w.stopCh:
+		return true
+	case event, ok := <-watcher.Events:
+		if !ok {
+			return true
+		}
+		w.handleFileEvent(event, filename, debounce)
+	case err, ok := <-watcher.Errors:
+		if !ok {
+			return true
+		}
+		w.handleWatcherError(err)
+	case <-debounce.ch:
+		w.handleDebounceExpired()
+		debounce.clear()
+	}
+	return false
+}
+
+// handleFileEvent handles a file system event.
+func (w *ConfigWatcher) handleFileEvent(event fsnotify.Event, filename string, debounce *debounceState) {
+	// Only process events for our config file
+	if filepath.Base(event.Name) != filename {
+		return
+	}
+
+	w.logger.Debug("received file system event",
+		zap.String("name", event.Name),
+		zap.String("op", event.Op.String()),
+	)
+
+	// Handle relevant events
+	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
+		debounce.reset(w.debounce)
+	}
+}
+
+// handleWatcherError handles a watcher error.
+func (w *ConfigWatcher) handleWatcherError(err error) {
+	w.logger.Error("watcher error", zap.Error(err))
+	configWatcherErrors.Inc()
+}
+
+// handleDebounceExpired handles the debounce timer expiration.
+func (w *ConfigWatcher) handleDebounceExpired() {
+	w.logger.Info("reloading configuration after debounce",
+		zap.String("path", w.path),
+	)
+	if err := w.reload(); err != nil {
+		w.logger.Error("failed to reload configuration",
+			zap.String("path", w.path),
+			zap.Error(err),
+		)
 	}
 }
 

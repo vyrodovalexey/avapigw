@@ -6,7 +6,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
@@ -675,4 +677,407 @@ func TestHTTPRouteWebhook_validateSyntax_Filters(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "requestHeaderModifier is required")
 	})
+}
+
+// ============================================================================
+// HTTPRouteWebhook validateBackendRefs Tests
+// ============================================================================
+
+func TestHTTPRouteWebhook_validateBackendRefs(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	tests := []struct {
+		name        string
+		objects     []client.Object
+		route       *avapigwv1alpha1.HTTPRoute
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name: "valid - Service backend exists",
+			objects: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "default"},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{{
+							BackendRef: avapigwv1alpha1.BackendRef{
+								Name: "my-service",
+							},
+						}},
+					}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name:    "invalid - Service backend does not exist",
+			objects: []client.Object{},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{{
+							BackendRef: avapigwv1alpha1.BackendRef{
+								Name: "missing-service",
+							},
+						}},
+					}},
+				},
+			},
+			expectError: true,
+			errorMsg:    "not found",
+		},
+		{
+			name: "valid - Backend CRD exists",
+			objects: []client.Object{
+				&avapigwv1alpha1.Backend{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-backend", Namespace: "default"},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{{
+							BackendRef: avapigwv1alpha1.BackendRef{
+								Group: strPtr(avapigwv1alpha1.GroupVersion.Group),
+								Kind:  strPtr("Backend"),
+								Name:  "my-backend",
+							},
+						}},
+					}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name:    "invalid - Backend CRD does not exist",
+			objects: []client.Object{},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{{
+							BackendRef: avapigwv1alpha1.BackendRef{
+								Group: strPtr(avapigwv1alpha1.GroupVersion.Group),
+								Kind:  strPtr("Backend"),
+								Name:  "missing-backend",
+							},
+						}},
+					}},
+				},
+			},
+			expectError: true,
+			errorMsg:    "not found",
+		},
+		{
+			name: "valid - Service in different namespace",
+			objects: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "other-ns"},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{{
+							BackendRef: avapigwv1alpha1.BackendRef{
+								Name:      "my-service",
+								Namespace: strPtr("other-ns"),
+							},
+						}},
+					}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "valid - multiple backend refs",
+			objects: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: "service-1", Namespace: "default"},
+				},
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: "service-2", Namespace: "default"},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{
+							{BackendRef: avapigwv1alpha1.BackendRef{Name: "service-1"}},
+							{BackendRef: avapigwv1alpha1.BackendRef{Name: "service-2"}},
+						},
+					}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "invalid - one of multiple backend refs missing",
+			objects: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{Name: "service-1", Namespace: "default"},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{
+							{BackendRef: avapigwv1alpha1.BackendRef{Name: "service-1"}},
+							{BackendRef: avapigwv1alpha1.BackendRef{Name: "missing-service"}},
+						},
+					}},
+				},
+			},
+			expectError: true,
+			errorMsg:    "not found",
+		},
+		{
+			name:    "valid - no backend refs (empty rules)",
+			objects: []client.Object{},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					Rules: []avapigwv1alpha1.HTTPRouteRule{{}},
+				},
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			webhook := &HTTPRouteWebhook{
+				Client:             cl,
+				Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+				DuplicateChecker:   validator.NewDuplicateChecker(cl),
+				ReferenceValidator: validator.NewReferenceValidator(cl),
+			}
+
+			err := webhook.validateBackendRefs(context.Background(), tt.route)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.errorMsg != "" {
+					assert.Contains(t, err.Error(), tt.errorMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// HTTPRouteWebhook validateParentProtocols Tests
+// ============================================================================
+
+func TestHTTPRouteWebhook_validateParentProtocols(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		objects     []client.Object
+		route       *avapigwv1alpha1.HTTPRoute
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name: "valid - HTTP listener",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+					Spec: avapigwv1alpha1.GatewaySpec{
+						Listeners: []avapigwv1alpha1.Listener{{
+							Name:     "http",
+							Port:     80,
+							Protocol: avapigwv1alpha1.ProtocolHTTP,
+						}},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					ParentRefs: []avapigwv1alpha1.ParentRef{{
+						Name:        "test-gateway",
+						SectionName: strPtr("http"),
+					}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "valid - HTTPS listener",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+					Spec: avapigwv1alpha1.GatewaySpec{
+						Listeners: []avapigwv1alpha1.Listener{{
+							Name:     "https",
+							Port:     443,
+							Protocol: avapigwv1alpha1.ProtocolHTTPS,
+						}},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					ParentRefs: []avapigwv1alpha1.ParentRef{{
+						Name:        "test-gateway",
+						SectionName: strPtr("https"),
+					}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "invalid - TCP listener for HTTPRoute",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+					Spec: avapigwv1alpha1.GatewaySpec{
+						Listeners: []avapigwv1alpha1.Listener{{
+							Name:     "tcp",
+							Port:     9000,
+							Protocol: avapigwv1alpha1.ProtocolTCP,
+						}},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					ParentRefs: []avapigwv1alpha1.ParentRef{{
+						Name:        "test-gateway",
+						SectionName: strPtr("tcp"),
+					}},
+				},
+			},
+			expectError: true,
+			errorMsg:    "protocol",
+		},
+		{
+			name: "invalid - GRPC listener for HTTPRoute",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+					Spec: avapigwv1alpha1.GatewaySpec{
+						Listeners: []avapigwv1alpha1.Listener{{
+							Name:     "grpc",
+							Port:     50051,
+							Protocol: avapigwv1alpha1.ProtocolGRPC,
+						}},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					ParentRefs: []avapigwv1alpha1.ParentRef{{
+						Name:        "test-gateway",
+						SectionName: strPtr("grpc"),
+					}},
+				},
+			},
+			expectError: true,
+			errorMsg:    "protocol",
+		},
+		{
+			name: "valid - no section name (any listener)",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+					Spec: avapigwv1alpha1.GatewaySpec{
+						Listeners: []avapigwv1alpha1.Listener{{
+							Name:     "http",
+							Port:     80,
+							Protocol: avapigwv1alpha1.ProtocolHTTP,
+						}},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					ParentRefs: []avapigwv1alpha1.ParentRef{{
+						Name: "test-gateway",
+						// No SectionName - should not validate protocol
+					}},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "valid - parent in different namespace",
+			objects: []client.Object{
+				&avapigwv1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "other-ns"},
+					Spec: avapigwv1alpha1.GatewaySpec{
+						Listeners: []avapigwv1alpha1.Listener{{
+							Name:     "http",
+							Port:     80,
+							Protocol: avapigwv1alpha1.ProtocolHTTP,
+						}},
+					},
+				},
+			},
+			route: &avapigwv1alpha1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+				Spec: avapigwv1alpha1.HTTPRouteSpec{
+					ParentRefs: []avapigwv1alpha1.ParentRef{{
+						Name:        "test-gateway",
+						Namespace:   strPtr("other-ns"),
+						SectionName: strPtr("http"),
+					}},
+				},
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			webhook := &HTTPRouteWebhook{
+				Client:             cl,
+				Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+				DuplicateChecker:   validator.NewDuplicateChecker(cl),
+				ReferenceValidator: validator.NewReferenceValidator(cl),
+			}
+
+			err := webhook.validateParentProtocols(context.Background(), tt.route)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.errorMsg != "" {
+					assert.Contains(t, err.Error(), tt.errorMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

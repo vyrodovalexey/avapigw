@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,48 +14,24 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/controller/base"
+	"github.com/vyrodovalexey/avapigw/internal/controller/route"
 )
 
+// Compile-time check that GRPCRoute implements route.RouteWithParentRefs
+var _ route.RouteWithParentRefs = &avapigwv1alpha1.GRPCRoute{}
+
+// Local aliases for constants to maintain backward compatibility.
+// These reference the centralized constants from constants.go.
 const (
-	grpcRouteFinalizer = "avapigw.vyrodovalexey.github.com/grpcroute-finalizer"
-
-	// grpcRouteReconcileTimeout is the maximum duration for a single GRPCRoute reconciliation
-	grpcRouteReconcileTimeout = 30 * time.Second
+	grpcRouteFinalizer        = GRPCRouteFinalizerName
+	grpcRouteReconcileTimeout = GRPCRouteReconcileTimeout
 )
-
-// Prometheus metrics for GRPCRoute controller
-var (
-	grpcRouteReconcileDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "grpcroute_reconcile_duration_seconds",
-			Help:      "Duration of GRPCRoute reconciliation in seconds",
-			Buckets:   prometheus.DefBuckets,
-		},
-		[]string{"result"},
-	)
-
-	grpcRouteReconcileTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "avapigw",
-			Subsystem: "controller",
-			Name:      "grpcroute_reconcile_total",
-			Help:      "Total number of GRPCRoute reconciliations",
-		},
-		[]string{"result"},
-	)
-)
-
-func init() {
-	prometheus.MustRegister(grpcRouteReconcileDuration, grpcRouteReconcileTotal)
-}
 
 // GRPCRouteReconciler reconciles a GRPCRoute object
 type GRPCRouteReconciler struct {
@@ -65,6 +40,10 @@ type GRPCRouteReconciler struct {
 	Recorder            record.EventRecorder
 	RequeueStrategy     *RequeueStrategy
 	requeueStrategyOnce sync.Once // Ensures thread-safe initialization of RequeueStrategy
+
+	// Base reconciler components
+	metrics          *base.ControllerMetrics
+	finalizerHandler *base.FinalizerHandler
 }
 
 // getRequeueStrategy returns the requeue strategy, initializing with defaults if needed.
@@ -79,7 +58,26 @@ func (r *GRPCRouteReconciler) getRequeueStrategy() *RequeueStrategy {
 	return r.RequeueStrategy
 }
 
-// +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes,verbs=get;list;watch;create;update;patch;delete
+// initBaseComponents initializes the base controller components.
+// This is called automatically during reconciliation but can also be called
+// explicitly for testing purposes.
+func (r *GRPCRouteReconciler) initBaseComponents() {
+	if r.metrics == nil {
+		r.metrics = base.DefaultMetricsRegistry.RegisterController("grpcroute")
+	}
+	if r.finalizerHandler == nil {
+		r.finalizerHandler = base.NewFinalizerHandler(r.Client, grpcRouteFinalizer)
+	}
+}
+
+// ensureInitialized ensures base components are initialized.
+// This is a helper for methods that may be called directly in tests.
+func (r *GRPCRouteReconciler) ensureInitialized() {
+	r.initBaseComponents()
+}
+
+//nolint:lll // kubebuilder RBAC marker cannot be shortened
+//+kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=grpcroutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=avapigw.vyrodovalexey.github.com,resources=gateways,verbs=get;list;watch
@@ -89,7 +87,8 @@ func (r *GRPCRouteReconciler) getRequeueStrategy() *RequeueStrategy {
 
 // Reconcile handles GRPCRoute reconciliation
 func (r *GRPCRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// Add timeout to prevent hanging reconciliations
+	r.initBaseComponents()
+
 	ctx, cancel := context.WithTimeout(ctx, grpcRouteReconcileTimeout)
 	defer cancel()
 
@@ -97,17 +96,10 @@ func (r *GRPCRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	strategy := r.getRequeueStrategy()
 	resourceKey := req.String()
 
-	// Track reconciliation metrics
 	start := time.Now()
 	var reconcileErr *ReconcileError
 	defer func() {
-		duration := time.Since(start).Seconds()
-		result := MetricResultSuccess
-		if reconcileErr != nil {
-			result = MetricResultError
-		}
-		grpcRouteReconcileDuration.WithLabelValues(result).Observe(duration)
-		grpcRouteReconcileTotal.WithLabelValues(result).Inc()
+		r.metrics.ObserveReconcile(time.Since(start).Seconds(), reconcileErr == nil)
 	}()
 
 	logger.Info("Reconciling GRPCRoute",
@@ -117,19 +109,13 @@ func (r *GRPCRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	)
 
 	// Fetch the GRPCRoute instance
-	grpcRoute := &avapigwv1alpha1.GRPCRoute{}
-	if err := r.Get(ctx, req.NamespacedName, grpcRoute); err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("GRPCRoute not found, ignoring")
-			strategy.ResetFailureCount(resourceKey)
-			return ctrl.Result{}, nil
-		}
-		reconcileErr = ClassifyError("getGRPCRoute", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to get GRPCRoute",
-			"errorType", reconcileErr.Type,
-			"retryable", reconcileErr.Retryable,
-		)
-		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	grpcRoute, result, err := r.fetchGRPCRoute(ctx, req, strategy, resourceKey)
+	if err != nil {
+		reconcileErr = err
+		return result, reconcileErr
+	}
+	if grpcRoute == nil {
+		return result, nil
 	}
 
 	// Handle deletion
@@ -141,55 +127,107 @@ func (r *GRPCRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return result, err
 	}
 
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(grpcRoute, grpcRouteFinalizer) {
-		controllerutil.AddFinalizer(grpcRoute, grpcRouteFinalizer)
-		if err := r.Update(ctx, grpcRoute); err != nil {
-			reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
-			logger.Error(reconcileErr, "Failed to add finalizer",
-				"errorType", reconcileErr.Type,
-			)
-			r.Recorder.Event(grpcRoute, corev1.EventTypeWarning, "FinalizerError", err.Error())
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	// Ensure finalizer and reconcile
+	return r.ensureFinalizerAndReconcileGRPCRoute(ctx, grpcRoute, strategy, resourceKey, &reconcileErr)
+}
+
+// fetchGRPCRoute fetches the GRPCRoute instance and handles not-found errors.
+func (r *GRPCRouteReconciler) fetchGRPCRoute(
+	ctx context.Context,
+	req ctrl.Request,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (*avapigwv1alpha1.GRPCRoute, ctrl.Result, *ReconcileError) {
+	logger := log.FromContext(ctx)
+	grpcRoute := &avapigwv1alpha1.GRPCRoute{}
+	if err := r.Get(ctx, req.NamespacedName, grpcRoute); err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("GRPCRoute not found, ignoring")
+			strategy.ResetFailureCount(resourceKey)
+			return nil, ctrl.Result{}, nil
 		}
-		return strategy.ForImmediateRequeue(), nil
+		reconcileErr := ClassifyError("getGRPCRoute", resourceKey, err)
+		logger.Error(reconcileErr, "Failed to get GRPCRoute",
+			"errorType", reconcileErr.Type,
+			"retryable", reconcileErr.Retryable,
+		)
+		return nil, strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	}
+	return grpcRoute, ctrl.Result{}, nil
+}
+
+// ensureFinalizerAndReconcileGRPCRoute ensures the finalizer is present and performs reconciliation.
+func (r *GRPCRouteReconciler) ensureFinalizerAndReconcileGRPCRoute(
+	ctx context.Context,
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+	strategy *RequeueStrategy,
+	resourceKey string,
+	reconcileErr **ReconcileError,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Add finalizer if not present
+	if !r.finalizerHandler.HasFinalizer(grpcRoute) {
+		added, err := r.finalizerHandler.EnsureFinalizer(ctx, grpcRoute)
+		if err != nil {
+			*reconcileErr = ClassifyError("addFinalizer", resourceKey, err)
+			logger.Error(*reconcileErr, "Failed to add finalizer", "errorType", (*reconcileErr).Type)
+			r.Recorder.Event(grpcRoute, corev1.EventTypeWarning, "FinalizerError", err.Error())
+			return strategy.ForTransientErrorWithBackoff(resourceKey), *reconcileErr
+		}
+		if added {
+			return strategy.ForImmediateRequeue(), nil
+		}
 	}
 
 	// Reconcile the GRPCRoute
 	if err := r.reconcileGRPCRoute(ctx, grpcRoute); err != nil {
-		reconcileErr = ClassifyError("reconcileGRPCRoute", resourceKey, err)
-		logger.Error(reconcileErr, "Failed to reconcile GRPCRoute",
-			"errorType", reconcileErr.Type,
-			"retryable", reconcileErr.Retryable,
-			"userActionRequired", reconcileErr.UserActionRequired,
+		*reconcileErr = ClassifyError("reconcileGRPCRoute", resourceKey, err)
+		logger.Error(*reconcileErr, "Failed to reconcile GRPCRoute",
+			"errorType", (*reconcileErr).Type,
+			"retryable", (*reconcileErr).Retryable,
+			"userActionRequired", (*reconcileErr).UserActionRequired,
 		)
-		r.Recorder.Event(grpcRoute, corev1.EventTypeWarning, string(reconcileErr.Type)+"Error", err.Error())
-
-		switch reconcileErr.Type {
-		case ErrorTypeValidation:
-			return strategy.ForValidationError(), reconcileErr
-		case ErrorTypePermanent:
-			return strategy.ForPermanentError(), reconcileErr
-		case ErrorTypeDependency:
-			return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
-		default:
-			return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
-		}
+		r.Recorder.Event(grpcRoute, corev1.EventTypeWarning, string((*reconcileErr).Type)+"Error", err.Error())
+		return r.handleGRPCRouteReconcileError(*reconcileErr, strategy, resourceKey)
 	}
 
-	// Success - reset failure count
 	strategy.ResetFailureCount(resourceKey)
-	logger.Info("GRPCRoute reconciled successfully", "name", req.Name, "namespace", req.Namespace)
+	logger.Info("GRPCRoute reconciled successfully", "name", grpcRoute.Name, "namespace", grpcRoute.Namespace)
 	return strategy.ForSuccess(), nil
 }
 
+// handleGRPCRouteReconcileError returns the appropriate result based on error type.
+func (r *GRPCRouteReconciler) handleGRPCRouteReconcileError(
+	reconcileErr *ReconcileError,
+	strategy *RequeueStrategy,
+	resourceKey string,
+) (ctrl.Result, error) {
+	switch reconcileErr.Type {
+	case ErrorTypeValidation:
+		return strategy.ForValidationError(), reconcileErr
+	case ErrorTypePermanent:
+		return strategy.ForPermanentError(), reconcileErr
+	case ErrorTypeDependency:
+		return strategy.ForDependencyErrorWithBackoff(resourceKey), reconcileErr
+	default:
+		return strategy.ForTransientErrorWithBackoff(resourceKey), reconcileErr
+	}
+}
+
 // handleDeletion handles GRPCRoute deletion
-func (r *GRPCRouteReconciler) handleDeletion(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) (ctrl.Result, error) {
+func (r *GRPCRouteReconciler) handleDeletion(
+	ctx context.Context,
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+) (ctrl.Result, error) {
+	// Ensure base components are initialized (needed when called directly in tests)
+	r.ensureInitialized()
+
 	logger := log.FromContext(ctx)
 	strategy := r.getRequeueStrategy()
 	resourceKey := client.ObjectKeyFromObject(grpcRoute).String()
 
-	if controllerutil.ContainsFinalizer(grpcRoute, grpcRouteFinalizer) {
+	if r.finalizerHandler.HasFinalizer(grpcRoute) {
 		// Perform cleanup
 		logger.Info("Performing cleanup for GRPCRoute deletion",
 			"name", grpcRoute.Name,
@@ -200,8 +238,7 @@ func (r *GRPCRouteReconciler) handleDeletion(ctx context.Context, grpcRoute *ava
 		r.Recorder.Event(grpcRoute, corev1.EventTypeNormal, "Deleting", "GRPCRoute is being deleted")
 
 		// Remove finalizer
-		controllerutil.RemoveFinalizer(grpcRoute, grpcRouteFinalizer)
-		if err := r.Update(ctx, grpcRoute); err != nil {
+		if _, err := r.finalizerHandler.RemoveFinalizer(ctx, grpcRoute); err != nil {
 			reconcileErr := ClassifyError("removeFinalizer", resourceKey, err)
 			logger.Error(reconcileErr, "Failed to remove finalizer",
 				"errorType", reconcileErr.Type,
@@ -216,17 +253,26 @@ func (r *GRPCRouteReconciler) handleDeletion(ctx context.Context, grpcRoute *ava
 // reconcileGRPCRoute performs the main reconciliation logic
 func (r *GRPCRouteReconciler) reconcileGRPCRoute(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) error {
 	logger := log.FromContext(ctx)
+	resourceKey := client.ObjectKeyFromObject(grpcRoute).String()
 
 	// Validate parent references (Gateways)
 	parentStatuses, err := r.validateParentRefs(ctx, grpcRoute)
 	if err != nil {
-		logger.Error(err, "Failed to validate parent references")
-		return err
+		reconcileErr := ClassifyError("validateParentRefs", resourceKey, err)
+		logger.Error(reconcileErr, "Failed to validate parent references",
+			"errorType", reconcileErr.Type,
+		)
+		return reconcileErr
 	}
 
 	// Validate backend references
 	if err := r.validateBackendRefs(ctx, grpcRoute); err != nil {
-		logger.Error(err, "Failed to validate backend references")
+		// Log but continue - backend validation errors are not fatal
+		reconcileErr := ClassifyError("validateBackendRefs", resourceKey, err)
+		logger.Info("Backend validation warning, continuing with reconciliation",
+			"error", err.Error(),
+			"errorType", reconcileErr.Type,
+		)
 		// Continue with status update even if backends are invalid
 	}
 
@@ -235,227 +281,203 @@ func (r *GRPCRouteReconciler) reconcileGRPCRoute(ctx context.Context, grpcRoute 
 
 	// Update status
 	if err := r.Status().Update(ctx, grpcRoute); err != nil {
-		logger.Error(err, "Failed to update GRPCRoute status")
-		return err
+		reconcileErr := ClassifyError("updateStatus", resourceKey, err)
+		logger.Error(reconcileErr, "Failed to update GRPCRoute status",
+			"errorType", reconcileErr.Type,
+		)
+		return reconcileErr
 	}
 
-	r.Recorder.Event(grpcRoute, corev1.EventTypeNormal, "Reconciled", "GRPCRoute reconciled successfully")
+	r.Recorder.Event(grpcRoute, corev1.EventTypeNormal, EventReasonReconciled, "GRPCRoute reconciled successfully")
 	return nil
 }
 
 // validateParentRefs validates parent references and returns parent statuses
-func (r *GRPCRouteReconciler) validateParentRefs(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) ([]avapigwv1alpha1.RouteParentStatus, error) {
-	logger := log.FromContext(ctx)
+func (r *GRPCRouteReconciler) validateParentRefs(
+	ctx context.Context,
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+) ([]avapigwv1alpha1.RouteParentStatus, error) {
 	parentStatuses := make([]avapigwv1alpha1.RouteParentStatus, 0, len(grpcRoute.Spec.ParentRefs))
 
 	for _, parentRef := range grpcRoute.Spec.ParentRefs {
-		parentStatus := avapigwv1alpha1.RouteParentStatus{
-			ParentRef:      parentRef,
-			ControllerName: "avapigw.vyrodovalexey.github.com/gateway-controller",
-		}
-
-		// Determine namespace
-		namespace := grpcRoute.Namespace
-		if parentRef.Namespace != nil {
-			namespace = *parentRef.Namespace
-		}
-
-		// Get the Gateway
-		gateway := &avapigwv1alpha1.Gateway{}
-		err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: parentRef.Name}, gateway)
+		parentStatus, err := r.validateSingleGRPCParentRef(ctx, grpcRoute, parentRef)
 		if err != nil {
-			if errors.IsNotFound(err) {
-				logger.Info("Parent Gateway not found", "gateway", parentRef.Name, "namespace", namespace)
-				parentStatus.Conditions = []avapigwv1alpha1.Condition{
-					{
-						Type:               avapigwv1alpha1.ConditionTypeAccepted,
-						Status:             metav1.ConditionFalse,
-						LastTransitionTime: metav1.Now(),
-						Reason:             string(avapigwv1alpha1.ReasonNoMatchingParent),
-						Message:            fmt.Sprintf("Gateway %s/%s not found", namespace, parentRef.Name),
-					},
-				}
-				parentStatuses = append(parentStatuses, parentStatus)
-				continue
-			}
-			return nil, fmt.Errorf("failed to get Gateway %s/%s: %w", namespace, parentRef.Name, err)
+			return nil, err
 		}
-
-		// Validate listener match
-		accepted, message := r.validateListenerMatch(grpcRoute, gateway, parentRef)
-		if accepted {
-			parentStatus.Conditions = []avapigwv1alpha1.Condition{
-				{
-					Type:               avapigwv1alpha1.ConditionTypeAccepted,
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonAccepted),
-					Message:            "Route accepted by Gateway",
-				},
-				{
-					Type:               avapigwv1alpha1.ConditionTypeResolvedRefs,
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonResolvedRefs),
-					Message:            "All references resolved",
-				},
-			}
-		} else {
-			parentStatus.Conditions = []avapigwv1alpha1.Condition{
-				{
-					Type:               avapigwv1alpha1.ConditionTypeAccepted,
-					Status:             metav1.ConditionFalse,
-					LastTransitionTime: metav1.Now(),
-					Reason:             string(avapigwv1alpha1.ReasonNotAllowedByListeners),
-					Message:            message,
-				},
-			}
-		}
-
 		parentStatuses = append(parentStatuses, parentStatus)
 	}
 
 	return parentStatuses, nil
 }
 
+// validateSingleGRPCParentRef validates a single parent reference and returns its status.
+func (r *GRPCRouteReconciler) validateSingleGRPCParentRef(
+	ctx context.Context,
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+	parentRef avapigwv1alpha1.ParentRef,
+) (avapigwv1alpha1.RouteParentStatus, error) {
+	logger := log.FromContext(ctx)
+	parentStatus := avapigwv1alpha1.RouteParentStatus{
+		ParentRef:      parentRef,
+		ControllerName: GatewayControllerName,
+	}
+
+	namespace := grpcRoute.Namespace
+	if parentRef.Namespace != nil {
+		namespace = *parentRef.Namespace
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: parentRef.Name}, gateway)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("Parent Gateway not found", "gateway", parentRef.Name, "namespace", namespace)
+			parentStatus.Conditions = r.buildGRPCNotFoundConditions(namespace, parentRef.Name)
+			return parentStatus, nil
+		}
+		return parentStatus, fmt.Errorf("failed to get Gateway %s/%s: %w", namespace, parentRef.Name, err)
+	}
+
+	parentStatus.Conditions = r.buildGRPCListenerMatchConditions(grpcRoute, gateway, parentRef)
+	return parentStatus, nil
+}
+
+// buildGRPCNotFoundConditions builds conditions for a not-found gateway.
+func (r *GRPCRouteReconciler) buildGRPCNotFoundConditions(namespace, name string) []avapigwv1alpha1.Condition {
+	return []avapigwv1alpha1.Condition{
+		{
+			Type:               avapigwv1alpha1.ConditionTypeAccepted,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             string(avapigwv1alpha1.ReasonNoMatchingParent),
+			Message:            fmt.Sprintf("Gateway %s/%s not found", namespace, name),
+		},
+	}
+}
+
+// buildGRPCListenerMatchConditions builds conditions based on listener match validation.
+func (r *GRPCRouteReconciler) buildGRPCListenerMatchConditions(
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+	gateway *avapigwv1alpha1.Gateway,
+	parentRef avapigwv1alpha1.ParentRef,
+) []avapigwv1alpha1.Condition {
+	accepted, message := r.validateListenerMatch(grpcRoute, gateway, parentRef)
+	if accepted {
+		return []avapigwv1alpha1.Condition{
+			{
+				Type:               avapigwv1alpha1.ConditionTypeAccepted,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(avapigwv1alpha1.ReasonAccepted),
+				Message:            "Route accepted by Gateway",
+			},
+			{
+				Type:               avapigwv1alpha1.ConditionTypeResolvedRefs,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(avapigwv1alpha1.ReasonResolvedRefs),
+				Message:            "All references resolved",
+			},
+		}
+	}
+	return []avapigwv1alpha1.Condition{
+		{
+			Type:               avapigwv1alpha1.ConditionTypeAccepted,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             string(avapigwv1alpha1.ReasonNotAllowedByListeners),
+			Message:            message,
+		},
+	}
+}
+
 // validateListenerMatch validates that the route matches a listener on the gateway
-func (r *GRPCRouteReconciler) validateListenerMatch(grpcRoute *avapigwv1alpha1.GRPCRoute, gateway *avapigwv1alpha1.Gateway, parentRef avapigwv1alpha1.ParentRef) (matches bool, reason string) {
+func (r *GRPCRouteReconciler) validateListenerMatch(
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+	gateway *avapigwv1alpha1.Gateway,
+	parentRef avapigwv1alpha1.ParentRef,
+) (matches bool, reason string) {
 	// If a specific section (listener) is specified, validate it
 	if parentRef.SectionName != nil {
-		listenerName := *parentRef.SectionName
-		for _, listener := range gateway.Spec.Listeners {
-			if listener.Name == listenerName {
-				// Check protocol compatibility
-				if listener.Protocol != avapigwv1alpha1.ProtocolGRPC && listener.Protocol != avapigwv1alpha1.ProtocolGRPCS {
-					return false, fmt.Sprintf("Listener %s does not support gRPC protocol", listenerName)
-				}
-				// Check hostname match
-				if !r.hostnameMatches(grpcRoute.Spec.Hostnames, listener.Hostname) {
-					return false, fmt.Sprintf("No matching hostname for listener %s", listenerName)
-				}
-				return true, ""
-			}
-		}
-		return false, fmt.Sprintf("Listener %s not found on Gateway", listenerName)
+		return r.validateSpecificListener(grpcRoute, gateway, *parentRef.SectionName)
 	}
 
 	// No specific listener, check if any GRPC/GRPCS listener matches
+	return r.findMatchingGRPCListener(grpcRoute, gateway)
+}
+
+// validateSpecificListener validates a specific named listener for GRPC protocol compatibility.
+func (r *GRPCRouteReconciler) validateSpecificListener(
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+	gateway *avapigwv1alpha1.Gateway,
+	listenerName string,
+) (matches bool, reason string) {
 	for _, listener := range gateway.Spec.Listeners {
-		if listener.Protocol == avapigwv1alpha1.ProtocolGRPC || listener.Protocol == avapigwv1alpha1.ProtocolGRPCS {
-			if r.hostnameMatches(grpcRoute.Spec.Hostnames, listener.Hostname) {
-				return true, ""
-			}
+		if listener.Name != listenerName {
+			continue
+		}
+		// Check protocol compatibility
+		if !r.isGRPCProtocol(listener.Protocol) {
+			return false, fmt.Sprintf("Listener %s does not support gRPC protocol", listenerName)
+		}
+		// Check hostname match
+		if !r.hostnameMatches(grpcRoute.Spec.Hostnames, listener.Hostname) {
+			return false, fmt.Sprintf("No matching hostname for listener %s", listenerName)
+		}
+		return true, ""
+	}
+	return false, fmt.Sprintf("Listener %s not found on Gateway", listenerName)
+}
+
+// findMatchingGRPCListener finds any GRPC/GRPCS listener that matches the route.
+func (r *GRPCRouteReconciler) findMatchingGRPCListener(
+	grpcRoute *avapigwv1alpha1.GRPCRoute,
+	gateway *avapigwv1alpha1.Gateway,
+) (matches bool, reason string) {
+	for _, listener := range gateway.Spec.Listeners {
+		if r.isGRPCProtocol(listener.Protocol) && r.hostnameMatches(grpcRoute.Spec.Hostnames, listener.Hostname) {
+			return true, ""
 		}
 	}
-
 	return false, "No matching GRPC/GRPCS listener found on Gateway"
 }
 
-// hostnameMatches checks if route hostnames match the listener hostname
-func (r *GRPCRouteReconciler) hostnameMatches(routeHostnames []avapigwv1alpha1.Hostname, listenerHostname *avapigwv1alpha1.Hostname) bool {
-	// If listener has no hostname, it matches all
-	if listenerHostname == nil {
-		return true
-	}
-
-	// If route has no hostnames, it matches all listeners
-	if len(routeHostnames) == 0 {
-		return true
-	}
-
-	listenerHost := string(*listenerHostname)
-	for _, routeHostname := range routeHostnames {
-		routeHost := string(routeHostname)
-		if r.hostnameMatch(routeHost, listenerHost) {
-			return true
-		}
-	}
-
-	return false
+// isGRPCProtocol checks if the protocol is GRPC or GRPCS.
+func (r *GRPCRouteReconciler) isGRPCProtocol(protocol avapigwv1alpha1.ProtocolType) bool {
+	return protocol == avapigwv1alpha1.ProtocolGRPC || protocol == avapigwv1alpha1.ProtocolGRPCS
 }
 
-// hostnameMatch checks if two hostnames match (supporting wildcards)
-func (r *GRPCRouteReconciler) hostnameMatch(routeHost, listenerHost string) bool {
-	// Exact match
-	if routeHost == listenerHost {
-		return true
-	}
-
-	// Wildcard matching
-	if listenerHost != "" && listenerHost[0] == '*' {
-		suffix := listenerHost[1:]
-		if routeHost != "" && routeHost[0] == '*' {
-			return routeHost[1:] == suffix
-		}
-		if len(routeHost) > len(suffix) {
-			return routeHost[len(routeHost)-len(suffix):] == suffix
-		}
-	}
-
-	if routeHost != "" && routeHost[0] == '*' {
-		suffix := routeHost[1:]
-		if len(listenerHost) > len(suffix) {
-			return listenerHost[len(listenerHost)-len(suffix):] == suffix
-		}
-	}
-
-	return false
+// hostnameMatches checks if route hostnames match the listener hostname.
+// This method delegates to the shared route.HostnameMatches function.
+func (r *GRPCRouteReconciler) hostnameMatches(
+	routeHostnames []avapigwv1alpha1.Hostname,
+	listenerHostname *avapigwv1alpha1.Hostname,
+) bool {
+	return route.HostnameMatches(routeHostnames, listenerHostname)
 }
 
-// validateBackendRefs validates backend references
+// validateBackendRefs validates backend references for the GRPCRoute.
+// It extracts backend refs from all rules and delegates validation to the shared validator.
 func (r *GRPCRouteReconciler) validateBackendRefs(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) error {
-	logger := log.FromContext(ctx)
+	backendRefs := r.extractBackendRefs(grpcRoute)
+	validator := route.NewBackendRefValidator(r.Client, r.Recorder)
+	return validator.ValidateBackendRefs(ctx, grpcRoute, backendRefs)
+}
 
+// extractBackendRefs extracts all backend references from a GRPCRoute's rules.
+func (r *GRPCRouteReconciler) extractBackendRefs(grpcRoute *avapigwv1alpha1.GRPCRoute) []route.BackendRefInfo {
+	var refs []route.BackendRefInfo
 	for _, rule := range grpcRoute.Spec.Rules {
 		for _, backendRef := range rule.BackendRefs {
-			namespace := grpcRoute.Namespace
-			if backendRef.Namespace != nil {
-				namespace = *backendRef.Namespace
-			}
-
-			kind := BackendKindService
-			if backendRef.Kind != nil {
-				kind = *backendRef.Kind
-			}
-
-			group := ""
-			if backendRef.Group != nil {
-				group = *backendRef.Group
-			}
-
-			// Check based on kind
-			switch {
-			case group == "" && kind == BackendKindService:
-				// Kubernetes Service
-				svc := &corev1.Service{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, svc); err != nil {
-					if errors.IsNotFound(err) {
-						logger.Info("Backend Service not found", "service", backendRef.Name, "namespace", namespace)
-						r.Recorder.Event(grpcRoute, corev1.EventTypeWarning, "BackendNotFound",
-							fmt.Sprintf("Service %s/%s not found", namespace, backendRef.Name))
-						continue
-					}
-					return fmt.Errorf("failed to get Service %s/%s: %w", namespace, backendRef.Name, err)
-				}
-			case group == avapigwv1alpha1.GroupVersion.Group && kind == BackendKindBackend:
-				// Custom Backend resource
-				backend := &avapigwv1alpha1.Backend{}
-				if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: backendRef.Name}, backend); err != nil {
-					if errors.IsNotFound(err) {
-						logger.Info("Backend not found", "backend", backendRef.Name, "namespace", namespace)
-						r.Recorder.Event(grpcRoute, corev1.EventTypeWarning, "BackendNotFound",
-							fmt.Sprintf("Backend %s/%s not found", namespace, backendRef.Name))
-						continue
-					}
-					return fmt.Errorf("failed to get Backend %s/%s: %w", namespace, backendRef.Name, err)
-				}
-			default:
-				logger.Info("Unsupported backend kind", "group", group, "kind", kind)
-			}
+			refs = append(refs, route.BackendRefInfo{
+				Name:      backendRef.Name,
+				Namespace: backendRef.Namespace,
+				Kind:      backendRef.Kind,
+				Group:     backendRef.Group,
+			})
 		}
 	}
-
-	return nil
+	return refs
 }
 
 // SetupWithManager sets up the controller with the Manager
@@ -473,69 +495,51 @@ func (r *GRPCRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// findGRPCRoutesForGateway finds GRPCRoutes that reference a Gateway
+// findGRPCRoutesForGateway finds GRPCRoutes that reference a Gateway.
+// Uses field indexers for efficient filtered lookups.
 func (r *GRPCRouteReconciler) findGRPCRoutesForGateway(ctx context.Context, obj client.Object) []reconcile.Request {
 	gateway := obj.(*avapigwv1alpha1.Gateway)
-	var requests []reconcile.Request
 
+	// Use field index for efficient lookup
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
 	var grpcRoutes avapigwv1alpha1.GRPCRouteList
-	if err := r.List(ctx, &grpcRoutes); err != nil {
-		return requests
+	if err := r.List(ctx, &grpcRoutes, client.MatchingFields{GRPCRouteGatewayIndexField: gatewayKey}); err != nil {
+		return nil
 	}
 
-	for _, route := range grpcRoutes.Items {
-		for _, parentRef := range route.Spec.ParentRefs {
-			namespace := route.Namespace
-			if parentRef.Namespace != nil {
-				namespace = *parentRef.Namespace
-			}
-			if namespace == gateway.Namespace && parentRef.Name == gateway.Name {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: client.ObjectKey{
-						Namespace: route.Namespace,
-						Name:      route.Name,
-					},
-				})
-				break
-			}
-		}
+	requests := make([]reconcile.Request, 0, len(grpcRoutes.Items))
+	for _, grpcRoute := range grpcRoutes.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Namespace: grpcRoute.Namespace,
+				Name:      grpcRoute.Name,
+			},
+		})
 	}
 
 	return requests
 }
 
-// findGRPCRoutesForBackend finds GRPCRoutes that reference a Backend
+// findGRPCRoutesForBackend finds GRPCRoutes that reference a Backend.
+// Uses field indexers for efficient filtered lookups.
 func (r *GRPCRouteReconciler) findGRPCRoutesForBackend(ctx context.Context, obj client.Object) []reconcile.Request {
 	backend := obj.(*avapigwv1alpha1.Backend)
-	var requests []reconcile.Request
 
+	// Use field index for efficient lookup
+	backendKey := BackendIndexKey(backend.Namespace, backend.Name)
 	var grpcRoutes avapigwv1alpha1.GRPCRouteList
-	if err := r.List(ctx, &grpcRoutes); err != nil {
-		return requests
+	if err := r.List(ctx, &grpcRoutes, client.MatchingFields{GRPCRouteBackendIndexField: backendKey}); err != nil {
+		return nil
 	}
 
-	for _, route := range grpcRoutes.Items {
-		for _, rule := range route.Spec.Rules {
-			for _, backendRef := range rule.BackendRefs {
-				namespace := route.Namespace
-				if backendRef.Namespace != nil {
-					namespace = *backendRef.Namespace
-				}
-				kind := "Service"
-				if backendRef.Kind != nil {
-					kind = *backendRef.Kind
-				}
-				if kind == "Backend" && namespace == backend.Namespace && backendRef.Name == backend.Name {
-					requests = append(requests, reconcile.Request{
-						NamespacedName: client.ObjectKey{
-							Namespace: route.Namespace,
-							Name:      route.Name,
-						},
-					})
-					break
-				}
-			}
-		}
+	requests := make([]reconcile.Request, 0, len(grpcRoutes.Items))
+	for _, grpcRoute := range grpcRoutes.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Namespace: grpcRoute.Namespace,
+				Name:      grpcRoute.Name,
+			},
+		})
 	}
 
 	return requests

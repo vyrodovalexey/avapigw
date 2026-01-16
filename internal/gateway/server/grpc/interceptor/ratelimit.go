@@ -2,9 +2,9 @@ package interceptor
 
 import (
 	"context"
-	"sync"
-	"time"
 
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
+	"github.com/vyrodovalexey/avapigw/internal/ratelimit"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,6 +14,7 @@ import (
 )
 
 // RateLimiter defines the interface for rate limiting.
+// This interface is compatible with core.LimiterAdapter.
 type RateLimiter interface {
 	// Allow checks if the request is allowed based on the key.
 	Allow(ctx context.Context, key string) (bool, error)
@@ -46,7 +47,12 @@ func UnaryRateLimitInterceptorWithConfig(config RateLimitConfig) grpc.UnaryServe
 		skipMethods[method] = true
 	}
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
 		// Skip rate limiting for certain methods
 		if skipMethods[info.FullMethod] {
 			return handler(ctx, req)
@@ -173,169 +179,87 @@ func defaultKeyFunc(ctx context.Context, method string, md metadata.MD) string {
 	return "unknown"
 }
 
-// TokenBucketLimiter implements a simple token bucket rate limiter.
-type TokenBucketLimiter struct {
-	rate       float64
-	burst      int
-	buckets    map[string]*bucket
-	mu         sync.Mutex
-	cleanupInt time.Duration
-}
+// UnaryRateLimitInterceptorWithCore returns a unary interceptor using the core rate limiter.
+func UnaryRateLimitInterceptorWithCore(coreConfig core.RateLimitCoreConfig) grpc.UnaryServerInterceptor {
+	rateLimitCore := core.NewRateLimitCore(coreConfig)
 
-type bucket struct {
-	tokens     float64
-	lastUpdate time.Time
-}
-
-// NewTokenBucketLimiter creates a new token bucket rate limiter.
-func NewTokenBucketLimiter(rate float64, burst int) *TokenBucketLimiter {
-	limiter := &TokenBucketLimiter{
-		rate:       rate,
-		burst:      burst,
-		buckets:    make(map[string]*bucket),
-		cleanupInt: 5 * time.Minute,
-	}
-
-	// Start cleanup goroutine
-	go limiter.cleanup()
-
-	return limiter
-}
-
-// Allow implements RateLimiter.
-func (l *TokenBucketLimiter) Allow(ctx context.Context, key string) (bool, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	now := time.Now()
-
-	b, exists := l.buckets[key]
-	if !exists {
-		b = &bucket{
-			tokens:     float64(l.burst),
-			lastUpdate: now,
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		// Skip rate limiting for certain methods
+		if rateLimitCore.ShouldSkip(info.FullMethod) {
+			return handler(ctx, req)
 		}
-		l.buckets[key] = b
-	}
 
-	// Add tokens based on elapsed time
-	elapsed := now.Sub(b.lastUpdate).Seconds()
-	b.tokens += elapsed * l.rate
-	if b.tokens > float64(l.burst) {
-		b.tokens = float64(l.burst)
-	}
-	b.lastUpdate = now
-
-	// Check if we have tokens
-	if b.tokens >= 1 {
-		b.tokens--
-		return true, nil
-	}
-
-	return false, nil
-}
-
-// cleanup removes stale buckets.
-func (l *TokenBucketLimiter) cleanup() {
-	ticker := time.NewTicker(l.cleanupInt)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		l.mu.Lock()
-		now := time.Now()
-		for key, b := range l.buckets {
-			if now.Sub(b.lastUpdate) > l.cleanupInt {
-				delete(l.buckets, key)
-			}
+		// Get metadata for key extraction
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			md = metadata.MD{}
 		}
-		l.mu.Unlock()
-	}
-}
 
-// SlidingWindowLimiter implements a sliding window rate limiter.
-type SlidingWindowLimiter struct {
-	limit      int
-	window     time.Duration
-	requests   map[string][]time.Time
-	mu         sync.Mutex
-	cleanupInt time.Duration
-}
+		// Get rate limit key
+		key := defaultKeyFunc(ctx, info.FullMethod, md)
 
-// NewSlidingWindowLimiter creates a new sliding window rate limiter.
-func NewSlidingWindowLimiter(limit int, window time.Duration) *SlidingWindowLimiter {
-	limiter := &SlidingWindowLimiter{
-		limit:      limit,
-		window:     window,
-		requests:   make(map[string][]time.Time),
-		cleanupInt: window * 2,
-	}
-
-	// Start cleanup goroutine
-	go limiter.cleanup()
-
-	return limiter
-}
-
-// Allow implements RateLimiter.
-func (l *SlidingWindowLimiter) Allow(ctx context.Context, key string) (bool, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	now := time.Now()
-	windowStart := now.Add(-l.window)
-
-	// Get or create request list
-	requests, exists := l.requests[key]
-	if !exists {
-		requests = make([]time.Time, 0)
-	}
-
-	// Remove old requests
-	validRequests := make([]time.Time, 0, len(requests))
-	for _, t := range requests {
-		if t.After(windowStart) {
-			validRequests = append(validRequests, t)
+		// Check rate limit using core
+		result, err := rateLimitCore.Check(ctx, key)
+		if err != nil {
+			// Allow request on error to avoid blocking
+			return handler(ctx, req)
 		}
+
+		if !result.Allowed {
+			rateLimitCore.LogExceeded(key, result.Limit)
+			return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded")
+		}
+
+		return handler(ctx, req)
 	}
-
-	// Check limit
-	if len(validRequests) >= l.limit {
-		l.requests[key] = validRequests
-		return false, nil
-	}
-
-	// Add new request
-	validRequests = append(validRequests, now)
-	l.requests[key] = validRequests
-
-	return true, nil
 }
 
-// cleanup removes stale entries.
-func (l *SlidingWindowLimiter) cleanup() {
-	ticker := time.NewTicker(l.cleanupInt)
-	defer ticker.Stop()
+// StreamRateLimitInterceptorWithCore returns a stream interceptor using the core rate limiter.
+func StreamRateLimitInterceptorWithCore(coreConfig core.RateLimitCoreConfig) grpc.StreamServerInterceptor {
+	rateLimitCore := core.NewRateLimitCore(coreConfig)
 
-	for range ticker.C {
-		l.mu.Lock()
-		now := time.Now()
-		windowStart := now.Add(-l.window)
-
-		for key, requests := range l.requests {
-			validRequests := make([]time.Time, 0, len(requests))
-			for _, t := range requests {
-				if t.After(windowStart) {
-					validRequests = append(validRequests, t)
-				}
-			}
-			if len(validRequests) == 0 {
-				delete(l.requests, key)
-			} else {
-				l.requests[key] = validRequests
-			}
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		// Skip rate limiting for certain methods
+		if rateLimitCore.ShouldSkip(info.FullMethod) {
+			return handler(srv, ss)
 		}
-		l.mu.Unlock()
+
+		ctx := ss.Context()
+
+		// Get metadata for key extraction
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			md = metadata.MD{}
+		}
+
+		// Get rate limit key
+		key := defaultKeyFunc(ctx, info.FullMethod, md)
+
+		// Check rate limit using core
+		result, err := rateLimitCore.Check(ctx, key)
+		if err != nil {
+			// Allow request on error to avoid blocking
+			return handler(srv, ss)
+		}
+
+		if !result.Allowed {
+			rateLimitCore.LogExceeded(key, result.Limit)
+			return status.Error(codes.ResourceExhausted, "rate limit exceeded")
+		}
+
+		return handler(srv, ss)
 	}
+}
+
+// NewLimiterFromRatelimit creates a RateLimiter from the internal ratelimit.Limiter.
+// This is the recommended way to create a rate limiter for gRPC interceptors.
+func NewLimiterFromRatelimit(limiter ratelimit.Limiter) RateLimiter {
+	return core.NewLimiterAdapter(limiter)
 }
 
 // MethodRateLimiter applies different rate limits based on method.

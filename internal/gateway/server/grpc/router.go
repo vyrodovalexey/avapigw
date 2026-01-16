@@ -447,63 +447,78 @@ func compileGRPCRule(rule *GRPCRouteRule, index int, logger *zap.Logger) *Compil
 		Priority:       index,
 	}
 
-	// Compile matches (use first match for service/method)
 	if len(rule.Matches) > 0 {
 		match := rule.Matches[0]
-
-		// Compile service matcher
-		switch match.Type {
-		case GRPCMethodMatchTypeExact, "":
-			compiled.ServiceMatcher = NewExactServiceMatcher(match.Service)
-		case GRPCMethodMatchTypeRegex:
-			if matcher, err := NewRegexServiceMatcher(match.Service); err == nil {
-				compiled.ServiceMatcher = matcher
-			} else {
-				logger.Warn("failed to compile service regex",
-					zap.String("pattern", match.Service),
-					zap.Error(err),
-				)
-				compiled.ServiceMatcher = NewExactServiceMatcher(match.Service)
-			}
-		}
-
-		// Compile method matcher
-		switch match.Type {
-		case GRPCMethodMatchTypeExact, "":
-			compiled.MethodMatcher = NewExactMethodMatcher(match.Method)
-		case GRPCMethodMatchTypeRegex:
-			if matcher, err := NewRegexMethodMatcher(match.Method); err == nil {
-				compiled.MethodMatcher = matcher
-			} else {
-				logger.Warn("failed to compile method regex",
-					zap.String("pattern", match.Method),
-					zap.Error(err),
-				)
-				compiled.MethodMatcher = NewExactMethodMatcher(match.Method)
-			}
-		}
-
-		// Compile header matchers
-		for _, header := range match.Headers {
-			switch header.Type {
-			case GRPCHeaderMatchTypeExact, "":
-				compiled.HeaderMatchers = append(compiled.HeaderMatchers,
-					NewExactHeaderMatcher(header.Name, header.Value))
-			case GRPCHeaderMatchTypeRegex:
-				if matcher, err := NewRegexHeaderMatcher(header.Name, header.Value); err == nil {
-					compiled.HeaderMatchers = append(compiled.HeaderMatchers, matcher)
-				} else {
-					logger.Warn("failed to compile header regex",
-						zap.String("name", header.Name),
-						zap.String("pattern", header.Value),
-						zap.Error(err),
-					)
-				}
-			}
-		}
+		compiled.ServiceMatcher = compileServiceMatcher(match, logger)
+		compiled.MethodMatcher = compileMethodMatcher(match, logger)
+		compiled.HeaderMatchers = compileGRPCHeaderMatchers(match.Headers, logger)
 	}
 
 	return compiled
+}
+
+// compileServiceMatcher compiles the service matcher for a gRPC rule.
+func compileServiceMatcher(match GRPCMethodMatch, logger *zap.Logger) ServiceMatcher {
+	switch match.Type {
+	case GRPCMethodMatchTypeRegex:
+		if matcher, err := NewRegexServiceMatcher(match.Service); err == nil {
+			return matcher
+		}
+		logger.Warn("failed to compile service regex",
+			zap.String("pattern", match.Service),
+			zap.Error(fmt.Errorf("regex compilation failed")),
+		)
+		return NewExactServiceMatcher(match.Service)
+	default:
+		return NewExactServiceMatcher(match.Service)
+	}
+}
+
+// compileMethodMatcher compiles the method matcher for a gRPC rule.
+func compileMethodMatcher(match GRPCMethodMatch, logger *zap.Logger) MethodMatcher {
+	switch match.Type {
+	case GRPCMethodMatchTypeRegex:
+		if matcher, err := NewRegexMethodMatcher(match.Method); err == nil {
+			return matcher
+		}
+		logger.Warn("failed to compile method regex",
+			zap.String("pattern", match.Method),
+			zap.Error(fmt.Errorf("regex compilation failed")),
+		)
+		return NewExactMethodMatcher(match.Method)
+	default:
+		return NewExactMethodMatcher(match.Method)
+	}
+}
+
+// compileGRPCHeaderMatchers compiles header matchers for a gRPC rule.
+func compileGRPCHeaderMatchers(headers []GRPCHeaderMatch, logger *zap.Logger) []HeaderMatcher {
+	matchers := make([]HeaderMatcher, 0, len(headers))
+	for _, header := range headers {
+		matcher := compileGRPCHeaderMatcher(header, logger)
+		if matcher != nil {
+			matchers = append(matchers, matcher)
+		}
+	}
+	return matchers
+}
+
+// compileGRPCHeaderMatcher compiles a single header matcher.
+func compileGRPCHeaderMatcher(header GRPCHeaderMatch, logger *zap.Logger) HeaderMatcher {
+	switch header.Type {
+	case GRPCHeaderMatchTypeRegex:
+		if matcher, err := NewRegexHeaderMatcher(header.Name, header.Value); err == nil {
+			return matcher
+		}
+		logger.Warn("failed to compile header regex",
+			zap.String("name", header.Name),
+			zap.String("pattern", header.Value),
+			zap.Error(fmt.Errorf("regex compilation failed")),
+		)
+		return nil
+	default:
+		return NewExactHeaderMatcher(header.Name, header.Value)
+	}
 }
 
 // hostnameToRegex converts a hostname pattern to a regex.

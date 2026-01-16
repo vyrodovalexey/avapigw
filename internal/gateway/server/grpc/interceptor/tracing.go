@@ -36,6 +36,32 @@ func UnaryTracingInterceptor() grpc.UnaryServerInterceptor {
 
 // UnaryTracingInterceptorWithConfig returns a unary tracing interceptor with custom configuration.
 func UnaryTracingInterceptorWithConfig(config TracingConfig) grpc.UnaryServerInterceptor {
+	config, tracer, skipMethods := normalizeTracingConfig(config)
+
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		if skipMethods[info.FullMethod] {
+			return handler(ctx, req)
+		}
+
+		ctx = extractTraceContext(ctx, config.Propagators)
+		ctx, span := startUnarySpan(ctx, tracer, info.FullMethod)
+		defer span.End()
+
+		setUnarySpanAttributes(ctx, span, info.FullMethod)
+		resp, err := handler(ctx, req)
+		setSpanStatus(span, err)
+
+		return resp, err
+	}
+}
+
+// normalizeTracingConfig ensures config has all required defaults.
+func normalizeTracingConfig(config TracingConfig) (TracingConfig, trace.Tracer, map[string]bool) {
 	if config.TracerProvider == nil {
 		config.TracerProvider = otel.GetTracerProvider()
 	}
@@ -53,54 +79,47 @@ func UnaryTracingInterceptorWithConfig(config TracingConfig) grpc.UnaryServerInt
 		skipMethods[method] = true
 	}
 
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		// Skip tracing for certain methods
-		if skipMethods[info.FullMethod] {
-			return handler(ctx, req)
-		}
+	return config, tracer, skipMethods
+}
 
-		// Extract trace context from incoming metadata
-		md, _ := metadata.FromIncomingContext(ctx)
-		ctx = config.Propagators.Extract(ctx, metadataCarrier(md))
+// extractTraceContext extracts trace context from incoming metadata.
+func extractTraceContext(ctx context.Context, propagators propagation.TextMapPropagator) context.Context {
+	md, _ := metadata.FromIncomingContext(ctx)
+	return propagators.Extract(ctx, metadataCarrier(md))
+}
 
-		// Start span
-		ctx, span := tracer.Start(ctx, info.FullMethod,
-			trace.WithSpanKind(trace.SpanKindServer),
-		)
-		defer span.End()
+// startUnarySpan starts a new span for a unary RPC.
+func startUnarySpan(ctx context.Context, tracer trace.Tracer, method string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindServer))
+}
 
-		// Set span attributes
-		span.SetAttributes(
-			attribute.String("rpc.system", "grpc"),
-			attribute.String("rpc.service", extractService(info.FullMethod)),
-			attribute.String("rpc.method", extractMethod(info.FullMethod)),
-		)
+// setUnarySpanAttributes sets common attributes on a unary span.
+func setUnarySpanAttributes(ctx context.Context, span trace.Span, method string) {
+	span.SetAttributes(
+		attribute.String("rpc.system", "grpc"),
+		attribute.String("rpc.service", extractService(method)),
+		attribute.String("rpc.method", extractMethod(method)),
+	)
 
-		// Add peer info
-		if p, ok := peer.FromContext(ctx); ok {
-			span.SetAttributes(attribute.String("net.peer.ip", p.Addr.String()))
-		}
+	if p, ok := peer.FromContext(ctx); ok {
+		span.SetAttributes(attribute.String("net.peer.ip", p.Addr.String()))
+	}
 
-		// Add request ID if available
-		if requestID := GetRequestID(ctx); requestID != "" {
-			span.SetAttributes(attribute.String("request.id", requestID))
-		}
+	if requestID := GetRequestID(ctx); requestID != "" {
+		span.SetAttributes(attribute.String("request.id", requestID))
+	}
+}
 
-		// Process request
-		resp, err := handler(ctx, req)
-
-		// Set status based on error
-		if err != nil {
-			st, _ := grpcstatus.FromError(err)
-			span.SetAttributes(attribute.String("rpc.grpc.status_code", st.Code().String()))
-			span.SetStatus(codes.Error, st.Message())
-			span.RecordError(err)
-		} else {
-			span.SetAttributes(attribute.String("rpc.grpc.status_code", "OK"))
-			span.SetStatus(codes.Ok, "")
-		}
-
-		return resp, err
+// setSpanStatus sets the span status based on the error.
+func setSpanStatus(span trace.Span, err error) {
+	if err != nil {
+		st, _ := grpcstatus.FromError(err)
+		span.SetAttributes(attribute.String("rpc.grpc.status_code", st.Code().String()))
+		span.SetStatus(codes.Error, st.Message())
+		span.RecordError(err)
+	} else {
+		span.SetAttributes(attribute.String("rpc.grpc.status_code", "OK"))
+		span.SetStatus(codes.Ok, "")
 	}
 }
 
@@ -111,76 +130,43 @@ func StreamTracingInterceptor() grpc.StreamServerInterceptor {
 
 // StreamTracingInterceptorWithConfig returns a stream tracing interceptor with custom configuration.
 func StreamTracingInterceptorWithConfig(config TracingConfig) grpc.StreamServerInterceptor {
-	if config.TracerProvider == nil {
-		config.TracerProvider = otel.GetTracerProvider()
-	}
-	if config.Propagators == nil {
-		config.Propagators = otel.GetTextMapPropagator()
-	}
-	if config.ServiceName == "" {
-		config.ServiceName = TracerName
-	}
-
-	tracer := config.TracerProvider.Tracer(config.ServiceName)
-
-	skipMethods := make(map[string]bool)
-	for _, method := range config.SkipMethods {
-		skipMethods[method] = true
-	}
+	config, tracer, skipMethods := normalizeTracingConfig(config)
 
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		// Skip tracing for certain methods
 		if skipMethods[info.FullMethod] {
 			return handler(srv, ss)
 		}
 
-		ctx := ss.Context()
-
-		// Extract trace context from incoming metadata
-		md, _ := metadata.FromIncomingContext(ctx)
-		ctx = config.Propagators.Extract(ctx, metadataCarrier(md))
-
-		// Start span
-		ctx, span := tracer.Start(ctx, info.FullMethod,
-			trace.WithSpanKind(trace.SpanKindServer),
-		)
+		ctx := extractTraceContext(ss.Context(), config.Propagators)
+		ctx, span := startStreamSpan(ctx, tracer, info.FullMethod)
 		defer span.End()
 
-		// Set span attributes
-		span.SetAttributes(
-			attribute.String("rpc.system", "grpc"),
-			attribute.String("rpc.service", extractService(info.FullMethod)),
-			attribute.String("rpc.method", extractMethod(info.FullMethod)),
-			attribute.Bool("rpc.grpc.client_stream", info.IsClientStream),
-			attribute.Bool("rpc.grpc.server_stream", info.IsServerStream),
-		)
-
-		// Add peer info
-		if p, ok := peer.FromContext(ctx); ok {
-			span.SetAttributes(attribute.String("net.peer.ip", p.Addr.String()))
-		}
-
-		// Wrap the stream with the new context
-		wrappedStream := &tracingServerStream{
-			ServerStream: ss,
-			ctx:          ctx,
-		}
-
-		// Process stream
+		setStreamSpanAttributes(ctx, span, info)
+		wrappedStream := &tracingServerStream{ServerStream: ss, ctx: ctx}
 		err := handler(srv, wrappedStream)
-
-		// Set status based on error
-		if err != nil {
-			st, _ := grpcstatus.FromError(err)
-			span.SetAttributes(attribute.String("rpc.grpc.status_code", st.Code().String()))
-			span.SetStatus(codes.Error, st.Message())
-			span.RecordError(err)
-		} else {
-			span.SetAttributes(attribute.String("rpc.grpc.status_code", "OK"))
-			span.SetStatus(codes.Ok, "")
-		}
+		setSpanStatus(span, err)
 
 		return err
+	}
+}
+
+// startStreamSpan starts a new span for a stream RPC.
+func startStreamSpan(ctx context.Context, tracer trace.Tracer, method string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindServer))
+}
+
+// setStreamSpanAttributes sets common attributes on a stream span.
+func setStreamSpanAttributes(ctx context.Context, span trace.Span, info *grpc.StreamServerInfo) {
+	span.SetAttributes(
+		attribute.String("rpc.system", "grpc"),
+		attribute.String("rpc.service", extractService(info.FullMethod)),
+		attribute.String("rpc.method", extractMethod(info.FullMethod)),
+		attribute.Bool("rpc.grpc.client_stream", info.IsClientStream),
+		attribute.Bool("rpc.grpc.server_stream", info.IsServerStream),
+	)
+
+	if p, ok := peer.FromContext(ctx); ok {
+		span.SetAttributes(attribute.String("net.peer.ip", p.Addr.String()))
 	}
 }
 

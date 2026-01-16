@@ -85,9 +85,14 @@ func NewHTTPRouteDefaulter() *HTTPRouteDefaulter {
 
 // Default applies default values to an HTTPRoute
 func (d *HTTPRouteDefaulter) Default(route *avapigwv1alpha1.HTTPRoute) {
-	// Default parent refs
-	for i := range route.Spec.ParentRefs {
-		parentRef := &route.Spec.ParentRefs[i]
+	defaultParentRefs(route.Spec.ParentRefs)
+	defaultHTTPRouteRules(route.Spec.Rules)
+}
+
+// defaultParentRefs applies default values to parent refs
+func defaultParentRefs(parentRefs []avapigwv1alpha1.ParentRef) {
+	for i := range parentRefs {
+		parentRef := &parentRefs[i]
 		if parentRef.Group == nil {
 			group := avapigwv1alpha1.GroupVersion.Group
 			parentRef.Group = &group
@@ -97,44 +102,55 @@ func (d *HTTPRouteDefaulter) Default(route *avapigwv1alpha1.HTTPRoute) {
 			parentRef.Kind = &kind
 		}
 	}
+}
 
-	// Default rules
-	for i := range route.Spec.Rules {
-		rule := &route.Spec.Rules[i]
+// defaultHTTPRouteRules applies default values to HTTP route rules
+func defaultHTTPRouteRules(rules []avapigwv1alpha1.HTTPRouteRule) {
+	for i := range rules {
+		rule := &rules[i]
+		defaultHTTPRouteMatches(rule.Matches)
+		defaultHTTPBackendRefs(rule.BackendRefs)
+	}
+}
 
-		// Default matches
-		for j := range rule.Matches {
-			match := &rule.Matches[j]
+// defaultHTTPRouteMatches applies default values to HTTP route matches
+func defaultHTTPRouteMatches(matches []avapigwv1alpha1.HTTPRouteMatch) {
+	for j := range matches {
+		match := &matches[j]
+		defaultHTTPPathMatch(match)
+	}
+}
 
-			// Default path match
-			if match.Path == nil {
-				match.Path = &avapigwv1alpha1.HTTPPathMatch{}
-			}
-			if match.Path.Type == nil {
-				pathType := avapigwv1alpha1.PathMatchPathPrefix
-				match.Path.Type = &pathType
-			}
-			if match.Path.Value == nil {
-				value := "/"
-				match.Path.Value = &value
-			}
+// defaultHTTPPathMatch applies default values to an HTTP path match
+func defaultHTTPPathMatch(match *avapigwv1alpha1.HTTPRouteMatch) {
+	if match.Path == nil {
+		match.Path = &avapigwv1alpha1.HTTPPathMatch{}
+	}
+	if match.Path.Type == nil {
+		pathType := avapigwv1alpha1.PathMatchPathPrefix
+		match.Path.Type = &pathType
+	}
+	if match.Path.Value == nil {
+		value := "/"
+		match.Path.Value = &value
+	}
+}
+
+// defaultHTTPBackendRefs applies default values to HTTP backend refs
+func defaultHTTPBackendRefs(backendRefs []avapigwv1alpha1.HTTPBackendRef) {
+	for j := range backendRefs {
+		backendRef := &backendRefs[j]
+		if backendRef.Group == nil {
+			group := ""
+			backendRef.Group = &group
 		}
-
-		// Default backend refs
-		for j := range rule.BackendRefs {
-			backendRef := &rule.BackendRefs[j]
-			if backendRef.Group == nil {
-				group := ""
-				backendRef.Group = &group
-			}
-			if backendRef.Kind == nil {
-				kind := kindService
-				backendRef.Kind = &kind
-			}
-			if backendRef.Weight == nil {
-				weight := int32(1)
-				backendRef.Weight = &weight
-			}
+		if backendRef.Kind == nil {
+			kind := kindService
+			backendRef.Kind = &kind
+		}
+		if backendRef.Weight == nil {
+			weight := int32(1)
+			backendRef.Weight = &weight
 		}
 	}
 }
@@ -149,66 +165,75 @@ func NewGRPCRouteDefaulter() *GRPCRouteDefaulter {
 
 // Default applies default values to a GRPCRoute
 func (d *GRPCRouteDefaulter) Default(route *avapigwv1alpha1.GRPCRoute) {
-	// Default parent refs
-	for i := range route.Spec.ParentRefs {
-		parentRef := &route.Spec.ParentRefs[i]
-		if parentRef.Group == nil {
-			group := avapigwv1alpha1.GroupVersion.Group
-			parentRef.Group = &group
-		}
-		if parentRef.Kind == nil {
-			kind := kindGateway
-			parentRef.Kind = &kind
+	defaultParentRefs(route.Spec.ParentRefs)
+	defaultGRPCRouteRules(route.Spec.Rules)
+}
+
+// defaultGRPCRouteRules applies default values to gRPC route rules
+func defaultGRPCRouteRules(rules []avapigwv1alpha1.GRPCRouteRule) {
+	for i := range rules {
+		rule := &rules[i]
+		defaultGRPCRouteMatches(rule.Matches)
+		defaultGRPCRetryPolicy(rule.RetryPolicy)
+		defaultGRPCBackendRefs(rule.BackendRefs)
+	}
+}
+
+// defaultGRPCRouteMatches applies default values to gRPC route matches
+func defaultGRPCRouteMatches(matches []avapigwv1alpha1.GRPCRouteMatch) {
+	for j := range matches {
+		match := &matches[j]
+		if match.Method != nil && match.Method.Type == nil {
+			matchType := avapigwv1alpha1.GRPCMethodMatchExact
+			match.Method.Type = &matchType
 		}
 	}
+}
 
-	// Default rules
-	for i := range route.Spec.Rules {
-		rule := &route.Spec.Rules[i]
+// defaultGRPCRetryPolicy applies default values to a gRPC retry policy
+func defaultGRPCRetryPolicy(retryPolicy *avapigwv1alpha1.GRPCRetryPolicy) {
+	if retryPolicy == nil {
+		return
+	}
 
-		// Default method match type
-		for j := range rule.Matches {
-			match := &rule.Matches[j]
-			if match.Method != nil && match.Method.Type == nil {
-				matchType := avapigwv1alpha1.GRPCMethodMatchExact
-				match.Method.Type = &matchType
-			}
+	if retryPolicy.NumRetries == nil {
+		numRetries := int32(1)
+		retryPolicy.NumRetries = &numRetries
+	}
+
+	defaultRetryBackoff(retryPolicy)
+}
+
+// defaultRetryBackoff applies default values to retry backoff configuration
+func defaultRetryBackoff(retryPolicy *avapigwv1alpha1.GRPCRetryPolicy) {
+	if retryPolicy.Backoff == nil {
+		retryPolicy.Backoff = &avapigwv1alpha1.RetryBackoff{}
+	}
+	if retryPolicy.Backoff.BaseInterval == nil {
+		baseInterval := "100ms"
+		retryPolicy.Backoff.BaseInterval = &baseInterval
+	}
+	if retryPolicy.Backoff.MaxInterval == nil {
+		maxInterval := "10s"
+		retryPolicy.Backoff.MaxInterval = &maxInterval
+	}
+}
+
+// defaultGRPCBackendRefs applies default values to gRPC backend refs
+func defaultGRPCBackendRefs(backendRefs []avapigwv1alpha1.GRPCBackendRef) {
+	for j := range backendRefs {
+		backendRef := &backendRefs[j]
+		if backendRef.Group == nil {
+			group := ""
+			backendRef.Group = &group
 		}
-
-		// Default retry policy
-		if rule.RetryPolicy != nil {
-			if rule.RetryPolicy.NumRetries == nil {
-				numRetries := int32(1)
-				rule.RetryPolicy.NumRetries = &numRetries
-			}
-			if rule.RetryPolicy.Backoff == nil {
-				rule.RetryPolicy.Backoff = &avapigwv1alpha1.RetryBackoff{}
-			}
-			if rule.RetryPolicy.Backoff.BaseInterval == nil {
-				baseInterval := "100ms"
-				rule.RetryPolicy.Backoff.BaseInterval = &baseInterval
-			}
-			if rule.RetryPolicy.Backoff.MaxInterval == nil {
-				maxInterval := "10s"
-				rule.RetryPolicy.Backoff.MaxInterval = &maxInterval
-			}
+		if backendRef.Kind == nil {
+			kind := kindService
+			backendRef.Kind = &kind
 		}
-
-		// Default backend refs
-		for j := range rule.BackendRefs {
-			backendRef := &rule.BackendRefs[j]
-			if backendRef.Group == nil {
-				group := ""
-				backendRef.Group = &group
-			}
-			if backendRef.Kind == nil {
-				kind := kindService
-				backendRef.Kind = &kind
-			}
-			if backendRef.Weight == nil {
-				weight := int32(1)
-				backendRef.Weight = &weight
-			}
+		if backendRef.Weight == nil {
+			weight := int32(1)
+			backendRef.Weight = &weight
 		}
 	}
 }
@@ -223,48 +248,46 @@ func NewTCPRouteDefaulter() *TCPRouteDefaulter {
 
 // Default applies default values to a TCPRoute
 func (d *TCPRouteDefaulter) Default(route *avapigwv1alpha1.TCPRoute) {
-	// Default parent refs
-	for i := range route.Spec.ParentRefs {
-		parentRef := &route.Spec.ParentRefs[i]
-		if parentRef.Group == nil {
-			group := avapigwv1alpha1.GroupVersion.Group
-			parentRef.Group = &group
-		}
-		if parentRef.Kind == nil {
-			kind := kindGateway
-			parentRef.Kind = &kind
-		}
+	defaultParentRefs(route.Spec.ParentRefs)
+	defaultTCPRouteRules(route.Spec.Rules)
+}
+
+// defaultTCPRouteRules applies default values to TCP route rules
+func defaultTCPRouteRules(rules []avapigwv1alpha1.TCPRouteRule) {
+	for i := range rules {
+		rule := &rules[i]
+		defaultTCPTimeouts(rule)
+		defaultTCPBackendRefs(rule.BackendRefs)
 	}
+}
 
-	// Default rules
-	for i := range route.Spec.Rules {
-		rule := &route.Spec.Rules[i]
+// defaultTCPTimeouts applies default timeout values to a TCP route rule
+func defaultTCPTimeouts(rule *avapigwv1alpha1.TCPRouteRule) {
+	if rule.IdleTimeout == nil {
+		timeout := avapigwv1alpha1.Duration("3600s")
+		rule.IdleTimeout = &timeout
+	}
+	if rule.ConnectTimeout == nil {
+		timeout := avapigwv1alpha1.Duration("10s")
+		rule.ConnectTimeout = &timeout
+	}
+}
 
-		// Default timeouts
-		if rule.IdleTimeout == nil {
-			timeout := avapigwv1alpha1.Duration("3600s")
-			rule.IdleTimeout = &timeout
+// defaultTCPBackendRefs applies default values to TCP backend refs
+func defaultTCPBackendRefs(backendRefs []avapigwv1alpha1.TCPBackendRef) {
+	for j := range backendRefs {
+		backendRef := &backendRefs[j]
+		if backendRef.Group == nil {
+			group := ""
+			backendRef.Group = &group
 		}
-		if rule.ConnectTimeout == nil {
-			timeout := avapigwv1alpha1.Duration("10s")
-			rule.ConnectTimeout = &timeout
+		if backendRef.Kind == nil {
+			kind := kindService
+			backendRef.Kind = &kind
 		}
-
-		// Default backend refs
-		for j := range rule.BackendRefs {
-			backendRef := &rule.BackendRefs[j]
-			if backendRef.Group == nil {
-				group := ""
-				backendRef.Group = &group
-			}
-			if backendRef.Kind == nil {
-				kind := kindService
-				backendRef.Kind = &kind
-			}
-			if backendRef.Weight == nil {
-				weight := int32(1)
-				backendRef.Weight = &weight
-			}
+		if backendRef.Weight == nil {
+			weight := int32(1)
+			backendRef.Weight = &weight
 		}
 	}
 }

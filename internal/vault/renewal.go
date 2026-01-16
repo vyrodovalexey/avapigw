@@ -105,53 +105,57 @@ func (m *TokenRenewalManager) renewalLoop(ctx context.Context) {
 
 // checkAndRenew checks if the token needs renewal and renews it if necessary.
 func (m *TokenRenewalManager) checkAndRenew(ctx context.Context) {
+	if !m.shouldRenewToken() {
+		return
+	}
+
+	if m.attemptRenewalWithRetries(ctx) {
+		return
+	}
+
+	m.attemptReauthentication(ctx)
+}
+
+// shouldRenewToken checks if the token needs renewal based on expiry threshold.
+func (m *TokenRenewalManager) shouldRenewToken() bool {
 	m.client.mu.RLock()
 	tokenExpiry := m.client.tokenExpiry
 	m.client.mu.RUnlock()
 
-	// If token doesn't expire, no need to renew
 	if tokenExpiry.IsZero() {
 		m.logger.Debug("Token does not expire, skipping renewal")
-		return
+		return false
 	}
 
-	// Check if token is about to expire
 	timeUntilExpiry := time.Until(tokenExpiry)
 	if timeUntilExpiry > m.config.RenewalThreshold {
 		m.logger.Debug("Token not yet due for renewal",
 			zap.Duration("timeUntilExpiry", timeUntilExpiry),
 			zap.Duration("threshold", m.config.RenewalThreshold),
 		)
-		return
+		return false
 	}
 
 	m.logger.Info("Token approaching expiry, attempting renewal",
 		zap.Duration("timeUntilExpiry", timeUntilExpiry),
 	)
+	return true
+}
 
-	// Attempt renewal with retries
+// attemptRenewalWithRetries attempts to renew the token with configured retries.
+// Returns true if renewal succeeded, false otherwise.
+func (m *TokenRenewalManager) attemptRenewalWithRetries(ctx context.Context) bool {
 	var lastErr error
 	for attempt := 0; attempt <= m.config.MaxRetries; attempt++ {
-		if attempt > 0 {
-			m.logger.Debug("Retrying token renewal",
-				zap.Int("attempt", attempt),
-				zap.Int("maxRetries", m.config.MaxRetries),
-			)
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-m.stopCh:
-				return
-			case <-time.After(m.config.RetryInterval):
-			}
+		if !m.waitForRetry(ctx, attempt) {
+			return false
 		}
 
 		err := m.client.RenewToken(ctx)
 		if err == nil {
 			m.logger.Info("Token renewed successfully")
 			UpdateTokenExpiry(m.client.tokenExpiry)
-			return
+			return true
 		}
 
 		lastErr = err
@@ -165,8 +169,32 @@ func (m *TokenRenewalManager) checkAndRenew(ctx context.Context) {
 		zap.Int("maxRetries", m.config.MaxRetries),
 		zap.Error(lastErr),
 	)
+	return false
+}
 
-	// If renewal fails, try to re-authenticate
+// waitForRetry waits before a retry attempt. Returns false if context is cancelled.
+func (m *TokenRenewalManager) waitForRetry(ctx context.Context, attempt int) bool {
+	if attempt == 0 {
+		return true
+	}
+
+	m.logger.Debug("Retrying token renewal",
+		zap.Int("attempt", attempt),
+		zap.Int("maxRetries", m.config.MaxRetries),
+	)
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-m.stopCh:
+		return false
+	case <-time.After(m.config.RetryInterval):
+		return true
+	}
+}
+
+// attemptReauthentication tries to re-authenticate after renewal failure.
+func (m *TokenRenewalManager) attemptReauthentication(ctx context.Context) {
 	m.logger.Info("Attempting re-authentication after renewal failure")
 	if err := m.client.Authenticate(ctx); err != nil {
 		m.logger.Error("Re-authentication failed", zap.Error(err))

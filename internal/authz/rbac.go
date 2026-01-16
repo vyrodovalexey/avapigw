@@ -286,71 +286,102 @@ func (c *ClaimCondition) Evaluate(subject *Subject, resource *Resource) bool {
 		return false
 	}
 
-	// Handle different value types
 	switch v := val.(type) {
 	case string:
-		for _, allowed := range c.Values {
-			if v == allowed {
-				return true
-			}
-		}
+		return c.evaluateStringClaim(v)
 	case []interface{}:
-		for _, item := range v {
-			if str, ok := item.(string); ok {
-				for _, allowed := range c.Values {
-					if str == allowed {
-						if c.MatchAny {
-							return true
-						}
-					}
-				}
-			}
-		}
-		if !c.MatchAny {
-			// Check if all values are present
-			for _, allowed := range c.Values {
-				found := false
-				for _, item := range v {
-					if str, ok := item.(string); ok && str == allowed {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return false
-				}
-			}
-			return true
-		}
+		return c.evaluateInterfaceSliceClaim(v)
 	case []string:
-		for _, item := range v {
-			for _, allowed := range c.Values {
-				if item == allowed {
-					if c.MatchAny {
-						return true
-					}
-				}
-			}
-		}
-		if !c.MatchAny {
-			// Check if all values are present
-			for _, allowed := range c.Values {
-				found := false
-				for _, item := range v {
-					if item == allowed {
-						found = true
-						break
-					}
-				}
-				if !found {
-					return false
-				}
-			}
-			return true
-		}
+		return c.evaluateStringSliceClaim(v)
 	}
 
 	return false
+}
+
+// evaluateStringClaim checks if a string claim matches any allowed value.
+func (c *ClaimCondition) evaluateStringClaim(v string) bool {
+	for _, allowed := range c.Values {
+		if v == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// evaluateInterfaceSliceClaim checks if an interface slice claim matches allowed values.
+func (c *ClaimCondition) evaluateInterfaceSliceClaim(v []interface{}) bool {
+	if c.MatchAny {
+		return c.matchAnyInterfaceSlice(v)
+	}
+	return c.matchAllInterfaceSlice(v)
+}
+
+// matchAnyInterfaceSlice returns true if any value in the slice matches an allowed value.
+func (c *ClaimCondition) matchAnyInterfaceSlice(v []interface{}) bool {
+	for _, item := range v {
+		if str, ok := item.(string); ok {
+			for _, allowed := range c.Values {
+				if str == allowed {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// matchAllInterfaceSlice returns true if all allowed values are present in the slice.
+func (c *ClaimCondition) matchAllInterfaceSlice(v []interface{}) bool {
+	for _, allowed := range c.Values {
+		found := false
+		for _, item := range v {
+			if str, ok := item.(string); ok && str == allowed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// evaluateStringSliceClaim checks if a string slice claim matches allowed values.
+func (c *ClaimCondition) evaluateStringSliceClaim(v []string) bool {
+	if c.MatchAny {
+		return c.matchAnyStringSlice(v)
+	}
+	return c.matchAllStringSlice(v)
+}
+
+// matchAnyStringSlice returns true if any value in the slice matches an allowed value.
+func (c *ClaimCondition) matchAnyStringSlice(v []string) bool {
+	for _, item := range v {
+		for _, allowed := range c.Values {
+			if item == allowed {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchAllStringSlice returns true if all allowed values are present in the slice.
+func (c *ClaimCondition) matchAllStringSlice(v []string) bool {
+	for _, allowed := range c.Values {
+		found := false
+		for _, item := range v {
+			if item == allowed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // RoleCondition checks if the subject has specific roles.
@@ -587,7 +618,26 @@ func (t *Target) Matches(resource *Resource) bool {
 		return false
 	}
 
-	// Compile patterns once
+	t.compilePatterns()
+
+	if !t.matchesMethods(resource.Method) {
+		return false
+	}
+	if !t.matchesPaths(resource.Path) {
+		return false
+	}
+	if !t.matchesHosts(resource.Host) {
+		return false
+	}
+	if !t.matchesPorts(resource.Port) {
+		return false
+	}
+
+	return true
+}
+
+// compilePatterns compiles path and host patterns once.
+func (t *Target) compilePatterns() {
 	t.once.Do(func() {
 		for _, path := range t.Paths {
 			if re, err := compilePattern(path); err == nil {
@@ -600,64 +650,58 @@ func (t *Target) Matches(resource *Resource) bool {
 			}
 		}
 	})
+}
 
-	// Check methods
-	if len(t.Methods) > 0 {
-		found := false
-		for _, method := range t.Methods {
-			if strings.EqualFold(method, resource.Method) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+// matchesMethods checks if the resource method matches any allowed method.
+func (t *Target) matchesMethods(method string) bool {
+	if len(t.Methods) == 0 {
+		return true
+	}
+	for _, m := range t.Methods {
+		if strings.EqualFold(m, method) {
+			return true
 		}
 	}
+	return false
+}
 
-	// Check paths
-	if len(t.compiledPaths) > 0 {
-		found := false
-		for _, re := range t.compiledPaths {
-			if re.MatchString(resource.Path) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+// matchesPaths checks if the resource path matches any compiled path pattern.
+func (t *Target) matchesPaths(path string) bool {
+	if len(t.compiledPaths) == 0 {
+		return true
+	}
+	for _, re := range t.compiledPaths {
+		if re.MatchString(path) {
+			return true
 		}
 	}
+	return false
+}
 
-	// Check hosts
-	if len(t.compiledHosts) > 0 {
-		found := false
-		for _, re := range t.compiledHosts {
-			if re.MatchString(resource.Host) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+// matchesHosts checks if the resource host matches any compiled host pattern.
+func (t *Target) matchesHosts(host string) bool {
+	if len(t.compiledHosts) == 0 {
+		return true
+	}
+	for _, re := range t.compiledHosts {
+		if re.MatchString(host) {
+			return true
 		}
 	}
+	return false
+}
 
-	// Check ports
-	if len(t.Ports) > 0 && resource.Port > 0 {
-		found := false
-		for _, port := range t.Ports {
-			if port == resource.Port {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
+// matchesPorts checks if the resource port matches any allowed port.
+func (t *Target) matchesPorts(port int) bool {
+	if len(t.Ports) == 0 || port <= 0 {
+		return true
+	}
+	for _, p := range t.Ports {
+		if p == port {
+			return true
 		}
 	}
-
-	return true
+	return false
 }
 
 // compilePattern compiles a pattern with wildcards to a regex.

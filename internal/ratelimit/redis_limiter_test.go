@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vyrodovalexey/avapigw/internal/circuitbreaker"
@@ -336,4 +337,408 @@ func BenchmarkRedisRateLimiter_PrefixKey(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = limiter.prefixKey("user:123:api:endpoint")
 	}
+}
+
+// TestNewRedisRateLimiter_WithMiniredis tests creating a Redis rate limiter with miniredis.
+func TestNewRedisRateLimiter_WithMiniredis(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmTokenBucket,
+		Requests:  10,
+		Window:    time.Second,
+		Burst:     5,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     true,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	require.NotNil(t, limiter)
+	defer limiter.Close()
+
+	assert.True(t, limiter.IsHealthy())
+}
+
+// TestNewRedisRateLimiter_NilConfig tests creating a Redis rate limiter with nil config.
+func TestNewRedisRateLimiter_NilConfig(t *testing.T) {
+	// This will fail because default config points to localhost:6379 which is not running
+	// We just verify it doesn't panic
+	_, err := NewRedisRateLimiter(nil)
+	assert.Error(t, err) // Expected to fail without Redis
+}
+
+// TestRedisRateLimiter_TokenBucket_WithMiniredis tests token bucket algorithm with miniredis.
+func TestRedisRateLimiter_TokenBucket_WithMiniredis(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmTokenBucket,
+		Requests:  10,
+		Window:    time.Second,
+		Burst:     5,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     false,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// First request should be allowed
+	result, err := limiter.Allow(ctx, "user:1")
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.Equal(t, 5, result.Limit) // Burst is the limit for token bucket
+
+	// Multiple requests should be allowed up to burst
+	for i := 0; i < 4; i++ {
+		result, err = limiter.Allow(ctx, "user:1")
+		require.NoError(t, err)
+		assert.True(t, result.Allowed)
+	}
+
+	// After burst is exhausted, requests should be denied
+	result, err = limiter.Allow(ctx, "user:1")
+	require.NoError(t, err)
+	assert.False(t, result.Allowed)
+}
+
+// TestRedisRateLimiter_SlidingWindow_WithMiniredis tests sliding window algorithm with miniredis.
+func TestRedisRateLimiter_SlidingWindow_WithMiniredis(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmSlidingWindow,
+		Requests:  5,
+		Window:    time.Second,
+		Precision: 10,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     false,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// First 5 requests should be allowed
+	for i := 0; i < 5; i++ {
+		result, err := limiter.Allow(ctx, "user:2")
+		require.NoError(t, err)
+		assert.True(t, result.Allowed, "request %d should be allowed", i+1)
+	}
+
+	// 6th request should be denied
+	result, err := limiter.Allow(ctx, "user:2")
+	require.NoError(t, err)
+	assert.False(t, result.Allowed)
+}
+
+// TestRedisRateLimiter_FixedWindow_WithMiniredis tests fixed window algorithm with miniredis.
+func TestRedisRateLimiter_FixedWindow_WithMiniredis(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmFixedWindow,
+		Requests:  5,
+		Window:    time.Second,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     false,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// First 5 requests should be allowed
+	for i := 0; i < 5; i++ {
+		result, err := limiter.Allow(ctx, "user:3")
+		require.NoError(t, err)
+		assert.True(t, result.Allowed, "request %d should be allowed", i+1)
+	}
+
+	// 6th request should be denied
+	result, err := limiter.Allow(ctx, "user:3")
+	require.NoError(t, err)
+	assert.False(t, result.Allowed)
+}
+
+// TestRedisRateLimiter_AllowN_WithMiniredis tests AllowN method with miniredis.
+func TestRedisRateLimiter_AllowN_WithMiniredis(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmTokenBucket,
+		Requests:  10,
+		Window:    time.Second,
+		Burst:     10,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     false,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// Request 5 tokens at once
+	result, err := limiter.AllowN(ctx, "user:4", 5)
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+
+	// Request 5 more tokens
+	result, err = limiter.AllowN(ctx, "user:4", 5)
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+
+	// Request 1 more token should fail
+	result, err = limiter.AllowN(ctx, "user:4", 1)
+	require.NoError(t, err)
+	assert.False(t, result.Allowed)
+}
+
+// TestRedisRateLimiter_Reset_WithMiniredis tests Reset method with miniredis.
+func TestRedisRateLimiter_Reset_WithMiniredis(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmFixedWindow, // Use fixed window for easier reset testing
+		Requests:  5,
+		Window:    time.Second,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     false,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// Exhaust the rate limit
+	for i := 0; i < 5; i++ {
+		_, err := limiter.Allow(ctx, "user:5")
+		require.NoError(t, err)
+	}
+
+	// Should be denied
+	result, err := limiter.Allow(ctx, "user:5")
+	require.NoError(t, err)
+	assert.False(t, result.Allowed)
+
+	// Reset the rate limit - this deletes the key
+	err = limiter.Reset(ctx, "user:5")
+	require.NoError(t, err)
+
+	// Note: For fixed window, the key includes the window timestamp,
+	// so Reset may not immediately allow new requests in the same window.
+	// We just verify Reset doesn't error.
+}
+
+// TestRedisRateLimiter_FallbackOnError tests fallback behavior when Redis fails.
+func TestRedisRateLimiter_FallbackOnError(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmTokenBucket,
+		Requests:  100, // High limit so fallback doesn't exhaust
+		Window:    time.Second,
+		Burst:     100,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     true,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// First request should work with Redis
+	result, err := limiter.Allow(ctx, "user:fallback")
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+
+	// Close miniredis to simulate failure
+	mr.Close()
+
+	// Requests should still work via fallback (even if Redis fails)
+	// The circuit breaker will eventually open and use fallback
+	var lastResult *Result
+	for i := 0; i < 15; i++ {
+		lastResult, err = limiter.Allow(ctx, "user:fallback:new")
+		// We don't check error here because some requests may fail before fallback kicks in
+	}
+
+	// After circuit breaker opens, fallback should be used
+	// The last result should be allowed (fallback has high limit)
+	require.NotNil(t, lastResult)
+	// Note: We can't guarantee the last request used fallback,
+	// but we verify the limiter doesn't panic and handles errors gracefully
+}
+
+// TestRedisRateLimiter_DefaultAlgorithm tests default algorithm selection.
+func TestRedisRateLimiter_DefaultAlgorithm(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: "unknown", // Unknown algorithm should default to token bucket
+		Requests:  10,
+		Window:    time.Second,
+		Burst:     5,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     false,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// Should work with default algorithm
+	result, err := limiter.Allow(ctx, "user:7")
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+}
+
+// TestRedisRateLimiter_MultipleKeys tests rate limiting with multiple keys.
+func TestRedisRateLimiter_MultipleKeys(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	config := &RedisRateLimiterConfig{
+		Algorithm: AlgorithmTokenBucket,
+		Requests:  10,
+		Window:    time.Second,
+		Burst:     2,
+		RedisConfig: &store.RedisConfig{
+			Address:           mr.Addr(),
+			Prefix:            "test:",
+			DialTimeout:       100 * time.Millisecond,
+			ReadTimeout:       100 * time.Millisecond,
+			WriteTimeout:      100 * time.Millisecond,
+			ConnectionRetries: 1,
+		},
+		FallbackEnabled:     false,
+		HealthCheckInterval: 100 * time.Millisecond,
+		Logger:              zap.NewNop(),
+	}
+
+	limiter, err := NewRedisRateLimiter(config)
+	require.NoError(t, err)
+	defer limiter.Close()
+
+	ctx := context.Background()
+
+	// Exhaust rate limit for user:a
+	for i := 0; i < 2; i++ {
+		_, err := limiter.Allow(ctx, "user:a")
+		require.NoError(t, err)
+	}
+
+	// user:a should be denied
+	result, err := limiter.Allow(ctx, "user:a")
+	require.NoError(t, err)
+	assert.False(t, result.Allowed)
+
+	// user:b should still be allowed (separate rate limit)
+	result, err = limiter.Allow(ctx, "user:b")
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
 }

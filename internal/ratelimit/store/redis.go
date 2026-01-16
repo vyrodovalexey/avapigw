@@ -135,6 +135,29 @@ func NewRedisStore(addr, password string, db int, prefix string) (*RedisStore, e
 // Uses exponential backoff with decorrelated jitter for connection retries
 // to prevent thundering herd problems.
 func NewRedisStoreWithConfig(config *RedisConfig) (*RedisStore, error) {
+	config, logger := normalizeRedisConfig(config)
+	client := createRedisClient(config)
+	connConfig := buildConnectionConfig(config)
+
+	store, err := connectWithRetry(client, config, connConfig, logger)
+	if err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+
+	return store, nil
+}
+
+// redisConnectionConfig holds normalized connection retry settings.
+type redisConnectionConfig struct {
+	maxRetries     int
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+	totalTimeout   time.Duration
+}
+
+// normalizeRedisConfig ensures config has all required defaults.
+func normalizeRedisConfig(config *RedisConfig) (*RedisConfig, *zap.Logger) {
 	if config == nil {
 		config = DefaultRedisConfig()
 	}
@@ -144,7 +167,12 @@ func NewRedisStoreWithConfig(config *RedisConfig) (*RedisStore, error) {
 		logger = zap.NewNop()
 	}
 
-	client := redis.NewClient(&redis.Options{
+	return config, logger
+}
+
+// createRedisClient creates a new Redis client with the given configuration.
+func createRedisClient(config *RedisConfig) *redis.Client {
+	return redis.NewClient(&redis.Options{
 		Addr:         config.Address,
 		Password:     config.Password,
 		DB:           config.DB,
@@ -155,8 +183,10 @@ func NewRedisStoreWithConfig(config *RedisConfig) (*RedisStore, error) {
 		ReadTimeout:  config.ReadTimeout,
 		WriteTimeout: config.WriteTimeout,
 	})
+}
 
-	// Test connection with exponential backoff
+// buildConnectionConfig creates normalized connection retry settings.
+func buildConnectionConfig(config *RedisConfig) *redisConnectionConfig {
 	maxRetries := config.ConnectionRetries
 	if maxRetries <= 0 {
 		maxRetries = 5
@@ -172,77 +202,119 @@ func NewRedisStoreWithConfig(config *RedisConfig) (*RedisStore, error) {
 		maxBackoff = 10 * time.Second
 	}
 
-	var lastErr error
-	backoff := newDecorrelatedJitterBackoff(initialBackoff, maxBackoff)
-
-	// Create a context with overall timeout for connection attempts
 	totalTimeout := time.Duration(maxRetries+1) * config.DialTimeout
 	if totalTimeout > 2*time.Minute {
 		totalTimeout = 2 * time.Minute
 	}
-	overallCtx, overallCancel := context.WithTimeout(context.Background(), totalTimeout)
+
+	return &redisConnectionConfig{
+		maxRetries:     maxRetries,
+		initialBackoff: initialBackoff,
+		maxBackoff:     maxBackoff,
+		totalTimeout:   totalTimeout,
+	}
+}
+
+// connectWithRetry attempts to connect to Redis with exponential backoff.
+func connectWithRetry(
+	client *redis.Client,
+	config *RedisConfig,
+	connConfig *redisConnectionConfig,
+	logger *zap.Logger,
+) (*RedisStore, error) {
+	backoff := newDecorrelatedJitterBackoff(connConfig.initialBackoff, connConfig.maxBackoff)
+
+	overallCtx, overallCancel := context.WithTimeout(context.Background(), connConfig.totalTimeout)
 	defer overallCancel()
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Check overall timeout
-		select {
-		case <-overallCtx.Done():
-			_ = client.Close()
-			return nil, fmt.Errorf("connection timeout exceeded: %w", overallCtx.Err())
-		default:
+	var lastErr error
+	for attempt := 0; attempt <= connConfig.maxRetries; attempt++ {
+		if err := overallCtx.Err(); err != nil {
+			return nil, fmt.Errorf("connection timeout exceeded: %w", err)
+		}
+
+		if store := tryConnect(overallCtx, client, config, logger, attempt); store != nil {
+			return store, nil
 		}
 
 		ctx, cancel := context.WithTimeout(overallCtx, config.DialTimeout)
-		err := client.Ping(ctx).Err()
+		lastErr = client.Ping(ctx).Err()
 		cancel()
 
-		if err == nil {
-			if attempt > 0 {
-				logger.Info("Redis connection established after retry",
-					zap.String("address", config.Address),
-					zap.Int("attempt", attempt+1),
-				)
-			}
-			return &RedisStore{
-				client: client,
-				prefix: config.Prefix,
-				logger: logger,
-			}, nil
-		}
-
-		lastErr = err
 		redisStoreConnectionErrors.Inc()
 
-		if attempt >= maxRetries {
+		if attempt >= connConfig.maxRetries {
 			break
 		}
 
-		// Calculate backoff with decorrelated jitter
-		wait := backoff.next(attempt)
-
-		logger.Debug("Redis connection failed, retrying",
-			zap.String("address", config.Address),
-			zap.Int("attempt", attempt+1),
-			zap.Int("max_retries", maxRetries),
-			zap.Duration("backoff", wait),
-			zap.Error(err),
+		retryErr := waitForConnectionRetry(
+			overallCtx, backoff, logger, config.Address, attempt, connConfig.maxRetries, lastErr,
 		)
-
-		redisStoreConnectionRetries.Inc()
-
-		// Sleep with context awareness
-		select {
-		case <-overallCtx.Done():
-			_ = client.Close()
-			return nil, fmt.Errorf("connection timeout exceeded during backoff: %w", overallCtx.Err())
-		case <-time.After(wait):
+		if retryErr != nil {
+			return nil, retryErr
 		}
 	}
 
-	// Close the client on failure
-	_ = client.Close()
+	return nil, fmt.Errorf("failed to connect to Redis after %d attempts: %w", connConfig.maxRetries+1, lastErr)
+}
 
-	return nil, fmt.Errorf("failed to connect to Redis after %d attempts: %w", maxRetries+1, lastErr)
+// tryConnect attempts a single connection to Redis.
+func tryConnect(
+	ctx context.Context,
+	client *redis.Client,
+	config *RedisConfig,
+	logger *zap.Logger,
+	attempt int,
+) *RedisStore {
+	pingCtx, cancel := context.WithTimeout(ctx, config.DialTimeout)
+	err := client.Ping(pingCtx).Err()
+	cancel()
+
+	if err != nil {
+		return nil
+	}
+
+	if attempt > 0 {
+		logger.Info("Redis connection established after retry",
+			zap.String("address", config.Address),
+			zap.Int("attempt", attempt+1),
+		)
+	}
+
+	return &RedisStore{
+		client: client,
+		prefix: config.Prefix,
+		logger: logger,
+	}
+}
+
+// waitForConnectionRetry waits before the next connection attempt.
+func waitForConnectionRetry(
+	ctx context.Context,
+	backoff *decorrelatedJitterBackoff,
+	logger *zap.Logger,
+	address string,
+	attempt, maxRetries int,
+	err error,
+) error {
+	wait := backoff.next(attempt)
+
+	logger.Debug("Redis connection failed, retrying",
+		zap.String("address", address),
+		zap.Int("attempt", attempt+1),
+		zap.Int("max_retries", maxRetries),
+		zap.Duration("backoff", wait),
+		zap.Error(err),
+	)
+
+	redisStoreConnectionRetries.Inc()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("connection timeout exceeded during backoff: %w", ctx.Err())
+	case <-time.After(wait):
+		return nil
+	}
 }
 
 // decorrelatedJitterBackoff implements AWS-style decorrelated jitter backoff
@@ -376,7 +448,12 @@ func (s *RedisStore) Increment(ctx context.Context, key string, delta int64) (in
 }
 
 // IncrementWithExpiry implements Store using a Lua script for atomicity.
-func (s *RedisStore) IncrementWithExpiry(ctx context.Context, key string, delta int64, expiration time.Duration) (int64, error) {
+func (s *RedisStore) IncrementWithExpiry(
+	ctx context.Context,
+	key string,
+	delta int64,
+	expiration time.Duration,
+) (int64, error) {
 	start := time.Now()
 
 	// Check for context cancellation before performing the operation

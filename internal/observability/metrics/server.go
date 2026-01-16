@@ -105,9 +105,22 @@ func (s *Server) WithRuntimeCollector(collector *RuntimeCollector) *Server {
 
 // Start starts the metrics server.
 func (s *Server) Start(ctx context.Context) error {
+	mux := s.setupRoutes()
+	s.setupServer(mux)
+	s.startCollectors()
+
+	s.logger.Info("starting metrics server",
+		zap.Int("port", s.config.Port),
+		zap.String("path", s.config.Path),
+	)
+
+	return s.runServer(ctx)
+}
+
+// setupRoutes configures HTTP routes for the metrics server.
+func (s *Server) setupRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Create handler options
 	handlerOpts := promhttp.HandlerOpts{
 		ErrorLog:            &zapErrorLogger{logger: s.logger},
 		ErrorHandling:       promhttp.ContinueOnError,
@@ -118,48 +131,49 @@ func (s *Server) Start(ctx context.Context) error {
 		EnableOpenMetrics:   true,
 	}
 
-	// Register metrics handler
-	mux.Handle(s.config.Path, promhttp.HandlerFor(
-		prometheus.DefaultGatherer,
-		handlerOpts,
-	))
+	mux.Handle(s.config.Path, promhttp.HandlerFor(prometheus.DefaultGatherer, handlerOpts))
+	mux.HandleFunc("/health", s.healthHandler)
+	mux.HandleFunc("/ready", s.readyHandler)
 
-	// Register health endpoint for the metrics server itself
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte("OK")); err != nil {
-			// Log but don't fail - this is a health check
-			s.logger.Debug("failed to write health response", zap.Error(err))
-		}
-	})
+	return mux
+}
 
-	// Register ready endpoint
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte("Ready")); err != nil {
-			s.logger.Debug("failed to write ready response", zap.Error(err))
-		}
-	})
+// healthHandler handles health check requests.
+func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("OK")); err != nil {
+		s.logger.Debug("failed to write health response", zap.Error(err))
+	}
+}
 
+// readyHandler handles readiness check requests.
+func (s *Server) readyHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("Ready")); err != nil {
+		s.logger.Debug("failed to write ready response", zap.Error(err))
+	}
+}
+
+// setupServer configures the HTTP server with the given handler.
+func (s *Server) setupServer(mux *http.ServeMux) {
 	s.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", s.config.Port),
 		Handler:      mux,
 		ReadTimeout:  s.config.ReadTimeout,
 		WriteTimeout: s.config.WriteTimeout,
 	}
+}
 
-	// Start periodic collection if collectors are set
+// startCollectors starts periodic metric collection if collectors are configured.
+func (s *Server) startCollectors() {
 	if s.collector != nil || s.runtime != nil {
 		s.collectTicker = time.NewTicker(10 * time.Second)
 		go s.collectLoop()
 	}
+}
 
-	s.logger.Info("starting metrics server",
-		zap.Int("port", s.config.Port),
-		zap.String("path", s.config.Path),
-	)
-
-	// Start server in goroutine
+// runServer starts the HTTP server and waits for shutdown.
+func (s *Server) runServer(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -167,7 +181,6 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Wait for context cancellation or error
 	select {
 	case <-ctx.Done():
 		return s.Stop(context.Background())

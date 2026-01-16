@@ -100,11 +100,30 @@ func NewLogger(config *Config) (*Logger, error) {
 		config = DefaultConfig()
 	}
 
-	// Create atomic level
 	level := zap.NewAtomicLevel()
 	level.SetLevel(parseLevel(config.Level))
 
-	// Create encoder config
+	encoderConfig := buildEncoderConfig(config)
+	encoder := buildEncoder(config.Format, encoderConfig)
+
+	output, err := buildOutput(config.Output)
+	if err != nil {
+		return nil, err
+	}
+
+	core := buildCore(encoder, output, level, config.Sampling)
+	opts := buildLoggerOptions(config)
+	zapLogger := zap.New(core, opts...)
+
+	return &Logger{
+		Logger: zapLogger,
+		config: config,
+		level:  level,
+	}, nil
+}
+
+// buildEncoderConfig creates the encoder configuration based on config settings.
+func buildEncoderConfig(config *Config) zapcore.EncoderConfig {
 	encoderConfig := zapcore.EncoderConfig{
 		TimeKey:        "timestamp",
 		LevelKey:       "level",
@@ -124,46 +143,57 @@ func NewLogger(config *Config) (*Logger, error) {
 		encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	}
 
-	// Create encoder
-	var encoder zapcore.Encoder
-	switch config.Format {
-	case FormatConsole:
-		encoder = zapcore.NewConsoleEncoder(encoderConfig)
-	default:
-		encoder = zapcore.NewJSONEncoder(encoderConfig)
-	}
+	return encoderConfig
+}
 
-	// Create output
-	var output zapcore.WriteSyncer
-	switch config.Output {
+// buildEncoder creates the appropriate encoder based on format.
+func buildEncoder(format Format, encoderConfig zapcore.EncoderConfig) zapcore.Encoder {
+	switch format {
+	case FormatConsole:
+		return zapcore.NewConsoleEncoder(encoderConfig)
+	default:
+		return zapcore.NewJSONEncoder(encoderConfig)
+	}
+}
+
+// buildOutput creates the output writer based on the output configuration.
+func buildOutput(outputPath string) (zapcore.WriteSyncer, error) {
+	switch outputPath {
 	case "stdout":
-		output = zapcore.AddSync(os.Stdout)
+		return zapcore.AddSync(os.Stdout), nil
 	case "stderr":
-		output = zapcore.AddSync(os.Stderr)
+		return zapcore.AddSync(os.Stderr), nil
 	default:
 		// G302: Log files need to be readable for log aggregation tools, 0o644 is intentional
-		file, err := os.OpenFile(config.Output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // log files need broader read permissions
+		//nolint:gosec // log files need broader read permissions
+		file, err := os.OpenFile(outputPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			return nil, err
 		}
-		output = zapcore.AddSync(file)
+		return zapcore.AddSync(file), nil
 	}
+}
 
-	// Create core
+// buildCore creates the zapcore.Core with optional sampling.
+func buildCore(
+	encoder zapcore.Encoder,
+	output zapcore.WriteSyncer,
+	level zap.AtomicLevel,
+	sampling *SamplingConfig,
+) zapcore.Core {
 	core := zapcore.NewCore(encoder, output, level)
 
-	// Apply sampling if configured
-	if config.Sampling != nil {
-		core = zapcore.NewSamplerWithOptions(
-			core,
-			1, // tick
-			config.Sampling.Initial,
-			config.Sampling.Thereafter,
-		)
+	if sampling != nil {
+		core = zapcore.NewSamplerWithOptions(core, 1, sampling.Initial, sampling.Thereafter)
 	}
 
-	// Build options
+	return core
+}
+
+// buildLoggerOptions creates zap options based on configuration.
+func buildLoggerOptions(config *Config) []zap.Option {
 	opts := []zap.Option{}
+
 	if !config.DisableCaller {
 		opts = append(opts, zap.AddCaller())
 	}
@@ -174,7 +204,6 @@ func NewLogger(config *Config) (*Logger, error) {
 		opts = append(opts, zap.Development())
 	}
 
-	// Add initial fields
 	if len(config.InitialFields) > 0 {
 		fields := make([]zap.Field, 0, len(config.InitialFields))
 		for k, v := range config.InitialFields {
@@ -183,14 +212,7 @@ func NewLogger(config *Config) (*Logger, error) {
 		opts = append(opts, zap.Fields(fields...))
 	}
 
-	// Create logger
-	zapLogger := zap.New(core, opts...)
-
-	return &Logger{
-		Logger: zapLogger,
-		config: config,
-		level:  level,
-	}, nil
+	return opts
 }
 
 // SetLevel sets the log level dynamically.

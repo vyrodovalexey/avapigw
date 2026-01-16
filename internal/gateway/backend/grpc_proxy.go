@@ -176,7 +176,12 @@ func (p *GRPCProxy) ProxyUnary(ctx context.Context, fullMethod string, req []byt
 }
 
 // ProxyStream proxies a streaming RPC call to the backend.
-func (p *GRPCProxy) ProxyStream(ctx context.Context, desc *grpc.StreamDesc, fullMethod string, backend *Backend) (grpc.ClientStream, error) {
+func (p *GRPCProxy) ProxyStream(
+	ctx context.Context,
+	desc *grpc.StreamDesc,
+	fullMethod string,
+	backend *Backend,
+) (grpc.ClientStream, error) {
 	conn, err := p.GetConnection(ctx, backend)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "failed to get connection: %v", err)
@@ -198,7 +203,12 @@ func (p *GRPCProxy) ProxyStream(ctx context.Context, desc *grpc.StreamDesc, full
 }
 
 // ProxyBidirectionalStream proxies a bidirectional streaming RPC call.
-func (p *GRPCProxy) ProxyBidirectionalStream(ctx context.Context, fullMethod string, backend *Backend, serverStream grpc.ServerStream) error {
+func (p *GRPCProxy) ProxyBidirectionalStream(
+	ctx context.Context,
+	fullMethod string,
+	backend *Backend,
+	serverStream grpc.ServerStream,
+) error {
 	conn, err := p.GetConnection(ctx, backend)
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "failed to get connection: %v", err)
