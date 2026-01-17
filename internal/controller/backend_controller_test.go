@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1264,6 +1265,721 @@ func TestBackendReconciler_findBackendsForService_CrossNamespace(t *testing.T) {
 		assert.Equal(t, "backend-1", requests[0].Name)
 		assert.Equal(t, "default", requests[0].Namespace)
 	})
+}
+
+// ============================================================================
+// BackendReconciler.handleReconcileError Tests
+// ============================================================================
+
+func TestBackendReconciler_handleReconcileError(t *testing.T) {
+	r := &BackendReconciler{}
+	r.initBaseComponents()
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-backend"
+
+	tests := []struct {
+		name           string
+		reconcileErr   *ReconcileError
+		validateResult func(t *testing.T, result ctrl.Result, err error)
+	}{
+		{
+			name: "validation error returns validation result",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeValidation,
+				Op:                 "validate",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          false,
+				UserActionRequired: true,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				// Validation errors should not requeue immediately
+				assert.False(t, result.Requeue)
+			},
+		},
+		{
+			name: "permanent error returns permanent result",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypePermanent,
+				Op:                 "reconcile",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          false,
+				UserActionRequired: true,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				// Permanent errors should not requeue
+				assert.False(t, result.Requeue)
+			},
+		},
+		{
+			name: "dependency error returns dependency result with backoff",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeDependency,
+				Op:                 "fetchDependency",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          true,
+				UserActionRequired: false,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				// Dependency errors should requeue with backoff
+				assert.True(t, result.RequeueAfter > 0)
+			},
+		},
+		{
+			name: "transient error returns transient result with backoff",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeTransient,
+				Op:                 "update",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          true,
+				UserActionRequired: false,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				// Transient errors should requeue with backoff
+				assert.True(t, result.RequeueAfter > 0)
+			},
+		},
+		{
+			name: "internal error returns transient result with backoff",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeInternal,
+				Op:                 "internal",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          true,
+				UserActionRequired: false,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				// Internal errors (default case) should requeue with backoff
+				assert.True(t, result.RequeueAfter > 0)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := r.handleReconcileError(tt.reconcileErr, strategy, resourceKey)
+			tt.validateResult(t, result, err)
+		})
+	}
+}
+
+// ============================================================================
+// BackendReconciler.extractEndpointsFromSlice Tests
+// ============================================================================
+
+func TestBackendReconciler_extractEndpointsFromSlice(t *testing.T) {
+	r := &BackendReconciler{}
+
+	tests := []struct {
+		name          string
+		slice         *discoveryv1.EndpointSlice
+		targetPort    int32
+		wantEndpoints int
+		wantHealthy   int
+	}{
+		{
+			name: "extracts ready endpoints",
+			slice: &discoveryv1.EndpointSlice{
+				Endpoints: []discoveryv1.Endpoint{
+					{
+						Addresses:  []string{"10.0.0.1", "10.0.0.2"},
+						Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+					},
+				},
+				Ports: []discoveryv1.EndpointPort{
+					{Port: ptrInt32(8080)},
+				},
+			},
+			targetPort:    8080,
+			wantEndpoints: 2,
+			wantHealthy:   2,
+		},
+		{
+			name: "skips not ready endpoints",
+			slice: &discoveryv1.EndpointSlice{
+				Endpoints: []discoveryv1.Endpoint{
+					{
+						Addresses:  []string{"10.0.0.1"},
+						Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+					},
+					{
+						Addresses:  []string{"10.0.0.2"},
+						Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(false)},
+					},
+				},
+				Ports: []discoveryv1.EndpointPort{
+					{Port: ptrInt32(8080)},
+				},
+			},
+			targetPort:    8080,
+			wantEndpoints: 1,
+			wantHealthy:   1,
+		},
+		{
+			name: "handles nil ready condition as ready",
+			slice: &discoveryv1.EndpointSlice{
+				Endpoints: []discoveryv1.Endpoint{
+					{
+						Addresses:  []string{"10.0.0.1"},
+						Conditions: discoveryv1.EndpointConditions{Ready: nil},
+					},
+				},
+				Ports: []discoveryv1.EndpointPort{
+					{Port: ptrInt32(8080)},
+				},
+			},
+			targetPort:    8080,
+			wantEndpoints: 1,
+			wantHealthy:   1,
+		},
+		{
+			name: "handles multiple addresses per endpoint",
+			slice: &discoveryv1.EndpointSlice{
+				Endpoints: []discoveryv1.Endpoint{
+					{
+						Addresses:  []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+						Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+					},
+				},
+				Ports: []discoveryv1.EndpointPort{
+					{Port: ptrInt32(8080)},
+				},
+			},
+			targetPort:    8080,
+			wantEndpoints: 3,
+			wantHealthy:   3,
+		},
+		{
+			name: "empty endpoints returns empty slice",
+			slice: &discoveryv1.EndpointSlice{
+				Endpoints: []discoveryv1.Endpoint{},
+				Ports: []discoveryv1.EndpointPort{
+					{Port: ptrInt32(8080)},
+				},
+			},
+			targetPort:    8080,
+			wantEndpoints: 0,
+			wantHealthy:   0,
+		},
+		{
+			name: "uses target port when no matching port found",
+			slice: &discoveryv1.EndpointSlice{
+				Endpoints: []discoveryv1.Endpoint{
+					{
+						Addresses:  []string{"10.0.0.1"},
+						Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+					},
+				},
+				Ports: []discoveryv1.EndpointPort{
+					{Port: ptrInt32(9090)}, // Different port
+				},
+			},
+			targetPort:    8080,
+			wantEndpoints: 1,
+			wantHealthy:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoints := r.extractEndpointsFromSlice(tt.slice, tt.targetPort)
+
+			assert.Len(t, endpoints, tt.wantEndpoints)
+
+			healthyCount := 0
+			for _, ep := range endpoints {
+				if ep.Healthy {
+					healthyCount++
+				}
+			}
+			assert.Equal(t, tt.wantHealthy, healthyCount)
+		})
+	}
+}
+
+// ============================================================================
+// BackendReconciler.findMatchingPort Tests
+// ============================================================================
+
+func TestBackendReconciler_findMatchingPort(t *testing.T) {
+	r := &BackendReconciler{}
+
+	tests := []struct {
+		name       string
+		ports      []discoveryv1.EndpointPort
+		targetPort int32
+		wantPort   int32
+	}{
+		{
+			name: "finds matching port",
+			ports: []discoveryv1.EndpointPort{
+				{Port: ptrInt32(8080)},
+				{Port: ptrInt32(9090)},
+			},
+			targetPort: 8080,
+			wantPort:   8080,
+		},
+		{
+			name: "returns target port when no match",
+			ports: []discoveryv1.EndpointPort{
+				{Port: ptrInt32(9090)},
+				{Port: ptrInt32(9091)},
+			},
+			targetPort: 8080,
+			wantPort:   8080,
+		},
+		{
+			name:       "returns target port for empty ports",
+			ports:      []discoveryv1.EndpointPort{},
+			targetPort: 8080,
+			wantPort:   8080,
+		},
+		{
+			name: "handles nil port in slice",
+			ports: []discoveryv1.EndpointPort{
+				{Port: nil},
+				{Port: ptrInt32(8080)},
+			},
+			targetPort: 8080,
+			wantPort:   8080,
+		},
+		{
+			name: "returns target port when all ports are nil",
+			ports: []discoveryv1.EndpointPort{
+				{Port: nil},
+				{Port: nil},
+			},
+			targetPort: 8080,
+			wantPort:   8080,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			port := r.findMatchingPort(tt.ports, tt.targetPort)
+			assert.Equal(t, tt.wantPort, port)
+		})
+	}
+}
+
+// ============================================================================
+// BackendReconciler.setEndpointHealthConditions Tests
+// ============================================================================
+
+func TestBackendReconciler_setEndpointHealthConditions(t *testing.T) {
+	r := &BackendReconciler{}
+
+	tests := []struct {
+		name              string
+		totalEndpoints    int32
+		healthyEndpoints  int32
+		healthyCount      int32
+		expectedPhase     avapigwv1alpha1.PhaseStatus
+		expectedCondition metav1.ConditionStatus
+		expectedReason    string
+	}{
+		{
+			name:              "no endpoints - Error phase",
+			totalEndpoints:    0,
+			healthyEndpoints:  0,
+			healthyCount:      0,
+			expectedPhase:     avapigwv1alpha1.PhaseStatusError,
+			expectedCondition: metav1.ConditionFalse,
+			expectedReason:    string(avapigwv1alpha1.ReasonNotReady),
+		},
+		{
+			name:              "no healthy endpoints - Degraded phase",
+			totalEndpoints:    3,
+			healthyEndpoints:  0,
+			healthyCount:      0,
+			expectedPhase:     avapigwv1alpha1.PhaseStatusDegraded,
+			expectedCondition: metav1.ConditionFalse,
+			expectedReason:    string(avapigwv1alpha1.ReasonDegraded),
+		},
+		{
+			name:              "partial healthy endpoints - Degraded phase with True condition",
+			totalEndpoints:    3,
+			healthyEndpoints:  2,
+			healthyCount:      2,
+			expectedPhase:     avapigwv1alpha1.PhaseStatusDegraded,
+			expectedCondition: metav1.ConditionTrue,
+			expectedReason:    string(avapigwv1alpha1.ReasonDegraded),
+		},
+		{
+			name:              "all endpoints healthy - Ready phase",
+			totalEndpoints:    3,
+			healthyEndpoints:  3,
+			healthyCount:      3,
+			expectedPhase:     avapigwv1alpha1.PhaseStatusReady,
+			expectedCondition: metav1.ConditionTrue,
+			expectedReason:    string(avapigwv1alpha1.ReasonReady),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &avapigwv1alpha1.Backend{
+				Status: avapigwv1alpha1.BackendStatus{
+					TotalEndpoints:   tt.totalEndpoints,
+					HealthyEndpoints: tt.healthyEndpoints,
+				},
+			}
+
+			r.setEndpointHealthConditions(backend, tt.healthyCount)
+
+			assert.Equal(t, tt.expectedPhase, backend.Status.Phase)
+
+			readyCondition := backend.Status.GetCondition(avapigwv1alpha1.ConditionTypeReady)
+			require.NotNil(t, readyCondition)
+			assert.Equal(t, tt.expectedCondition, readyCondition.Status)
+			assert.Equal(t, tt.expectedReason, readyCondition.Reason)
+
+			// Verify ResolvedRefs condition is always set to True
+			resolvedRefsCondition := backend.Status.GetCondition(avapigwv1alpha1.ConditionTypeResolvedRefs)
+			require.NotNil(t, resolvedRefsCondition)
+			assert.Equal(t, metav1.ConditionTrue, resolvedRefsCondition.Status)
+		})
+	}
+}
+
+// ============================================================================
+// BackendReconciler.discoverFromEndpointSlices Tests
+// ============================================================================
+
+func TestBackendReconciler_discoverFromEndpointSlices(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name          string
+		objects       []client.Object
+		namespace     string
+		serviceRef    *avapigwv1alpha1.ServiceRef
+		wantEndpoints int
+		wantFound     bool
+	}{
+		{
+			name: "discovers endpoints from EndpointSlices",
+			objects: []client.Object{
+				&discoveryv1.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-service-abc",
+						Namespace: "default",
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "test-service",
+						},
+					},
+					Endpoints: []discoveryv1.Endpoint{
+						{
+							Addresses:  []string{"10.0.0.1", "10.0.0.2"},
+							Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+						},
+					},
+					Ports: []discoveryv1.EndpointPort{
+						{Port: ptrInt32(8080)},
+					},
+				},
+			},
+			namespace: "default",
+			serviceRef: &avapigwv1alpha1.ServiceRef{
+				Name: "test-service",
+				Port: 8080,
+			},
+			wantEndpoints: 2,
+			wantFound:     true,
+		},
+		{
+			name: "discovers endpoints from multiple EndpointSlices",
+			objects: []client.Object{
+				&discoveryv1.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-service-abc",
+						Namespace: "default",
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "test-service",
+						},
+					},
+					Endpoints: []discoveryv1.Endpoint{
+						{
+							Addresses:  []string{"10.0.0.1"},
+							Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+						},
+					},
+					Ports: []discoveryv1.EndpointPort{
+						{Port: ptrInt32(8080)},
+					},
+				},
+				&discoveryv1.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-service-def",
+						Namespace: "default",
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "test-service",
+						},
+					},
+					Endpoints: []discoveryv1.Endpoint{
+						{
+							Addresses:  []string{"10.0.0.2", "10.0.0.3"},
+							Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+						},
+					},
+					Ports: []discoveryv1.EndpointPort{
+						{Port: ptrInt32(8080)},
+					},
+				},
+			},
+			namespace: "default",
+			serviceRef: &avapigwv1alpha1.ServiceRef{
+				Name: "test-service",
+				Port: 8080,
+			},
+			wantEndpoints: 3,
+			wantFound:     true,
+		},
+		{
+			name:      "returns false when no EndpointSlices found",
+			objects:   []client.Object{},
+			namespace: "default",
+			serviceRef: &avapigwv1alpha1.ServiceRef{
+				Name: "test-service",
+				Port: 8080,
+			},
+			wantEndpoints: 0,
+			wantFound:     false,
+		},
+		{
+			name: "returns false when EndpointSlices for different service",
+			objects: []client.Object{
+				&discoveryv1.EndpointSlice{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-service-abc",
+						Namespace: "default",
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "other-service",
+						},
+					},
+					Endpoints: []discoveryv1.Endpoint{
+						{
+							Addresses:  []string{"10.0.0.1"},
+							Conditions: discoveryv1.EndpointConditions{Ready: ptrBool(true)},
+						},
+					},
+					Ports: []discoveryv1.EndpointPort{
+						{Port: ptrInt32(8080)},
+					},
+				},
+			},
+			namespace: "default",
+			serviceRef: &avapigwv1alpha1.ServiceRef{
+				Name: "test-service",
+				Port: 8080,
+			},
+			wantEndpoints: 0,
+			wantFound:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			r := newBackendReconciler(cl, scheme)
+
+			endpoints, found := r.discoverFromEndpointSlices(context.Background(), tt.namespace, tt.serviceRef)
+
+			assert.Equal(t, tt.wantFound, found)
+			assert.Len(t, endpoints, tt.wantEndpoints)
+		})
+	}
+}
+
+// ============================================================================
+// BackendReconciler.fetchBackend Tests
+// ============================================================================
+
+func TestBackendReconciler_fetchBackend(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name        string
+		objects     []client.Object
+		request     ctrl.Request
+		wantBackend bool
+		wantErr     bool
+	}{
+		{
+			name: "successfully fetches backend",
+			objects: []client.Object{
+				&avapigwv1alpha1.Backend{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-backend",
+						Namespace: "default",
+					},
+				},
+			},
+			request: ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      "test-backend",
+					Namespace: "default",
+				},
+			},
+			wantBackend: true,
+			wantErr:     false,
+		},
+		{
+			name:    "returns nil for not found",
+			objects: []client.Object{},
+			request: ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      "non-existent",
+					Namespace: "default",
+				},
+			},
+			wantBackend: false,
+			wantErr:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			r := newBackendReconciler(cl, scheme)
+			strategy := DefaultRequeueStrategy()
+			resourceKey := tt.request.String()
+
+			backend, _, err := r.fetchBackend(context.Background(), tt.request, strategy, resourceKey)
+
+			if tt.wantErr {
+				assert.NotNil(t, err)
+			} else {
+				assert.Nil(t, err)
+			}
+
+			if tt.wantBackend {
+				assert.NotNil(t, backend)
+			} else {
+				assert.Nil(t, backend)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// BackendReconciler.ensureFinalizerAndReconcileBackend Tests
+// ============================================================================
+
+func TestBackendReconciler_ensureFinalizerAndReconcileBackend(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tests := []struct {
+		name           string
+		backend        *avapigwv1alpha1.Backend
+		wantErr        bool
+		validateResult func(t *testing.T, result ctrl.Result)
+		validate       func(t *testing.T, cl client.Client)
+	}{
+		{
+			name: "adds finalizer when not present",
+			backend: &avapigwv1alpha1.Backend{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-backend",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.BackendSpec{
+					Endpoints: []avapigwv1alpha1.EndpointConfig{
+						{Address: "10.0.0.1", Port: 8080},
+					},
+				},
+			},
+			wantErr: false,
+			validateResult: func(t *testing.T, result ctrl.Result) {
+				assert.True(t, result.Requeue)
+			},
+			validate: func(t *testing.T, cl client.Client) {
+				backend := &avapigwv1alpha1.Backend{}
+				err := cl.Get(context.Background(), types.NamespacedName{Name: "test-backend", Namespace: "default"}, backend)
+				require.NoError(t, err)
+				assert.Contains(t, backend.Finalizers, backendFinalizer)
+			},
+		},
+		{
+			name: "reconciles when finalizer present",
+			backend: &avapigwv1alpha1.Backend{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-backend",
+					Namespace:  "default",
+					Finalizers: []string{backendFinalizer},
+				},
+				Spec: avapigwv1alpha1.BackendSpec{
+					Endpoints: []avapigwv1alpha1.EndpointConfig{
+						{Address: "10.0.0.1", Port: 8080},
+					},
+				},
+			},
+			wantErr: false,
+			validateResult: func(t *testing.T, result ctrl.Result) {
+				assert.True(t, result.RequeueAfter > 0)
+			},
+			validate: func(t *testing.T, cl client.Client) {
+				backend := &avapigwv1alpha1.Backend{}
+				err := cl.Get(context.Background(), types.NamespacedName{Name: "test-backend", Namespace: "default"}, backend)
+				require.NoError(t, err)
+				assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, backend.Status.Phase)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.backend).
+				WithStatusSubresource(&avapigwv1alpha1.Backend{}).
+				Build()
+
+			r := newBackendReconciler(cl, scheme)
+			r.initBaseComponents()
+			strategy := DefaultRequeueStrategy()
+			resourceKey := client.ObjectKeyFromObject(tt.backend).String()
+
+			// Fetch the backend to get the version from the fake client
+			fetchedBackend := &avapigwv1alpha1.Backend{}
+			err := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.backend), fetchedBackend)
+			require.NoError(t, err)
+
+			var reconcileErr *ReconcileError
+			result, err := r.ensureFinalizerAndReconcileBackend(context.Background(), fetchedBackend, strategy, resourceKey, &reconcileErr)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			if tt.validateResult != nil {
+				tt.validateResult(t, result)
+			}
+
+			if tt.validate != nil {
+				tt.validate(t, cl)
+			}
+		})
+	}
 }
 
 // ============================================================================

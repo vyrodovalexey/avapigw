@@ -466,3 +466,213 @@ func TestTLSVersionToInt(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// Additional TLSConfig Webhook Tests for Coverage
+// ============================================================================
+
+func TestTLSConfigWebhook_ValidateReferences(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid TLSConfig with secret in different namespace", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-cert", Namespace: "other-ns"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret).Build()
+
+		otherNs := "other-ns"
+		config := &avapigwv1alpha1.TLSConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-config", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSConfigSpec{
+				CertificateSource: avapigwv1alpha1.CertificateSource{
+					Secret: &avapigwv1alpha1.SecretCertificateSource{
+						Name:      "tls-cert",
+						Namespace: &otherNs,
+					},
+				},
+			},
+		}
+
+		webhook := &TLSConfigWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTLSConfigDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), config)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid TLSConfig with missing secret", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		config := &avapigwv1alpha1.TLSConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-config", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSConfigSpec{
+				CertificateSource: avapigwv1alpha1.CertificateSource{
+					Secret: &avapigwv1alpha1.SecretCertificateSource{
+						Name: "missing-tls-cert",
+					},
+				},
+			},
+		}
+
+		webhook := &TLSConfigWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTLSConfigDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), config)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.certificateSource.secret")
+	})
+
+	t.Run("valid TLSConfig with client validation CA certificate", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-cert", Namespace: "default"},
+		}
+		caSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "ca-cert", Namespace: "default"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret, caSecret).Build()
+
+		enabled := true
+		config := &avapigwv1alpha1.TLSConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-config", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSConfigSpec{
+				CertificateSource: avapigwv1alpha1.CertificateSource{
+					Secret: &avapigwv1alpha1.SecretCertificateSource{
+						Name: "tls-cert",
+					},
+				},
+				ClientValidation: &avapigwv1alpha1.ClientValidationConfig{
+					Enabled: &enabled,
+					CACertificateRef: &avapigwv1alpha1.SecretObjectReference{
+						Name: "ca-cert",
+					},
+				},
+			},
+		}
+
+		webhook := &TLSConfigWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTLSConfigDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), config)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid TLSConfig with missing CA certificate", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-cert", Namespace: "default"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret).Build()
+
+		enabled := true
+		config := &avapigwv1alpha1.TLSConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-config", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSConfigSpec{
+				CertificateSource: avapigwv1alpha1.CertificateSource{
+					Secret: &avapigwv1alpha1.SecretCertificateSource{
+						Name: "tls-cert",
+					},
+				},
+				ClientValidation: &avapigwv1alpha1.ClientValidationConfig{
+					Enabled: &enabled,
+					CACertificateRef: &avapigwv1alpha1.SecretObjectReference{
+						Name: "missing-ca-cert",
+					},
+				},
+			},
+		}
+
+		webhook := &TLSConfigWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTLSConfigDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), config)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.clientValidation.caCertificateRef")
+	})
+
+	t.Run("valid TLSConfig with trusted CAs", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-cert", Namespace: "default"},
+		}
+		trustedCA := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "trusted-ca", Namespace: "default"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret, trustedCA).Build()
+
+		enabled := true
+		config := &avapigwv1alpha1.TLSConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-config", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSConfigSpec{
+				CertificateSource: avapigwv1alpha1.CertificateSource{
+					Secret: &avapigwv1alpha1.SecretCertificateSource{
+						Name: "tls-cert",
+					},
+				},
+				ClientValidation: &avapigwv1alpha1.ClientValidationConfig{
+					Enabled: &enabled,
+					TrustedCAs: []avapigwv1alpha1.SecretObjectReference{{
+						Name: "trusted-ca",
+					}},
+				},
+			},
+		}
+
+		webhook := &TLSConfigWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTLSConfigDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), config)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid TLSConfig with missing trusted CA", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-cert", Namespace: "default"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret).Build()
+
+		enabled := true
+		config := &avapigwv1alpha1.TLSConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-config", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSConfigSpec{
+				CertificateSource: avapigwv1alpha1.CertificateSource{
+					Secret: &avapigwv1alpha1.SecretCertificateSource{
+						Name: "tls-cert",
+					},
+				},
+				ClientValidation: &avapigwv1alpha1.ClientValidationConfig{
+					Enabled: &enabled,
+					TrustedCAs: []avapigwv1alpha1.SecretObjectReference{{
+						Name: "missing-trusted-ca",
+					}},
+				},
+			},
+		}
+
+		webhook := &TLSConfigWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTLSConfigDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), config)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.clientValidation.trustedCAs")
+	})
+}

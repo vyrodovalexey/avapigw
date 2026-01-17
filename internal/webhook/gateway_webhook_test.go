@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -692,4 +693,253 @@ func TestValidateHostname_EdgeCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ============================================================================
+// Additional Gateway Webhook Tests for Coverage
+// ============================================================================
+
+func TestGatewayWebhook_ValidateAddressesSyntax(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	t.Run("valid gateway with IP address", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		addrType := avapigwv1alpha1.AddressTypeIPAddress
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+				Addresses: []avapigwv1alpha1.GatewayAddress{{
+					Type:  &addrType,
+					Value: "192.168.1.1",
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid gateway with invalid IP address", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		addrType := avapigwv1alpha1.AddressTypeIPAddress
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+				Addresses: []avapigwv1alpha1.GatewayAddress{{
+					Type:  &addrType,
+					Value: "invalid-ip",
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid IP address")
+	})
+}
+
+func TestGatewayWebhook_ValidateReferences(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid gateway with TLSConfig reference", func(t *testing.T) {
+		tlsConfig := &avapigwv1alpha1.TLSConfig{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-config", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSConfigSpec{
+				CertificateSource: avapigwv1alpha1.CertificateSource{
+					Secret: &avapigwv1alpha1.SecretCertificateSource{
+						Name: "tls-cert",
+					},
+				},
+			},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsConfig).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{{
+							Name: "tls-config",
+						}},
+					},
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.NoError(t, err)
+	})
+
+	t.Run("valid gateway with Secret reference", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-secret", Namespace: "default"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{{
+							Name: "tls-secret",
+						}},
+					},
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid gateway with missing certificate reference", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{{
+							Name: "missing-cert",
+						}},
+					},
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("valid gateway with cross-namespace certificate reference", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-secret", Namespace: "other-ns"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret).Build()
+
+		otherNs := "other-ns"
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{{
+							Name:      "tls-secret",
+							Namespace: &otherNs,
+						}},
+					},
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.NoError(t, err)
+	})
+}
+
+func TestGatewayWebhook_ValidateListenerHostname(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	t.Run("invalid listener with invalid hostname", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		invalidHostname := avapigwv1alpha1.Hostname("invalid_hostname")
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+					Hostname: &invalidHostname,
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid hostname")
+	})
 }

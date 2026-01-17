@@ -936,3 +936,278 @@ func TestGRPCRouteReconciler_getRequeueStrategy_InitializesDefault(t *testing.T)
 	require.NotNil(t, strategy)
 	assert.NotNil(t, strategy.config)
 }
+
+// ============================================================================
+// GRPCRouteReconciler.handleGRPCRouteReconcileError Tests
+// ============================================================================
+
+func TestGRPCRouteReconciler_handleGRPCRouteReconcileError(t *testing.T) {
+	tests := []struct {
+		name          string
+		errorType     ErrorType
+		expectRequeue bool
+	}{
+		{
+			name:          "validation error",
+			errorType:     ErrorTypeValidation,
+			expectRequeue: false,
+		},
+		{
+			name:          "permanent error",
+			errorType:     ErrorTypePermanent,
+			expectRequeue: false,
+		},
+		{
+			name:          "dependency error",
+			errorType:     ErrorTypeDependency,
+			expectRequeue: true,
+		},
+		{
+			name:          "transient error",
+			errorType:     ErrorTypeTransient,
+			expectRequeue: true,
+		},
+		{
+			name:          "internal error",
+			errorType:     ErrorTypeInternal,
+			expectRequeue: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &GRPCRouteReconciler{}
+			strategy := DefaultRequeueStrategy()
+			resourceKey := "default/test-route"
+
+			reconcileErr := &ReconcileError{
+				Type:      tt.errorType,
+				Op:        "test",
+				Resource:  resourceKey,
+				Err:       assert.AnError,
+				Retryable: tt.expectRequeue,
+			}
+
+			result, err := r.handleGRPCRouteReconcileError(reconcileErr, strategy, resourceKey)
+
+			assert.Error(t, err)
+			assert.Equal(t, tt.expectRequeue, result.Requeue)
+			assert.True(t, result.RequeueAfter > 0)
+		})
+	}
+}
+
+// ============================================================================
+// GRPCRouteReconciler.fetchGRPCRoute Tests
+// ============================================================================
+
+func TestGRPCRouteReconciler_fetchGRPCRoute(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	t.Run("success - route found", func(t *testing.T) {
+		route := &avapigwv1alpha1.GRPCRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route).
+			Build()
+
+		r := newGRPCRouteReconciler(cl, scheme)
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		fetchedRoute, result, reconcileErr := r.fetchGRPCRoute(context.Background(), req, strategy, resourceKey)
+
+		assert.Nil(t, reconcileErr)
+		assert.NotNil(t, fetchedRoute)
+		assert.True(t, result.IsZero())
+		assert.Equal(t, "test-route", fetchedRoute.Name)
+	})
+
+	t.Run("not found - returns nil route", func(t *testing.T) {
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			Build()
+
+		r := newGRPCRouteReconciler(cl, scheme)
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/non-existent"
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "non-existent",
+				Namespace: "default",
+			},
+		}
+
+		fetchedRoute, result, reconcileErr := r.fetchGRPCRoute(context.Background(), req, strategy, resourceKey)
+
+		assert.Nil(t, reconcileErr)
+		assert.Nil(t, fetchedRoute)
+		assert.True(t, result.IsZero())
+	})
+
+	t.Run("get error - returns error", func(t *testing.T) {
+		// Use an error client that returns errors on Get
+		cl := &errorClient{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+			getErr: assert.AnError,
+		}
+
+		r := &GRPCRouteReconciler{
+			Client:   cl,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(100),
+		}
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		fetchedRoute, result, reconcileErr := r.fetchGRPCRoute(context.Background(), req, strategy, resourceKey)
+
+		assert.NotNil(t, reconcileErr)
+		assert.Nil(t, fetchedRoute)
+		assert.True(t, result.RequeueAfter > 0)
+	})
+}
+
+// ============================================================================
+// GRPCRouteReconciler.ensureFinalizerAndReconcileGRPCRoute Tests
+// ============================================================================
+
+func TestGRPCRouteReconciler_ensureFinalizerAndReconcileGRPCRoute(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	t.Run("adds finalizer when not present", func(t *testing.T) {
+		route := &avapigwv1alpha1.GRPCRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route).
+			WithStatusSubresource(&avapigwv1alpha1.GRPCRoute{}).
+			Build()
+
+		r := newGRPCRouteReconciler(cl, scheme)
+		r.initBaseComponents()
+
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+		var reconcileErr *ReconcileError
+
+		result, err := r.ensureFinalizerAndReconcileGRPCRoute(context.Background(), route, strategy, resourceKey, &reconcileErr)
+
+		assert.NoError(t, err)
+		assert.True(t, result.Requeue)
+	})
+
+	t.Run("reconciles when finalizer present", func(t *testing.T) {
+		route := &avapigwv1alpha1.GRPCRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-route",
+				Namespace:  "default",
+				Finalizers: []string{grpcRouteFinalizer},
+			},
+			Spec: avapigwv1alpha1.GRPCRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "test-gateway"},
+				},
+			},
+		}
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gateway",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{
+					{Name: "grpc", Port: 50051, Protocol: avapigwv1alpha1.ProtocolGRPC},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route, gateway).
+			WithStatusSubresource(&avapigwv1alpha1.GRPCRoute{}).
+			Build()
+
+		r := newGRPCRouteReconciler(cl, scheme)
+		r.initBaseComponents()
+
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+		var reconcileErr *ReconcileError
+
+		result, err := r.ensureFinalizerAndReconcileGRPCRoute(context.Background(), route, strategy, resourceKey, &reconcileErr)
+
+		assert.NoError(t, err)
+		assert.True(t, result.RequeueAfter > 0)
+	})
+
+	t.Run("handles reconcile error", func(t *testing.T) {
+		route := &avapigwv1alpha1.GRPCRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-route",
+				Namespace:  "default",
+				Finalizers: []string{grpcRouteFinalizer},
+			},
+			Spec: avapigwv1alpha1.GRPCRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "test-gateway"},
+				},
+			},
+		}
+
+		// Use an error client that returns errors on Status().Update()
+		baseCl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route).
+			WithStatusSubresource(&avapigwv1alpha1.GRPCRoute{}).
+			Build()
+
+		cl := &statusUpdateErrorClient{
+			Client:    baseCl,
+			updateErr: assert.AnError,
+		}
+
+		r := &GRPCRouteReconciler{
+			Client:   cl,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(100),
+		}
+		r.initBaseComponents()
+
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+		var reconcileErr *ReconcileError
+
+		result, err := r.ensureFinalizerAndReconcileGRPCRoute(context.Background(), route, strategy, resourceKey, &reconcileErr)
+
+		assert.Error(t, err)
+		assert.True(t, result.RequeueAfter > 0)
+	})
+}

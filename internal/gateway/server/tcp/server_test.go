@@ -1004,3 +1004,739 @@ func TestServer_ShutdownTimeoutHandling(t *testing.T) {
 		assert.NoError(t, err)
 	})
 }
+
+func TestShouldContinueOnError(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("returns true for timeout error", func(t *testing.T) {
+		ctx := context.Background()
+		stopCh := make(chan struct{})
+
+		// Create a timeout error
+		timeoutErr := &mockTimeoutError{timeout: true}
+
+		result := shouldContinueOnError(timeoutErr, ctx, stopCh, logger)
+
+		assert.True(t, result)
+	})
+
+	t.Run("returns false when context is done", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+		stopCh := make(chan struct{})
+
+		err := &mockTimeoutError{timeout: false}
+
+		result := shouldContinueOnError(err, ctx, stopCh, logger)
+
+		assert.False(t, result)
+	})
+
+	t.Run("returns false when stop channel is closed", func(t *testing.T) {
+		ctx := context.Background()
+		stopCh := make(chan struct{})
+		close(stopCh)
+
+		err := &mockTimeoutError{timeout: false}
+
+		result := shouldContinueOnError(err, ctx, stopCh, logger)
+
+		assert.False(t, result)
+	})
+
+	t.Run("returns true for other errors and logs", func(t *testing.T) {
+		ctx := context.Background()
+		stopCh := make(chan struct{})
+
+		err := &mockTimeoutError{timeout: false}
+
+		result := shouldContinueOnError(err, ctx, stopCh, logger)
+
+		assert.True(t, result)
+	})
+}
+
+// mockTimeoutError implements net.Error for testing
+type mockTimeoutError struct {
+	timeout bool
+}
+
+func (e *mockTimeoutError) Error() string   { return "mock error" }
+func (e *mockTimeoutError) Timeout() bool   { return e.timeout }
+func (e *mockTimeoutError) Temporary() bool { return false }
+
+func TestServer_checkShutdown(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("returns nil when context is active and stop channel is open", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		ctx := context.Background()
+
+		err := server.checkShutdown(ctx)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("returns context error when context is cancelled", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := server.checkShutdown(ctx)
+
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("returns nil when stop channel is closed", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		close(server.stopCh)
+		ctx := context.Background()
+
+		err := server.checkShutdown(ctx)
+
+		assert.NoError(t, err)
+	})
+}
+
+func TestServer_handleAcceptShutdown(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("returns context error when context is cancelled", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := server.handleAcceptShutdown(ctx)
+
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("returns nil when stop channel is closed", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		close(server.stopCh)
+		ctx := context.Background()
+
+		err := server.handleAcceptShutdown(ctx)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("returns nil when neither is triggered", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		ctx := context.Background()
+
+		err := server.handleAcceptShutdown(ctx)
+
+		assert.NoError(t, err)
+	})
+}
+
+func TestServer_closeListener(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("handles nil listener", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		server.listener = nil
+
+		// Should not panic
+		server.closeListener()
+	})
+
+	t.Run("closes listener and logs error on failure", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		server.listener = &mockListenerWithError{}
+
+		// Should not panic
+		server.closeListener()
+	})
+
+	t.Run("closes listener successfully", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+
+		server := NewServer(nil, logger)
+		server.listener = listener
+
+		server.closeListener()
+
+		// Verify listener is closed by trying to accept
+		_, err = listener.Accept()
+		assert.Error(t, err)
+	})
+}
+
+// mockListenerWithError returns an error on Close
+type mockListenerWithError struct{}
+
+func (m *mockListenerWithError) Accept() (net.Conn, error) {
+	return nil, nil
+}
+
+func (m *mockListenerWithError) Close() error {
+	return net.ErrClosed
+}
+
+func (m *mockListenerWithError) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8080}
+}
+
+func TestServer_handleShutdownTimeout(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("closes all connections and waits", func(t *testing.T) {
+		config := &ServerConfig{
+			Port:           0,
+			Address:        "127.0.0.1",
+			MaxConnections: 10,
+		}
+		server := NewServer(config, logger)
+
+		// Add some connections to the tracker
+		for i := 0; i < 3; i++ {
+			s, c := net.Pipe()
+			defer s.Close()
+			defer c.Close()
+			server.connections.Add(c)
+		}
+
+		// Should not panic and should close connections
+		server.handleShutdownTimeout()
+
+		// Connections should be closed
+		assert.Equal(t, 3, server.connections.Count()) // Count doesn't change, but connections are closed
+	})
+}
+
+func TestServer_waitForForceClose(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("completes when wait group is done", func(t *testing.T) {
+		server := NewServer(nil, logger)
+
+		// No pending goroutines, should complete immediately
+		server.waitForForceClose()
+	})
+
+	t.Run("times out when handlers are still running", func(t *testing.T) {
+		server := NewServer(nil, logger)
+
+		// Add a pending goroutine that won't complete
+		server.wg.Add(1)
+		go func() {
+			time.Sleep(5 * time.Second)
+			server.wg.Done()
+		}()
+
+		start := time.Now()
+		server.waitForForceClose()
+		elapsed := time.Since(start)
+
+		// Should timeout after ~1 second
+		assert.True(t, elapsed >= 900*time.Millisecond && elapsed < 2*time.Second)
+	})
+}
+
+func TestServer_spawnConnectionHandler(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	t.Run("spawns handler goroutine", func(t *testing.T) {
+		server := NewServerWithBackend(nil, manager, logger)
+		server.router.AddRoute(&TCPRoute{
+			Name: "test-route",
+			BackendRefs: []BackendRef{
+				{Name: "test-backend", Port: 8080},
+			},
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		// Spawn the handler
+		server.spawnConnectionHandler(ctx, serverConn)
+
+		// Give it time to start
+		time.Sleep(50 * time.Millisecond)
+
+		// Cancel context to stop the handler
+		cancel()
+
+		// Wait for handler to complete
+		server.wg.Wait()
+	})
+
+	t.Run("handles context cancellation during spawn", func(t *testing.T) {
+		server := NewServerWithBackend(nil, manager, logger)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		// Spawn the handler with cancelled context
+		server.spawnConnectionHandler(ctx, serverConn)
+
+		// Wait for handler to complete
+		server.wg.Wait()
+	})
+}
+
+func TestServer_trackConnection(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("tracks connection successfully", func(t *testing.T) {
+		server := NewServer(nil, logger)
+
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		tracked, ok := server.trackConnection(serverConn)
+
+		assert.True(t, ok)
+		assert.NotNil(t, tracked)
+		assert.NotEmpty(t, tracked.ID)
+		assert.Equal(t, 1, server.connections.Count())
+	})
+
+	t.Run("rejects connection when max reached", func(t *testing.T) {
+		config := &ServerConfig{
+			MaxConnections: 1,
+		}
+		server := NewServer(config, logger)
+
+		// Add first connection
+		s1, c1 := net.Pipe()
+		defer s1.Close()
+		defer c1.Close()
+		_, ok := server.trackConnection(c1)
+		assert.True(t, ok)
+
+		// Try to add second connection
+		s2, c2 := net.Pipe()
+		defer s2.Close()
+		defer c2.Close()
+		tracked, ok := server.trackConnection(c2)
+
+		assert.False(t, ok)
+		assert.Nil(t, tracked)
+	})
+}
+
+func TestServer_matchRoute(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("returns route when found", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		server.router.AddRoute(&TCPRoute{
+			Name: "test-route",
+			BackendRefs: []BackendRef{
+				{Name: "backend", Port: 8080},
+			},
+		})
+
+		ctx := context.Background()
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		route := server.matchRoute(ctx, serverConn, "conn-id")
+
+		assert.NotNil(t, route)
+		assert.Equal(t, "test-route", route.Name)
+	})
+
+	t.Run("returns nil when no routes", func(t *testing.T) {
+		server := NewServer(nil, logger)
+
+		ctx := context.Background()
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		route := server.matchRoute(ctx, serverConn, "conn-id")
+
+		assert.Nil(t, route)
+	})
+
+	t.Run("returns nil when context is cancelled after matching", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		server.router.AddRoute(&TCPRoute{
+			Name: "test-route",
+			BackendRefs: []BackendRef{
+				{Name: "backend", Port: 8080},
+			},
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		route := server.matchRoute(ctx, serverConn, "conn-id")
+
+		assert.Nil(t, route)
+	})
+}
+
+func TestServer_proxyConnection(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	t.Run("proxies connection to backend", func(t *testing.T) {
+		// Create a mock backend server
+		backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer backendListener.Close()
+
+		backendAddr := backendListener.Addr().(*net.TCPAddr)
+
+		// Handle backend connections - echo data back
+		go func() {
+			conn, err := backendListener.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			buf := make([]byte, 1024)
+			for {
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				conn.Write(buf[:n])
+			}
+		}()
+
+		// Create backend with the mock server endpoint
+		manager.AddBackend(backend.BackendConfig{
+			Name: "test-backend",
+			Endpoints: []backend.EndpointConfig{
+				{Address: "127.0.0.1", Port: backendAddr.Port},
+			},
+		})
+
+		server := NewServerWithBackend(nil, manager, logger)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		tracked := &TrackedConnection{
+			ID:        "test-id",
+			StartTime: time.Now(),
+		}
+
+		route := &TCPRoute{
+			Name: "test-route",
+			BackendRefs: []BackendRef{
+				{Name: "test-backend", Port: backendAddr.Port},
+			},
+			ConnectTimeout: time.Second,
+			IdleTimeout:    5 * time.Second,
+		}
+
+		backendSvc := manager.GetBackend("test-backend")
+
+		// Run proxy in goroutine
+		done := make(chan struct{})
+		go func() {
+			server.proxyConnection(ctx, serverConn, tracked, route, backendSvc)
+			close(done)
+		}()
+
+		// Send data through client
+		testData := []byte("hello proxy")
+		_, err = clientConn.Write(testData)
+		require.NoError(t, err)
+
+		// Read response
+		buf := make([]byte, len(testData))
+		clientConn.SetReadDeadline(time.Now().Add(time.Second))
+		n, err := clientConn.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, testData, buf[:n])
+
+		// Close client to end proxy
+		clientConn.Close()
+
+		select {
+		case <-done:
+			// Success
+		case <-time.After(2 * time.Second):
+			t.Fatal("proxyConnection did not complete")
+		}
+	})
+
+	t.Run("handles proxy error", func(t *testing.T) {
+		// Create backend with unreachable endpoint
+		manager.AddBackend(backend.BackendConfig{
+			Name: "unreachable-backend",
+			Endpoints: []backend.EndpointConfig{
+				{Address: "127.0.0.1", Port: 59999}, // Unlikely to be listening
+			},
+		})
+
+		server := NewServerWithBackend(nil, manager, logger)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		tracked := &TrackedConnection{
+			ID:        "test-id",
+			StartTime: time.Now(),
+		}
+
+		route := &TCPRoute{
+			Name: "test-route",
+			BackendRefs: []BackendRef{
+				{Name: "unreachable-backend", Port: 59999},
+			},
+			ConnectTimeout: 100 * time.Millisecond,
+			IdleTimeout:    time.Second,
+		}
+
+		backendSvc := manager.GetBackend("unreachable-backend")
+
+		// Run proxy - should complete with error
+		done := make(chan struct{})
+		go func() {
+			server.proxyConnection(ctx, serverConn, tracked, route, backendSvc)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// Success - proxy completed (with error)
+		case <-time.After(2 * time.Second):
+			t.Fatal("proxyConnection did not complete")
+		}
+	})
+}
+
+func TestServer_setAcceptDeadlineWithDeadlineSupport(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("sets deadline on listener with SetDeadline interface", func(t *testing.T) {
+		server := NewServer(nil, logger)
+		server.listener = &mockListenerWithDeadline{}
+
+		err := server.setAcceptDeadline(time.Second)
+
+		assert.NoError(t, err)
+	})
+}
+
+// mockListenerWithDeadline implements the SetDeadline interface
+type mockListenerWithDeadline struct {
+	deadlineSet bool
+}
+
+func (m *mockListenerWithDeadline) Accept() (net.Conn, error) {
+	return nil, nil
+}
+
+func (m *mockListenerWithDeadline) Close() error {
+	return nil
+}
+
+func (m *mockListenerWithDeadline) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8080}
+}
+
+func (m *mockListenerWithDeadline) SetDeadline(t time.Time) error {
+	m.deadlineSet = true
+	return nil
+}
+
+func TestServer_waitForConnectionsOrTimeout(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("completes when all connections close", func(t *testing.T) {
+		server := NewServer(nil, logger)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// No pending goroutines, should complete immediately
+		server.waitForConnectionsOrTimeout(ctx)
+	})
+
+	t.Run("times out when connections don't close", func(t *testing.T) {
+		server := NewServer(nil, logger)
+
+		// Add a pending goroutine that won't complete quickly
+		done := make(chan struct{})
+		server.wg.Add(1)
+		go func() {
+			defer server.wg.Done()
+			select {
+			case <-done:
+				return
+			case <-time.After(10 * time.Second):
+				return
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+		server.waitForConnectionsOrTimeout(ctx)
+		elapsed := time.Since(start)
+
+		// Signal the goroutine to exit
+		close(done)
+
+		// Should timeout after ~200ms (with some tolerance for handleShutdownTimeout)
+		assert.True(t, elapsed >= 150*time.Millisecond,
+			"elapsed time %v should be at least 150ms", elapsed)
+	})
+}
+
+func TestServer_AcceptLoopWithConnections(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	t.Run("accepts and handles connections", func(t *testing.T) {
+		config := &ServerConfig{
+			Port:           0,
+			Address:        "127.0.0.1",
+			AcceptDeadline: 100 * time.Millisecond,
+		}
+		server := NewServerWithBackend(config, manager, logger)
+		server.router.AddRoute(&TCPRoute{
+			Name: "test-route",
+			BackendRefs: []BackendRef{
+				{Name: "test-backend", Port: 8080},
+			},
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Start server
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- server.Start(ctx)
+		}()
+
+		// Wait for server to start
+		time.Sleep(100 * time.Millisecond)
+		require.True(t, server.IsRunning())
+
+		// Get the actual port
+		addr := server.listener.Addr().(*net.TCPAddr)
+
+		// Connect to server
+		conn, err := net.DialTimeout("tcp", addr.String(), time.Second)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Give it time to handle the connection
+		time.Sleep(100 * time.Millisecond)
+
+		// Cancel context to stop server
+		cancel()
+
+		select {
+		case <-errCh:
+			// Server stopped
+		case <-time.After(2 * time.Second):
+			t.Fatal("server did not stop")
+		}
+	})
+}
+
+func TestServer_StopWithActiveConnections(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	t.Run("gracefully closes active connections", func(t *testing.T) {
+		// Create a mock backend server
+		backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer backendListener.Close()
+
+		backendAddr := backendListener.Addr().(*net.TCPAddr)
+
+		// Handle backend connections - hold connection open
+		go func() {
+			conn, err := backendListener.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			// Hold connection open
+			time.Sleep(10 * time.Second)
+		}()
+
+		// Create backend
+		manager.AddBackend(backend.BackendConfig{
+			Name: "test-backend",
+			Endpoints: []backend.EndpointConfig{
+				{Address: "127.0.0.1", Port: backendAddr.Port},
+			},
+		})
+
+		config := &ServerConfig{
+			Port:            0,
+			Address:         "127.0.0.1",
+			ShutdownTimeout: 500 * time.Millisecond,
+			AcceptDeadline:  100 * time.Millisecond,
+		}
+		server := NewServerWithBackend(config, manager, logger)
+		server.router.AddRoute(&TCPRoute{
+			Name: "test-route",
+			BackendRefs: []BackendRef{
+				{Name: "test-backend", Port: backendAddr.Port},
+			},
+			ConnectTimeout: time.Second,
+			IdleTimeout:    5 * time.Second,
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Start server
+		go func() {
+			server.Start(ctx)
+		}()
+
+		// Wait for server to start
+		time.Sleep(100 * time.Millisecond)
+		require.True(t, server.IsRunning())
+
+		// Get the actual port
+		addr := server.listener.Addr().(*net.TCPAddr)
+
+		// Connect to server
+		conn, err := net.DialTimeout("tcp", addr.String(), time.Second)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Give it time to establish connection
+		time.Sleep(200 * time.Millisecond)
+
+		// Stop server - should force close connections after timeout
+		err = server.Stop(context.Background())
+		assert.NoError(t, err)
+		assert.False(t, server.IsRunning())
+	})
+}

@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -494,4 +495,368 @@ func TestCachingProviderWithNilLogger(t *testing.T) {
 	cachingProvider := NewCachingProvider(envProvider, 1*time.Minute, nil)
 	assert.NotNil(t, cachingProvider)
 	assert.NotNil(t, cachingProvider.logger)
+}
+
+func TestNewProviderFromConfigWithVaultEnabled(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Test with VaultEnabled but no SecretsProvider set
+	cfg := config.DefaultConfig()
+	cfg.SecretsProvider = ""
+	cfg.VaultEnabled = true
+	cfg.VaultAddress = "http://localhost:8200"
+	cfg.VaultAuthMethod = "token"
+
+	// This will fail because we can't actually connect to Vault
+	// but it tests the code path
+	_, err := NewProviderFromConfig(ctx, cfg, k8sClient, logger)
+	assert.Error(t, err) // Expected to fail without real Vault
+}
+
+func TestNewProviderFromConfigWithNilLogger(t *testing.T) {
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := config.DefaultConfig()
+	cfg.SecretsProvider = "kubernetes"
+
+	// Should work with nil logger
+	provider, err := NewProviderFromConfig(ctx, cfg, k8sClient, nil)
+	require.NoError(t, err)
+	assert.Equal(t, ProviderTypeKubernetes, provider.Type())
+}
+
+func TestProviderManagerSetPrimaryNil(t *testing.T) {
+	logger := zap.NewNop()
+
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	pm := NewProviderManager(envProvider, logger)
+	assert.Equal(t, envProvider, pm.Primary())
+
+	// Set primary to nil
+	pm.SetPrimary(nil)
+	assert.Nil(t, pm.Primary())
+}
+
+func TestProviderManagerCloseWithError(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Create a provider manager with multiple providers
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "CLOSE_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	pm := NewProviderManager(envProvider, logger)
+
+	// Add noop provider
+	noopProvider := NewNoopProvider(logger)
+	pm.AddProvider(noopProvider)
+
+	// Close should not error for these providers
+	err = pm.Close()
+	assert.NoError(t, err)
+}
+
+func TestCachingProviderGetSecretError(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create env provider
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "CACHE_ERROR_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	// Wrap with caching
+	cachingProvider := NewCachingProvider(envProvider, 1*time.Minute, logger)
+
+	// Try to get a non-existent secret
+	_, err = cachingProvider.GetSecret(ctx, "nonexistent")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrSecretNotFound)
+}
+
+func TestCachingProviderWriteSecretError(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create env provider (read-only)
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "CACHE_WRITE_ERROR_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	// Wrap with caching
+	cachingProvider := NewCachingProvider(envProvider, 1*time.Minute, logger)
+
+	// Write should fail because env provider is read-only
+	err = cachingProvider.WriteSecret(ctx, "test", map[string][]byte{"key": []byte("value")})
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrReadOnly)
+}
+
+func TestCachingProviderDeleteSecretError(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create env provider (read-only)
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "CACHE_DELETE_ERROR_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	// Wrap with caching
+	cachingProvider := NewCachingProvider(envProvider, 1*time.Minute, logger)
+
+	// Delete should fail because env provider is read-only
+	err = cachingProvider.DeleteSecret(ctx, "test")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrReadOnly)
+}
+
+func TestBuildVaultConfig(t *testing.T) {
+	logger := zap.NewNop()
+
+	cfg := config.DefaultConfig()
+	cfg.VaultAddress = "http://vault.example.com:8200"
+	cfg.VaultNamespace = "my-namespace"
+	cfg.VaultAuthMethod = "kubernetes"
+	cfg.VaultRole = "my-role"
+	cfg.VaultMountPath = "kubernetes"
+	cfg.VaultSecretMountPoint = "kv"
+	cfg.VaultTimeout = 60 * time.Second
+	cfg.VaultMaxRetries = 5
+	cfg.VaultRetryWaitMin = 1 * time.Second
+	cfg.VaultRetryWaitMax = 10 * time.Second
+
+	vaultCfg := buildVaultConfig(cfg, logger)
+
+	assert.Equal(t, "http://vault.example.com:8200", vaultCfg.Address)
+	assert.Equal(t, "my-namespace", vaultCfg.Namespace)
+	assert.Equal(t, "kubernetes", vaultCfg.AuthMethod)
+	assert.Equal(t, "my-role", vaultCfg.Role)
+	assert.Equal(t, "kubernetes", vaultCfg.MountPath)
+	assert.Equal(t, "kv", vaultCfg.SecretMountPoint)
+	assert.Equal(t, 60*time.Second, vaultCfg.Timeout)
+	assert.Equal(t, 5, vaultCfg.MaxRetries)
+	assert.Equal(t, 1*time.Second, vaultCfg.RetryWaitMin)
+	assert.Equal(t, 10*time.Second, vaultCfg.RetryWaitMax)
+	assert.Equal(t, logger, vaultCfg.Logger)
+	assert.Nil(t, vaultCfg.TLSConfig)
+}
+
+func TestBuildVaultConfigWithTLS(t *testing.T) {
+	logger := zap.NewNop()
+
+	cfg := config.DefaultConfig()
+	cfg.VaultAddress = "https://vault.example.com:8200"
+	cfg.VaultCACert = "/path/to/ca.crt"
+	cfg.VaultClientCert = "/path/to/client.crt"
+	cfg.VaultTLSSkipVerify = true
+
+	vaultCfg := buildVaultConfig(cfg, logger)
+
+	assert.NotNil(t, vaultCfg.TLSConfig)
+	assert.True(t, vaultCfg.TLSConfig.InsecureSkipVerify)
+}
+
+func TestDetermineProviderType(t *testing.T) {
+	tests := []struct {
+		name         string
+		cfg          *config.Config
+		expectedType ProviderType
+		expectError  bool
+	}{
+		{
+			name: "explicit kubernetes provider",
+			cfg: func() *config.Config {
+				c := config.DefaultConfig()
+				c.SecretsProvider = "kubernetes"
+				return c
+			}(),
+			expectedType: ProviderTypeKubernetes,
+			expectError:  false,
+		},
+		{
+			name: "explicit vault provider",
+			cfg: func() *config.Config {
+				c := config.DefaultConfig()
+				c.SecretsProvider = "vault"
+				return c
+			}(),
+			expectedType: ProviderTypeVault,
+			expectError:  false,
+		},
+		{
+			name: "explicit local provider",
+			cfg: func() *config.Config {
+				c := config.DefaultConfig()
+				c.SecretsProvider = "local"
+				return c
+			}(),
+			expectedType: ProviderTypeLocal,
+			expectError:  false,
+		},
+		{
+			name: "explicit env provider",
+			cfg: func() *config.Config {
+				c := config.DefaultConfig()
+				c.SecretsProvider = "env"
+				return c
+			}(),
+			expectedType: ProviderTypeEnv,
+			expectError:  false,
+		},
+		{
+			name: "vault enabled without explicit provider",
+			cfg: func() *config.Config {
+				c := config.DefaultConfig()
+				c.SecretsProvider = ""
+				c.VaultEnabled = true
+				return c
+			}(),
+			expectedType: ProviderTypeVault,
+			expectError:  false,
+		},
+		{
+			name: "default to kubernetes",
+			cfg: func() *config.Config {
+				c := config.DefaultConfig()
+				c.SecretsProvider = ""
+				c.VaultEnabled = false
+				return c
+			}(),
+			expectedType: ProviderTypeKubernetes,
+			expectError:  false,
+		},
+		{
+			name: "invalid provider type",
+			cfg: func() *config.Config {
+				c := config.DefaultConfig()
+				c.SecretsProvider = "invalid"
+				return c
+			}(),
+			expectedType: "",
+			expectError:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			providerType, err := determineProviderType(tt.cfg)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedType, providerType)
+			}
+		})
+	}
+}
+
+func TestNewProviderWithNilLogger(t *testing.T) {
+	ctx := context.Background()
+
+	provider, err := NewProvider(ctx, &ProviderConfig{
+		Type:      ProviderTypeEnv,
+		EnvPrefix: "TEST_NIL_LOGGER_",
+		Logger:    nil, // nil logger
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, provider)
+	assert.Equal(t, ProviderTypeEnv, provider.Type())
+}
+
+// mockErrorProvider is a mock provider that returns errors for testing
+type mockErrorProvider struct {
+	closeErr error
+}
+
+func (m *mockErrorProvider) Type() ProviderType {
+	return ProviderType("mock-error")
+}
+
+func (m *mockErrorProvider) GetSecret(ctx context.Context, path string) (*Secret, error) {
+	return nil, ErrSecretNotFound
+}
+
+func (m *mockErrorProvider) ListSecrets(ctx context.Context, path string) ([]string, error) {
+	return []string{}, nil
+}
+
+func (m *mockErrorProvider) WriteSecret(ctx context.Context, path string, data map[string][]byte) error {
+	return ErrReadOnly
+}
+
+func (m *mockErrorProvider) DeleteSecret(ctx context.Context, path string) error {
+	return ErrReadOnly
+}
+
+func (m *mockErrorProvider) IsReadOnly() bool {
+	return true
+}
+
+func (m *mockErrorProvider) HealthCheck(ctx context.Context) error {
+	return nil
+}
+
+func (m *mockErrorProvider) Close() error {
+	return m.closeErr
+}
+
+func TestProviderManagerCloseWithProviderError(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Create a mock provider that returns an error on Close
+	mockProvider := &mockErrorProvider{
+		closeErr: errors.New("mock close error"),
+	}
+
+	pm := NewProviderManager(nil, logger)
+	pm.AddProvider(mockProvider)
+
+	// Close should return the error
+	err := pm.Close()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "mock close error")
+}
+
+func TestProviderManagerCloseWithMultipleProviders(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Create providers - one that errors and one that doesn't
+	mockProvider := &mockErrorProvider{
+		closeErr: errors.New("mock close error"),
+	}
+
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "MULTI_CLOSE_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	pm := NewProviderManager(envProvider, logger)
+	pm.AddProvider(mockProvider)
+
+	// Close should return the last error
+	err = pm.Close()
+	assert.Error(t, err)
 }

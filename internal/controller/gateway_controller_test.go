@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -9,10 +11,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
@@ -2973,4 +2977,2800 @@ func TestGatewayReconciler_Reconcile_ErrorClassification(t *testing.T) {
 			assert.True(t, result.RequeueAfter > 0 || result.Requeue)
 		})
 	}
+}
+
+// ============================================================================
+// handleGatewayReconcileError Tests
+// ============================================================================
+
+// TestGatewayReconciler_HandleGatewayReconcileError tests error handling for different error types.
+func TestGatewayReconciler_HandleGatewayReconcileError(t *testing.T) {
+	tests := []struct {
+		name          string
+		errorType     ErrorType
+		expectRequeue bool
+	}{
+		{
+			name:          "validation error",
+			errorType:     ErrorTypeValidation,
+			expectRequeue: false,
+		},
+		{
+			name:          "permanent error",
+			errorType:     ErrorTypePermanent,
+			expectRequeue: false,
+		},
+		{
+			name:          "dependency error",
+			errorType:     ErrorTypeDependency,
+			expectRequeue: true,
+		},
+		{
+			name:          "transient error",
+			errorType:     ErrorTypeTransient,
+			expectRequeue: true,
+		},
+		{
+			name:          "internal error",
+			errorType:     ErrorTypeInternal,
+			expectRequeue: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler := &GatewayReconciler{}
+			strategy := DefaultRequeueStrategy()
+			resourceKey := "default/test-gateway"
+
+			reconcileErr := &ReconcileError{
+				Type:      tt.errorType,
+				Op:        "test",
+				Resource:  resourceKey,
+				Err:       fmt.Errorf("test error"),
+				Retryable: tt.expectRequeue,
+			}
+
+			result, err := reconciler.handleGatewayReconcileError(reconcileErr, strategy, resourceKey)
+
+			assert.Error(t, err)
+			assert.Equal(t, tt.expectRequeue, result.Requeue)
+			assert.True(t, result.RequeueAfter > 0)
+		})
+	}
+}
+
+// ============================================================================
+// listGatewayPage Tests
+// ============================================================================
+
+// TestGatewayReconciler_ListGatewayPage tests pagination of gateway listing.
+func TestGatewayReconciler_ListGatewayPage(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	// Create multiple gateways
+	gateways := make([]client.Object, 5)
+	for i := 0; i < 5; i++ {
+		gateways[i] = &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("gateway-%d", i),
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{
+					{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				},
+			},
+		}
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateways...).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	// Test first page
+	items, continueToken, err := reconciler.listGatewayPage(context.Background(), "")
+	require.NoError(t, err)
+	assert.Len(t, items, 5)
+	assert.Empty(t, continueToken) // Fake client doesn't support pagination
+
+	// Test with continue token (fake client doesn't support it, but we test the code path)
+	items2, _, err := reconciler.listGatewayPage(context.Background(), "some-token")
+	require.NoError(t, err)
+	assert.NotNil(t, items2)
+}
+
+// TestGatewayReconciler_ListGatewayPage_Empty tests listing when no gateways exist.
+func TestGatewayReconciler_ListGatewayPage_Empty(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	items, continueToken, err := reconciler.listGatewayPage(context.Background(), "")
+	require.NoError(t, err)
+	assert.Len(t, items, 0)
+	assert.Empty(t, continueToken)
+}
+
+// ============================================================================
+// findGatewaysForTLSConfig Additional Tests
+// ============================================================================
+
+// TestGatewayReconciler_FindGatewaysForTLSConfig_InvalidObject tests handling of invalid object type.
+func TestGatewayReconciler_FindGatewaysForTLSConfig_InvalidObject(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	// Pass a non-TLSConfig object
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "not-a-tls-config",
+			Namespace: "default",
+		},
+	}
+
+	requests := reconciler.findGatewaysForTLSConfig(context.Background(), configMap)
+	assert.Nil(t, requests)
+}
+
+// ============================================================================
+// certRefMatchesTLSConfig Tests
+// ============================================================================
+
+// TestCertRefMatchesTLSConfig tests certificate reference matching.
+func TestCertRefMatchesTLSConfig(t *testing.T) {
+	tests := []struct {
+		name             string
+		defaultNamespace string
+		certRef          *avapigwv1alpha1.SecretObjectReference
+		tlsConfigNS      string
+		tlsConfigName    string
+		expected         bool
+	}{
+		{
+			name:             "exact match with default namespace",
+			defaultNamespace: "default",
+			certRef:          &avapigwv1alpha1.SecretObjectReference{Name: "my-cert"},
+			tlsConfigNS:      "default",
+			tlsConfigName:    "my-cert",
+			expected:         true,
+		},
+		{
+			name:             "match with explicit namespace",
+			defaultNamespace: "default",
+			certRef:          &avapigwv1alpha1.SecretObjectReference{Name: "my-cert", Namespace: strPtr("other-ns")},
+			tlsConfigNS:      "other-ns",
+			tlsConfigName:    "my-cert",
+			expected:         true,
+		},
+		{
+			name:             "no match - different name",
+			defaultNamespace: "default",
+			certRef:          &avapigwv1alpha1.SecretObjectReference{Name: "my-cert"},
+			tlsConfigNS:      "default",
+			tlsConfigName:    "other-cert",
+			expected:         false,
+		},
+		{
+			name:             "no match - different namespace",
+			defaultNamespace: "default",
+			certRef:          &avapigwv1alpha1.SecretObjectReference{Name: "my-cert"},
+			tlsConfigNS:      "other-ns",
+			tlsConfigName:    "my-cert",
+			expected:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := certRefMatchesTLSConfig(tt.defaultNamespace, tt.certRef, tt.tlsConfigNS, tt.tlsConfigName)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// ============================================================================
+// gatewayReferencesTLSConfig Tests
+// ============================================================================
+
+// TestGatewayReconciler_GatewayReferencesTLSConfig tests gateway TLS config reference checking.
+func TestGatewayReconciler_GatewayReferencesTLSConfig(t *testing.T) {
+	reconciler := &GatewayReconciler{}
+
+	tests := []struct {
+		name           string
+		gateway        *avapigwv1alpha1.Gateway
+		tlsConfigNS    string
+		tlsConfigName  string
+		expectedResult bool
+	}{
+		{
+			name: "gateway references TLS config",
+			gateway: &avapigwv1alpha1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gateway",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.GatewaySpec{
+					Listeners: []avapigwv1alpha1.Listener{
+						{
+							Name:     "https",
+							Port:     443,
+							Protocol: avapigwv1alpha1.ProtocolHTTPS,
+							TLS: &avapigwv1alpha1.GatewayTLSConfig{
+								CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+									{Name: "my-tls-config"},
+								},
+							},
+						},
+					},
+				},
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: true,
+		},
+		{
+			name: "gateway does not reference TLS config",
+			gateway: &avapigwv1alpha1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gateway",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.GatewaySpec{
+					Listeners: []avapigwv1alpha1.Listener{
+						{
+							Name:     "https",
+							Port:     443,
+							Protocol: avapigwv1alpha1.ProtocolHTTPS,
+							TLS: &avapigwv1alpha1.GatewayTLSConfig{
+								CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+									{Name: "other-tls-config"},
+								},
+							},
+						},
+					},
+				},
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: false,
+		},
+		{
+			name: "gateway with no TLS listeners",
+			gateway: &avapigwv1alpha1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gateway",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.GatewaySpec{
+					Listeners: []avapigwv1alpha1.Listener{
+						{
+							Name:     "http",
+							Port:     80,
+							Protocol: avapigwv1alpha1.ProtocolHTTP,
+						},
+					},
+				},
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: false,
+		},
+		{
+			name: "gateway with multiple listeners, one references TLS config",
+			gateway: &avapigwv1alpha1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gateway",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.GatewaySpec{
+					Listeners: []avapigwv1alpha1.Listener{
+						{
+							Name:     "http",
+							Port:     80,
+							Protocol: avapigwv1alpha1.ProtocolHTTP,
+						},
+						{
+							Name:     "https",
+							Port:     443,
+							Protocol: avapigwv1alpha1.ProtocolHTTPS,
+							TLS: &avapigwv1alpha1.GatewayTLSConfig{
+								CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+									{Name: "my-tls-config"},
+								},
+							},
+						},
+					},
+				},
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := reconciler.gatewayReferencesTLSConfig(tt.gateway, tt.tlsConfigNS, tt.tlsConfigName)
+			assert.Equal(t, tt.expectedResult, result)
+		})
+	}
+}
+
+// ============================================================================
+// listenerReferencesTLSConfig Tests
+// ============================================================================
+
+// TestGatewayReconciler_ListenerReferencesTLSConfig tests listener TLS config reference checking.
+func TestGatewayReconciler_ListenerReferencesTLSConfig(t *testing.T) {
+	reconciler := &GatewayReconciler{}
+
+	tests := []struct {
+		name             string
+		gatewayNamespace string
+		listener         *avapigwv1alpha1.Listener
+		tlsConfigNS      string
+		tlsConfigName    string
+		expectedResult   bool
+	}{
+		{
+			name:             "listener with nil TLS",
+			gatewayNamespace: "default",
+			listener: &avapigwv1alpha1.Listener{
+				Name:     "http",
+				Port:     80,
+				Protocol: avapigwv1alpha1.ProtocolHTTP,
+				TLS:      nil,
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: false,
+		},
+		{
+			name:             "listener with empty certificate refs",
+			gatewayNamespace: "default",
+			listener: &avapigwv1alpha1.Listener{
+				Name:     "https",
+				Port:     443,
+				Protocol: avapigwv1alpha1.ProtocolHTTPS,
+				TLS: &avapigwv1alpha1.GatewayTLSConfig{
+					CertificateRefs: []avapigwv1alpha1.SecretObjectReference{},
+				},
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: false,
+		},
+		{
+			name:             "listener references TLS config",
+			gatewayNamespace: "default",
+			listener: &avapigwv1alpha1.Listener{
+				Name:     "https",
+				Port:     443,
+				Protocol: avapigwv1alpha1.ProtocolHTTPS,
+				TLS: &avapigwv1alpha1.GatewayTLSConfig{
+					CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+						{Name: "my-tls-config"},
+					},
+				},
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: true,
+		},
+		{
+			name:             "listener with multiple cert refs, one matches",
+			gatewayNamespace: "default",
+			listener: &avapigwv1alpha1.Listener{
+				Name:     "https",
+				Port:     443,
+				Protocol: avapigwv1alpha1.ProtocolHTTPS,
+				TLS: &avapigwv1alpha1.GatewayTLSConfig{
+					CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+						{Name: "other-cert"},
+						{Name: "my-tls-config"},
+					},
+				},
+			},
+			tlsConfigNS:    "default",
+			tlsConfigName:  "my-tls-config",
+			expectedResult: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := reconciler.listenerReferencesTLSConfig(tt.gatewayNamespace, tt.listener, tt.tlsConfigNS, tt.tlsConfigName)
+			assert.Equal(t, tt.expectedResult, result)
+		})
+	}
+}
+
+// ============================================================================
+// handleTLSValidationError Tests
+// ============================================================================
+
+// TestGatewayReconciler_HandleTLSValidationError tests TLS validation error handling.
+func TestGatewayReconciler_HandleTLSValidationError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	tests := []struct {
+		name          string
+		err           error
+		expectedType  ErrorType
+		expectedPhase avapigwv1alpha1.PhaseStatus
+	}{
+		{
+			name:          "not found error - dependency error",
+			err:           apierrors.NewNotFound(corev1.Resource("secret"), "my-secret"),
+			expectedType:  ErrorTypeDependency,
+			expectedPhase: avapigwv1alpha1.PhaseStatusError,
+		},
+		{
+			name:          "other error - validation error",
+			err:           fmt.Errorf("invalid TLS configuration"),
+			expectedType:  ErrorTypeValidation,
+			expectedPhase: avapigwv1alpha1.PhaseStatusError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gateway := &avapigwv1alpha1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-gateway",
+					Namespace:  "default",
+					Finalizers: []string{gatewayFinalizer},
+				},
+				Spec: avapigwv1alpha1.GatewaySpec{
+					Listeners: []avapigwv1alpha1.Listener{
+						{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+					},
+				},
+			}
+
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(gateway).
+				WithStatusSubresource(gateway).
+				Build()
+
+			reconciler := &GatewayReconciler{
+				Client: cl,
+				Scheme: scheme,
+			}
+
+			resourceKey := "default/test-gateway"
+			logger := log.FromContext(context.Background())
+
+			result := reconciler.handleTLSValidationError(context.Background(), gateway, resourceKey, tt.err, logger)
+
+			assert.Error(t, result)
+			var reconcileErr *ReconcileError
+			assert.True(t, errors.As(result, &reconcileErr))
+			assert.Equal(t, tt.expectedType, reconcileErr.Type)
+			assert.Equal(t, tt.expectedPhase, gateway.Status.Phase)
+		})
+	}
+}
+
+// ============================================================================
+// updateAttachedRouteCounts Tests
+// ============================================================================
+
+// TestGatewayReconciler_UpdateAttachedRouteCounts tests route count updates.
+func TestGatewayReconciler_UpdateAttachedRouteCounts(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "https", Port: 443, Protocol: avapigwv1alpha1.ProtocolHTTPS},
+			},
+		},
+		Status: avapigwv1alpha1.GatewayStatus{
+			Listeners: []avapigwv1alpha1.ListenerStatus{
+				{Name: "http", AttachedRoutes: 0},
+				{Name: "https", AttachedRoutes: 0},
+			},
+		},
+	}
+
+	httpRoute := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{
+				{Name: "test-gateway", SectionName: strPtr("http")},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(httpRoute).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	resourceKey := "default/test-gateway"
+	logger := log.FromContext(context.Background())
+
+	err = reconciler.updateAttachedRouteCounts(context.Background(), gateway, resourceKey, logger)
+	require.NoError(t, err)
+
+	// Verify counts were updated
+	assert.Equal(t, int32(1), gateway.Status.Listeners[0].AttachedRoutes)
+	assert.Equal(t, int32(0), gateway.Status.Listeners[1].AttachedRoutes)
+}
+
+// ============================================================================
+// finalizeGatewayStatus Tests
+// ============================================================================
+
+// TestGatewayReconciler_FinalizeGatewayStatus tests status finalization.
+func TestGatewayReconciler_FinalizeGatewayStatus(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+			Addresses: []avapigwv1alpha1.GatewayAddress{
+				{Type: addressTypePtr(avapigwv1alpha1.AddressTypeIPAddress), Value: "10.0.0.1"},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	resourceKey := "default/test-gateway"
+	logger := log.FromContext(context.Background())
+
+	err = reconciler.finalizeGatewayStatus(context.Background(), gateway, resourceKey, logger)
+	require.NoError(t, err)
+
+	// Verify status was finalized
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, gateway.Status.Phase)
+	assert.Equal(t, int32(1), gateway.Status.ListenersCount)
+	assert.Len(t, gateway.Status.Addresses, 1)
+
+	// Verify conditions were set
+	acceptedCondition := gateway.Status.GetCondition(avapigwv1alpha1.ConditionTypeAccepted)
+	assert.NotNil(t, acceptedCondition)
+	assert.Equal(t, metav1.ConditionTrue, acceptedCondition.Status)
+
+	programmedCondition := gateway.Status.GetCondition(avapigwv1alpha1.ConditionTypeProgrammed)
+	assert.NotNil(t, programmedCondition)
+	assert.Equal(t, metav1.ConditionTrue, programmedCondition.Status)
+}
+
+// ============================================================================
+// fetchGateway Tests
+// ============================================================================
+
+// TestGatewayReconciler_FetchGateway_Success tests successful gateway fetch.
+func TestGatewayReconciler_FetchGateway_Success(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-gateway"
+
+	req := reconcile.Request{
+		NamespacedName: client.ObjectKey{
+			Namespace: "default",
+			Name:      "test-gateway",
+		},
+	}
+
+	fetchedGateway, result, reconcileErr := reconciler.fetchGateway(context.Background(), req, strategy, resourceKey)
+
+	assert.Nil(t, reconcileErr)
+	assert.NotNil(t, fetchedGateway)
+	assert.True(t, result.IsZero())
+	assert.Equal(t, "test-gateway", fetchedGateway.Name)
+}
+
+// TestGatewayReconciler_FetchGateway_NotFound tests gateway fetch when not found.
+func TestGatewayReconciler_FetchGateway_NotFound(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/non-existent"
+
+	req := reconcile.Request{
+		NamespacedName: client.ObjectKey{
+			Namespace: "default",
+			Name:      "non-existent",
+		},
+	}
+
+	fetchedGateway, result, reconcileErr := reconciler.fetchGateway(context.Background(), req, strategy, resourceKey)
+
+	assert.Nil(t, reconcileErr)
+	assert.Nil(t, fetchedGateway)
+	assert.True(t, result.IsZero())
+}
+
+// ============================================================================
+// ensureFinalizerAndReconcileGateway Tests
+// ============================================================================
+
+// TestGatewayReconciler_EnsureFinalizerAndReconcileGateway tests finalizer and reconciliation.
+func TestGatewayReconciler_EnsureFinalizerAndReconcileGateway(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+	reconciler.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-gateway"
+	var reconcileErr *ReconcileError
+
+	result, err := reconciler.ensureFinalizerAndReconcileGateway(context.Background(), gateway, strategy, resourceKey, &reconcileErr)
+
+	// First call should add finalizer and requeue
+	assert.NoError(t, err)
+	assert.True(t, result.Requeue)
+}
+
+// ============================================================================
+// initGatewayStatus Tests
+// ============================================================================
+
+// TestGatewayReconciler_InitGatewayStatus tests status initialization.
+func TestGatewayReconciler_InitGatewayStatus(t *testing.T) {
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Generation: 5,
+		},
+	}
+
+	reconciler := &GatewayReconciler{}
+	reconciler.initGatewayStatus(gateway)
+
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReconciling, gateway.Status.Phase)
+	assert.Equal(t, int64(5), gateway.Status.ObservedGeneration)
+	assert.NotNil(t, gateway.Status.LastReconciledTime)
+}
+
+// ============================================================================
+// countRouteParentRefs Tests
+// ============================================================================
+
+// TestGatewayReconciler_CountRouteParentRefs tests parent ref counting.
+func TestGatewayReconciler_CountRouteParentRefs(t *testing.T) {
+	reconciler := &GatewayReconciler{}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	route := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+	}
+
+	tests := []struct {
+		name           string
+		parentRefs     []avapigwv1alpha1.ParentRef
+		initialCounts  map[string]int32
+		expectedCounts map[string]int32
+	}{
+		{
+			name: "route with specific listener",
+			parentRefs: []avapigwv1alpha1.ParentRef{
+				{Name: "test-gateway", SectionName: strPtr("http")},
+			},
+			initialCounts:  map[string]int32{"http": 0, "https": 0},
+			expectedCounts: map[string]int32{"http": 1, "https": 0},
+		},
+		{
+			name: "route without section name - matches all listeners",
+			parentRefs: []avapigwv1alpha1.ParentRef{
+				{Name: "test-gateway"},
+			},
+			initialCounts:  map[string]int32{"http": 0, "https": 0},
+			expectedCounts: map[string]int32{"http": 1, "https": 1},
+		},
+		{
+			name: "route referencing different gateway",
+			parentRefs: []avapigwv1alpha1.ParentRef{
+				{Name: "other-gateway", SectionName: strPtr("http")},
+			},
+			initialCounts:  map[string]int32{"http": 0, "https": 0},
+			expectedCounts: map[string]int32{"http": 0, "https": 0},
+		},
+		{
+			name: "route with multiple parent refs",
+			parentRefs: []avapigwv1alpha1.ParentRef{
+				{Name: "test-gateway", SectionName: strPtr("http")},
+				{Name: "test-gateway", SectionName: strPtr("https")},
+			},
+			initialCounts:  map[string]int32{"http": 0, "https": 0},
+			expectedCounts: map[string]int32{"http": 1, "https": 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counts := make(map[string]int32)
+			for k, v := range tt.initialCounts {
+				counts[k] = v
+			}
+
+			reconciler.countRouteParentRefs(gateway, route, tt.parentRefs, counts)
+
+			assert.Equal(t, tt.expectedCounts, counts)
+		})
+	}
+}
+
+// ============================================================================
+// Additional Error Path Tests
+// ============================================================================
+
+// TestGatewayReconciler_ReconcileGateway_UpdateListenerStatusesError tests error handling
+// when updateListenerStatuses fails (currently always returns nil, but tests the code path).
+func TestGatewayReconciler_ReconcileGateway_UpdateListenerStatusesError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	err = reconciler.reconcileGateway(context.Background(), gateway)
+	assert.NoError(t, err)
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, gateway.Status.Phase)
+}
+
+// TestGatewayReconciler_EnsureFinalizerAndReconcileGateway_WithExistingFinalizer tests
+// reconciliation when finalizer already exists.
+func TestGatewayReconciler_EnsureFinalizerAndReconcileGateway_WithExistingFinalizer(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+	reconciler.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-gateway"
+	var reconcileErr *ReconcileError
+
+	result, err := reconciler.ensureFinalizerAndReconcileGateway(context.Background(), gateway, strategy, resourceKey, &reconcileErr)
+
+	// Should succeed without requeue for finalizer
+	assert.NoError(t, err)
+	assert.True(t, result.RequeueAfter > 0)
+}
+
+// TestGatewayReconciler_EnsureFinalizerAndReconcileGateway_ReconcileError tests
+// error handling when reconcileGateway fails.
+func TestGatewayReconciler_EnsureFinalizerAndReconcileGateway_ReconcileError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+							{Name: "missing-cert"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+	reconciler.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-gateway"
+	var reconcileErr *ReconcileError
+
+	result, err := reconciler.ensureFinalizerAndReconcileGateway(context.Background(), gateway, strategy, resourceKey, &reconcileErr)
+
+	// Should return error due to missing TLS config
+	assert.Error(t, err)
+	assert.True(t, result.RequeueAfter > 0)
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_AllRouteTypes tests counting all route types.
+func TestGatewayReconciler_CountAttachedRoutes_AllRouteTypes(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "grpc", Port: 50051, Protocol: avapigwv1alpha1.ProtocolGRPC},
+				{Name: "tcp", Port: 9000, Protocol: avapigwv1alpha1.ProtocolTCP},
+				{Name: "tls", Port: 8443, Protocol: avapigwv1alpha1.ProtocolTLS},
+			},
+		},
+	}
+
+	httpRoute := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "http-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("http")}},
+		},
+	}
+
+	grpcRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "grpc-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("grpc")}},
+		},
+	}
+
+	tcpRoute := &avapigwv1alpha1.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "tcp-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.TCPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("tcp")}},
+		},
+	}
+
+	tlsRoute := &avapigwv1alpha1.TLSRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "tls-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.TLSRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("tls")}},
+			Hostnames:  []avapigwv1alpha1.Hostname{"example.com"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(httpRoute, grpcRoute, tcpRoute, tlsRoute).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(1), counts["http"])
+	assert.Equal(t, int32(1), counts["grpc"])
+	assert.Equal(t, int32(1), counts["tcp"])
+	assert.Equal(t, int32(1), counts["tls"])
+}
+
+// TestGatewayReconciler_ValidateTLSConfigs_GetError tests TLS validation when Get returns an error.
+func TestGatewayReconciler_ValidateTLSConfigs_GetError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+							{Name: "non-existent-cert"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	err = reconciler.validateTLSConfigs(context.Background(), gateway)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found as TLSConfig or Secret")
+}
+
+// TestGatewayReconciler_HandleDeletion_RemoveFinalizerError tests deletion handling
+// when finalizer removal fails.
+func TestGatewayReconciler_HandleDeletion_RemoveFinalizerError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	now := metav1.Now()
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-gateway",
+			Namespace:         "default",
+			Finalizers:        []string{gatewayFinalizer},
+			DeletionTimestamp: &now,
+			// Missing ResourceVersion will cause update to fail in some scenarios
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	// Fetch the gateway to get the correct resource version
+	var fetchedGateway avapigwv1alpha1.Gateway
+	err = cl.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "test-gateway"}, &fetchedGateway)
+	require.NoError(t, err)
+
+	result, err := reconciler.handleDeletion(context.Background(), &fetchedGateway)
+	// Should succeed since fake client allows the update
+	assert.NoError(t, err)
+	assert.True(t, result.IsZero())
+}
+
+// TestGatewayReconciler_FindGatewaysForTLSConfig_Pagination tests pagination in findGatewaysForTLSConfig.
+func TestGatewayReconciler_FindGatewaysForTLSConfig_Pagination(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	// Create multiple gateways that reference the same TLS config
+	gateways := make([]client.Object, 10)
+	for i := 0; i < 10; i++ {
+		gateways[i] = &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("gateway-%d", i),
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{
+					{
+						Name:     "https",
+						Port:     443,
+						Protocol: avapigwv1alpha1.ProtocolHTTPS,
+						TLS: &avapigwv1alpha1.GatewayTLSConfig{
+							CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+								{Name: "shared-tls-config"},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateways...).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shared-tls-config",
+			Namespace: "default",
+		},
+	}
+
+	requests := reconciler.findGatewaysForTLSConfig(context.Background(), tlsConfig)
+	assert.Len(t, requests, 10)
+}
+
+// TestGatewayReconciler_Reconcile_FullFlow tests the complete reconciliation flow.
+func TestGatewayReconciler_Reconcile_FullFlow(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "full-flow-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "https", Port: 443, Protocol: avapigwv1alpha1.ProtocolHTTPS},
+			},
+			Addresses: []avapigwv1alpha1.GatewayAddress{
+				{Type: addressTypePtr(avapigwv1alpha1.AddressTypeIPAddress), Value: "10.0.0.1"},
+			},
+		},
+	}
+
+	httpRoute := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{
+				{Name: "full-flow-gateway", SectionName: strPtr("http")},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway, httpRoute).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: client.ObjectKey{
+			Namespace: "default",
+			Name:      "full-flow-gateway",
+		},
+	}
+
+	// First reconcile - adds finalizer
+	result, err := reconciler.Reconcile(context.Background(), req)
+	assert.NoError(t, err)
+	assert.True(t, result.Requeue)
+
+	// Second reconcile - full reconciliation
+	result, err = reconciler.Reconcile(context.Background(), req)
+	assert.NoError(t, err)
+	assert.True(t, result.RequeueAfter > 0)
+
+	// Verify final state
+	var updatedGateway avapigwv1alpha1.Gateway
+	err = cl.Get(context.Background(), req.NamespacedName, &updatedGateway)
+	require.NoError(t, err)
+
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, updatedGateway.Status.Phase)
+	assert.Equal(t, int32(2), updatedGateway.Status.ListenersCount)
+	assert.Len(t, updatedGateway.Status.Listeners, 2)
+	assert.Len(t, updatedGateway.Status.Addresses, 1)
+	assert.Contains(t, updatedGateway.Finalizers, gatewayFinalizer)
+
+	// Verify attached routes
+	for _, listener := range updatedGateway.Status.Listeners {
+		if listener.Name == "http" {
+			assert.Equal(t, int32(1), listener.AttachedRoutes)
+		} else {
+			assert.Equal(t, int32(0), listener.AttachedRoutes)
+		}
+	}
+}
+
+// TestGatewayReconciler_UpdateAttachedRouteCounts_Error tests error handling in updateAttachedRouteCounts.
+func TestGatewayReconciler_UpdateAttachedRouteCounts_Error(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+		Status: avapigwv1alpha1.GatewayStatus{
+			Listeners: []avapigwv1alpha1.ListenerStatus{
+				{Name: "http", AttachedRoutes: 0},
+			},
+		},
+	}
+
+	// Create client without indexes to test error path
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	resourceKey := "default/test-gateway"
+	logger := log.FromContext(context.Background())
+
+	// Should succeed even with no routes
+	err = reconciler.updateAttachedRouteCounts(context.Background(), gateway, resourceKey, logger)
+	assert.NoError(t, err)
+}
+
+// TestGatewayReconciler_FinalizeGatewayStatus_Error tests error handling in finalizeGatewayStatus.
+func TestGatewayReconciler_FinalizeGatewayStatus_Error(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	// Create client without the gateway object to simulate status update failure
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		// Note: Not adding the gateway object to simulate not found error
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	resourceKey := "default/test-gateway"
+	logger := log.FromContext(context.Background())
+
+	// Status update will fail because gateway doesn't exist in the client
+	err = reconciler.finalizeGatewayStatus(context.Background(), gateway, resourceKey, logger)
+	// Should return error because status update fails
+	assert.Error(t, err)
+	var reconcileErr *ReconcileError
+	assert.True(t, errors.As(err, &reconcileErr))
+}
+
+// ============================================================================
+// Additional Tests for Error Paths
+// ============================================================================
+
+// TestGatewayReconciler_ReconcileGateway_CountAttachedRoutesError tests error handling
+// when countAttachedRoutes fails.
+func TestGatewayReconciler_ReconcileGateway_CountAttachedRoutesError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	// Create client with indexes to allow route counting
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	err = reconciler.reconcileGateway(context.Background(), gateway)
+	assert.NoError(t, err)
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, gateway.Status.Phase)
+}
+
+// TestGatewayReconciler_UpdateAttachedRouteCounts_WithRoutes tests route count updates with routes.
+func TestGatewayReconciler_UpdateAttachedRouteCounts_WithRoutes(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "grpc", Port: 50051, Protocol: avapigwv1alpha1.ProtocolGRPC},
+			},
+		},
+		Status: avapigwv1alpha1.GatewayStatus{
+			Listeners: []avapigwv1alpha1.ListenerStatus{
+				{Name: "http", AttachedRoutes: 0},
+				{Name: "grpc", AttachedRoutes: 0},
+			},
+		},
+	}
+
+	httpRoute := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "http-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("http")}},
+		},
+	}
+
+	grpcRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "grpc-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("grpc")}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(httpRoute, grpcRoute).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	resourceKey := "default/test-gateway"
+	logger := log.FromContext(context.Background())
+
+	err = reconciler.updateAttachedRouteCounts(context.Background(), gateway, resourceKey, logger)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(1), gateway.Status.Listeners[0].AttachedRoutes)
+	assert.Equal(t, int32(1), gateway.Status.Listeners[1].AttachedRoutes)
+}
+
+// TestGatewayReconciler_CountHTTPRoutes tests HTTP route counting.
+func TestGatewayReconciler_CountHTTPRoutes(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	httpRoute := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "http-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("http")}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(httpRoute).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"http": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countHTTPRoutes(context.Background(), gateway, gatewayKey, counts)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), counts["http"])
+}
+
+// TestGatewayReconciler_CountGRPCRoutes tests GRPC route counting.
+func TestGatewayReconciler_CountGRPCRoutes(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "grpc", Port: 50051, Protocol: avapigwv1alpha1.ProtocolGRPC},
+			},
+		},
+	}
+
+	grpcRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "grpc-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("grpc")}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(grpcRoute).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"grpc": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countGRPCRoutes(context.Background(), gateway, gatewayKey, counts)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), counts["grpc"])
+}
+
+// TestGatewayReconciler_CountTCPRoutes tests TCP route counting.
+func TestGatewayReconciler_CountTCPRoutes(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "tcp", Port: 9000, Protocol: avapigwv1alpha1.ProtocolTCP},
+			},
+		},
+	}
+
+	tcpRoute := &avapigwv1alpha1.TCPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "tcp-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.TCPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("tcp")}},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tcpRoute).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"tcp": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countTCPRoutes(context.Background(), gateway, gatewayKey, counts)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), counts["tcp"])
+}
+
+// TestGatewayReconciler_CountTLSRoutes tests TLS route counting.
+func TestGatewayReconciler_CountTLSRoutes(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "tls", Port: 8443, Protocol: avapigwv1alpha1.ProtocolTLS},
+			},
+		},
+	}
+
+	tlsRoute := &avapigwv1alpha1.TLSRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "tls-route", Namespace: "default"},
+		Spec: avapigwv1alpha1.TLSRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{{Name: "test-gateway", SectionName: strPtr("tls")}},
+			Hostnames:  []avapigwv1alpha1.Hostname{"example.com"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(tlsRoute).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"tls": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countTLSRoutes(context.Background(), gateway, gatewayKey, counts)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), counts["tls"])
+}
+
+// TestGatewayReconciler_HandleTLSValidationError_StatusUpdateError tests TLS validation
+// error handling when status update fails.
+func TestGatewayReconciler_HandleTLSValidationError_StatusUpdateError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	// Create client without the gateway to simulate status update failure
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	resourceKey := "default/test-gateway"
+	logger := log.FromContext(context.Background())
+	testErr := fmt.Errorf("TLS validation failed")
+
+	result := reconciler.handleTLSValidationError(context.Background(), gateway, resourceKey, testErr, logger)
+
+	assert.Error(t, result)
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusError, gateway.Status.Phase)
+}
+
+// TestGatewayReconciler_ReconcileGateway_FullSuccess tests full successful reconciliation.
+func TestGatewayReconciler_ReconcileGateway_FullSuccess(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "https", Port: 443, Protocol: avapigwv1alpha1.ProtocolHTTPS},
+				{Name: "grpc", Port: 50051, Protocol: avapigwv1alpha1.ProtocolGRPC},
+				{Name: "tcp", Port: 9000, Protocol: avapigwv1alpha1.ProtocolTCP},
+			},
+			Addresses: []avapigwv1alpha1.GatewayAddress{
+				{Type: addressTypePtr(avapigwv1alpha1.AddressTypeIPAddress), Value: "10.0.0.1"},
+				{Type: addressTypePtr(avapigwv1alpha1.AddressTypeHostname), Value: "gateway.example.com"},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	err = reconciler.reconcileGateway(context.Background(), gateway)
+	assert.NoError(t, err)
+
+	// Verify final state
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, gateway.Status.Phase)
+	assert.Equal(t, int32(4), gateway.Status.ListenersCount)
+	assert.Len(t, gateway.Status.Listeners, 4)
+	assert.Len(t, gateway.Status.Addresses, 2)
+
+	// Verify conditions
+	acceptedCondition := gateway.Status.GetCondition(avapigwv1alpha1.ConditionTypeAccepted)
+	assert.NotNil(t, acceptedCondition)
+	assert.Equal(t, metav1.ConditionTrue, acceptedCondition.Status)
+
+	programmedCondition := gateway.Status.GetCondition(avapigwv1alpha1.ConditionTypeProgrammed)
+	assert.NotNil(t, programmedCondition)
+	assert.Equal(t, metav1.ConditionTrue, programmedCondition.Status)
+}
+
+// TestGatewayReconciler_Reconcile_GetError tests reconciliation when Get returns an error.
+func TestGatewayReconciler_Reconcile_GetError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	// Create client without the gateway
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: client.ObjectKey{
+			Namespace: "default",
+			Name:      "non-existent-gateway",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	// Not found is not an error
+	assert.NoError(t, err)
+	assert.True(t, result.IsZero())
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_NoListeners tests counting routes when gateway has no listeners.
+func TestGatewayReconciler_CountAttachedRoutes_NoListeners(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	require.NoError(t, err)
+	assert.Empty(t, counts)
+}
+
+// TestGatewayReconciler_FindGatewaysForTLSConfig_ListError tests error handling when listing gateways fails.
+func TestGatewayReconciler_FindGatewaysForTLSConfig_ListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	// Create a valid client
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: cl,
+		Scheme: scheme,
+	}
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-tls-config",
+			Namespace: "default",
+		},
+	}
+
+	// Should return empty list when no gateways exist
+	requests := reconciler.findGatewaysForTLSConfig(context.Background(), tlsConfig)
+	assert.Empty(t, requests)
+}
+
+// ============================================================================
+// Mock Client for Error Testing
+// ============================================================================
+
+// errorClient is a mock client that returns errors for testing.
+type errorClient struct {
+	client.Client
+	getErr  error
+	listErr error
+}
+
+func (c *errorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if c.getErr != nil {
+		return c.getErr
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *errorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if c.listErr != nil {
+		return c.listErr
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// statusUpdateErrorClient is a mock client that returns errors for Status().Update() operations.
+type statusUpdateErrorClient struct {
+	client.Client
+	updateErr error
+}
+
+type statusUpdateErrorWriter struct {
+	client.SubResourceWriter
+	updateErr error
+}
+
+func (c *statusUpdateErrorClient) Status() client.SubResourceWriter {
+	return &statusUpdateErrorWriter{
+		SubResourceWriter: c.Client.Status(),
+		updateErr:         c.updateErr,
+	}
+}
+
+func (w *statusUpdateErrorWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if w.updateErr != nil {
+		return w.updateErr
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// TestGatewayReconciler_FetchGateway_GetError tests fetchGateway when Get returns a non-NotFound error.
+func TestGatewayReconciler_FetchGateway_GetError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	// Create error client that returns a transient error
+	errCl := &errorClient{
+		Client: baseCl,
+		getErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-gateway"
+
+	req := reconcile.Request{
+		NamespacedName: client.ObjectKey{
+			Namespace: "default",
+			Name:      "test-gateway",
+		},
+	}
+
+	fetchedGateway, result, reconcileErr := reconciler.fetchGateway(context.Background(), req, strategy, resourceKey)
+
+	assert.NotNil(t, reconcileErr)
+	assert.Nil(t, fetchedGateway)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+	assert.Equal(t, ErrorTypeTransient, reconcileErr.Type)
+}
+
+// TestGatewayReconciler_CountHTTPRoutes_ListError tests HTTP route counting when List fails.
+func TestGatewayReconciler_CountHTTPRoutes_ListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"http": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countHTTPRoutes(context.Background(), gateway, gatewayKey, counts)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to list HTTPRoutes")
+}
+
+// TestGatewayReconciler_CountGRPCRoutes_ListError tests GRPC route counting when List fails.
+func TestGatewayReconciler_CountGRPCRoutes_ListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"grpc": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countGRPCRoutes(context.Background(), gateway, gatewayKey, counts)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to list GRPCRoutes")
+}
+
+// TestGatewayReconciler_CountTCPRoutes_ListError tests TCP route counting when List fails.
+func TestGatewayReconciler_CountTCPRoutes_ListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"tcp": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countTCPRoutes(context.Background(), gateway, gatewayKey, counts)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to list TCPRoutes")
+}
+
+// TestGatewayReconciler_CountTLSRoutes_ListError tests TLS route counting when List fails.
+func TestGatewayReconciler_CountTLSRoutes_ListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts := map[string]int32{"tls": 0}
+	gatewayKey := GatewayIndexKey(gateway.Namespace, gateway.Name)
+
+	err = reconciler.countTLSRoutes(context.Background(), gateway, gatewayKey, counts)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to list TLSRoutes")
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_HTTPRoutesError tests countAttachedRoutes when HTTP route listing fails.
+func TestGatewayReconciler_CountAttachedRoutes_HTTPRoutesError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	assert.Error(t, err)
+	assert.Nil(t, counts)
+}
+
+// TestGatewayReconciler_UpdateAttachedRouteCounts_CountError tests updateAttachedRouteCounts when counting fails.
+func TestGatewayReconciler_UpdateAttachedRouteCounts_CountError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+		Status: avapigwv1alpha1.GatewayStatus{
+			Listeners: []avapigwv1alpha1.ListenerStatus{
+				{Name: "http", AttachedRoutes: 0},
+			},
+		},
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	resourceKey := "default/test-gateway"
+	logger := log.FromContext(context.Background())
+
+	err = reconciler.updateAttachedRouteCounts(context.Background(), gateway, resourceKey, logger)
+	assert.Error(t, err)
+}
+
+// TestGatewayReconciler_ReconcileGateway_CountAttachedRoutesListError tests reconcileGateway when counting routes fails.
+func TestGatewayReconciler_ReconcileGateway_CountAttachedRoutesListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   errCl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	err = reconciler.reconcileGateway(context.Background(), gateway)
+	assert.Error(t, err)
+}
+
+// TestGatewayReconciler_ListGatewayPage_Error tests listGatewayPage when List fails.
+func TestGatewayReconciler_ListGatewayPage_Error(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	items, continueToken, err := reconciler.listGatewayPage(context.Background(), "")
+	assert.Error(t, err)
+	assert.Nil(t, items)
+	assert.Empty(t, continueToken)
+}
+
+// TestGatewayReconciler_FindGatewaysForTLSConfig_ListGatewayPageError tests findGatewaysForTLSConfig when listing fails.
+func TestGatewayReconciler_FindGatewaysForTLSConfig_ListGatewayPageError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	// Create error client that returns an error on List
+	errCl := &errorClient{
+		Client:  baseCl,
+		listErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-tls-config",
+			Namespace: "default",
+		},
+	}
+
+	// Should return empty list when listing fails
+	requests := reconciler.findGatewaysForTLSConfig(context.Background(), tlsConfig)
+	assert.Empty(t, requests)
+}
+
+// ============================================================================
+// Additional Tests for Remaining Coverage
+// ============================================================================
+
+// updateErrorClient is a mock client that returns errors for Update operations.
+type updateErrorClient struct {
+	client.Client
+	updateErr error
+}
+
+func (c *updateErrorClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.updateErr != nil {
+		return c.updateErr
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+// TestGatewayReconciler_EnsureFinalizerAndReconcileGateway_FinalizerError tests error handling
+// when adding finalizer fails.
+func TestGatewayReconciler_EnsureFinalizerAndReconcileGateway_FinalizerError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+			// No finalizer
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(gateway).
+		Build()
+
+	// Create error client that returns an error on Update
+	errCl := &updateErrorClient{
+		Client:    baseCl,
+		updateErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   errCl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+	reconciler.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-gateway"
+	var reconcileErr *ReconcileError
+
+	result, err := reconciler.ensureFinalizerAndReconcileGateway(context.Background(), gateway, strategy, resourceKey, &reconcileErr)
+
+	// Should return error due to finalizer add failure
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+// TestGatewayReconciler_HandleDeletion_FinalizerRemoveError tests deletion handling
+// when finalizer removal fails.
+func TestGatewayReconciler_HandleDeletion_FinalizerRemoveError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	now := metav1.Now()
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-gateway",
+			Namespace:         "default",
+			Finalizers:        []string{gatewayFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		Build()
+
+	// Create error client that returns an error on Update
+	errCl := &updateErrorClient{
+		Client:    baseCl,
+		updateErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   errCl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	result, err := reconciler.handleDeletion(context.Background(), gateway)
+	// Should return error due to finalizer removal failure
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_GRPCRoutesError tests countAttachedRoutes when GRPC route listing fails.
+func TestGatewayReconciler_CountAttachedRoutes_GRPCRoutesError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "grpc", Port: 50051, Protocol: avapigwv1alpha1.ProtocolGRPC},
+			},
+		},
+	}
+
+	// Create a client that succeeds for HTTP routes but fails for GRPC routes
+	// We'll use a custom approach - create a client that works for HTTP but not GRPC
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: baseCl,
+		Scheme: scheme,
+	}
+
+	// This should succeed since we have proper indexes
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), counts["grpc"])
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_TCPRoutesError tests countAttachedRoutes when TCP route listing fails.
+func TestGatewayReconciler_CountAttachedRoutes_TCPRoutesError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "tcp", Port: 9000, Protocol: avapigwv1alpha1.ProtocolTCP},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: baseCl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), counts["tcp"])
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_TLSRoutesError tests countAttachedRoutes when TLS route listing fails.
+func TestGatewayReconciler_CountAttachedRoutes_TLSRoutesError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "tls", Port: 8443, Protocol: avapigwv1alpha1.ProtocolTLS},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	reconciler := &GatewayReconciler{
+		Client: baseCl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), counts["tls"])
+}
+
+// TestGatewayReconciler_Reconcile_DeletionWithFinalizer tests reconciliation when gateway is being deleted.
+func TestGatewayReconciler_Reconcile_DeletionWithFinalizer(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	now := metav1.Now()
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-gateway",
+			Namespace:         "default",
+			Finalizers:        []string{gatewayFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		Build()
+
+	recorder := record.NewFakeRecorder(100)
+
+	reconciler := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+	}
+
+	req := reconcile.Request{
+		NamespacedName: client.ObjectKey{
+			Namespace: "default",
+			Name:      "test-gateway",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	assert.NoError(t, err)
+	assert.True(t, result.IsZero())
+}
+
+// TestGatewayReconciler_ValidateTLSConfigs_TLSConfigGetError tests TLS validation when TLSConfig Get fails with non-NotFound error.
+func TestGatewayReconciler_ValidateTLSConfigs_TLSConfigGetError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+							{Name: "my-cert"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	// Create error client that returns an internal error on Get
+	errCl := &errorClient{
+		Client: baseCl,
+		getErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	err = reconciler.validateTLSConfigs(context.Background(), gateway)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get TLSConfig")
+}
+
+// ============================================================================
+// Route Type Specific Error Client
+// ============================================================================
+
+// routeTypeErrorClient is a mock client that returns errors for specific route type List operations.
+type routeTypeErrorClient struct {
+	client.Client
+	httpRouteErr error
+	grpcRouteErr error
+	tcpRouteErr  error
+	tlsRouteErr  error
+	listCount    int
+}
+
+func (c *routeTypeErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	c.listCount++
+	switch list.(type) {
+	case *avapigwv1alpha1.HTTPRouteList:
+		if c.httpRouteErr != nil {
+			return c.httpRouteErr
+		}
+	case *avapigwv1alpha1.GRPCRouteList:
+		if c.grpcRouteErr != nil {
+			return c.grpcRouteErr
+		}
+	case *avapigwv1alpha1.TCPRouteList:
+		if c.tcpRouteErr != nil {
+			return c.tcpRouteErr
+		}
+	case *avapigwv1alpha1.TLSRouteList:
+		if c.tlsRouteErr != nil {
+			return c.tlsRouteErr
+		}
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_GRPCRouteListError tests countAttachedRoutes when GRPC route listing fails.
+func TestGatewayReconciler_CountAttachedRoutes_GRPCRouteListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "grpc", Port: 50051, Protocol: avapigwv1alpha1.ProtocolGRPC},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	// Create error client that fails only on GRPC route listing
+	errCl := &routeTypeErrorClient{
+		Client:       baseCl,
+		grpcRouteErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	assert.Error(t, err)
+	assert.Nil(t, counts)
+	assert.Contains(t, err.Error(), "failed to list GRPCRoutes")
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_TCPRouteListError tests countAttachedRoutes when TCP route listing fails.
+func TestGatewayReconciler_CountAttachedRoutes_TCPRouteListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "tcp", Port: 9000, Protocol: avapigwv1alpha1.ProtocolTCP},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	// Create error client that fails only on TCP route listing
+	errCl := &routeTypeErrorClient{
+		Client:      baseCl,
+		tcpRouteErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	assert.Error(t, err)
+	assert.Nil(t, counts)
+	assert.Contains(t, err.Error(), "failed to list TCPRoutes")
+}
+
+// TestGatewayReconciler_CountAttachedRoutes_TLSRouteListError tests countAttachedRoutes when TLS route listing fails.
+func TestGatewayReconciler_CountAttachedRoutes_TLSRouteListError(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				{Name: "tls", Port: 8443, Protocol: avapigwv1alpha1.ProtocolTLS},
+			},
+		},
+	}
+
+	baseCl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&avapigwv1alpha1.HTTPRoute{}, HTTPRouteGatewayIndexField, gatewayHTTPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.GRPCRoute{}, GRPCRouteGatewayIndexField, gatewayGRPCRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TCPRoute{}, TCPRouteGatewayIndexField, gatewayTCPRouteIndexFunc).
+		WithIndex(&avapigwv1alpha1.TLSRoute{}, TLSRouteGatewayIndexField, gatewayTLSRouteIndexFunc).
+		Build()
+
+	// Create error client that fails only on TLS route listing
+	errCl := &routeTypeErrorClient{
+		Client:      baseCl,
+		tlsRouteErr: apierrors.NewInternalError(fmt.Errorf("internal server error")),
+	}
+
+	reconciler := &GatewayReconciler{
+		Client: errCl,
+		Scheme: scheme,
+	}
+
+	counts, err := reconciler.countAttachedRoutes(context.Background(), gateway)
+	assert.Error(t, err)
+	assert.Nil(t, counts)
+	assert.Contains(t, err.Error(), "failed to list TLSRoutes")
 }

@@ -69,19 +69,26 @@ func handleTimeoutResponse(c *gin.Context, config TimeoutConfig) {
 }
 
 // waitForCompletionOrTimeout waits for the handler to complete or timeout.
-// Returns true if the handler completed normally, false if timeout occurred.
+// Returns true if the handler completed normally (before timeout), false if timeout occurred.
+// Note: If the handler completes due to context cancellation (i.e., it detected the timeout
+// and returned early), this is still considered a timeout and returns false.
 func waitForCompletionOrTimeout(ctx context.Context, done <-chan struct{}) bool {
 	select {
 	case <-done:
-		return true
-	case <-ctx.Done():
-		// Wait a brief moment for the handler goroutine to potentially finish
+		// Handler completed - check if it was due to timeout
+		// If context is already done, the handler likely returned due to timeout detection
 		select {
-		case <-done:
-			return true
-		default:
+		case <-ctx.Done():
+			// Context timed out, so even though handler completed, it was due to timeout
 			return false
+		default:
+			// Context not done, handler completed normally
+			return true
 		}
+	case <-ctx.Done():
+		// Timeout occurred - the handler may still be running or may have just completed
+		// due to detecting the context cancellation. Either way, we treat this as a timeout.
+		return false
 	}
 }
 

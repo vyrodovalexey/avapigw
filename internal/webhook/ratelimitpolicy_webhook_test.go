@@ -733,3 +733,160 @@ func TestRateLimitPolicyWebhook_ValidateDelete(t *testing.T) {
 		assert.Contains(t, err.Error(), "expected a RateLimitPolicy")
 	})
 }
+
+// ============================================================================
+// Additional RateLimitPolicy Webhook Tests for Coverage
+// ============================================================================
+
+func TestRateLimitPolicyWebhook_ValidateReferences(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid RateLimitPolicy with Redis secret reference", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		redisSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "redis-secret", Namespace: "default"},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, redisSecret).Build()
+
+		policy := &avapigwv1alpha1.RateLimitPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+			Spec: avapigwv1alpha1.RateLimitPolicySpec{
+				TargetRef: avapigwv1alpha1.TargetRef{
+					Group: avapigwv1alpha1.GroupVersion.Group,
+					Kind:  "Gateway",
+					Name:  "test-gateway",
+				},
+				Rules: []avapigwv1alpha1.RateLimitRule{{
+					Name: "default",
+					Limit: avapigwv1alpha1.RateLimitValue{
+						Requests: 100,
+						Unit:     avapigwv1alpha1.RateLimitUnitMinute,
+					},
+				}},
+				Storage: &avapigwv1alpha1.RateLimitStorageConfig{
+					Type: avapigwv1alpha1.RateLimitStorageRedis,
+					Redis: &avapigwv1alpha1.RedisStorageConfig{
+						Address: "redis:6379",
+						SecretRef: &avapigwv1alpha1.SecretObjectReference{
+							Name: "redis-secret",
+						},
+					},
+				},
+			},
+		}
+
+		webhook := &RateLimitPolicyWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewRateLimitPolicyDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), policy)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid RateLimitPolicy with missing Redis secret", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		policy := &avapigwv1alpha1.RateLimitPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+			Spec: avapigwv1alpha1.RateLimitPolicySpec{
+				TargetRef: avapigwv1alpha1.TargetRef{
+					Group: avapigwv1alpha1.GroupVersion.Group,
+					Kind:  "Gateway",
+					Name:  "test-gateway",
+				},
+				Rules: []avapigwv1alpha1.RateLimitRule{{
+					Name: "default",
+					Limit: avapigwv1alpha1.RateLimitValue{
+						Requests: 100,
+						Unit:     avapigwv1alpha1.RateLimitUnitMinute,
+					},
+				}},
+				Storage: &avapigwv1alpha1.RateLimitStorageConfig{
+					Type: avapigwv1alpha1.RateLimitStorageRedis,
+					Redis: &avapigwv1alpha1.RedisStorageConfig{
+						Address: "redis:6379",
+						SecretRef: &avapigwv1alpha1.SecretObjectReference{
+							Name: "missing-redis-secret",
+						},
+					},
+				},
+			},
+		}
+
+		webhook := &RateLimitPolicyWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewRateLimitPolicyDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), policy)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.storage.redis.secretRef")
+	})
+
+	t.Run("valid RateLimitPolicy targeting GRPCRoute", func(t *testing.T) {
+		route := &avapigwv1alpha1.GRPCRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(route).Build()
+
+		policy := &avapigwv1alpha1.RateLimitPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
+			Spec: avapigwv1alpha1.RateLimitPolicySpec{
+				TargetRef: avapigwv1alpha1.TargetRef{
+					Group: avapigwv1alpha1.GroupVersion.Group,
+					Kind:  "GRPCRoute",
+					Name:  "test-route",
+				},
+				Rules: []avapigwv1alpha1.RateLimitRule{{
+					Name: "default",
+					Limit: avapigwv1alpha1.RateLimitValue{
+						Requests: 100,
+						Unit:     avapigwv1alpha1.RateLimitUnitMinute,
+					},
+				}},
+			},
+		}
+
+		webhook := &RateLimitPolicyWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewRateLimitPolicyDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), policy)
+		assert.NoError(t, err)
+	})
+}

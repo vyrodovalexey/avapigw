@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,6 +31,7 @@ func newTestScheme(t *testing.T) *runtime.Scheme {
 	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
 	require.NoError(t, err)
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, discoveryv1.AddToScheme(scheme))
 	return scheme
 }
 
@@ -1727,6 +1729,281 @@ func TestHTTPRouteReconciler_hostnameMatch_EdgeCases(t *testing.T) {
 			assert.Equal(t, tt.wantMatch, result)
 		})
 	}
+}
+
+// ============================================================================
+// HTTPRouteReconciler handleHTTPRouteReconcileError Tests
+// ============================================================================
+
+func TestHTTPRouteReconciler_handleHTTPRouteReconcileError(t *testing.T) {
+	tests := []struct {
+		name          string
+		errorType     ErrorType
+		expectRequeue bool
+	}{
+		{
+			name:          "validation error",
+			errorType:     ErrorTypeValidation,
+			expectRequeue: false,
+		},
+		{
+			name:          "permanent error",
+			errorType:     ErrorTypePermanent,
+			expectRequeue: false,
+		},
+		{
+			name:          "dependency error",
+			errorType:     ErrorTypeDependency,
+			expectRequeue: true,
+		},
+		{
+			name:          "transient error",
+			errorType:     ErrorTypeTransient,
+			expectRequeue: true,
+		},
+		{
+			name:          "internal error",
+			errorType:     ErrorTypeInternal,
+			expectRequeue: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &HTTPRouteReconciler{}
+			strategy := DefaultRequeueStrategy()
+			resourceKey := "default/test-route"
+
+			reconcileErr := &ReconcileError{
+				Type:      tt.errorType,
+				Op:        "test",
+				Resource:  resourceKey,
+				Err:       errors.New("test error"),
+				Retryable: tt.expectRequeue,
+			}
+
+			result, err := r.handleHTTPRouteReconcileError(reconcileErr, strategy, resourceKey)
+
+			assert.Error(t, err)
+			assert.Equal(t, tt.expectRequeue, result.Requeue)
+			assert.True(t, result.RequeueAfter > 0)
+		})
+	}
+}
+
+// ============================================================================
+// HTTPRouteReconciler fetchHTTPRoute Tests
+// ============================================================================
+
+func TestHTTPRouteReconciler_fetchHTTPRoute(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	t.Run("success - route found", func(t *testing.T) {
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route).
+			Build()
+
+		r := newHTTPRouteReconciler(cl, scheme)
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		fetchedRoute, result, reconcileErr := r.fetchHTTPRoute(context.Background(), req, strategy, resourceKey)
+
+		assert.Nil(t, reconcileErr)
+		assert.NotNil(t, fetchedRoute)
+		assert.True(t, result.IsZero())
+		assert.Equal(t, "test-route", fetchedRoute.Name)
+	})
+
+	t.Run("not found - returns nil route", func(t *testing.T) {
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			Build()
+
+		r := newHTTPRouteReconciler(cl, scheme)
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/non-existent"
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "non-existent",
+				Namespace: "default",
+			},
+		}
+
+		fetchedRoute, result, reconcileErr := r.fetchHTTPRoute(context.Background(), req, strategy, resourceKey)
+
+		assert.Nil(t, reconcileErr)
+		assert.Nil(t, fetchedRoute)
+		assert.True(t, result.IsZero())
+	})
+
+	t.Run("get error - returns error", func(t *testing.T) {
+		// Use an error client that returns errors on Get
+		cl := &errorClient{
+			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+			getErr: errors.New("get error"),
+		}
+
+		r := &HTTPRouteReconciler{
+			Client:   cl,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(100),
+		}
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+
+		req := ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		fetchedRoute, result, reconcileErr := r.fetchHTTPRoute(context.Background(), req, strategy, resourceKey)
+
+		assert.NotNil(t, reconcileErr)
+		assert.Nil(t, fetchedRoute)
+		assert.True(t, result.RequeueAfter > 0)
+	})
+}
+
+// ============================================================================
+// HTTPRouteReconciler ensureFinalizerAndReconcileHTTPRoute Tests
+// ============================================================================
+
+func TestHTTPRouteReconciler_ensureFinalizerAndReconcileHTTPRoute(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	t.Run("adds finalizer when not present", func(t *testing.T) {
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-route",
+				Namespace: "default",
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route).
+			WithStatusSubresource(&avapigwv1alpha1.HTTPRoute{}).
+			Build()
+
+		r := newHTTPRouteReconciler(cl, scheme)
+		r.initBaseComponents()
+
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+		var reconcileErr *ReconcileError
+
+		result, err := r.ensureFinalizerAndReconcileHTTPRoute(context.Background(), route, strategy, resourceKey, &reconcileErr)
+
+		assert.NoError(t, err)
+		assert.True(t, result.Requeue)
+	})
+
+	t.Run("reconciles when finalizer present", func(t *testing.T) {
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-route",
+				Namespace:  "default",
+				Finalizers: []string{httpRouteFinalizer},
+			},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "test-gateway"},
+				},
+			},
+		}
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-gateway",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{
+					{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+				},
+			},
+		}
+
+		cl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route, gateway).
+			WithStatusSubresource(&avapigwv1alpha1.HTTPRoute{}).
+			Build()
+
+		r := newHTTPRouteReconciler(cl, scheme)
+		r.initBaseComponents()
+
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+		var reconcileErr *ReconcileError
+
+		result, err := r.ensureFinalizerAndReconcileHTTPRoute(context.Background(), route, strategy, resourceKey, &reconcileErr)
+
+		assert.NoError(t, err)
+		assert.True(t, result.RequeueAfter > 0)
+	})
+
+	t.Run("handles reconcile error", func(t *testing.T) {
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-route",
+				Namespace:  "default",
+				Finalizers: []string{httpRouteFinalizer},
+			},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "test-gateway"},
+				},
+			},
+		}
+
+		// Use an error client that returns errors on Status().Update()
+		baseCl := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(route).
+			WithStatusSubresource(&avapigwv1alpha1.HTTPRoute{}).
+			Build()
+
+		cl := &statusUpdateErrorClient{
+			Client:    baseCl,
+			updateErr: errors.New("status update error"),
+		}
+
+		r := &HTTPRouteReconciler{
+			Client:   cl,
+			Scheme:   scheme,
+			Recorder: record.NewFakeRecorder(100),
+		}
+		r.initBaseComponents()
+
+		strategy := DefaultRequeueStrategy()
+		resourceKey := "default/test-route"
+		var reconcileErr *ReconcileError
+
+		result, err := r.ensureFinalizerAndReconcileHTTPRoute(context.Background(), route, strategy, resourceKey, &reconcileErr)
+
+		assert.Error(t, err)
+		assert.True(t, result.RequeueAfter > 0)
+	})
 }
 
 // ============================================================================

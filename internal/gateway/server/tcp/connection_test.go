@@ -540,3 +540,207 @@ func TestCountingConn_Write(t *testing.T) {
 		assert.Equal(t, 5, n)
 	})
 }
+
+func TestConnectionTracker_CloseAll_WithErrors(t *testing.T) {
+	logger := zap.NewNop()
+
+	t.Run("handles close errors gracefully", func(t *testing.T) {
+		tracker := NewConnectionTracker(10, logger)
+
+		// Add connections
+		for i := 0; i < 3; i++ {
+			server, client := net.Pipe()
+			defer server.Close()
+			defer client.Close()
+
+			_, err := tracker.Add(client)
+			require.NoError(t, err)
+		}
+
+		// Close all - should not panic even if some connections have errors
+		tracker.CloseAll()
+	})
+
+	t.Run("handles nil conn in tracked connection", func(t *testing.T) {
+		tracker := NewConnectionTracker(10, logger)
+
+		// Manually add a tracked connection with nil conn
+		tracked := &TrackedConnection{
+			ID:         "test-id",
+			RemoteAddr: "127.0.0.1:1234",
+			LocalAddr:  "127.0.0.1:5678",
+			StartTime:  time.Now(),
+			conn:       nil, // nil connection
+		}
+		tracker.connections.Store(tracked.ID, tracked)
+
+		// Close all - should not panic
+		tracker.CloseAll()
+	})
+}
+
+func TestTrackedConnection_ConcurrentAccess(t *testing.T) {
+	t.Run("concurrent read and write stats", func(t *testing.T) {
+		tracked := &TrackedConnection{
+			ID:        "test-id",
+			StartTime: time.Now(),
+		}
+
+		var wg sync.WaitGroup
+
+		// Concurrent AddBytesIn
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				tracked.AddBytesIn(10)
+			}()
+		}
+
+		// Concurrent AddBytesOut
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				tracked.AddBytesOut(20)
+			}()
+		}
+
+		// Concurrent GetStats
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				tracked.GetStats()
+			}()
+		}
+
+		wg.Wait()
+
+		bytesIn, bytesOut, _ := tracked.GetStats()
+		assert.Equal(t, int64(500), bytesIn)
+		assert.Equal(t, int64(1000), bytesOut)
+	})
+}
+
+func TestCountingConn_ReadError(t *testing.T) {
+	t.Run("handles read error", func(t *testing.T) {
+		server, client := net.Pipe()
+		server.Close() // Close server to cause read error
+
+		tracked := &TrackedConnection{
+			ID:        "test-id",
+			StartTime: time.Now(),
+		}
+		countingConn := NewCountingConn(client, tracked)
+
+		buf := make([]byte, 10)
+		_, err := countingConn.Read(buf)
+
+		assert.Error(t, err)
+		client.Close()
+	})
+
+	t.Run("does not count bytes on error", func(t *testing.T) {
+		server, client := net.Pipe()
+		server.Close() // Close server to cause read error
+
+		tracked := &TrackedConnection{
+			ID:        "test-id",
+			StartTime: time.Now(),
+		}
+		countingConn := NewCountingConn(client, tracked)
+
+		buf := make([]byte, 10)
+		countingConn.Read(buf)
+
+		bytesIn, _, _ := tracked.GetStats()
+		assert.Equal(t, int64(0), bytesIn)
+		client.Close()
+	})
+}
+
+func TestCountingConn_WriteError(t *testing.T) {
+	t.Run("handles write error", func(t *testing.T) {
+		server, client := net.Pipe()
+		server.Close() // Close server to cause write error
+
+		tracked := &TrackedConnection{
+			ID:        "test-id",
+			StartTime: time.Now(),
+		}
+		countingConn := NewCountingConn(client, tracked)
+
+		_, err := countingConn.Write([]byte("hello"))
+
+		assert.Error(t, err)
+		client.Close()
+	})
+}
+
+func TestConnectionTracker_AddRemoveConcurrent(t *testing.T) {
+	logger := zap.NewNop()
+	tracker := NewConnectionTracker(1000, logger)
+
+	var wg sync.WaitGroup
+	var ids sync.Map
+
+	// Concurrent adds
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			server, client := net.Pipe()
+			defer server.Close()
+			defer client.Close()
+
+			tracked, err := tracker.Add(client)
+			if err == nil {
+				ids.Store(tracked.ID, true)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Concurrent removes
+	ids.Range(func(key, value interface{}) bool {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			tracker.Remove(id)
+		}(key.(string))
+		return true
+	})
+
+	wg.Wait()
+
+	assert.Equal(t, 0, tracker.Count())
+}
+
+func TestConnectionTracker_ListConcurrent(t *testing.T) {
+	logger := zap.NewNop()
+	tracker := NewConnectionTracker(100, logger)
+
+	// Add some connections
+	for i := 0; i < 10; i++ {
+		server, client := net.Pipe()
+		defer server.Close()
+		defer client.Close()
+		tracker.Add(client)
+	}
+
+	var wg sync.WaitGroup
+
+	// Concurrent List calls
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			list := tracker.List()
+			assert.LessOrEqual(t, len(list), 10)
+		}()
+	}
+
+	wg.Wait()
+}

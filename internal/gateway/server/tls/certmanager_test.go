@@ -841,3 +841,264 @@ func TestCertificateManager_CloseWithWatcher(t *testing.T) {
 	err = cm.Close()
 	assert.NoError(t, err)
 }
+
+func TestCertificateManager_WatchCertificates_DifferentDirectories(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Create two different temp directories
+	tempDir1 := t.TempDir()
+	tempDir2 := t.TempDir()
+
+	// Generate and write test certificate to different directories
+	certPEM, keyPEM, err := generateTestCertificate("example.com")
+	require.NoError(t, err)
+
+	certFile := filepath.Join(tempDir1, "cert.pem")
+	keyFile := filepath.Join(tempDir2, "key.pem")
+
+	err = os.WriteFile(certFile, certPEM, 0600)
+	require.NoError(t, err)
+
+	err = os.WriteFile(keyFile, keyPEM, 0600)
+	require.NoError(t, err)
+
+	// Load certificate
+	err = cm.LoadCertificate("example.com", certFile, keyFile)
+	require.NoError(t, err)
+
+	// Start watching
+	stopCh := make(chan struct{})
+	err = cm.WatchCertificates(stopCh)
+	require.NoError(t, err)
+
+	// Wait a bit for watcher to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop watching
+	close(stopCh)
+
+	// Wait for watcher to stop
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestCertificateManager_HandleFileChange_ReloadError(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Generate and write test certificate
+	certPEM, keyPEM, err := generateTestCertificate("example.com")
+	require.NoError(t, err)
+	certFile, keyFile := writeTempCertFiles(t, certPEM, keyPEM)
+
+	// Load certificate
+	err = cm.LoadCertificate("example.com", certFile, keyFile)
+	require.NoError(t, err)
+
+	// Corrupt the certificate file
+	err = os.WriteFile(certFile, []byte("invalid cert"), 0600)
+	require.NoError(t, err)
+
+	// Trigger file change handler - should log error but not panic
+	cm.handleFileChange(certFile)
+
+	// Certificate should still be in the list (old one)
+	certs := cm.ListCertificates()
+	assert.Contains(t, certs, "example.com")
+}
+
+func TestCertificateManager_WatchLoop_WatcherClosed(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Generate and write test certificate
+	certPEM, keyPEM, err := generateTestCertificate("example.com")
+	require.NoError(t, err)
+	certFile, keyFile := writeTempCertFiles(t, certPEM, keyPEM)
+
+	// Load certificate
+	err = cm.LoadCertificate("example.com", certFile, keyFile)
+	require.NoError(t, err)
+
+	// Start watching
+	stopCh := make(chan struct{})
+	err = cm.WatchCertificates(stopCh)
+	require.NoError(t, err)
+
+	// Wait a bit for watcher to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Close the watcher directly (simulating watcher error)
+	cm.mu.Lock()
+	if cm.watcher != nil {
+		_ = cm.watcher.Close()
+	}
+	cm.mu.Unlock()
+
+	// Wait for watchLoop to exit
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop channel should still work
+	close(stopCh)
+}
+
+func TestCertificateManager_WatchCertificates_FileChange(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Generate and write test certificate
+	certPEM, keyPEM, err := generateTestCertificate("example.com")
+	require.NoError(t, err)
+	certFile, keyFile := writeTempCertFiles(t, certPEM, keyPEM)
+
+	// Load certificate
+	err = cm.LoadCertificate("example.com", certFile, keyFile)
+	require.NoError(t, err)
+
+	// Start watching
+	stopCh := make(chan struct{})
+	err = cm.WatchCertificates(stopCh)
+	require.NoError(t, err)
+
+	// Wait a bit for watcher to start
+	time.Sleep(200 * time.Millisecond)
+
+	// Modify the certificate file (write same content to trigger event)
+	err = os.WriteFile(certFile, certPEM, 0600)
+	require.NoError(t, err)
+
+	// Wait for file change to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Stop watching
+	close(stopCh)
+
+	// Wait for watcher to stop
+	time.Sleep(100 * time.Millisecond)
+
+	// Certificate should still be loaded
+	certs := cm.ListCertificates()
+	assert.Contains(t, certs, "example.com")
+}
+
+func TestCertificateManager_FindWildcardCert_NoMatch(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Load wildcard certificate for different domain
+	certPEM, keyPEM, err := generateTestCertificate("*.other.com")
+	require.NoError(t, err)
+	err = cm.LoadCertificateFromSecret("*.other.com", certPEM, keyPEM)
+	require.NoError(t, err)
+
+	// Test with hostname that doesn't match
+	hello := &tls.ClientHelloInfo{
+		ServerName: "api.example.com",
+	}
+
+	cert, err := cm.GetCertificate(hello)
+	require.Error(t, err)
+	assert.Nil(t, cert)
+}
+
+func TestCertificateManager_GetCertificate_EmptyServerName(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Load a certificate
+	certPEM, keyPEM, err := generateTestCertificate("example.com")
+	require.NoError(t, err)
+	err = cm.LoadCertificateFromSecret("example.com", certPEM, keyPEM)
+	require.NoError(t, err)
+
+	// Test with empty server name
+	hello := &tls.ClientHelloInfo{
+		ServerName: "",
+	}
+
+	cert, err := cm.GetCertificate(hello)
+	require.Error(t, err)
+	assert.Nil(t, cert)
+}
+
+func TestCertificateManager_GetCertificate_EmptyServerNameWithDefault(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Set default certificate
+	certPEM, keyPEM, err := generateTestCertificate("default.com")
+	require.NoError(t, err)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+	cm.SetDefaultCertificate(&cert)
+
+	// Test with empty server name - should return default
+	hello := &tls.ClientHelloInfo{
+		ServerName: "",
+	}
+
+	gotCert, err := cm.GetCertificate(hello)
+	require.NoError(t, err)
+	require.NotNil(t, gotCert)
+}
+
+func TestCertificateManager_MultipleCertificates(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Load multiple certificates
+	hostnames := []string{"example.com", "example.org", "example.net", "*.wildcard.com"}
+	for _, hostname := range hostnames {
+		certPEM, keyPEM, err := generateTestCertificate(hostname)
+		require.NoError(t, err)
+		err = cm.LoadCertificateFromSecret(hostname, certPEM, keyPEM)
+		require.NoError(t, err)
+	}
+
+	// Verify all certificates are loaded
+	certs := cm.ListCertificates()
+	assert.Len(t, certs, len(hostnames))
+
+	// Test each hostname
+	for _, hostname := range hostnames {
+		testHostname := hostname
+		if hostname == "*.wildcard.com" {
+			testHostname = "api.wildcard.com"
+		}
+		hello := &tls.ClientHelloInfo{
+			ServerName: testHostname,
+		}
+		cert, err := cm.GetCertificate(hello)
+		require.NoError(t, err, "Failed for hostname: %s", testHostname)
+		require.NotNil(t, cert)
+	}
+}
+
+func TestCertificateManager_RemoveCertificate_WithWatchedFiles(t *testing.T) {
+	logger := zap.NewNop()
+	cm := NewCertificateManager(logger)
+
+	// Generate and write test certificate
+	certPEM, keyPEM, err := generateTestCertificate("example.com")
+	require.NoError(t, err)
+	certFile, keyFile := writeTempCertFiles(t, certPEM, keyPEM)
+
+	// Load certificate (this adds to watchedFiles)
+	err = cm.LoadCertificate("example.com", certFile, keyFile)
+	require.NoError(t, err)
+
+	// Verify it's in watchedFiles
+	cm.mu.RLock()
+	_, exists := cm.watchedFiles["example.com"]
+	cm.mu.RUnlock()
+	assert.True(t, exists)
+
+	// Remove certificate
+	cm.RemoveCertificate("example.com")
+
+	// Verify it's removed from watchedFiles
+	cm.mu.RLock()
+	_, exists = cm.watchedFiles["example.com"]
+	cm.mu.RUnlock()
+	assert.False(t, exists)
+}

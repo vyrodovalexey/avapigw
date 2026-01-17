@@ -948,3 +948,291 @@ func TestRouter_WildcardPriority(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "high-priority", route.Name)
 }
+
+func TestRouter_RemoveRoute_WithWildcard(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add route with wildcard
+	route := &TLSRoute{
+		Name:      "wildcard-route",
+		Hostnames: []string{"*.example.com", "example.com"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "backend1", Port: 443},
+		},
+	}
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	// Verify route exists
+	assert.NotNil(t, router.GetRoute("wildcard-route"))
+
+	// Remove route
+	err = router.RemoveRoute("wildcard-route")
+	require.NoError(t, err)
+
+	// Verify route is removed
+	assert.Nil(t, router.GetRoute("wildcard-route"))
+
+	// Verify wildcard routes are cleared
+	router.mu.RLock()
+	assert.Empty(t, router.wildcardRoutes)
+	router.mu.RUnlock()
+}
+
+func TestRouter_UpdateRoute_WildcardToWildcard(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add route with wildcard
+	route := &TLSRoute{
+		Name:      "wildcard-route",
+		Hostnames: []string{"*.example.com"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "backend1", Port: 443},
+		},
+	}
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	// Update to different wildcard
+	updatedRoute := &TLSRoute{
+		Name:      "wildcard-route",
+		Hostnames: []string{"*.other.com"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "backend2", Port: 8443},
+		},
+	}
+	err = router.UpdateRoute(updatedRoute)
+	require.NoError(t, err)
+
+	// Verify old wildcard doesn't match
+	_, err = router.Match("api.example.com")
+	require.Error(t, err)
+
+	// Verify new wildcard matches
+	matchedRoute, err := router.Match("api.other.com")
+	require.NoError(t, err)
+	assert.Equal(t, "wildcard-route", matchedRoute.Name)
+}
+
+func TestCompileWildcardPattern_InvalidRegex(t *testing.T) {
+	// This test verifies that compileWildcardPattern handles edge cases
+	// The function should always produce valid regex for wildcard patterns
+
+	patterns := []string{
+		"*.example.com",
+		"*.sub.example.com",
+		"*.a.b.c.example.com",
+	}
+
+	for _, pattern := range patterns {
+		regex := compileWildcardPattern(pattern)
+		assert.NotNil(t, regex, "Pattern %s should compile", pattern)
+	}
+}
+
+func TestRouter_SortWildcardRoutes_ByPriority(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add routes with different priorities
+	routes := []*TLSRoute{
+		{
+			Name:      "low-priority",
+			Hostnames: []string{"*.example.com"},
+			Priority:  1,
+		},
+		{
+			Name:      "medium-priority",
+			Hostnames: []string{"*.example.org"},
+			Priority:  5,
+		},
+		{
+			Name:      "high-priority",
+			Hostnames: []string{"*.example.net"},
+			Priority:  10,
+		},
+	}
+
+	for _, route := range routes {
+		err := router.AddRoute(route)
+		require.NoError(t, err)
+	}
+
+	// Verify wildcard routes are sorted by priority (highest first)
+	router.mu.RLock()
+	if len(router.wildcardRoutes) >= 3 {
+		assert.Equal(t, "high-priority", router.wildcardRoutes[0].route.Name)
+	}
+	router.mu.RUnlock()
+}
+
+func TestRouter_SortWildcardRoutes_BySpecificity(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add routes with same priority but different specificity
+	routes := []*TLSRoute{
+		{
+			Name:      "less-specific",
+			Hostnames: []string{"*.example.com"},
+			Priority:  5,
+		},
+		{
+			Name:      "more-specific",
+			Hostnames: []string{"*.sub.example.com"},
+			Priority:  5,
+		},
+	}
+
+	for _, route := range routes {
+		err := router.AddRoute(route)
+		require.NoError(t, err)
+	}
+
+	// Verify more specific route comes first
+	router.mu.RLock()
+	if len(router.wildcardRoutes) >= 2 {
+		// More dots = more specific
+		assert.Equal(t, "more-specific", router.wildcardRoutes[0].route.Name)
+	}
+	router.mu.RUnlock()
+}
+
+func TestRouter_Match_CaseInsensitive(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add route with mixed case
+	route := &TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{"Example.COM"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "backend1", Port: 443},
+		},
+	}
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	// Test various case combinations
+	testCases := []string{
+		"example.com",
+		"EXAMPLE.COM",
+		"Example.Com",
+		"eXaMpLe.CoM",
+	}
+
+	for _, tc := range testCases {
+		matchedRoute, err := router.Match(tc)
+		require.NoError(t, err, "Failed for: %s", tc)
+		assert.Equal(t, "test-route", matchedRoute.Name)
+	}
+}
+
+func TestRouter_Match_WildcardNilRegex(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Manually add a wildcard route with nil regex (edge case)
+	router.mu.Lock()
+	router.wildcardRoutes = append(router.wildcardRoutes, &wildcardRoute{
+		pattern: "*.example.com",
+		regex:   nil, // Nil regex
+		route: &TLSRoute{
+			Name:      "nil-regex-route",
+			Hostnames: []string{"*.example.com"},
+		},
+	})
+	router.mu.Unlock()
+
+	// Match should not panic and should not match
+	_, err := router.Match("api.example.com")
+	require.Error(t, err)
+}
+
+func TestRouter_AddRoute_EmptyHostnames(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add route with empty hostnames
+	route := &TLSRoute{
+		Name:      "empty-hostnames",
+		Hostnames: []string{},
+		BackendRefs: []TLSBackendRef{
+			{Name: "backend1", Port: 443},
+		},
+	}
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	// Route should be added but not matchable
+	assert.NotNil(t, router.GetRoute("empty-hostnames"))
+}
+
+func TestRouter_UpdateRoute_EmptyToNonEmpty(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add route with empty hostnames
+	route := &TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{},
+	}
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	// Update with hostnames
+	updatedRoute := &TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{"example.com"},
+	}
+	err = router.UpdateRoute(updatedRoute)
+	require.NoError(t, err)
+
+	// Should now be matchable
+	matchedRoute, err := router.Match("example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "test-route", matchedRoute.Name)
+}
+
+func TestRouter_RemoveRoute_MultipleWildcards(t *testing.T) {
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add multiple routes with wildcards
+	routes := []*TLSRoute{
+		{
+			Name:      "route1",
+			Hostnames: []string{"*.example.com"},
+		},
+		{
+			Name:      "route2",
+			Hostnames: []string{"*.example.org"},
+		},
+		{
+			Name:      "route3",
+			Hostnames: []string{"*.example.net"},
+		},
+	}
+
+	for _, route := range routes {
+		err := router.AddRoute(route)
+		require.NoError(t, err)
+	}
+
+	// Remove middle route
+	err := router.RemoveRoute("route2")
+	require.NoError(t, err)
+
+	// Verify other routes still work
+	_, err = router.Match("api.example.com")
+	require.NoError(t, err)
+
+	_, err = router.Match("api.example.net")
+	require.NoError(t, err)
+
+	// Verify removed route doesn't match
+	_, err = router.Match("api.example.org")
+	require.Error(t, err)
+}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -795,4 +796,527 @@ func TestNewLocalProvider_BasePathIsFile(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrProviderNotConfigured)
 	assert.Contains(t, err.Error(), "not a directory")
+}
+
+func TestLocalProviderGetSecret_DirectoryOnlySubdirs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create a directory with only subdirectories (no files)
+	secretDir := filepath.Join(tmpDir, "only-subdirs")
+	require.NoError(t, os.MkdirAll(filepath.Join(secretDir, "subdir1"), 0750))
+	require.NoError(t, os.MkdirAll(filepath.Join(secretDir, "subdir2"), 0750))
+
+	// Should fail because no valid key files found
+	_, err = provider.GetSecret(ctx, "only-subdirs")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrSecretNotFound)
+}
+
+func TestLocalProviderWriteSecret_MarshalError(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Write a valid secret (YAML marshaling should work for any map[string][]byte)
+	err = provider.WriteSecret(ctx, "test-secret", map[string][]byte{
+		"key": []byte("value"),
+	})
+	require.NoError(t, err)
+}
+
+func TestLocalProviderDeleteSecret_DirectoryError(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create a directory with a file
+	secretDir := filepath.Join(tmpDir, "dir-to-delete")
+	require.NoError(t, os.MkdirAll(secretDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(secretDir, "key"), []byte("value"), 0600))
+
+	// Delete should succeed
+	err = provider.DeleteSecret(ctx, "dir-to-delete")
+	require.NoError(t, err)
+
+	// Verify directory is gone
+	_, err = os.Stat(secretDir)
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestLocalProviderListSecrets_SubPath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create nested structure
+	subDir := filepath.Join(tmpDir, "subpath")
+	require.NoError(t, os.MkdirAll(subDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "secret1.yaml"), []byte("key: value"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "secret2.json"), []byte(`{"key": "value"}`), 0600))
+
+	// List secrets in subpath
+	secrets, err := provider.ListSecrets(ctx, "subpath")
+	require.NoError(t, err)
+	assert.Len(t, secrets, 2)
+	assert.Contains(t, secrets, "secret1")
+	assert.Contains(t, secrets, "secret2")
+}
+
+func TestLocalProviderGetSecret_NestedPath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create nested secret
+	nestedDir := filepath.Join(tmpDir, "nested", "path")
+	require.NoError(t, os.MkdirAll(nestedDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(nestedDir, "secret.yaml"), []byte("key: value"), 0600))
+
+	// Get nested secret
+	secret, err := provider.GetSecret(ctx, "nested/path/secret")
+	require.NoError(t, err)
+	assert.Equal(t, "nested/path/secret", secret.Name)
+}
+
+func TestLocalProviderDeleteSecret_YMLFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create a .yml file
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "secret.yml"), []byte("key: value"), 0600))
+
+	// Delete should remove the .yml file
+	err = provider.DeleteSecret(ctx, "secret")
+	require.NoError(t, err)
+
+	// Verify file is gone
+	_, err = os.Stat(filepath.Join(tmpDir, "secret.yml"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestLocalProviderListSecrets_MixedContent(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create mixed content: directories, yaml, yml, json, and other files
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "dir-secret"), 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "yaml-secret.yaml"), []byte("key: value"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "yml-secret.yml"), []byte("key: value"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "json-secret.json"), []byte(`{"key": "value"}`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "other.txt"), []byte("not a secret"), 0600))
+
+	secrets, err := provider.ListSecrets(ctx, "")
+	require.NoError(t, err)
+
+	// Should include dir-secret, yaml-secret, yml-secret, json-secret
+	// Should NOT include other.txt
+	assert.Contains(t, secrets, "dir-secret")
+	assert.Contains(t, secrets, "yaml-secret")
+	assert.Contains(t, secrets, "yml-secret")
+	assert.Contains(t, secrets, "json-secret")
+	assert.NotContains(t, secrets, "other")
+	assert.NotContains(t, secrets, "other.txt")
+}
+
+func TestLocalProviderGetSecret_PriorityOrder(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create both directory and YAML file with same name
+	// Directory should take priority
+	secretDir := filepath.Join(tmpDir, "priority-secret")
+	require.NoError(t, os.MkdirAll(secretDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(secretDir, "from"), []byte("directory"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "priority-secret.yaml"), []byte("from: yaml"), 0600))
+
+	secret, err := provider.GetSecret(ctx, "priority-secret")
+	require.NoError(t, err)
+
+	// Should get value from directory (priority)
+	val, ok := secret.GetString("from")
+	assert.True(t, ok)
+	assert.Equal(t, "directory", val)
+}
+
+func TestLocalProviderReadSecretFromDirectory_UnreadableFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create a directory with a readable file
+	secretDir := filepath.Join(tmpDir, "readable-secret")
+	require.NoError(t, os.MkdirAll(secretDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(secretDir, "readable"), []byte("value"), 0600))
+
+	// Get the secret - should work
+	secret, err := provider.GetSecret(ctx, "readable-secret")
+	require.NoError(t, err)
+	val, ok := secret.GetString("readable")
+	assert.True(t, ok)
+	assert.Equal(t, "value", val)
+}
+
+func TestLocalProviderValidateAndCleanPath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{
+			name:    "valid simple path",
+			path:    "secret",
+			wantErr: false,
+		},
+		{
+			name:    "valid nested path",
+			path:    "nested/secret",
+			wantErr: false,
+		},
+		{
+			name:    "empty path",
+			path:    "",
+			wantErr: true,
+		},
+		{
+			name:    "path traversal",
+			path:    "../etc/passwd",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := provider.validateAndCleanPath(tt.path, time.Now())
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestLocalProviderListSecrets_ReadDirError(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create a subdir and then make it unreadable
+	subDir := filepath.Join(tmpDir, "unreadable")
+	require.NoError(t, os.MkdirAll(subDir, 0750))
+
+	// List secrets in a non-existent subpath returns empty list
+	secrets, err := provider.ListSecrets(ctx, "nonexistent-subpath")
+	require.NoError(t, err)
+	assert.Empty(t, secrets)
+}
+
+func TestLocalProviderReadSecretFromYAML_ByteValue(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create a YAML file with various types
+	yamlContent := `string_key: simple_value
+bool_key: true
+null_key: null`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "types.yaml"), []byte(yamlContent), 0600))
+
+	secret, err := provider.GetSecret(ctx, "types")
+	require.NoError(t, err)
+
+	// String key should work
+	strVal, ok := secret.GetString("string_key")
+	assert.True(t, ok)
+	assert.Equal(t, "simple_value", strVal)
+
+	// Bool key should be JSON-encoded
+	boolVal, ok := secret.Data["bool_key"]
+	assert.True(t, ok)
+	assert.Equal(t, "true", string(boolVal))
+}
+
+func TestLocalProviderReadSecretFromJSON_NumberValue(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create a JSON file with number values
+	jsonContent := `{"float_key": 3.14, "int_key": 42, "string_key": "value"}`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "numbers.json"), []byte(jsonContent), 0600))
+
+	secret, err := provider.GetSecret(ctx, "numbers")
+	require.NoError(t, err)
+
+	// Float key should be JSON-encoded
+	floatVal, ok := secret.Data["float_key"]
+	assert.True(t, ok)
+	assert.Contains(t, string(floatVal), "3.14")
+
+	// Int key should be JSON-encoded
+	intVal, ok := secret.Data["int_key"]
+	assert.True(t, ok)
+	assert.Equal(t, "42", string(intVal))
+
+	// String key should work
+	strVal, ok := secret.GetString("string_key")
+	assert.True(t, ok)
+	assert.Equal(t, "value", strVal)
+}
+
+func TestLocalProviderNewLocalProvider_StatError(t *testing.T) {
+	// Test with a path that doesn't exist
+	_, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: "/nonexistent/path/that/does/not/exist",
+		Logger:   zap.NewNop(),
+	})
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrProviderNotConfigured)
+}
+
+func TestLocalProviderGetSecret_FallbackToYAML(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create only a YAML file (no directory)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "yaml-only.yaml"), []byte("key: value"), 0600))
+
+	secret, err := provider.GetSecret(ctx, "yaml-only")
+	require.NoError(t, err)
+	assert.Equal(t, "yaml-only", secret.Name)
+	val, ok := secret.GetString("key")
+	assert.True(t, ok)
+	assert.Equal(t, "value", val)
+}
+
+func TestLocalProviderGetSecret_FallbackToJSON(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create only a JSON file (no directory or YAML)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "json-only.json"), []byte(`{"key": "value"}`), 0600))
+
+	secret, err := provider.GetSecret(ctx, "json-only")
+	require.NoError(t, err)
+	assert.Equal(t, "json-only", secret.Name)
+	val, ok := secret.GetString("key")
+	assert.True(t, ok)
+	assert.Equal(t, "value", val)
+}
+
+func TestLocalProviderListSecrets_EmptyDirectory(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// List secrets in empty directory
+	secrets, err := provider.ListSecrets(ctx, "")
+	require.NoError(t, err)
+	assert.Empty(t, secrets)
+}
+
+func TestLocalProviderDeleteSecret_AllFormats(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Create all formats
+	secretDir := filepath.Join(tmpDir, "all-formats")
+	require.NoError(t, os.MkdirAll(secretDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(secretDir, "key"), []byte("dir-value"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "all-formats.yaml"), []byte("key: yaml"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "all-formats.yml"), []byte("key: yml"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "all-formats.json"), []byte(`{"key": "json"}`), 0600))
+
+	// Delete should remove all
+	err = provider.DeleteSecret(ctx, "all-formats")
+	require.NoError(t, err)
+
+	// Verify all are gone
+	_, err = os.Stat(secretDir)
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(tmpDir, "all-formats.yaml"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(tmpDir, "all-formats.yml"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(tmpDir, "all-formats.json"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestLocalProviderWriteSecret_OverwriteExisting(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "local-provider-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	provider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Write initial secret
+	err = provider.WriteSecret(ctx, "overwrite-test", map[string][]byte{
+		"key": []byte("initial"),
+	})
+	require.NoError(t, err)
+
+	// Overwrite with new value
+	err = provider.WriteSecret(ctx, "overwrite-test", map[string][]byte{
+		"key": []byte("updated"),
+	})
+	require.NoError(t, err)
+
+	// Read back and verify
+	secret, err := provider.GetSecret(ctx, "overwrite-test")
+	require.NoError(t, err)
+	val, ok := secret.GetString("key")
+	assert.True(t, ok)
+	assert.Equal(t, "updated", val)
 }

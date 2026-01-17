@@ -598,3 +598,382 @@ func TestBackendWebhook_ValidateDelete(t *testing.T) {
 		assert.Contains(t, err.Error(), "expected a Backend")
 	})
 }
+
+// ============================================================================
+// Additional Backend Webhook Tests for Coverage
+// ============================================================================
+
+func TestBackendWebhook_ValidateCircuitBreakerConfig(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid circuit breaker with interval", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		interval := avapigwv1alpha1.Duration("10s")
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				CircuitBreaker: &avapigwv1alpha1.CircuitBreakerConfig{
+					Interval: &interval,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid circuit breaker with invalid interval", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		interval := avapigwv1alpha1.Duration("invalid")
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				CircuitBreaker: &avapigwv1alpha1.CircuitBreakerConfig{
+					Interval: &interval,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid duration format")
+	})
+
+	t.Run("valid circuit breaker with base ejection time", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		baseEjectionTime := avapigwv1alpha1.Duration("30s")
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				CircuitBreaker: &avapigwv1alpha1.CircuitBreakerConfig{
+					BaseEjectionTime: &baseEjectionTime,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid circuit breaker with invalid base ejection time", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		baseEjectionTime := avapigwv1alpha1.Duration("bad")
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				CircuitBreaker: &avapigwv1alpha1.CircuitBreakerConfig{
+					BaseEjectionTime: &baseEjectionTime,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid duration format")
+	})
+}
+
+func TestBackendWebhook_ValidateTLSReferences(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid TLS with certificate reference", func(t *testing.T) {
+		tlsSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "tls-cert", Namespace: "default"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret).Build()
+
+		mode := avapigwv1alpha1.BackendTLSModeMutual
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				TLS: &avapigwv1alpha1.BackendTLSConfig{
+					Mode: &mode,
+					CertificateRef: &avapigwv1alpha1.SecretObjectReference{
+						Name: "tls-cert",
+					},
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid TLS with missing certificate reference", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		mode := avapigwv1alpha1.BackendTLSModeMutual
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				TLS: &avapigwv1alpha1.BackendTLSConfig{
+					Mode: &mode,
+					CertificateRef: &avapigwv1alpha1.SecretObjectReference{
+						Name: "missing-tls-cert",
+					},
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.tls.certificateRef")
+	})
+
+	t.Run("valid TLS with CA certificate reference", func(t *testing.T) {
+		caSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "ca-cert", Namespace: "default"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(caSecret).Build()
+
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				TLS: &avapigwv1alpha1.BackendTLSConfig{
+					CACertificateRef: &avapigwv1alpha1.SecretObjectReference{
+						Name: "ca-cert",
+					},
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid TLS with missing CA certificate reference", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				TLS: &avapigwv1alpha1.BackendTLSConfig{
+					CACertificateRef: &avapigwv1alpha1.SecretObjectReference{
+						Name: "missing-ca-cert",
+					},
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.tls.caCertificateRef")
+	})
+}
+
+func TestBackendWebhook_ValidateServiceWithNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid service reference with explicit namespace", func(t *testing.T) {
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "other-ns"},
+		}
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(service).Build()
+
+		otherNs := "other-ns"
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Service: &avapigwv1alpha1.ServiceRef{
+					Name:      "my-service",
+					Namespace: &otherNs,
+					Port:      8080,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid service reference with missing service in namespace", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		otherNs := "other-ns"
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Service: &avapigwv1alpha1.ServiceRef{
+					Name:      "missing-service",
+					Namespace: &otherNs,
+					Port:      8080,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.service")
+	})
+}
+
+func TestBackendWebhook_ValidateHealthCheckTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid health check with timeout", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		timeout := avapigwv1alpha1.Duration("5s")
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				HealthCheck: &avapigwv1alpha1.HealthCheckConfig{
+					Timeout: &timeout,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid health check with invalid timeout", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		timeout := avapigwv1alpha1.Duration("invalid")
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+				HealthCheck: &avapigwv1alpha1.HealthCheckConfig{
+					Timeout: &timeout,
+				},
+			},
+		}
+
+		webhook := &BackendWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewBackendDefaulter(),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), backend)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid duration format")
+	})
+}

@@ -815,3 +815,432 @@ func TestRouterMatchWithRegexHeaders(t *testing.T) {
 		assert.Nil(t, matchedRule)
 	})
 }
+
+// ============================================================================
+// Router Compile Error Path Tests
+// ============================================================================
+
+// TestRouterCompileInvalidServiceRegex tests compiling with invalid service regex
+func TestRouterCompileInvalidServiceRegex(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Route with invalid regex pattern for service
+	route := &GRPCRoute{
+		Name:      "invalid-service-regex-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{
+						Service: "[invalid", // Invalid regex
+						Method:  "*",
+						Type:    GRPCMethodMatchTypeRegex,
+					},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	// Should not error - falls back to exact matcher
+	err := router.AddRoute(route)
+	assert.NoError(t, err)
+
+	// Should still be able to match (using fallback exact matcher)
+	md := metadata.MD{}
+	matchedRoute, _ := router.Match("[invalid", "TestMethod", md)
+	assert.NotNil(t, matchedRoute)
+}
+
+// TestRouterCompileInvalidMethodRegex tests compiling with invalid method regex
+func TestRouterCompileInvalidMethodRegex(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Route with invalid regex pattern for method
+	route := &GRPCRoute{
+		Name:      "invalid-method-regex-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{
+						Service: "*",
+						Method:  "[invalid", // Invalid regex
+						Type:    GRPCMethodMatchTypeRegex,
+					},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	// Should not error - falls back to exact matcher
+	err := router.AddRoute(route)
+	assert.NoError(t, err)
+
+	// Should still be able to match (using fallback exact matcher)
+	md := metadata.MD{}
+	matchedRoute, _ := router.Match("test.Service", "[invalid", md)
+	assert.NotNil(t, matchedRoute)
+}
+
+// TestRouterCompileInvalidHeaderRegex tests compiling with invalid header regex
+func TestRouterCompileInvalidHeaderRegex(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Route with invalid regex pattern for header
+	route := &GRPCRoute{
+		Name:      "invalid-header-regex-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{
+						Service: "*",
+						Method:  "*",
+						Headers: []GRPCHeaderMatch{
+							{
+								Name:  "x-version",
+								Value: "[invalid", // Invalid regex
+								Type:  GRPCHeaderMatchTypeRegex,
+							},
+						},
+					},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	// Should not error - invalid header matcher is skipped
+	err := router.AddRoute(route)
+	assert.NoError(t, err)
+
+	// Should match since invalid header matcher is skipped
+	md := metadata.MD{}
+	matchedRoute, _ := router.Match("test.Service", "TestMethod", md)
+	assert.NotNil(t, matchedRoute)
+}
+
+// TestRouterHostnameRegexError tests hostname regex compilation error
+func TestRouterHostnameRegexError(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Route with hostname that would cause regex error (though most are escaped)
+	route := &GRPCRoute{
+		Name:      "hostname-route",
+		Hostnames: []string{"api.example.com"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "*", Method: "*"},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(route)
+	assert.NoError(t, err)
+
+	// Should match the hostname
+	md := metadata.MD{":authority": []string{"api.example.com"}}
+	matchedRoute, _ := router.Match("test.Service", "TestMethod", md)
+	assert.NotNil(t, matchedRoute)
+}
+
+// TestRouterMatchRuleWithNilMatchers tests matching with nil matchers
+func TestRouterMatchRuleWithNilMatchers(t *testing.T) {
+	t.Parallel()
+
+	matcher := &GRPCRouteMatcher{}
+
+	// Create a compiled rule with nil matchers
+	rule := &CompiledGRPCRule{
+		Rule: &GRPCRouteRule{
+			Matches: []GRPCMethodMatch{}, // Empty matches
+		},
+		ServiceMatcher: nil,
+		MethodMatcher:  nil,
+		HeaderMatchers: nil,
+	}
+
+	// Should match since no matchers are defined
+	result := matcher.matchRule(rule, "any.Service", "AnyMethod", nil)
+	assert.True(t, result)
+}
+
+// TestRouterMatchHostnameWithNoRegexes tests hostname matching with no regexes
+func TestRouterMatchHostnameWithNoRegexes(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Route with empty hostnames (matches all)
+	route := &GRPCRoute{
+		Name:      "no-hostname-route",
+		Hostnames: []string{}, // Empty - matches all
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "*", Method: "*"},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(route)
+	assert.NoError(t, err)
+
+	// Should match any hostname
+	md := metadata.MD{":authority": []string{"any.example.com"}}
+	matchedRoute, _ := router.Match("test.Service", "TestMethod", md)
+	assert.NotNil(t, matchedRoute)
+}
+
+// TestRouterMatchWithMethodMatcher tests matching with method matcher only
+func TestRouterMatchWithMethodMatcher(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	route := &GRPCRoute{
+		Name:      "method-only-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{
+						Service: "", // Empty - matches all
+						Method:  "GetUser",
+						Type:    GRPCMethodMatchTypeExact,
+					},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(route)
+	assert.NoError(t, err)
+
+	t.Run("matches correct method", func(t *testing.T) {
+		md := metadata.MD{}
+		matchedRoute, _ := router.Match("any.Service", "GetUser", md)
+		assert.NotNil(t, matchedRoute)
+	})
+
+	t.Run("no match for different method", func(t *testing.T) {
+		md := metadata.MD{}
+		matchedRoute, _ := router.Match("any.Service", "CreateUser", md)
+		assert.Nil(t, matchedRoute)
+	})
+}
+
+// TestRouterMatchWithServiceMatcher tests matching with service matcher only
+func TestRouterMatchWithServiceMatcher(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	route := &GRPCRoute{
+		Name:      "service-only-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{
+						Service: "users.UserService",
+						Method:  "", // Empty - matches all
+						Type:    GRPCMethodMatchTypeExact,
+					},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(route)
+	assert.NoError(t, err)
+
+	t.Run("matches correct service", func(t *testing.T) {
+		md := metadata.MD{}
+		matchedRoute, _ := router.Match("users.UserService", "AnyMethod", md)
+		assert.NotNil(t, matchedRoute)
+	})
+
+	t.Run("no match for different service", func(t *testing.T) {
+		md := metadata.MD{}
+		matchedRoute, _ := router.Match("orders.OrderService", "AnyMethod", md)
+		assert.Nil(t, matchedRoute)
+	})
+}
+
+// TestRouterPriorityOrdering tests that routes are ordered by priority
+func TestRouterPriorityOrdering(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	// Add low priority route first
+	lowPriorityRoute := &GRPCRoute{
+		Name:      "low-priority",
+		Hostnames: []string{"*"},
+		Priority:  1,
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "*", Method: "*"},
+				},
+				BackendRefs: []BackendRef{{Name: "low-backend"}},
+			},
+		},
+	}
+
+	// Add high priority route second
+	highPriorityRoute := &GRPCRoute{
+		Name:      "high-priority",
+		Hostnames: []string{"*"},
+		Priority:  100,
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "*", Method: "*"},
+				},
+				BackendRefs: []BackendRef{{Name: "high-backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(lowPriorityRoute)
+	require.NoError(t, err)
+	err = router.AddRoute(highPriorityRoute)
+	require.NoError(t, err)
+
+	// Should match high priority route
+	md := metadata.MD{}
+	matchedRoute, _ := router.Match("test.Service", "TestMethod", md)
+	assert.NotNil(t, matchedRoute)
+	assert.Equal(t, "high-priority", matchedRoute.Name)
+}
+
+// TestGRPCRouteFilterTypes tests the route filter types
+func TestGRPCRouteFilterTypes(t *testing.T) {
+	t.Parallel()
+
+	filter := GRPCRouteFilter{
+		Type: GRPCRouteFilterRequestHeaderModifier,
+		RequestHeaderModifier: &HeaderModifier{
+			Set:    map[string]string{"x-custom": "value"},
+			Add:    map[string]string{"x-added": "value"},
+			Remove: []string{"x-remove"},
+		},
+	}
+
+	assert.Equal(t, GRPCRouteFilterRequestHeaderModifier, filter.Type)
+	assert.NotNil(t, filter.RequestHeaderModifier)
+	assert.Equal(t, "value", filter.RequestHeaderModifier.Set["x-custom"])
+	assert.Equal(t, "value", filter.RequestHeaderModifier.Add["x-added"])
+	assert.Contains(t, filter.RequestHeaderModifier.Remove, "x-remove")
+}
+
+// TestHeaderModifier tests the HeaderModifier struct
+func TestHeaderModifier(t *testing.T) {
+	t.Parallel()
+
+	modifier := &HeaderModifier{
+		Set:    map[string]string{"key1": "value1"},
+		Add:    map[string]string{"key2": "value2"},
+		Remove: []string{"key3"},
+	}
+
+	assert.Equal(t, "value1", modifier.Set["key1"])
+	assert.Equal(t, "value2", modifier.Add["key2"])
+	assert.Contains(t, modifier.Remove, "key3")
+}
+
+// TestCompiledGRPCRoute tests the CompiledGRPCRoute struct
+func TestCompiledGRPCRoute(t *testing.T) {
+	t.Parallel()
+
+	route := &GRPCRoute{
+		Name:      "test-route",
+		Hostnames: []string{"example.com"},
+		Priority:  10,
+	}
+
+	compiled := &CompiledGRPCRoute{
+		Route:       route,
+		HostRegexes: nil,
+		Rules:       nil,
+	}
+
+	assert.Equal(t, route, compiled.Route)
+	assert.Nil(t, compiled.HostRegexes)
+	assert.Nil(t, compiled.Rules)
+}
+
+// TestCompiledGRPCRule tests the CompiledGRPCRule struct
+func TestCompiledGRPCRule(t *testing.T) {
+	t.Parallel()
+
+	rule := &GRPCRouteRule{
+		BackendRefs: []BackendRef{{Name: "backend"}},
+	}
+
+	compiled := &CompiledGRPCRule{
+		Rule:           rule,
+		ServiceMatcher: NewExactServiceMatcher("test.Service"),
+		MethodMatcher:  NewExactMethodMatcher("TestMethod"),
+		HeaderMatchers: nil,
+		Priority:       5,
+	}
+
+	assert.Equal(t, rule, compiled.Rule)
+	assert.NotNil(t, compiled.ServiceMatcher)
+	assert.NotNil(t, compiled.MethodMatcher)
+	assert.Equal(t, 5, compiled.Priority)
+}
+
+// TestHostnameToRegexInvalidPattern tests hostnameToRegex with patterns that cause regex errors
+func TestHostnameToRegexInvalidPattern(t *testing.T) {
+	t.Parallel()
+
+	// Test with a hostname that would create an invalid regex after escaping
+	// Most patterns are valid after escaping, so we test edge cases
+
+	t.Run("normal hostname", func(t *testing.T) {
+		regex := hostnameToRegex("api.example.com")
+		assert.NotNil(t, regex)
+		assert.True(t, regex.MatchString("api.example.com"))
+	})
+
+	t.Run("hostname with special chars", func(t *testing.T) {
+		regex := hostnameToRegex("api-v1.example.com")
+		assert.NotNil(t, regex)
+		assert.True(t, regex.MatchString("api-v1.example.com"))
+	})
+
+	t.Run("hostname with numbers", func(t *testing.T) {
+		regex := hostnameToRegex("api123.example.com")
+		assert.NotNil(t, regex)
+		assert.True(t, regex.MatchString("api123.example.com"))
+	})
+}

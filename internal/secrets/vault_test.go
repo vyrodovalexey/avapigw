@@ -330,3 +330,172 @@ func TestCreateVaultAuthMethod_Unsupported(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported auth method")
 }
+
+// TestApplyVaultProviderDefaults tests the applyVaultProviderDefaults function
+func TestApplyVaultProviderDefaults(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      *VaultProviderConfig
+		expected vaultProviderDefaults
+	}{
+		{
+			name: "all defaults",
+			cfg:  &VaultProviderConfig{},
+			expected: vaultProviderDefaults{
+				secretMountPoint: "secret",
+				timeout:          30 * time.Second,
+				maxRetries:       3,
+				retryWaitMin:     500 * time.Millisecond,
+				retryWaitMax:     5 * time.Second,
+			},
+		},
+		{
+			name: "custom values",
+			cfg: &VaultProviderConfig{
+				SecretMountPoint: "kv",
+				Timeout:          60 * time.Second,
+				MaxRetries:       5,
+				RetryWaitMin:     1 * time.Second,
+				RetryWaitMax:     10 * time.Second,
+			},
+			expected: vaultProviderDefaults{
+				secretMountPoint: "kv",
+				timeout:          60 * time.Second,
+				maxRetries:       5,
+				retryWaitMin:     1 * time.Second,
+				retryWaitMax:     10 * time.Second,
+			},
+		},
+		{
+			name: "partial custom values",
+			cfg: &VaultProviderConfig{
+				SecretMountPoint: "custom-mount",
+				Timeout:          45 * time.Second,
+				// MaxRetries, RetryWaitMin, RetryWaitMax use defaults
+			},
+			expected: vaultProviderDefaults{
+				secretMountPoint: "custom-mount",
+				timeout:          45 * time.Second,
+				maxRetries:       3,
+				retryWaitMin:     500 * time.Millisecond,
+				retryWaitMax:     5 * time.Second,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := applyVaultProviderDefaults(tt.cfg)
+			assert.Equal(t, tt.expected.secretMountPoint, result.secretMountPoint)
+			assert.Equal(t, tt.expected.timeout, result.timeout)
+			assert.Equal(t, tt.expected.maxRetries, result.maxRetries)
+			assert.Equal(t, tt.expected.retryWaitMin, result.retryWaitMin)
+			assert.Equal(t, tt.expected.retryWaitMax, result.retryWaitMax)
+		})
+	}
+}
+
+// TestVaultProvider_Close_WithClient tests Close with a non-nil client
+func TestVaultProvider_Close_WithClient(t *testing.T) {
+	// Create a minimal vault client for testing
+	vaultCfg := vault.DefaultConfig()
+	vaultCfg.Address = "http://localhost:8200"
+	client, err := vault.NewClient(vaultCfg, zap.NewNop())
+	require.NoError(t, err)
+
+	p := &VaultProvider{
+		logger: zap.NewNop(),
+		client: client,
+	}
+
+	err = p.Close()
+	assert.NoError(t, err)
+}
+
+// TestVaultProviderConfig_AllFields tests all VaultProviderConfig fields
+func TestVaultProviderConfig_AllFields(t *testing.T) {
+	cfg := &VaultProviderConfig{
+		Address:          "http://vault.example.com:8200",
+		Namespace:        "my-namespace",
+		AuthMethod:       "kubernetes",
+		Role:             "my-role",
+		MountPath:        "kubernetes",
+		Token:            "my-token",
+		AppRoleID:        "role-id",
+		AppRoleSecretID:  "secret-id",
+		SecretMountPoint: "kv",
+		TLSConfig: &vault.TLSConfig{
+			InsecureSkipVerify: true,
+			ServerName:         "vault.example.com",
+		},
+		Timeout:      60 * time.Second,
+		MaxRetries:   5,
+		RetryWaitMin: 1 * time.Second,
+		RetryWaitMax: 10 * time.Second,
+		Logger:       zap.NewNop(),
+	}
+
+	// Verify all fields are set
+	assert.Equal(t, "http://vault.example.com:8200", cfg.Address)
+	assert.Equal(t, "my-namespace", cfg.Namespace)
+	assert.Equal(t, "kubernetes", cfg.AuthMethod)
+	assert.Equal(t, "my-role", cfg.Role)
+	assert.Equal(t, "kubernetes", cfg.MountPath)
+	assert.Equal(t, "my-token", cfg.Token)
+	assert.Equal(t, "role-id", cfg.AppRoleID)
+	assert.Equal(t, "secret-id", cfg.AppRoleSecretID)
+	assert.Equal(t, "kv", cfg.SecretMountPoint)
+	assert.NotNil(t, cfg.TLSConfig)
+	assert.True(t, cfg.TLSConfig.InsecureSkipVerify)
+	assert.Equal(t, 60*time.Second, cfg.Timeout)
+	assert.Equal(t, 5, cfg.MaxRetries)
+	assert.Equal(t, 1*time.Second, cfg.RetryWaitMin)
+	assert.Equal(t, 10*time.Second, cfg.RetryWaitMax)
+	assert.NotNil(t, cfg.Logger)
+}
+
+// TestApplyVaultProviderDefaults_AllDefaults tests that all defaults are applied
+func TestApplyVaultProviderDefaults_AllDefaults(t *testing.T) {
+	cfg := &VaultProviderConfig{}
+	defaults := applyVaultProviderDefaults(cfg)
+
+	assert.Equal(t, "secret", defaults.secretMountPoint)
+	assert.Equal(t, 30*time.Second, defaults.timeout)
+	assert.Equal(t, 3, defaults.maxRetries)
+	assert.Equal(t, 500*time.Millisecond, defaults.retryWaitMin)
+	assert.Equal(t, 5*time.Second, defaults.retryWaitMax)
+}
+
+// TestApplyVaultProviderDefaults_PartialDefaults tests partial defaults
+func TestApplyVaultProviderDefaults_PartialDefaults(t *testing.T) {
+	cfg := &VaultProviderConfig{
+		SecretMountPoint: "custom-mount",
+		Timeout:          45 * time.Second,
+		// MaxRetries, RetryWaitMin, RetryWaitMax should use defaults
+	}
+	defaults := applyVaultProviderDefaults(cfg)
+
+	assert.Equal(t, "custom-mount", defaults.secretMountPoint)
+	assert.Equal(t, 45*time.Second, defaults.timeout)
+	assert.Equal(t, 3, defaults.maxRetries)
+	assert.Equal(t, 500*time.Millisecond, defaults.retryWaitMin)
+	assert.Equal(t, 5*time.Second, defaults.retryWaitMax)
+}
+
+// TestApplyVaultProviderDefaults_NoDefaults tests when all values are provided
+func TestApplyVaultProviderDefaults_NoDefaults(t *testing.T) {
+	cfg := &VaultProviderConfig{
+		SecretMountPoint: "kv",
+		Timeout:          60 * time.Second,
+		MaxRetries:       5,
+		RetryWaitMin:     1 * time.Second,
+		RetryWaitMax:     10 * time.Second,
+	}
+	defaults := applyVaultProviderDefaults(cfg)
+
+	assert.Equal(t, "kv", defaults.secretMountPoint)
+	assert.Equal(t, 60*time.Second, defaults.timeout)
+	assert.Equal(t, 5, defaults.maxRetries)
+	assert.Equal(t, 1*time.Second, defaults.retryWaitMin)
+	assert.Equal(t, 10*time.Second, defaults.retryWaitMax)
+}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -385,5 +386,307 @@ func TestTCPRouteWebhook_ValidateDelete(t *testing.T) {
 		_, err := webhook.ValidateDelete(context.Background(), &avapigwv1alpha1.Gateway{})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "expected a TCPRoute")
+	})
+}
+
+// ============================================================================
+// Additional TCPRoute Webhook Tests for Coverage
+// ============================================================================
+
+func TestTCPRouteWebhook_ValidateParentProtocols(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid parent with TCP protocol and section name", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "tcp",
+					Port:     8080,
+					Protocol: avapigwv1alpha1.ProtocolTCP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		sectionName := "tcp"
+		route := &avapigwv1alpha1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.TCPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name:        "test-gateway",
+					SectionName: &sectionName,
+				}},
+				Rules: []avapigwv1alpha1.TCPRouteRule{{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{{
+						BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "my-service",
+						},
+					}},
+				}},
+			},
+		}
+
+		webhook := &TCPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTCPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), route)
+		// May fail due to service not existing
+		if err != nil {
+			assert.Contains(t, err.Error(), "service")
+		}
+	})
+
+	t.Run("invalid parent with non-TCP protocol", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		sectionName := "http"
+		route := &avapigwv1alpha1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.TCPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name:        "test-gateway",
+					SectionName: &sectionName,
+				}},
+				Rules: []avapigwv1alpha1.TCPRouteRule{{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{{
+						BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "my-service",
+						},
+					}},
+				}},
+			},
+		}
+
+		webhook := &TCPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTCPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), route)
+		assert.Error(t, err)
+	})
+
+	t.Run("parent with cross-namespace reference", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "other-ns"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "tcp",
+					Port:     8080,
+					Protocol: avapigwv1alpha1.ProtocolTCP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		otherNs := "other-ns"
+		sectionName := "tcp"
+		route := &avapigwv1alpha1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.TCPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name:        "test-gateway",
+					Namespace:   &otherNs,
+					SectionName: &sectionName,
+				}},
+				Rules: []avapigwv1alpha1.TCPRouteRule{{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{{
+						BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "my-service",
+						},
+					}},
+				}},
+			},
+		}
+
+		webhook := &TCPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTCPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), route)
+		// May fail due to service not existing
+		if err != nil {
+			assert.Contains(t, err.Error(), "service")
+		}
+	})
+}
+
+func TestTCPRouteWebhook_ValidateSingleBackendRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := avapigwv1alpha1.AddToScheme(scheme)
+	require.NoError(t, err)
+	err = corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	t.Run("valid backend ref with Backend kind", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "tcp",
+					Port:     8080,
+					Protocol: avapigwv1alpha1.ProtocolTCP,
+				}},
+			},
+		}
+
+		backend := &avapigwv1alpha1.Backend{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-backend", Namespace: "default"},
+			Spec: avapigwv1alpha1.BackendSpec{
+				Endpoints: []avapigwv1alpha1.EndpointConfig{{
+					Address: "10.0.0.1",
+					Port:    8080,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, backend).Build()
+
+		backendGroup := avapigwv1alpha1.GroupVersion.Group
+		backendKind := "Backend"
+		route := &avapigwv1alpha1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.TCPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "test-gateway",
+				}},
+				Rules: []avapigwv1alpha1.TCPRouteRule{{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{{
+						BackendRef: avapigwv1alpha1.BackendRef{
+							Group: &backendGroup,
+							Kind:  &backendKind,
+							Name:  "my-backend",
+						},
+					}},
+				}},
+			},
+		}
+
+		webhook := &TCPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTCPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), route)
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid backend ref with missing Backend", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "tcp",
+					Port:     8080,
+					Protocol: avapigwv1alpha1.ProtocolTCP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		backendGroup := avapigwv1alpha1.GroupVersion.Group
+		backendKind := "Backend"
+		route := &avapigwv1alpha1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.TCPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "test-gateway",
+				}},
+				Rules: []avapigwv1alpha1.TCPRouteRule{{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{{
+						BackendRef: avapigwv1alpha1.BackendRef{
+							Group: &backendGroup,
+							Kind:  &backendKind,
+							Name:  "missing-backend",
+						},
+					}},
+				}},
+			},
+		}
+
+		webhook := &TCPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTCPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), route)
+		assert.Error(t, err)
+	})
+
+	t.Run("valid backend ref with cross-namespace Service", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "tcp",
+					Port:     8080,
+					Protocol: avapigwv1alpha1.ProtocolTCP,
+				}},
+			},
+		}
+
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "other-ns"},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, service).Build()
+
+		otherNs := "other-ns"
+		route := &avapigwv1alpha1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.TCPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "test-gateway",
+				}},
+				Rules: []avapigwv1alpha1.TCPRouteRule{{
+					BackendRefs: []avapigwv1alpha1.TCPBackendRef{{
+						BackendRef: avapigwv1alpha1.BackendRef{
+							Name:      "my-service",
+							Namespace: &otherNs,
+						},
+					}},
+				}},
+			},
+		}
+
+		webhook := &TCPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewTCPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err := webhook.ValidateCreate(context.Background(), route)
+		assert.NoError(t, err)
 	})
 }

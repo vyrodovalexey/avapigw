@@ -1,8 +1,10 @@
 package backend
 
 import (
+	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1536,4 +1538,489 @@ func TestEndpoint_ConcurrentIsHealthy(t *testing.T) {
 	assert.NotPanics(t, func() {
 		wg.Wait()
 	})
+}
+
+// ============================================================================
+// Test Cases for Manager Lifecycle (Start, Stop, Wait, IsRunning)
+// ============================================================================
+
+func TestManager_Start(t *testing.T) {
+	tests := []struct {
+		name        string
+		setupFunc   func(*Manager)
+		expectError bool
+	}{
+		{
+			name:        "starts manager successfully",
+			setupFunc:   nil,
+			expectError: false,
+		},
+		{
+			name: "returns error when already running",
+			setupFunc: func(m *Manager) {
+				m.running.Store(true)
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := zap.NewNop()
+			manager := NewManager(logger)
+
+			if tt.setupFunc != nil {
+				tt.setupFunc(manager)
+			}
+
+			ctx := t.Context()
+			err := manager.Start(ctx)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "already running")
+			} else {
+				require.NoError(t, err)
+				assert.True(t, manager.IsRunning())
+
+				// Clean up
+				stopCtx := t.Context()
+				_ = manager.Stop(stopCtx)
+			}
+		})
+	}
+}
+
+func TestManager_Start_WithBackends(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	// Add backend with health checker
+	config := BackendConfig{
+		Name: "test-backend",
+		Endpoints: []EndpointConfig{
+			{Address: "localhost", Port: 8080},
+		},
+		HealthCheck: &HealthCheckConfig{
+			Enabled:            true,
+			Interval:           1,
+			Timeout:            1,
+			HealthyThreshold:   1,
+			UnhealthyThreshold: 1,
+			Path:               "/health",
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	assert.True(t, manager.IsRunning())
+
+	// Verify health checker was started
+	backend := manager.GetBackend("test-backend")
+	require.NotNil(t, backend)
+	require.NotNil(t, backend.HealthChecker)
+	assert.True(t, backend.HealthChecker.IsRunning())
+
+	// Clean up
+	stopCtx := t.Context()
+	_ = manager.Stop(stopCtx)
+}
+
+func TestManager_Stop(t *testing.T) {
+	tests := []struct {
+		name        string
+		startFirst  bool
+		expectError bool
+	}{
+		{
+			name:        "stops running manager",
+			startFirst:  true,
+			expectError: false,
+		},
+		{
+			name:        "returns error when not running",
+			startFirst:  false,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := zap.NewNop()
+			manager := NewManager(logger)
+
+			ctx := t.Context()
+			if tt.startFirst {
+				err := manager.Start(ctx)
+				require.NoError(t, err)
+			}
+
+			stopCtx := t.Context()
+			err := manager.Stop(stopCtx)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "not running")
+			} else {
+				require.NoError(t, err)
+				assert.False(t, manager.IsRunning())
+			}
+		})
+	}
+}
+
+func TestManager_Stop_WithBackends(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	// Add backend with health checker
+	config := BackendConfig{
+		Name: "test-backend",
+		Endpoints: []EndpointConfig{
+			{Address: "localhost", Port: 8080},
+		},
+		HealthCheck: &HealthCheckConfig{
+			Enabled:            true,
+			Interval:           1,
+			Timeout:            1,
+			HealthyThreshold:   1,
+			UnhealthyThreshold: 1,
+			Path:               "/health",
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Stop manager
+	stopCtx := t.Context()
+	err = manager.Stop(stopCtx)
+	require.NoError(t, err)
+	assert.False(t, manager.IsRunning())
+
+	// Verify health checker was stopped
+	backend := manager.GetBackend("test-backend")
+	require.NotNil(t, backend)
+	require.NotNil(t, backend.HealthChecker)
+	assert.False(t, backend.HealthChecker.IsRunning())
+}
+
+func TestManager_Stop_ContextTimeout(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	ctx := t.Context()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Create a context that's already cancelled
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Stop with cancelled context should return context error
+	err = manager.Stop(cancelledCtx)
+	assert.Error(t, err)
+	assert.Equal(t, context.Canceled, err)
+}
+
+func TestManager_Wait(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	ctx := t.Context()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Stop in a goroutine
+	go func() {
+		stopCtx := context.Background()
+		_ = manager.Stop(stopCtx)
+	}()
+
+	// Wait should return after stop
+	done := make(chan struct{})
+	go func() {
+		manager.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait() did not return after Stop()")
+	}
+}
+
+func TestManager_IsRunning(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	// Initially not running
+	assert.False(t, manager.IsRunning())
+
+	// After start, should be running
+	ctx := t.Context()
+	err := manager.Start(ctx)
+	require.NoError(t, err)
+	assert.True(t, manager.IsRunning())
+
+	// After stop, should not be running
+	stopCtx := t.Context()
+	err = manager.Stop(stopCtx)
+	require.NoError(t, err)
+	assert.False(t, manager.IsRunning())
+}
+
+// ============================================================================
+// Test Cases for Manager.Stats
+// ============================================================================
+
+func TestManager_Stats(t *testing.T) {
+	tests := []struct {
+		name          string
+		setupBackends []BackendConfig
+		expectedStats ManagerStats
+		startManager  bool
+	}{
+		{
+			name:          "returns empty stats when no backends",
+			setupBackends: nil,
+			expectedStats: ManagerStats{
+				TotalBackends:    0,
+				HealthyBackends:  0,
+				TotalEndpoints:   0,
+				HealthyEndpoints: 0,
+			},
+			startManager: false,
+		},
+		{
+			name: "returns stats with healthy endpoints",
+			setupBackends: []BackendConfig{
+				{
+					Name: "backend1",
+					Endpoints: []EndpointConfig{
+						{Address: "host1", Port: 8080},
+						{Address: "host2", Port: 8081},
+					},
+				},
+			},
+			expectedStats: ManagerStats{
+				TotalBackends:    1,
+				HealthyBackends:  1,
+				TotalEndpoints:   2,
+				HealthyEndpoints: 2,
+			},
+			startManager: false,
+		},
+		{
+			name: "returns stats with multiple backends",
+			setupBackends: []BackendConfig{
+				{
+					Name: "backend1",
+					Endpoints: []EndpointConfig{
+						{Address: "host1", Port: 8080},
+					},
+				},
+				{
+					Name: "backend2",
+					Endpoints: []EndpointConfig{
+						{Address: "host2", Port: 8081},
+						{Address: "host3", Port: 8082},
+					},
+				},
+			},
+			expectedStats: ManagerStats{
+				TotalBackends:    2,
+				HealthyBackends:  2,
+				TotalEndpoints:   3,
+				HealthyEndpoints: 3,
+			},
+			startManager: false,
+		},
+		{
+			name: "returns uptime when manager is started",
+			setupBackends: []BackendConfig{
+				{
+					Name: "backend1",
+					Endpoints: []EndpointConfig{
+						{Address: "host1", Port: 8080},
+					},
+				},
+			},
+			expectedStats: ManagerStats{
+				TotalBackends:    1,
+				HealthyBackends:  1,
+				TotalEndpoints:   1,
+				HealthyEndpoints: 1,
+			},
+			startManager: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := zap.NewNop()
+			manager := NewManager(logger)
+
+			for _, config := range tt.setupBackends {
+				err := manager.AddBackend(config)
+				require.NoError(t, err)
+			}
+
+			if tt.startManager {
+				ctx := t.Context()
+				err := manager.Start(ctx)
+				require.NoError(t, err)
+				defer func() {
+					stopCtx := context.Background()
+					_ = manager.Stop(stopCtx)
+				}()
+				// Wait a bit for uptime
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			stats := manager.Stats()
+
+			assert.Equal(t, tt.expectedStats.TotalBackends, stats.TotalBackends)
+			assert.Equal(t, tt.expectedStats.HealthyBackends, stats.HealthyBackends)
+			assert.Equal(t, tt.expectedStats.TotalEndpoints, stats.TotalEndpoints)
+			assert.Equal(t, tt.expectedStats.HealthyEndpoints, stats.HealthyEndpoints)
+
+			if tt.startManager {
+				assert.Greater(t, stats.Uptime, time.Duration(0))
+			}
+		})
+	}
+}
+
+func TestManager_Stats_WithUnhealthyEndpoints(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	config := BackendConfig{
+		Name: "backend1",
+		Endpoints: []EndpointConfig{
+			{Address: "host1", Port: 8080},
+			{Address: "host2", Port: 8081},
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	// Mark one endpoint as unhealthy
+	backend := manager.GetBackend("backend1")
+	require.NotNil(t, backend)
+	backend.Endpoints[0].SetHealthy(false)
+
+	stats := manager.Stats()
+
+	assert.Equal(t, 1, stats.TotalBackends)
+	assert.Equal(t, 1, stats.HealthyBackends) // Still has one healthy endpoint
+	assert.Equal(t, 2, stats.TotalEndpoints)
+	assert.Equal(t, 1, stats.HealthyEndpoints)
+}
+
+func TestManager_Stats_AllUnhealthyEndpoints(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	config := BackendConfig{
+		Name: "backend1",
+		Endpoints: []EndpointConfig{
+			{Address: "host1", Port: 8080},
+			{Address: "host2", Port: 8081},
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	// Mark all endpoints as unhealthy
+	backend := manager.GetBackend("backend1")
+	require.NotNil(t, backend)
+	for _, ep := range backend.Endpoints {
+		ep.SetHealthy(false)
+	}
+
+	stats := manager.Stats()
+
+	assert.Equal(t, 1, stats.TotalBackends)
+	assert.Equal(t, 0, stats.HealthyBackends) // No healthy endpoints
+	assert.Equal(t, 2, stats.TotalEndpoints)
+	assert.Equal(t, 0, stats.HealthyEndpoints)
+}
+
+// ============================================================================
+// Test Cases for Manager Monitor Loop
+// ============================================================================
+
+func TestManager_MonitorLoop_ContextCancellation(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	// Add a backend
+	config := BackendConfig{
+		Name: "test-backend",
+		Endpoints: []EndpointConfig{
+			{Address: "localhost", Port: 8080},
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	// Start manager
+	ctx, cancel := context.WithCancel(context.Background())
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Cancel context to trigger monitor loop exit
+	cancel()
+
+	// Wait for manager to stop
+	done := make(chan struct{})
+	go func() {
+		manager.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success - monitor loop exited due to context cancellation
+	case <-time.After(5 * time.Second):
+		t.Fatal("Monitor loop did not exit after context cancellation")
+	}
+}
+
+func TestManager_MonitorLoop_StopChannel(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	// Add a backend
+	config := BackendConfig{
+		Name: "test-backend",
+		Endpoints: []EndpointConfig{
+			{Address: "localhost", Port: 8080},
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	// Start manager
+	ctx := t.Context()
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+
+	// Stop manager via Stop() which closes stopCh
+	stopCtx := t.Context()
+	err = manager.Stop(stopCtx)
+	require.NoError(t, err)
+
+	// Verify manager is stopped
+	assert.False(t, manager.IsRunning())
 }

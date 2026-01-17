@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -2358,4 +2359,537 @@ func TestVaultSecretReconciler_Stop_WithoutInit(t *testing.T) {
 
 	// Stop without init should not panic
 	reconciler.Stop()
+}
+
+// ============================================================================
+// Test Cases for handleVaultSecretReconcileError
+// ============================================================================
+
+func TestVaultSecretReconciler_handleVaultSecretReconcileError(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+	reconciler.initBaseComponents()
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-vaultsecret"
+
+	tests := []struct {
+		name           string
+		reconcileErr   *ReconcileError
+		validateResult func(t *testing.T, result ctrl.Result, err error)
+	}{
+		{
+			name: "validation error returns validation result",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeValidation,
+				Op:                 "validate",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          false,
+				UserActionRequired: true,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				assert.False(t, result.Requeue)
+			},
+		},
+		{
+			name: "permanent error returns permanent result",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypePermanent,
+				Op:                 "reconcile",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          false,
+				UserActionRequired: true,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				assert.False(t, result.Requeue)
+			},
+		},
+		{
+			name: "dependency error returns dependency result with backoff",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeDependency,
+				Op:                 "fetchDependency",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          true,
+				UserActionRequired: false,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				assert.True(t, result.RequeueAfter > 0)
+			},
+		},
+		{
+			name: "transient error returns transient result with backoff",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeTransient,
+				Op:                 "update",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          true,
+				UserActionRequired: false,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				assert.True(t, result.RequeueAfter > 0)
+			},
+		},
+		{
+			name: "internal error returns transient result with backoff",
+			reconcileErr: &ReconcileError{
+				Type:               ErrorTypeInternal,
+				Op:                 "internal",
+				Resource:           resourceKey,
+				Err:                assert.AnError,
+				Retryable:          true,
+				UserActionRequired: false,
+			},
+			validateResult: func(t *testing.T, result ctrl.Result, err error) {
+				assert.Error(t, err)
+				assert.True(t, result.RequeueAfter > 0)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := reconciler.handleVaultSecretReconcileError(tt.reconcileErr, strategy, resourceKey)
+			tt.validateResult(t, result, err)
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for handleVaultSecretReconcileSuccess
+// ============================================================================
+
+func TestVaultSecretReconciler_handleVaultSecretReconcileSuccess(t *testing.T) {
+	scheme := setupScheme(t)
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	reconciler := &VaultSecretReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	reconciler.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-vaultsecret"
+
+	tests := []struct {
+		name        string
+		vaultSecret *avapigwv1alpha1.VaultSecret
+		validate    func(t *testing.T, result ctrl.Result, err error)
+	}{
+		{
+			name: "success with default refresh interval",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+				},
+			},
+			validate: func(t *testing.T, result ctrl.Result, err error) {
+				assert.NoError(t, err)
+				assert.True(t, result.RequeueAfter > 0)
+				// Default is 5 minutes with jitter (up to 10% by default from both VaultSecret and strategy)
+				assert.True(t, result.RequeueAfter >= 4*time.Minute && result.RequeueAfter <= 6*time.Minute,
+					"Expected requeue after to be approximately 5 minutes, got %v", result.RequeueAfter)
+			},
+		},
+		{
+			name: "success with custom refresh interval",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					Refresh: &avapigwv1alpha1.VaultRefreshConfig{
+						Enabled:       boolPtr(true),
+						Interval:      durationPtr(10 * time.Minute),
+						JitterPercent: int32Ptr(0), // No jitter from VaultSecret, but strategy still adds jitter
+					},
+				},
+			},
+			validate: func(t *testing.T, result ctrl.Result, err error) {
+				assert.NoError(t, err)
+				assert.True(t, result.RequeueAfter > 0)
+				// 10 minutes with strategy jitter (up to 10%)
+				assert.True(t, result.RequeueAfter >= 9*time.Minute && result.RequeueAfter <= 11*time.Minute,
+					"Expected requeue after to be approximately 10 minutes, got %v", result.RequeueAfter)
+			},
+		},
+		{
+			name: "success with disabled refresh",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					Refresh: &avapigwv1alpha1.VaultRefreshConfig{
+						Enabled:       boolPtr(false),
+						JitterPercent: int32Ptr(0), // No jitter from VaultSecret, but strategy still adds jitter
+					},
+				},
+			},
+			validate: func(t *testing.T, result ctrl.Result, err error) {
+				assert.NoError(t, err)
+				assert.True(t, result.RequeueAfter > 0)
+				// Disabled refresh uses 24 hours with strategy jitter (up to 10%)
+				assert.True(t, result.RequeueAfter >= 21*time.Hour && result.RequeueAfter <= 27*time.Hour,
+					"Expected requeue after to be approximately 24 hours, got %v", result.RequeueAfter)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset failure count before each test
+			strategy.ResetFailureCount(resourceKey)
+
+			ctx := context.Background()
+			logger := ctrl.Log.WithName("test")
+
+			result, err := reconciler.handleVaultSecretReconcileSuccess(ctx, tt.vaultSecret, strategy, resourceKey, logger)
+			tt.validate(t, result, err)
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for handleVaultSyncError
+// ============================================================================
+
+func TestVaultSecretReconciler_handleVaultSyncError(t *testing.T) {
+	scheme := setupScheme(t)
+
+	vaultSecret := &avapigwv1alpha1.VaultSecret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.VaultSecretSpec{
+			Path: "secret/test",
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(vaultSecret).
+		WithStatusSubresource(&avapigwv1alpha1.VaultSecret{}).
+		Build()
+
+	reconciler := &VaultSecretReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	reconciler.initBaseComponents()
+
+	ctx := context.Background()
+	logger := ctrl.Log.WithName("test")
+	resourceKey := "default/test"
+	testErr := fmt.Errorf("vault sync failed")
+
+	reconcileErr := reconciler.handleVaultSyncError(ctx, vaultSecret, resourceKey, testErr, logger)
+
+	assert.NotNil(t, reconcileErr)
+	assert.Equal(t, "syncSecret", reconcileErr.Op)
+	assert.Contains(t, reconcileErr.Error(), "vault sync failed")
+
+	// Verify status was updated
+	updatedVS := &avapigwv1alpha1.VaultSecret{}
+	err := cl.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test"}, updatedVS)
+	require.NoError(t, err)
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusError, updatedVS.Status.Phase)
+	assert.NotNil(t, updatedVS.Status.LastVaultError)
+	assert.Contains(t, *updatedVS.Status.LastVaultError, "vault sync failed")
+}
+
+// ============================================================================
+// Test Cases for finalizeVaultSecretReconcile
+// ============================================================================
+
+func TestVaultSecretReconciler_finalizeVaultSecretReconcile(t *testing.T) {
+	scheme := setupScheme(t)
+
+	vaultSecret := &avapigwv1alpha1.VaultSecret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.VaultSecretSpec{
+			Path: "secret/test",
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(vaultSecret).
+		WithStatusSubresource(&avapigwv1alpha1.VaultSecret{}).
+		Build()
+
+	reconciler := &VaultSecretReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	reconciler.initBaseComponents()
+
+	ctx := context.Background()
+	logger := ctrl.Log.WithName("test")
+	resourceKey := "default/test"
+
+	err := reconciler.finalizeVaultSecretReconcile(ctx, vaultSecret, resourceKey, logger)
+
+	assert.NoError(t, err)
+
+	// Verify status was updated
+	updatedVS := &avapigwv1alpha1.VaultSecret{}
+	err = cl.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test"}, updatedVS)
+	require.NoError(t, err)
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, updatedVS.Status.Phase)
+	assert.Nil(t, updatedVS.Status.LastVaultError)
+	assert.NotNil(t, updatedVS.Status.LastRefreshTime)
+	assert.NotNil(t, updatedVS.Status.NextRefreshTime)
+
+	// Verify Ready condition
+	readyCondition := updatedVS.Status.GetCondition(avapigwv1alpha1.ConditionTypeReady)
+	require.NotNil(t, readyCondition)
+	assert.Equal(t, metav1.ConditionTrue, readyCondition.Status)
+	assert.Equal(t, string(avapigwv1alpha1.ReasonReady), readyCondition.Reason)
+}
+
+// ============================================================================
+// Test Cases for fetchVaultSecret
+// ============================================================================
+
+func TestVaultSecretReconciler_fetchVaultSecret(t *testing.T) {
+	scheme := setupScheme(t)
+
+	tests := []struct {
+		name            string
+		objects         []client.Object
+		request         reconcile.Request
+		wantVaultSecret bool
+		wantErr         bool
+	}{
+		{
+			name: "successfully fetches VaultSecret",
+			objects: []client.Object{
+				&avapigwv1alpha1.VaultSecret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test",
+						Namespace: "default",
+					},
+					Spec: avapigwv1alpha1.VaultSecretSpec{
+						Path: "secret/test",
+					},
+				},
+			},
+			request: reconcile.Request{
+				NamespacedName: client.ObjectKey{
+					Name:      "test",
+					Namespace: "default",
+				},
+			},
+			wantVaultSecret: true,
+			wantErr:         false,
+		},
+		{
+			name:    "returns nil for not found",
+			objects: []client.Object{},
+			request: reconcile.Request{
+				NamespacedName: client.ObjectKey{
+					Name:      "non-existent",
+					Namespace: "default",
+				},
+			},
+			wantVaultSecret: false,
+			wantErr:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.objects...).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client:   cl,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(100),
+			}
+			reconciler.initBaseComponents()
+
+			strategy := DefaultRequeueStrategy()
+			resourceKey := tt.request.String()
+
+			vaultSecret, _, err := reconciler.fetchVaultSecret(context.Background(), tt.request, strategy, resourceKey)
+
+			if tt.wantErr {
+				assert.NotNil(t, err)
+			} else {
+				assert.Nil(t, err)
+			}
+
+			if tt.wantVaultSecret {
+				assert.NotNil(t, vaultSecret)
+			} else {
+				assert.Nil(t, vaultSecret)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for cleanupTargetSecretIfNeeded
+// ============================================================================
+
+func TestVaultSecretReconciler_cleanupTargetSecretIfNeeded(t *testing.T) {
+	scheme := setupScheme(t)
+
+	tests := []struct {
+		name                string
+		vaultSecret         *avapigwv1alpha1.VaultSecret
+		targetSecretExists  bool
+		expectSecretDeleted bool
+	}{
+		{
+			name: "deletes target secret with Delete policy",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					Target: &avapigwv1alpha1.VaultTargetConfig{
+						Name: "target-secret",
+						DeletionPolicy: func() *avapigwv1alpha1.SecretDeletionPolicy {
+							p := avapigwv1alpha1.SecretDeletionPolicyDelete
+							return &p
+						}(),
+					},
+				},
+			},
+			targetSecretExists:  true,
+			expectSecretDeleted: true,
+		},
+		{
+			name: "retains target secret with Retain policy",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					Target: &avapigwv1alpha1.VaultTargetConfig{
+						Name: "target-secret",
+						DeletionPolicy: func() *avapigwv1alpha1.SecretDeletionPolicy {
+							p := avapigwv1alpha1.SecretDeletionPolicyRetain
+							return &p
+						}(),
+					},
+				},
+			},
+			targetSecretExists:  true,
+			expectSecretDeleted: false,
+		},
+		{
+			name: "no-op when target is nil",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path:   "secret/test",
+					Target: nil,
+				},
+			},
+			targetSecretExists:  false,
+			expectSecretDeleted: false,
+		},
+		{
+			name: "uses default Delete policy when not specified",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					Target: &avapigwv1alpha1.VaultTargetConfig{
+						Name:           "target-secret",
+						DeletionPolicy: nil, // Default is Delete
+					},
+				},
+			},
+			targetSecretExists:  true,
+			expectSecretDeleted: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			objects = append(objects, tt.vaultSecret)
+
+			if tt.targetSecretExists {
+				targetSecret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "target-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"data": []byte("test"),
+					},
+				}
+				objects = append(objects, targetSecret)
+			}
+
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client:   cl,
+				Scheme:   scheme,
+				Recorder: record.NewFakeRecorder(100),
+			}
+			reconciler.initBaseComponents()
+
+			ctx := context.Background()
+			logger := ctrl.Log.WithName("test")
+			resourceKey := "default/test"
+
+			reconciler.cleanupTargetSecretIfNeeded(ctx, tt.vaultSecret, resourceKey, logger)
+
+			// Check if target secret exists
+			targetSecret := &corev1.Secret{}
+			err := cl.Get(ctx, client.ObjectKey{Namespace: "default", Name: "target-secret"}, targetSecret)
+
+			if tt.expectSecretDeleted {
+				assert.True(t, apierrors.IsNotFound(err), "Target secret should be deleted")
+			} else if tt.targetSecretExists {
+				assert.NoError(t, err, "Target secret should still exist")
+			}
+		})
+	}
 }

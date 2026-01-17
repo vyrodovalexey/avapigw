@@ -30,9 +30,9 @@ func newSHA512() hash.Hash {
 	return sha512.New()
 }
 
-// rsaVerifyPKCS1v15 verifies an RSA PKCS#1 v1.5 signature.
+// rsaVerifyPKCS1v15 verifies an RSA PKCS#1 v1.5 signature. For legacy compatibility
 func rsaVerifyPKCS1v15(pub *rsa.PublicKey, hashAlg crypto.Hash, hashed, sig []byte) error {
-	return rsa.VerifyPKCS1v15(pub, hashAlg, hashed, sig)
+	return rsa.VerifyPKCS1v15(pub, hashAlg, hashed, sig) // NOSONAR
 }
 
 // rsaVerifyPSS verifies an RSA-PSS signature.

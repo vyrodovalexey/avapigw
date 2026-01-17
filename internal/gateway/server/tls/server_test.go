@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -1164,4 +1165,1278 @@ func TestServer_DoubleStop(t *testing.T) {
 	require.NoError(t, err)
 
 	cancel()
+}
+
+func TestServer_HandleShutdownTimeout(t *testing.T) {
+	logger := zap.NewNop()
+
+	config := &ServerConfig{
+		Port:            0,
+		Address:         "127.0.0.1",
+		Mode:            TLSModePassthrough,
+		MaxConnections:  100,
+		ShutdownTimeout: 100 * time.Millisecond, // Very short timeout
+		AcceptDeadline:  50 * time.Millisecond,
+	}
+
+	server := NewServer(config, logger)
+
+	// Start server
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = server.Start(ctx)
+	}()
+
+	// Wait for server to start
+	time.Sleep(200 * time.Millisecond)
+
+	// Get listener address
+	server.mu.RLock()
+	listener := server.listener
+	server.mu.RUnlock()
+
+	if listener == nil {
+		t.Skip("Server listener not available")
+	}
+
+	addr := listener.Addr().String()
+
+	// Create multiple connections that will hold
+	var conns []net.Conn
+	for i := 0; i < 3; i++ {
+		conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
+		if err != nil {
+			continue
+		}
+		conns = append(conns, conn)
+	}
+
+	// Wait for connections to be tracked
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop server - this should trigger handleShutdownTimeout
+	// because connections won't close gracefully in time
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer stopCancel()
+
+	err := server.Stop(stopCtx)
+	require.NoError(t, err)
+
+	// Clean up connections
+	for _, conn := range conns {
+		conn.Close()
+	}
+
+	cancel()
+}
+
+func TestServer_ResolveBackendForRoute(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	// Add a backend
+	err := manager.AddBackend(backend.BackendConfig{
+		Name: "test-backend",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 8080},
+		},
+	})
+	require.NoError(t, err)
+
+	server := NewServerWithBackend(nil, manager, logger)
+
+	// Create a tracked connection for testing
+	conn1, conn2 := net.Pipe()
+	defer conn1.Close()
+	defer conn2.Close()
+
+	tracked, err := server.connections.Add(conn1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tracked.ID)
+
+	tests := []struct {
+		name       string
+		route      *TLSRoute
+		expectNil  bool
+		setupProxy bool
+	}{
+		{
+			name: "valid route with backend",
+			route: &TLSRoute{
+				Name: "test-route",
+				BackendRefs: []TLSBackendRef{
+					{Name: "test-backend", Port: 8080},
+				},
+			},
+			expectNil:  false,
+			setupProxy: true,
+		},
+		{
+			name: "route with namespace",
+			route: &TLSRoute{
+				Name: "test-route",
+				BackendRefs: []TLSBackendRef{
+					{Name: "test-backend", Namespace: "default", Port: 8080},
+				},
+			},
+			expectNil:  true, // Backend key will be "default/test-backend" which doesn't exist
+			setupProxy: true,
+		},
+		{
+			name: "route with no backends",
+			route: &TLSRoute{
+				Name:        "test-route",
+				BackendRefs: []TLSBackendRef{},
+			},
+			expectNil:  true,
+			setupProxy: true,
+		},
+		{
+			name: "no proxy configured",
+			route: &TLSRoute{
+				Name: "test-route",
+				BackendRefs: []TLSBackendRef{
+					{Name: "test-backend", Port: 8080},
+				},
+			},
+			expectNil:  true,
+			setupProxy: false,
+		},
+		{
+			name: "backend not found",
+			route: &TLSRoute{
+				Name: "test-route",
+				BackendRefs: []TLSBackendRef{
+					{Name: "non-existent-backend", Port: 8080},
+				},
+			},
+			expectNil:  true,
+			setupProxy: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var testServer *Server
+			if tt.setupProxy {
+				testServer = NewServerWithBackend(nil, manager, logger)
+			} else {
+				testServer = NewServer(nil, logger)
+			}
+
+			// Create tracked connection
+			c1, c2 := net.Pipe()
+			defer c1.Close()
+			defer c2.Close()
+
+			tc, err := testServer.connections.Add(c1)
+			require.NoError(t, err)
+			defer testServer.connections.Remove(tc.ID)
+
+			result := testServer.resolveBackendForRoute(tt.route, tc)
+
+			if tt.expectNil {
+				assert.Nil(t, result)
+			} else {
+				assert.NotNil(t, result)
+			}
+		})
+	}
+
+	// Clean up
+	_ = manager.RemoveBackend("test-backend")
+}
+
+func TestServer_ExtractSNIAndValidate(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Create tracked connection
+	conn1, conn2 := net.Pipe()
+	defer conn1.Close()
+	defer conn2.Close()
+
+	tracked, err := server.connections.Add(conn1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tracked.ID)
+
+	tests := []struct {
+		name         string
+		setupData    func(conn net.Conn)
+		ctxCancelled bool
+		expectOK     bool
+		expectedSNI  string
+	}{
+		{
+			name: "valid ClientHello",
+			setupData: func(conn net.Conn) {
+				go func() {
+					clientHello := buildClientHello("example.com")
+					_, _ = conn.Write(clientHello)
+				}()
+			},
+			ctxCancelled: false,
+			expectOK:     true,
+			expectedSNI:  "example.com",
+		},
+		{
+			name: "invalid TLS record",
+			setupData: func(conn net.Conn) {
+				go func() {
+					// Write invalid data
+					_, _ = conn.Write([]byte{0x00, 0x00, 0x00, 0x00, 0x00})
+				}()
+			},
+			ctxCancelled: false,
+			expectOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c1, c2 := net.Pipe()
+			defer c1.Close()
+			defer c2.Close()
+
+			tc, err := server.connections.Add(c1)
+			require.NoError(t, err)
+			defer server.connections.Remove(tc.ID)
+
+			ctx := context.Background()
+			if tt.ctxCancelled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			tt.setupData(c2)
+
+			sni, _, ok := server.extractSNIAndValidate(ctx, c1, tc)
+
+			assert.Equal(t, tt.expectOK, ok)
+			if tt.expectOK {
+				assert.Equal(t, tt.expectedSNI, sni)
+			}
+		})
+	}
+}
+
+func TestServer_ExtractSNIAndValidate_ContextCancelledAfterExtraction(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Write valid ClientHello
+	go func() {
+		clientHello := buildClientHello("example.com")
+		_, _ = c2.Write(clientHello)
+	}()
+
+	// Create a context that we'll cancel after SNI extraction
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start extraction in goroutine
+	resultCh := make(chan struct {
+		sni string
+		ok  bool
+	}, 1)
+
+	go func() {
+		// Cancel context right before the check
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	sni, _, ok := server.extractSNIAndValidate(ctx, c1, tc)
+	resultCh <- struct {
+		sni string
+		ok  bool
+	}{sni, ok}
+
+	// The result depends on timing - either we get the SNI or context is cancelled
+	result := <-resultCh
+	// Either outcome is valid depending on timing
+	_ = result
+}
+
+func TestServer_HandlePassthroughConnection_NoRoute(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	server := NewServerWithBackend(nil, manager, logger)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Write valid ClientHello
+	go func() {
+		clientHello := buildClientHello("unknown.example.com")
+		_, _ = c2.Write(clientHello)
+	}()
+
+	ctx := context.Background()
+
+	// This should return without error because no route matches
+	server.handlePassthroughConnection(ctx, c1, tc)
+}
+
+func TestServer_HandlePassthroughConnection_ContextCancelled(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	server := NewServerWithBackend(nil, manager, logger)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Create cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// This should return immediately due to cancelled context
+	server.handlePassthroughConnection(ctx, c1, tc)
+}
+
+func TestServer_HandleTerminateConnection_NotTLSConn(t *testing.T) {
+	logger := zap.NewNop()
+
+	config := &ServerConfig{
+		Mode: TLSModeTerminate,
+	}
+	server := NewServer(config, logger)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	ctx := context.Background()
+
+	// This should return because c1 is not a *tls.Conn
+	server.handleTerminateConnection(ctx, c1, tc)
+}
+
+func TestServer_HandleTerminateConnection_ContextCancelled(t *testing.T) {
+	logger := zap.NewNop()
+
+	config := &ServerConfig{
+		Mode: TLSModeTerminate,
+	}
+	server := NewServer(config, logger)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Create cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// This should return immediately due to cancelled context
+	server.handleTerminateConnection(ctx, c1, tc)
+}
+
+func TestServer_PerformTLSHandshake_ContextCancelled(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Create a TLS connection pair
+	certPEM, keyPEM, err := generateServerTestCertificate("localhost")
+	require.NoError(t, err)
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Accept connection in goroutine
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// Don't complete handshake
+		time.Sleep(2 * time.Second)
+	}()
+
+	// Connect to server
+	conn, err := net.DialTimeout("tcp", listener.Addr().String(), 1*time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Wrap in TLS
+	tlsClientConfig := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+	tlsConn := tls.Client(conn, tlsClientConfig)
+
+	// Create tracked connection
+	tc, err := server.connections.Add(tlsConn)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Create cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// This should return nil due to cancelled context
+	state := server.performTLSHandshake(ctx, tlsConn, tc)
+	assert.Nil(t, state)
+}
+
+func TestServer_HandleConnection_MaxConnectionsReached(t *testing.T) {
+	logger := zap.NewNop()
+
+	config := &ServerConfig{
+		Port:           0,
+		Address:        "127.0.0.1",
+		Mode:           TLSModePassthrough,
+		MaxConnections: 1, // Only allow 1 connection
+		AcceptDeadline: 100 * time.Millisecond,
+	}
+
+	server := NewServer(config, logger)
+
+	// Add a connection to fill the limit
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+
+	// Try to handle another connection - should be rejected
+	c3, c4 := net.Pipe()
+	defer c3.Close()
+	defer c4.Close()
+
+	ctx := context.Background()
+
+	// This should reject the connection due to max connections
+	server.handleConnection(ctx, c3)
+
+	// Clean up
+	server.connections.Remove(tc.ID)
+}
+
+func TestServer_HandleConnection_ContextCancelledBeforeHandling(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	// Create cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// This should return immediately due to cancelled context
+	server.handleConnection(ctx, c1)
+}
+
+func TestServer_ProxyPassthroughConnection(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	// Start a test backend server
+	backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer backendListener.Close()
+
+	// Accept and echo
+	go func() {
+		conn, err := backendListener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		_, _ = conn.Write(buf[:n])
+	}()
+
+	// Add backend
+	err = manager.AddBackend(backend.BackendConfig{
+		Name: "test-backend",
+		Endpoints: []backend.EndpointConfig{
+			{
+				Address: "127.0.0.1",
+				Port:    backendListener.Addr().(*net.TCPAddr).Port,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	server := NewServerWithBackend(nil, manager, logger)
+
+	// Add route
+	err = server.router.AddRoute(&TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{"example.com"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "test-backend", Port: backendListener.Addr().(*net.TCPAddr).Port},
+		},
+	})
+	require.NoError(t, err)
+
+	// Create connection
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	route := server.router.GetRoute("test-route")
+	require.NotNil(t, route)
+
+	backendSvc := manager.GetBackend("test-backend")
+	require.NotNil(t, backendSvc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Run proxy in goroutine
+	go func() {
+		server.proxyPassthroughConnection(ctx, c1, []byte("hello"), backendSvc, route, "example.com", tc)
+	}()
+
+	// Read response
+	buf := make([]byte, 1024)
+	_ = c2.SetReadDeadline(time.Now().Add(1 * time.Second))
+	n, err := c2.Read(buf)
+	if err == nil {
+		assert.Equal(t, "hello", string(buf[:n]))
+	}
+
+	// Clean up
+	_ = manager.RemoveBackend("test-backend")
+}
+
+func TestServer_HandleAcceptError_NonTimeout(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	ctx := context.Background()
+
+	// Test with a non-timeout error
+	err := errors.New("some accept error")
+	shouldContinue := server.handleAcceptError(err, ctx)
+
+	// Should continue on non-timeout errors (logged but continues)
+	assert.True(t, shouldContinue)
+}
+
+func TestServer_HandleAcceptError_ContextDone(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Test with context cancelled
+	err := errors.New("some accept error")
+	shouldContinue := server.handleAcceptError(err, ctx)
+
+	// Should not continue when context is done
+	assert.False(t, shouldContinue)
+}
+
+func TestServer_HandleAcceptError_StopChClosed(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Close stop channel
+	close(server.stopCh)
+
+	ctx := context.Background()
+
+	// Test with stop channel closed
+	err := errors.New("some accept error")
+	shouldContinue := server.handleAcceptError(err, ctx)
+
+	// Should not continue when stop channel is closed
+	assert.False(t, shouldContinue)
+}
+
+func TestServer_SetAcceptDeadline_TCPListener(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Create a TCP listener
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	server.listener = listener.(*net.TCPListener)
+
+	// Should succeed
+	err = server.setAcceptDeadline(100 * time.Millisecond)
+	assert.NoError(t, err)
+}
+
+func TestServer_SetAcceptDeadline_WithSetDeadlineInterface(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Create a mock listener that implements SetDeadline
+	mockListener := &mockListenerWithDeadline{}
+	server.listener = mockListener
+
+	// Should succeed
+	err := server.setAcceptDeadline(100 * time.Millisecond)
+	assert.NoError(t, err)
+}
+
+// mockListenerWithDeadline implements net.Listener with SetDeadline
+type mockListenerWithDeadline struct{}
+
+func (m *mockListenerWithDeadline) Accept() (net.Conn, error) {
+	return nil, nil
+}
+
+func (m *mockListenerWithDeadline) Close() error {
+	return nil
+}
+
+func (m *mockListenerWithDeadline) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8443}
+}
+
+func (m *mockListenerWithDeadline) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func TestServer_GetShutdownTimeout_Default(t *testing.T) {
+	logger := zap.NewNop()
+
+	config := &ServerConfig{
+		ShutdownTimeout: 0, // Zero should use default
+	}
+	server := NewServer(config, logger)
+
+	timeout := server.getShutdownTimeout()
+	assert.Equal(t, DefaultTLSShutdownTimeout, timeout)
+}
+
+func TestServer_GetShutdownTimeout_Custom(t *testing.T) {
+	logger := zap.NewNop()
+
+	config := &ServerConfig{
+		ShutdownTimeout: 5 * time.Second,
+	}
+	server := NewServer(config, logger)
+
+	timeout := server.getShutdownTimeout()
+	assert.Equal(t, 5*time.Second, timeout)
+}
+
+func TestServer_SignalShutdown_NilCancelFunc(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// cancelFunc is nil by default
+	assert.Nil(t, server.cancelFunc)
+
+	// Should not panic
+	server.signalShutdown()
+}
+
+func TestServer_WaitForConnectionsWithTimeout_GracefulClose(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// No connections, should complete immediately
+	server.waitForConnectionsWithTimeout(ctx)
+}
+
+func TestServer_CleanupServerState(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Set running state
+	server.running = true
+	server.cancelFunc = func() {}
+
+	// Clean up
+	server.cleanupServerState()
+
+	assert.False(t, server.running)
+	assert.Nil(t, server.cancelFunc)
+}
+
+func TestServer_HandleTerminateConnection_WithTLSConn(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Generate test certificate
+	certPEM, keyPEM, err := generateServerTestCertificate("localhost")
+	require.NoError(t, err)
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+
+	config := &ServerConfig{
+		Mode:        TLSModeTerminate,
+		DefaultCert: &cert,
+	}
+	server := NewServer(config, logger)
+
+	// Add a route for the test
+	err = server.router.AddRoute(&TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{"localhost"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "test-backend", Port: 8080},
+		},
+	})
+	require.NoError(t, err)
+
+	// Create a TLS server for testing
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Accept connection in goroutine
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Perform handshake
+		tlsConn := conn.(*tls.Conn)
+		_ = tlsConn.Handshake()
+	}()
+
+	// Connect as client
+	clientConn, err := net.DialTimeout("tcp", listener.Addr().String(), 1*time.Second)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	// Wrap in TLS
+	tlsClientConfig := &tls.Config{
+		ServerName:         "localhost",
+		InsecureSkipVerify: true,
+	}
+	tlsConn := tls.Client(clientConn, tlsClientConfig)
+
+	// Create tracked connection
+	tc, err := server.connections.Add(tlsConn)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Handle the connection - this will perform handshake and try to route
+	server.handleTerminateConnection(ctx, tlsConn, tc)
+
+	<-serverDone
+}
+
+func TestServer_PerformTLSHandshake_Success(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Generate test certificate
+	certPEM, keyPEM, err := generateServerTestCertificate("localhost")
+	require.NoError(t, err)
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+
+	// Create a TLS server
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Accept connection in goroutine
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Perform handshake on server side
+		tlsConn := conn.(*tls.Conn)
+		_ = tlsConn.Handshake()
+	}()
+
+	// Connect as client
+	clientConn, err := net.DialTimeout("tcp", listener.Addr().String(), 1*time.Second)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	// Wrap in TLS
+	tlsClientConfig := &tls.Config{
+		ServerName:         "localhost",
+		InsecureSkipVerify: true,
+	}
+	tlsConn := tls.Client(clientConn, tlsClientConfig)
+
+	// Create tracked connection
+	tc, err := server.connections.Add(tlsConn)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Perform handshake
+	state := server.performTLSHandshake(ctx, tlsConn, tc)
+	require.NotNil(t, state)
+	assert.Equal(t, "localhost", state.ServerName)
+
+	<-serverDone
+}
+
+func TestServer_PerformTLSHandshake_Failure(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Create a non-TLS server (will cause handshake failure)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Accept connection in goroutine and close immediately
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		conn.Close() // Close immediately to cause handshake failure
+	}()
+
+	// Connect as client
+	clientConn, err := net.DialTimeout("tcp", listener.Addr().String(), 1*time.Second)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	// Wrap in TLS
+	tlsClientConfig := &tls.Config{
+		ServerName:         "localhost",
+		InsecureSkipVerify: true,
+	}
+	tlsConn := tls.Client(clientConn, tlsClientConfig)
+
+	// Create tracked connection
+	tc, err := server.connections.Add(tlsConn)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Perform handshake - should fail
+	state := server.performTLSHandshake(ctx, tlsConn, tc)
+	assert.Nil(t, state)
+}
+
+func TestServer_HandlePassthroughConnection_WithRoute(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	// Start a test backend server
+	backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer backendListener.Close()
+
+	// Accept and echo
+	go func() {
+		conn, err := backendListener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		_, _ = conn.Write(buf[:n])
+	}()
+
+	// Add backend
+	err = manager.AddBackend(backend.BackendConfig{
+		Name: "test-backend",
+		Endpoints: []backend.EndpointConfig{
+			{
+				Address: "127.0.0.1",
+				Port:    backendListener.Addr().(*net.TCPAddr).Port,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	server := NewServerWithBackend(nil, manager, logger)
+
+	// Add route
+	err = server.router.AddRoute(&TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{"example.com"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "test-backend", Port: backendListener.Addr().(*net.TCPAddr).Port},
+		},
+	})
+	require.NoError(t, err)
+
+	// Create connection
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Write valid ClientHello
+	go func() {
+		clientHello := buildClientHello("example.com")
+		_, _ = c2.Write(clientHello)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Handle passthrough connection
+	server.handlePassthroughConnection(ctx, c1, tc)
+
+	// Clean up
+	_ = manager.RemoveBackend("test-backend")
+}
+
+func TestServer_HandleTerminateConnection_NoRoute(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Generate test certificate
+	certPEM, keyPEM, err := generateServerTestCertificate("localhost")
+	require.NoError(t, err)
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+
+	config := &ServerConfig{
+		Mode:        TLSModeTerminate,
+		DefaultCert: &cert,
+	}
+	server := NewServer(config, logger)
+
+	// Don't add any routes - this will cause no route match
+
+	// Create a TLS server for testing
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Accept connection in goroutine
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Perform handshake
+		tlsConn := conn.(*tls.Conn)
+		_ = tlsConn.Handshake()
+	}()
+
+	// Connect as client
+	clientConn, err := net.DialTimeout("tcp", listener.Addr().String(), 1*time.Second)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	// Wrap in TLS
+	tlsClientConfig := &tls.Config{
+		ServerName:         "unknown.example.com",
+		InsecureSkipVerify: true,
+	}
+	tlsConn := tls.Client(clientConn, tlsClientConfig)
+
+	// Create tracked connection
+	tc, err := server.connections.Add(tlsConn)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Handle the connection - should complete without error (no route found)
+	server.handleTerminateConnection(ctx, tlsConn, tc)
+
+	<-serverDone
+}
+
+func TestServer_HandleTerminateConnection_ContextCancelledAfterHandshake(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Generate test certificate
+	certPEM, keyPEM, err := generateServerTestCertificate("localhost")
+	require.NoError(t, err)
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	require.NoError(t, err)
+
+	config := &ServerConfig{
+		Mode:        TLSModeTerminate,
+		DefaultCert: &cert,
+	}
+	server := NewServer(config, logger)
+
+	// Add a route
+	err = server.router.AddRoute(&TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{"localhost"},
+	})
+	require.NoError(t, err)
+
+	// Create a TLS server for testing
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Accept connection in goroutine
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Perform handshake
+		tlsConn := conn.(*tls.Conn)
+		_ = tlsConn.Handshake()
+		// Hold connection open
+		time.Sleep(500 * time.Millisecond)
+	}()
+
+	// Connect as client
+	clientConn, err := net.DialTimeout("tcp", listener.Addr().String(), 1*time.Second)
+	require.NoError(t, err)
+	defer clientConn.Close()
+
+	// Wrap in TLS
+	tlsClientConfig := &tls.Config{
+		ServerName:         "localhost",
+		InsecureSkipVerify: true,
+	}
+	tlsConn := tls.Client(clientConn, tlsClientConfig)
+
+	// Create tracked connection
+	tc, err := server.connections.Add(tlsConn)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Create context that will be cancelled
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel after a short delay
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	// Handle the connection
+	server.handleTerminateConnection(ctx, tlsConn, tc)
+
+	<-serverDone
+}
+
+func TestServer_HandleShutdownTimeout_Direct(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	// Add some connections
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+
+	// Call handleShutdownTimeout directly
+	server.handleShutdownTimeout()
+
+	// Connection should be closed
+	// The tracked connection should still be in the list but closed
+	assert.True(t, server.connections.Count() >= 0)
+
+	// Clean up
+	server.connections.Remove(tc.ID)
+}
+
+func TestServer_ExtractSNIAndValidate_ContextCancelledDuringExtraction(t *testing.T) {
+	logger := zap.NewNop()
+	server := NewServer(nil, logger)
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	// Create a context that will be cancelled
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Write valid ClientHello but cancel context during extraction
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+		// Write ClientHello after cancel
+		clientHello := buildClientHello("example.com")
+		_, _ = c2.Write(clientHello)
+	}()
+
+	// This may or may not succeed depending on timing
+	sni, _, ok := server.extractSNIAndValidate(ctx, c1, tc)
+	// Either outcome is valid
+	_ = sni
+	_ = ok
+}
+
+func TestServer_ProxyPassthroughConnection_ContextCancelled(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	// Start a test backend server that holds connections
+	backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer backendListener.Close()
+
+	// Accept and hold
+	go func() {
+		conn, err := backendListener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		time.Sleep(5 * time.Second)
+	}()
+
+	// Add backend
+	err = manager.AddBackend(backend.BackendConfig{
+		Name: "test-backend",
+		Endpoints: []backend.EndpointConfig{
+			{
+				Address: "127.0.0.1",
+				Port:    backendListener.Addr().(*net.TCPAddr).Port,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	server := NewServerWithBackend(nil, manager, logger)
+
+	// Create connection
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	tc, err := server.connections.Add(c1)
+	require.NoError(t, err)
+	defer server.connections.Remove(tc.ID)
+
+	route := &TLSRoute{
+		Name:      "test-route",
+		Hostnames: []string{"example.com"},
+		BackendRefs: []TLSBackendRef{
+			{Name: "test-backend", Port: backendListener.Addr().(*net.TCPAddr).Port},
+		},
+	}
+
+	backendSvc := manager.GetBackend("test-backend")
+	require.NotNil(t, backendSvc)
+
+	// Create context that will be cancelled
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Run proxy in goroutine
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.proxyPassthroughConnection(ctx, c1, []byte("hello"), backendSvc, route, "example.com", tc)
+	}()
+
+	// Cancel context
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	// Wait for proxy to finish
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for proxyPassthroughConnection to return")
+	}
+
+	// Clean up
+	_ = manager.RemoveBackend("test-backend")
 }

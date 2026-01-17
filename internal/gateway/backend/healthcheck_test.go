@@ -1,6 +1,11 @@
 package backend
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -394,6 +399,362 @@ func TestCircuitBreaker_Reset(t *testing.T) {
 	cb.Reset()
 	assert.Equal(t, CircuitClosed, cb.State())
 
+	cb.mu.RLock()
+	assert.Equal(t, 0, cb.failures)
+	cb.mu.RUnlock()
+}
+
+// ============================================================================
+// Test Cases for HealthChecker TCP Check
+// ============================================================================
+
+func TestHealthChecker_TCPCheck(t *testing.T) {
+	// Create a TCP listener for testing
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Get the port
+	addr := listener.Addr().(*net.TCPAddr)
+
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            2,
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "", // Empty path triggers TCP check
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: "127.0.0.1",
+		Port:    addr.Port,
+		Healthy: true,
+	}
+
+	// TCP check should succeed
+	healthy, err := hc.tcpCheck(endpoint)
+	assert.NoError(t, err)
+	assert.True(t, healthy)
+}
+
+func TestHealthChecker_TCPCheck_ConnectionRefused(t *testing.T) {
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            1,
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "", // Empty path triggers TCP check
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: "127.0.0.1",
+		Port:    59999, // Unlikely to be in use
+		Healthy: true,
+	}
+
+	// TCP check should fail
+	healthy, err := hc.tcpCheck(endpoint)
+	assert.Error(t, err)
+	assert.False(t, healthy)
+}
+
+func TestHealthChecker_TCPCheck_Timeout(t *testing.T) {
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            1, // 1 second timeout
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "", // Empty path triggers TCP check
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: "192.0.2.1", // Non-routable IP (TEST-NET-1)
+		Port:    8080,
+		Healthy: true,
+	}
+
+	// TCP check should timeout
+	healthy, err := hc.tcpCheck(endpoint)
+	assert.Error(t, err)
+	assert.False(t, healthy)
+}
+
+// ============================================================================
+// Test Cases for HealthChecker handleHealthyResult
+// ============================================================================
+
+func TestHealthChecker_HandleHealthyResult(t *testing.T) {
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            1,
+		HealthyThreshold:   2,
+		UnhealthyThreshold: 2,
+		Path:               "/health",
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: "localhost",
+		Port:    8080,
+		Healthy: false, // Start unhealthy
+	}
+	addr := endpoint.FullAddress()
+
+	result := &HealthCheckResult{
+		Endpoint:        endpoint,
+		Healthy:         false,
+		ConsecutiveOK:   0,
+		ConsecutiveFail: 1,
+	}
+
+	// First healthy result - should not mark healthy yet (threshold is 2)
+	hc.handleHealthyResult(result, endpoint, addr)
+	assert.Equal(t, 1, result.ConsecutiveOK)
+	assert.Equal(t, 0, result.ConsecutiveFail)
+	assert.False(t, result.Healthy)
+
+	// Second healthy result - should mark healthy now
+	hc.handleHealthyResult(result, endpoint, addr)
+	assert.Equal(t, 2, result.ConsecutiveOK)
+	assert.True(t, result.Healthy)
+	assert.True(t, endpoint.IsHealthy())
+}
+
+func TestHealthChecker_HandleHealthyResult_AlreadyHealthy(t *testing.T) {
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            1,
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "/health",
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: "localhost",
+		Port:    8080,
+		Healthy: true, // Already healthy
+	}
+	addr := endpoint.FullAddress()
+
+	result := &HealthCheckResult{
+		Endpoint:        endpoint,
+		Healthy:         true,
+		ConsecutiveOK:   5,
+		ConsecutiveFail: 0,
+	}
+
+	// Healthy result when already healthy - should stay healthy
+	hc.handleHealthyResult(result, endpoint, addr)
+	assert.Equal(t, 6, result.ConsecutiveOK)
+	assert.True(t, result.Healthy)
+}
+
+// ============================================================================
+// Test Cases for HealthChecker HTTP Check with Server
+// ============================================================================
+
+func TestHealthChecker_HTTPCheck_Success(t *testing.T) {
+	// Create a test HTTP server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Parse server URL
+	parsedURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, _ := strconv.Atoi(parsedURL.Port())
+
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            5,
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "/health",
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: parsedURL.Hostname(),
+		Port:    port,
+		Healthy: true,
+	}
+
+	healthy, err := hc.httpCheck(endpoint)
+	assert.NoError(t, err)
+	assert.True(t, healthy)
+}
+
+func TestHealthChecker_HTTPCheck_UnhealthyStatus(t *testing.T) {
+	// Create a test HTTP server that returns 500
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	// Parse server URL
+	parsedURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, _ := strconv.Atoi(parsedURL.Port())
+
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            5,
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "/health",
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: parsedURL.Hostname(),
+		Port:    port,
+		Healthy: true,
+	}
+
+	healthy, err := hc.httpCheck(endpoint)
+	assert.Error(t, err)
+	assert.False(t, healthy)
+	assert.Contains(t, err.Error(), "unhealthy status code")
+}
+
+func TestHealthChecker_HTTPCheck_CustomPort(t *testing.T) {
+	// Create a test HTTP server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Parse server URL
+	parsedURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, _ := strconv.Atoi(parsedURL.Port())
+
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            5,
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "/health",
+		Port:               port, // Use custom port
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: parsedURL.Hostname(),
+		Port:    9999, // Different port - should use config.Port instead
+		Healthy: true,
+	}
+
+	healthy, err := hc.httpCheck(endpoint)
+	assert.NoError(t, err)
+	assert.True(t, healthy)
+}
+
+// ============================================================================
+// Test Cases for HealthChecker checkEndpoint with TCP
+// ============================================================================
+
+func TestHealthChecker_CheckEndpoint_TCP(t *testing.T) {
+	// Create a TCP listener for testing
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	// Get the port
+	addr := listener.Addr().(*net.TCPAddr)
+
+	logger := zap.NewNop()
+	config := &HealthCheckConfig{
+		Enabled:            true,
+		Interval:           1,
+		Timeout:            2,
+		HealthyThreshold:   1,
+		UnhealthyThreshold: 1,
+		Path:               "", // Empty path triggers TCP check
+	}
+	hc := NewHealthChecker(config, logger)
+
+	endpoint := &Endpoint{
+		Address: "127.0.0.1",
+		Port:    addr.Port,
+		Healthy: false,
+	}
+
+	// Run check
+	hc.checkEndpoint(endpoint)
+
+	// Verify result was recorded
+	result := hc.GetResult(endpoint)
+	require.NotNil(t, result)
+	assert.True(t, result.Healthy)
+}
+
+// ============================================================================
+// Test Cases for CircuitBreaker Allow with default state
+// ============================================================================
+
+func TestCircuitBreaker_Allow_DefaultState(t *testing.T) {
+	cb := NewCircuitBreaker(nil)
+
+	// Default state should be closed, allowing requests
+	assert.True(t, cb.Allow())
+	assert.Equal(t, CircuitClosed, cb.State())
+}
+
+func TestCircuitBreaker_Allow_HalfOpen(t *testing.T) {
+	config := &CircuitBreakerConfig{
+		Enabled:           true,
+		ConsecutiveErrors: 1,
+		Interval:          30,
+		BaseEjectionTime:  0, // Immediate transition
+		MaxEjectionPct:    50,
+	}
+	cb := NewCircuitBreaker(config)
+
+	// Open the circuit
+	cb.RecordFailure()
+	assert.Equal(t, CircuitOpen, cb.State())
+
+	// Wait for transition to half-open
+	time.Sleep(10 * time.Millisecond)
+
+	// Allow should transition to half-open and return true
+	assert.True(t, cb.Allow())
+	assert.Equal(t, CircuitHalfOpen, cb.State())
+
+	// Subsequent Allow in half-open should also return true
+	assert.True(t, cb.Allow())
+}
+
+func TestCircuitBreaker_RecordSuccess_InClosedState(t *testing.T) {
+	cb := NewCircuitBreaker(nil)
+
+	// Record success in closed state
+	cb.RecordSuccess()
+
+	// Should remain closed
+	assert.Equal(t, CircuitClosed, cb.State())
 	cb.mu.RLock()
 	assert.Equal(t, 0, cb.failures)
 	cb.mu.RUnlock()

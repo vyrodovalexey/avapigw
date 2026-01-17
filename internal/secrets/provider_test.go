@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,4 +132,84 @@ func TestProviderTypeConstants(t *testing.T) {
 	assert.Equal(t, ProviderType("vault"), ProviderTypeVault)
 	assert.Equal(t, ProviderType("local"), ProviderTypeLocal)
 	assert.Equal(t, ProviderType("env"), ProviderTypeEnv)
+}
+
+func TestSecretGetBytesNilSecret(t *testing.T) {
+	var nilSecret *Secret
+	val, ok := nilSecret.GetBytes("key1")
+	assert.False(t, ok)
+	assert.Nil(t, val)
+}
+
+func TestSecretGetBytesNilData(t *testing.T) {
+	emptySecret := &Secret{Name: "empty"}
+	val, ok := emptySecret.GetBytes("key1")
+	assert.False(t, ok)
+	assert.Nil(t, val)
+}
+
+func TestRecordOperation(t *testing.T) {
+	// Test recording operation with success
+	RecordOperation(ProviderTypeKubernetes, "get", 100*time.Millisecond, nil)
+
+	// Test recording operation with error
+	RecordOperation(ProviderTypeVault, "write", 200*time.Millisecond, ErrSecretNotFound)
+
+	// Test recording operation for different providers
+	RecordOperation(ProviderTypeLocal, "delete", 50*time.Millisecond, nil)
+	RecordOperation(ProviderTypeEnv, "list", 10*time.Millisecond, nil)
+}
+
+func TestRecordHealthStatus(t *testing.T) {
+	// Test recording healthy status
+	RecordHealthStatus(ProviderTypeKubernetes, true)
+
+	// Test recording unhealthy status
+	RecordHealthStatus(ProviderTypeVault, false)
+
+	// Test for different providers
+	RecordHealthStatus(ProviderTypeLocal, true)
+	RecordHealthStatus(ProviderTypeEnv, true)
+}
+
+func TestCommonErrors(t *testing.T) {
+	// Test that common errors are properly defined
+	assert.NotNil(t, ErrSecretNotFound)
+	assert.NotNil(t, ErrProviderNotConfigured)
+	assert.NotNil(t, ErrReadOnly)
+	assert.NotNil(t, ErrInvalidPath)
+	assert.NotNil(t, ErrProviderUnavailable)
+	assert.NotNil(t, ErrInvalidProviderType)
+
+	// Test error messages
+	assert.Equal(t, "secret not found", ErrSecretNotFound.Error())
+	assert.Equal(t, "provider not configured", ErrProviderNotConfigured.Error())
+	assert.Equal(t, "provider is read-only", ErrReadOnly.Error())
+	assert.Equal(t, "invalid secret path", ErrInvalidPath.Error())
+	assert.Equal(t, "provider unavailable", ErrProviderUnavailable.Error())
+	assert.Equal(t, "invalid provider type", ErrInvalidProviderType.Error())
+}
+
+func TestSecretWithMetadata(t *testing.T) {
+	now := time.Now()
+	secret := &Secret{
+		Name:      "test-secret",
+		Namespace: "test-ns",
+		Data: map[string][]byte{
+			"key1": []byte("value1"),
+		},
+		Metadata: map[string]string{
+			"label.app": "myapp",
+		},
+		Version:   "1",
+		CreatedAt: &now,
+		UpdatedAt: &now,
+	}
+
+	assert.Equal(t, "test-secret", secret.Name)
+	assert.Equal(t, "test-ns", secret.Namespace)
+	assert.Equal(t, "1", secret.Version)
+	assert.NotNil(t, secret.CreatedAt)
+	assert.NotNil(t, secret.UpdatedAt)
+	assert.Equal(t, "myapp", secret.Metadata["label.app"])
 }

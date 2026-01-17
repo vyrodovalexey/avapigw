@@ -668,3 +668,494 @@ func TestProxy_BufferPool(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestCalculateCheckInterval(t *testing.T) {
+	tests := []struct {
+		name        string
+		idleTimeout time.Duration
+		expected    time.Duration
+	}{
+		{
+			name:        "returns 1 second for timeout greater than 1 second",
+			idleTimeout: 5 * time.Second,
+			expected:    1 * time.Second,
+		},
+		{
+			name:        "returns idle timeout for timeout less than 1 second",
+			idleTimeout: 500 * time.Millisecond,
+			expected:    500 * time.Millisecond,
+		},
+		{
+			name:        "returns idle timeout for timeout equal to 1 second",
+			idleTimeout: 1 * time.Second,
+			expected:    1 * time.Second,
+		},
+		{
+			name:        "returns idle timeout for very short timeout",
+			idleTimeout: 100 * time.Millisecond,
+			expected:    100 * time.Millisecond,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := calculateCheckInterval(tt.idleTimeout)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestHandleConnError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected error
+	}{
+		{
+			name:     "returns nil for closed error (EOF)",
+			err:      io.EOF,
+			expected: nil,
+		},
+		{
+			name:     "returns nil for nil error",
+			err:      nil,
+			expected: nil,
+		},
+		{
+			name:     "returns error for other errors",
+			err:      io.ErrUnexpectedEOF,
+			expected: io.ErrUnexpectedEOF,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := handleConnError(tt.err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestHandleReadError(t *testing.T) {
+	t.Run("returns continue true for timeout error", func(t *testing.T) {
+		timeoutErr := &mockNetError{timeout: true}
+
+		shouldContinue, err := handleReadError(timeoutErr)
+
+		assert.True(t, shouldContinue)
+		assert.NoError(t, err)
+	})
+
+	t.Run("returns continue false for closed error", func(t *testing.T) {
+		shouldContinue, err := handleReadError(io.EOF)
+
+		assert.False(t, shouldContinue)
+		assert.NoError(t, err)
+	})
+
+	t.Run("returns error for other errors", func(t *testing.T) {
+		shouldContinue, err := handleReadError(io.ErrUnexpectedEOF)
+
+		assert.False(t, shouldContinue)
+		assert.Equal(t, io.ErrUnexpectedEOF, err)
+	})
+}
+
+func TestHandleReadErrorWithEOF(t *testing.T) {
+	t.Run("returns continue true for timeout error", func(t *testing.T) {
+		timeoutErr := &mockNetError{timeout: true}
+
+		shouldContinue, err := handleReadErrorWithEOF(timeoutErr)
+
+		assert.True(t, shouldContinue)
+		assert.NoError(t, err)
+	})
+
+	t.Run("returns continue false for EOF", func(t *testing.T) {
+		shouldContinue, err := handleReadErrorWithEOF(io.EOF)
+
+		assert.False(t, shouldContinue)
+		assert.NoError(t, err)
+	})
+
+	t.Run("returns error for other errors", func(t *testing.T) {
+		shouldContinue, err := handleReadErrorWithEOF(io.ErrUnexpectedEOF)
+
+		assert.False(t, shouldContinue)
+		assert.Equal(t, io.ErrUnexpectedEOF, err)
+	})
+}
+
+// mockNetError implements net.Error for testing
+type mockNetError struct {
+	timeout   bool
+	temporary bool
+}
+
+func (e *mockNetError) Error() string   { return "mock net error" }
+func (e *mockNetError) Timeout() bool   { return e.timeout }
+func (e *mockNetError) Temporary() bool { return e.temporary }
+
+func TestProxy_writeWithDeadline(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	proxy := NewProxy(manager, logger)
+
+	t.Run("writes data successfully", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+
+		// Read from server side in goroutine
+		go func() {
+			buf := make([]byte, 20)
+			srcServer.Read(buf)
+		}()
+
+		err := proxy.writeWithDeadline(srcClient, []byte("test data"))
+
+		assert.NoError(t, err)
+	})
+}
+
+func TestProxy_writeWithTimeoutDeadline(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	proxy := NewProxy(manager, logger)
+
+	t.Run("writes data successfully", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+
+		// Read from server side in goroutine
+		go func() {
+			buf := make([]byte, 20)
+			srcServer.Read(buf)
+		}()
+
+		err := proxy.writeWithTimeoutDeadline(srcClient, []byte("test data"), 5*time.Second)
+
+		assert.NoError(t, err)
+	})
+}
+
+func TestProxy_readWithDeadline(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	proxy := NewProxy(manager, logger)
+
+	t.Run("reads data successfully", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+
+		// Write from server side in goroutine
+		go func() {
+			srcServer.Write([]byte("test data"))
+		}()
+
+		buf := make([]byte, 20)
+		n, shouldContinue, err := proxy.readWithDeadline(srcClient, buf)
+
+		assert.NoError(t, err)
+		assert.False(t, shouldContinue)
+		assert.Equal(t, 9, n)
+		assert.Equal(t, "test data", string(buf[:n]))
+	})
+
+	t.Run("handles timeout", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+
+		// Don't write anything - will timeout
+		buf := make([]byte, 20)
+		_, shouldContinue, err := proxy.readWithDeadline(srcClient, buf)
+
+		assert.True(t, shouldContinue)
+		assert.NoError(t, err)
+	})
+}
+
+func TestProxy_readWithTimeoutDeadline(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	proxy := NewProxy(manager, logger)
+
+	t.Run("reads data successfully", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+
+		// Write from server side in goroutine
+		go func() {
+			srcServer.Write([]byte("test data"))
+		}()
+
+		buf := make([]byte, 20)
+		n, shouldContinue, err := proxy.readWithTimeoutDeadline(srcClient, buf, 5*time.Second)
+
+		assert.NoError(t, err)
+		assert.False(t, shouldContinue)
+		assert.Equal(t, 9, n)
+		assert.Equal(t, "test data", string(buf[:n]))
+	})
+
+	t.Run("handles timeout", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+
+		// Don't write anything - will timeout
+		buf := make([]byte, 20)
+		_, shouldContinue, err := proxy.readWithTimeoutDeadline(srcClient, buf, 100*time.Millisecond)
+
+		assert.True(t, shouldContinue)
+		assert.NoError(t, err)
+	})
+}
+
+func TestProxy_copyWithBufferAndContext(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	proxy := NewProxy(manager, logger)
+
+	t.Run("copies data successfully", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		dstClient, dstServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+		defer dstClient.Close()
+		defer dstServer.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		// Start copy
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- proxy.copyWithBufferAndContext(ctx, dstServer, srcServer)
+		}()
+
+		// Write data
+		go func() {
+			srcClient.Write([]byte("test data"))
+			srcClient.Close()
+		}()
+
+		// Read data
+		buf := make([]byte, 20)
+		dstClient.SetReadDeadline(time.Now().Add(time.Second))
+		n, err := dstClient.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "test data", string(buf[:n]))
+
+		// Wait for copy to complete
+		select {
+		case <-errCh:
+			// Success
+		case <-time.After(2 * time.Second):
+			t.Fatal("copy did not complete")
+		}
+	})
+
+	t.Run("handles context cancellation", func(t *testing.T) {
+		srcClient, srcServer := net.Pipe()
+		dstClient, dstServer := net.Pipe()
+		defer srcClient.Close()
+		defer srcServer.Close()
+		defer dstClient.Close()
+		defer dstServer.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- proxy.copyWithBufferAndContext(ctx, dstServer, srcServer)
+		}()
+
+		// Cancel context
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+
+		select {
+		case err := <-errCh:
+			assert.ErrorIs(t, err, context.Canceled)
+		case <-time.After(2 * time.Second):
+			t.Fatal("copy did not respond to context cancellation")
+		}
+	})
+}
+
+func TestProxy_bidirectionalCopyWithTimeout(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	proxy := NewProxy(manager, logger)
+
+	t.Run("copies data bidirectionally with timeout", func(t *testing.T) {
+		conn1Client, conn1Server := net.Pipe()
+		conn2Client, conn2Server := net.Pipe()
+		defer conn1Client.Close()
+		defer conn1Server.Close()
+		defer conn2Client.Close()
+		defer conn2Server.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		// Start bidirectional copy
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- proxy.bidirectionalCopyWithTimeout(ctx, conn1Server, conn2Server, 5*time.Second)
+		}()
+
+		// Write to conn1, read from conn2
+		go func() {
+			conn1Client.Write([]byte("hello"))
+		}()
+
+		buf := make([]byte, 10)
+		conn2Client.SetReadDeadline(time.Now().Add(time.Second))
+		n, err := conn2Client.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "hello", string(buf[:n]))
+
+		// Write to conn2, read from conn1
+		go func() {
+			conn2Client.Write([]byte("world"))
+		}()
+
+		conn1Client.SetReadDeadline(time.Now().Add(time.Second))
+		n, err = conn1Client.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "world", string(buf[:n]))
+
+		// Close one side to end the copy
+		conn1Client.Close()
+
+		select {
+		case <-errCh:
+			// Success
+		case <-time.After(2 * time.Second):
+			t.Fatal("bidirectionalCopyWithTimeout did not complete")
+		}
+	})
+
+	t.Run("handles context cancellation", func(t *testing.T) {
+		conn1Client, conn1Server := net.Pipe()
+		conn2Client, conn2Server := net.Pipe()
+		defer conn1Client.Close()
+		defer conn1Server.Close()
+		defer conn2Client.Close()
+		defer conn2Server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- proxy.bidirectionalCopyWithTimeout(ctx, conn1Server, conn2Server, 5*time.Second)
+		}()
+
+		// Cancel context
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+
+		select {
+		case err := <-errCh:
+			assert.ErrorIs(t, err, context.Canceled)
+		case <-time.After(2 * time.Second):
+			t.Fatal("bidirectionalCopyWithTimeout did not respond to context cancellation")
+		}
+	})
+}
+
+func TestIsClosedError_OpError(t *testing.T) {
+	t.Run("returns false for non-closed OpError", func(t *testing.T) {
+		opErr := &net.OpError{
+			Op:  "read",
+			Err: io.ErrUnexpectedEOF,
+		}
+
+		result := isClosedError(opErr)
+
+		assert.False(t, result)
+	})
+}
+
+func TestProxy_ProxyWithIdleTimeout_Success(t *testing.T) {
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+	proxy := NewProxy(manager, logger)
+
+	t.Run("proxies data with idle timeout successfully", func(t *testing.T) {
+		// Create a mock backend server
+		backendListener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer backendListener.Close()
+
+		backendAddr := backendListener.Addr().(*net.TCPAddr)
+
+		// Handle backend connections - echo data back
+		go func() {
+			conn, err := backendListener.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			buf := make([]byte, 1024)
+			for {
+				n, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+				conn.Write(buf[:n])
+			}
+		}()
+
+		// Create client connection
+		clientConn, serverConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		// Create backend with the mock server endpoint
+		backendSvc := &backend.Backend{
+			Name: "test-backend",
+			Endpoints: []*backend.Endpoint{
+				{Address: "127.0.0.1", Port: backendAddr.Port, Healthy: true},
+			},
+		}
+
+		// Start proxy in goroutine
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- proxy.ProxyWithIdleTimeout(ctx, serverConn, backendSvc, time.Second, 5*time.Second)
+		}()
+
+		// Send data through client
+		testData := []byte("hello proxy")
+		_, err = clientConn.Write(testData)
+		require.NoError(t, err)
+
+		// Read response
+		buf := make([]byte, len(testData))
+		clientConn.SetReadDeadline(time.Now().Add(time.Second))
+		n, err := clientConn.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, testData, buf[:n])
+
+		// Close client to end proxy
+		clientConn.Close()
+
+		select {
+		case <-errCh:
+			// Success
+		case <-time.After(2 * time.Second):
+			t.Fatal("ProxyWithIdleTimeout did not complete")
+		}
+	})
+}

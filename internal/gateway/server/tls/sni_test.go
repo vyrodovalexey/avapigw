@@ -4,6 +4,7 @@ package tls
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -917,4 +918,339 @@ func TestParseClientHello_TruncatedSessionID(t *testing.T) {
 	_, err := parseClientHello(handshake)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session ID")
+}
+
+func TestSkipFixedFields_MissingVersion(t *testing.T) {
+	// Data too short for version
+	data := []byte{0x01, 0x00, 0x00, 0x10} // Just handshake header
+	pos := 4
+
+	_, err := skipFixedFields(data, pos)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing version")
+}
+
+func TestSkipFixedFields_MissingRandom(t *testing.T) {
+	// Data has version but not enough for random
+	data := make([]byte, 4+2+10) // handshake header + version + partial random
+	data[0] = 0x01               // ClientHello
+	data[1] = 0x00
+	data[2] = 0x00
+	data[3] = byte(len(data) - 4)
+	data[4] = 0x03 // version
+	data[5] = 0x03
+
+	pos := 4
+
+	_, err := skipFixedFields(data, pos)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing random")
+}
+
+func TestSkipLengthPrefixedField_MissingLength(t *testing.T) {
+	// Data too short for length field
+	data := []byte{}
+	pos := 0
+
+	_, err := skipLengthPrefixedField(data, pos, 1, "test field")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing test field length")
+}
+
+func TestSkipLengthPrefixedField_MissingData(t *testing.T) {
+	// Data has length but not enough data
+	data := []byte{0x10} // Claims 16 bytes but has none
+	pos := 0
+
+	_, err := skipLengthPrefixedField(data, pos, 1, "test field")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing test field")
+}
+
+func TestSkipLengthPrefixedField_TwoByteLength(t *testing.T) {
+	// Test with 2-byte length field
+	data := []byte{0x00, 0x04, 0x01, 0x02, 0x03, 0x04} // 4 bytes of data
+	pos := 0
+
+	newPos, err := skipLengthPrefixedField(data, pos, 2, "test field")
+	require.NoError(t, err)
+	assert.Equal(t, 6, newPos)
+}
+
+func TestFindSNIInExtensions_TruncatedExtension(t *testing.T) {
+	// Build a ClientHello with truncated extension data
+	clientHelloBody := make([]byte, 0, 2+32+1+2+2+1+1+10)
+
+	// Client version (TLS 1.2)
+	clientHelloBody = append(clientHelloBody, 0x03, 0x03)
+
+	// Random (32 bytes)
+	random := make([]byte, 32)
+	clientHelloBody = append(clientHelloBody, random...)
+
+	// Session ID length (0)
+	clientHelloBody = append(clientHelloBody, 0x00)
+
+	// Cipher suites length (2) + one cipher suite
+	clientHelloBody = append(clientHelloBody, 0x00, 0x02)
+	clientHelloBody = append(clientHelloBody, 0x00, 0x2f)
+
+	// Compression methods length (1) + null compression
+	clientHelloBody = append(clientHelloBody, 0x01, 0x00)
+
+	// Extensions length (6) - provide exactly 6 bytes of extension data
+	clientHelloBody = append(clientHelloBody, 0x00, 0x06)
+	// Extension type (2 bytes) + extension length (2 bytes) + 2 bytes of data
+	// This is a valid extension structure but with truncated SNI data
+	clientHelloBody = append(clientHelloBody, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00) // SNI extension with empty list
+
+	// Build handshake message
+	handshakeLength := len(clientHelloBody)
+	handshake := make([]byte, 4+handshakeLength)
+	handshake[0] = 1 // ClientHello
+	handshake[1] = byte(handshakeLength >> 16)
+	handshake[2] = byte(handshakeLength >> 8)
+	handshake[3] = byte(handshakeLength)
+	copy(handshake[4:], clientHelloBody)
+
+	// Parse - should return empty SNI (extension has empty list)
+	sni, err := parseClientHello(handshake)
+	require.NoError(t, err)
+	assert.Empty(t, sni)
+}
+
+func TestParseSNIExtension_TruncatedNameEntry(t *testing.T) {
+	// SNI extension with truncated name entry - list length claims more than available
+	data := []byte{
+		0x00, 0x05, // SNI list length = 5
+		0x00,       // Name type = host_name
+		0x00, 0x10, // Name length = 16 (but no data follows)
+	}
+
+	sni, err := parseSNIExtension(data)
+	// This should return error because the extension is truncated
+	require.Error(t, err)
+	assert.Empty(t, sni)
+}
+
+func TestParseSNIExtension_TruncatedNameType(t *testing.T) {
+	// SNI extension with truncated name type - list length claims more than available
+	data := []byte{
+		0x00, 0x02, // SNI list length = 2
+		0x00, // Name type = host_name
+		// Missing name length and name
+	}
+
+	sni, err := parseSNIExtension(data)
+	// This should return error because the extension is truncated
+	require.Error(t, err)
+	assert.Empty(t, sni)
+}
+
+func TestExtractSNI_TruncatedHandshake(t *testing.T) {
+	// Create a TLS record that claims a handshake but doesn't have enough data
+	record := make([]byte, 5)
+	record[0] = 22 // Handshake
+	record[1] = 0x03
+	record[2] = 0x01
+	binary.BigEndian.PutUint16(record[3:5], 100) // Claims 100 bytes
+
+	// Create pipe for testing
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	// Write record header but close before sending full data
+	go func() {
+		_, _ = clientConn.Write(record)
+		clientConn.Close()
+	}()
+
+	// Extract SNI should fail
+	_, _, err := ExtractSNI(serverConn)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read handshake message")
+}
+
+func TestExtractSNIWithTimeout_SetDeadlineError(t *testing.T) {
+	// Create a mock connection that fails on SetReadDeadline
+	mockConn := &mockConnWithSetDeadlineError{}
+
+	_, _, err := ExtractSNIWithTimeout(mockConn, 1*time.Second)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to set read deadline")
+}
+
+// mockConnWithSetDeadlineError is a mock connection that fails on SetReadDeadline
+type mockConnWithSetDeadlineError struct {
+	net.Conn
+}
+
+func (m *mockConnWithSetDeadlineError) Read(b []byte) (n int, err error) {
+	return 0, io.EOF
+}
+
+func (m *mockConnWithSetDeadlineError) Write(b []byte) (n int, err error) {
+	return len(b), nil
+}
+
+func (m *mockConnWithSetDeadlineError) Close() error {
+	return nil
+}
+
+func (m *mockConnWithSetDeadlineError) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8080}
+}
+
+func (m *mockConnWithSetDeadlineError) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8081}
+}
+
+func (m *mockConnWithSetDeadlineError) SetDeadline(t time.Time) error {
+	return errors.New("set deadline error")
+}
+
+func (m *mockConnWithSetDeadlineError) SetReadDeadline(t time.Time) error {
+	return errors.New("set read deadline error")
+}
+
+func (m *mockConnWithSetDeadlineError) SetWriteDeadline(t time.Time) error {
+	return errors.New("set write deadline error")
+}
+
+func TestValidateClientHelloHeader_TruncatedLength(t *testing.T) {
+	// Handshake header with length claiming more data than available
+	data := []byte{0x01, 0x00, 0x01, 0x00} // Claims 256 bytes but has none
+
+	err := validateClientHelloHeader(data)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "truncated")
+}
+
+func TestSkipToExtensions_NoExtensions(t *testing.T) {
+	// Build a minimal ClientHello without extensions
+	clientHelloBody := make([]byte, 0, 2+32+1+2+2+1+1)
+
+	// Client version (TLS 1.2)
+	clientHelloBody = append(clientHelloBody, 0x03, 0x03)
+
+	// Random (32 bytes)
+	random := make([]byte, 32)
+	clientHelloBody = append(clientHelloBody, random...)
+
+	// Session ID length (0)
+	clientHelloBody = append(clientHelloBody, 0x00)
+
+	// Cipher suites length (2) + one cipher suite
+	clientHelloBody = append(clientHelloBody, 0x00, 0x02)
+	clientHelloBody = append(clientHelloBody, 0x00, 0x2f)
+
+	// Compression methods length (1) + null compression
+	clientHelloBody = append(clientHelloBody, 0x01, 0x00)
+
+	// No extensions
+
+	// Build handshake message
+	handshakeLength := len(clientHelloBody)
+	handshake := make([]byte, 4+handshakeLength)
+	handshake[0] = 1 // ClientHello
+	handshake[1] = byte(handshakeLength >> 16)
+	handshake[2] = byte(handshakeLength >> 8)
+	handshake[3] = byte(handshakeLength)
+	copy(handshake[4:], clientHelloBody)
+
+	// skipToExtensions should return -1 for no extensions
+	pos, err := skipToExtensions(handshake)
+	require.NoError(t, err)
+	assert.Equal(t, -1, pos)
+}
+
+func TestFindSNIInExtensions_MultipleExtensions(t *testing.T) {
+	// Build a ClientHello with multiple extensions, SNI not first
+	clientHelloBody := make([]byte, 0, 2+32+1+2+2+1+1+50)
+
+	// Client version (TLS 1.2)
+	clientHelloBody = append(clientHelloBody, 0x03, 0x03)
+
+	// Random (32 bytes)
+	random := make([]byte, 32)
+	clientHelloBody = append(clientHelloBody, random...)
+
+	// Session ID length (0)
+	clientHelloBody = append(clientHelloBody, 0x00)
+
+	// Cipher suites length (2) + one cipher suite
+	clientHelloBody = append(clientHelloBody, 0x00, 0x02)
+	clientHelloBody = append(clientHelloBody, 0x00, 0x2f)
+
+	// Compression methods length (1) + null compression
+	clientHelloBody = append(clientHelloBody, 0x01, 0x00)
+
+	// Build extensions
+	// First: supported_versions extension (type 43)
+	supportedVersions := []byte{0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04}
+
+	// Second: SNI extension
+	serverName := "example.com"
+	nameBytes := []byte(serverName)
+	nameLength := len(nameBytes)
+	sniListLength := 1 + 2 + nameLength
+	sniExtension := make([]byte, 0, 4+2+sniListLength)
+	sniExtension = append(sniExtension, 0x00, 0x00) // SNI type
+	sniExtension = append(sniExtension, byte((2+sniListLength)>>8), byte(2+sniListLength))
+	sniExtension = append(sniExtension, byte(sniListLength>>8), byte(sniListLength))
+	sniExtension = append(sniExtension, 0x00) // host_name type
+	sniExtension = append(sniExtension, byte(nameLength>>8), byte(nameLength))
+	sniExtension = append(sniExtension, nameBytes...)
+
+	// Combine extensions
+	allExtensions := append(supportedVersions, sniExtension...)
+	extensionsLength := len(allExtensions)
+
+	clientHelloBody = append(clientHelloBody, byte(extensionsLength>>8), byte(extensionsLength))
+	clientHelloBody = append(clientHelloBody, allExtensions...)
+
+	// Build handshake message
+	handshakeLength := len(clientHelloBody)
+	handshake := make([]byte, 4+handshakeLength)
+	handshake[0] = 1 // ClientHello
+	handshake[1] = byte(handshakeLength >> 16)
+	handshake[2] = byte(handshakeLength >> 8)
+	handshake[3] = byte(handshakeLength)
+	copy(handshake[4:], clientHelloBody)
+
+	// Parse - should find SNI even though it's not first
+	sni, err := parseClientHello(handshake)
+	require.NoError(t, err)
+	assert.Equal(t, "example.com", sni)
+}
+
+func TestBufferedConn_PartialBufferRead(t *testing.T) {
+	// Create pipe for testing
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	prependData := []byte("prepend data that is longer than read buffer")
+	connData := []byte("connection data")
+
+	// Write connection data in a goroutine
+	go func() {
+		_, _ = clientConn.Write(connData)
+	}()
+
+	// Create buffered connection
+	bufferedConn := NewBufferedConn(serverConn, prependData)
+
+	// Read with small buffer - should only get part of prepend data
+	buf := make([]byte, 10)
+	n, err := bufferedConn.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, 10, n)
+	assert.Equal(t, prependData[:10], buf[:n])
+
+	// Read again - should get more prepend data
+	n, err = bufferedConn.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, prependData[10:20], buf[:n])
 }

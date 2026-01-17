@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -697,4 +698,478 @@ func TestProxyWithRetry_ResponseHeadersCopied(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "custom-value", rec.Header().Get("X-Custom-Header"))
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+}
+
+// ============================================================================
+// Test Cases for NewProxy with URL Validation
+// ============================================================================
+
+func TestNewProxy_WithURLValidation(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	config := &ProxyConfig{
+		Timeout:             30 * time.Second,
+		BufferSize:          32 * 1024,
+		PreserveHost:        false,
+		AddForwardedHeaders: true,
+		EnableURLValidation: true,
+		URLValidatorConfig:  DefaultURLValidatorConfig(),
+	}
+
+	proxy := NewProxy(manager, logger, config)
+
+	require.NotNil(t, proxy)
+	assert.NotNil(t, proxy.urlValidator)
+}
+
+func TestNewProxy_WithURLValidationDisabled(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	config := &ProxyConfig{
+		Timeout:             30 * time.Second,
+		BufferSize:          32 * 1024,
+		PreserveHost:        false,
+		AddForwardedHeaders: true,
+		EnableURLValidation: false,
+	}
+
+	proxy := NewProxy(manager, logger, config)
+
+	require.NotNil(t, proxy)
+	assert.Nil(t, proxy.urlValidator)
+}
+
+func TestNewProxy_WithNilConfig(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	proxy := NewProxy(manager, logger, nil)
+
+	require.NotNil(t, proxy)
+	// Should use default config
+	assert.NotNil(t, proxy.config)
+}
+
+func TestNewProxy_WithInvalidURLValidatorConfig(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	config := &ProxyConfig{
+		Timeout:             30 * time.Second,
+		BufferSize:          32 * 1024,
+		PreserveHost:        false,
+		AddForwardedHeaders: true,
+		EnableURLValidation: true,
+		URLValidatorConfig: &URLValidatorConfig{
+			AllowedCIDRs: []string{"invalid-cidr"}, // Invalid CIDR
+		},
+	}
+
+	// Should not panic, but URL validator will be nil
+	proxy := NewProxy(manager, logger, config)
+
+	require.NotNil(t, proxy)
+	assert.Nil(t, proxy.urlValidator) // Validator creation failed
+}
+
+// ============================================================================
+// Test Cases for Proxy with URL Validation (SSRF Prevention)
+// ============================================================================
+
+func TestProxy_ServeHTTP_SSRFPrevention(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	config := &ProxyConfig{
+		Timeout:             30 * time.Second,
+		BufferSize:          32 * 1024,
+		PreserveHost:        false,
+		AddForwardedHeaders: true,
+		EnableURLValidation: true,
+		URLValidatorConfig:  DefaultURLValidatorConfig(),
+	}
+
+	proxy := NewProxy(manager, logger, config)
+
+	backend := createTestBackend("test-backend")
+	backend.Endpoints = []*Endpoint{
+		{
+			Address: "127.0.0.1", // Loopback - should be blocked
+			Port:    8080,
+			Healthy: true,
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	rec := httptest.NewRecorder()
+
+	err := proxy.ServeHTTP(rec, req, backend, 5*time.Second)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "SSRF protection")
+}
+
+// ============================================================================
+// Test Cases for ProxyHandler with Backend Found
+// ============================================================================
+
+func TestProxy_ProxyHandler_BackendFound(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("success"))
+	}))
+	defer server.Close()
+
+	// Parse server URL
+	parsedURL, _ := url.Parse(server.URL)
+	port, _ := strconv.Atoi(parsedURL.Port())
+
+	// Add backend to manager
+	config := BackendConfig{
+		Name: "test-backend",
+		Endpoints: []EndpointConfig{
+			{Address: parsedURL.Hostname(), Port: port},
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	proxyConfig := testProxyConfig()
+	proxy := NewProxy(manager, logger, proxyConfig)
+
+	handler := proxy.ProxyHandler("test-backend", 5*time.Second)
+
+	req := httptest.NewRequest(http.MethodGet, server.URL, nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestProxy_ProxyHandler_ProxyError(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	// Add backend with invalid endpoint
+	config := BackendConfig{
+		Name: "test-backend",
+		Endpoints: []EndpointConfig{
+			{Address: "invalid.example.com", Port: 80},
+		},
+	}
+	err := manager.AddBackend(config)
+	require.NoError(t, err)
+
+	// Mark endpoint as unhealthy to trigger error
+	backend := manager.GetBackend("test-backend")
+	backend.Endpoints[0].SetHealthy(false)
+
+	proxyConfig := testProxyConfig()
+	proxy := NewProxy(manager, logger, proxyConfig)
+
+	handler := proxy.ProxyHandler("test-backend", 5*time.Second)
+
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// ============================================================================
+// Test Cases for getTransport with ConnectionPool
+// ============================================================================
+
+func TestProxy_GetTransport_WithConnectionPool(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	proxyConfig := testProxyConfig()
+	proxy := NewProxy(manager, logger, proxyConfig)
+
+	// Create backend with connection pool
+	backend := &Backend{
+		Name: "test-backend",
+		ConnectionPool: NewConnectionPool(&ConnectionPoolConfig{
+			MaxConnections:        100,
+			MaxIdleConnections:    10,
+			MaxConnectionsPerHost: 10,
+			IdleTimeout:           90,
+		}),
+	}
+
+	transport := proxy.getTransport(backend)
+
+	assert.NotNil(t, transport)
+	assert.Equal(t, backend.ConnectionPool.GetTransport(), transport)
+}
+
+func TestProxy_GetTransport_WithoutConnectionPool(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	proxyConfig := testProxyConfig()
+	proxy := NewProxy(manager, logger, proxyConfig)
+
+	// Create backend without connection pool
+	backend := &Backend{
+		Name:           "test-backend",
+		ConnectionPool: nil,
+	}
+
+	transport := proxy.getTransport(backend)
+
+	assert.NotNil(t, transport)
+	assert.Equal(t, proxy.transport, transport)
+}
+
+// ============================================================================
+// Test Cases for addXForwardedFor edge cases
+// ============================================================================
+
+func TestProxy_AddXForwardedFor_EmptyClientIP(t *testing.T) {
+	config := testProxyConfig()
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	// Create request with no IP headers and empty RemoteAddr
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	req.RemoteAddr = "" // Empty remote addr
+	req.Header.Del("X-Real-IP")
+	req.Header.Del("X-Forwarded-For")
+
+	originalReq := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	originalReq.RemoteAddr = ""
+	originalReq.Header.Del("X-Real-IP")
+	originalReq.Header.Del("X-Forwarded-For")
+
+	endpoint := &Endpoint{
+		Address: "backend.example.com",
+		Port:    8080,
+		Healthy: true,
+	}
+
+	proxy.modifyRequest(req, originalReq, endpoint)
+
+	// X-Forwarded-For should not be set when client IP is empty
+	assert.Empty(t, req.Header.Get("X-Forwarded-For"))
+}
+
+func TestProxy_AddXForwardedFor_ExistingHeader(t *testing.T) {
+	config := testProxyConfig()
+	config.AddForwardedHeaders = true
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	// Create request with existing X-Forwarded-For
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	req.Header.Set("X-Real-IP", "192.168.1.1")
+
+	originalReq := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	originalReq.Header.Set("X-Forwarded-For", "10.0.0.1")
+	originalReq.Header.Set("X-Real-IP", "192.168.1.1")
+
+	endpoint := &Endpoint{
+		Address: "backend.example.com",
+		Port:    8080,
+		Healthy: true,
+	}
+
+	proxy.modifyRequest(req, originalReq, endpoint)
+
+	// Should append to existing X-Forwarded-For
+	assert.Equal(t, "10.0.0.1, 192.168.1.1", req.Header.Get("X-Forwarded-For"))
+}
+
+// ============================================================================
+// Test Cases for addXForwardedProto with TLS
+// ============================================================================
+
+func TestProxy_AddXForwardedProto_WithTLS(t *testing.T) {
+	config := testProxyConfig()
+	config.AddForwardedHeaders = true
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	// Create request with TLS
+	req := httptest.NewRequest(http.MethodGet, "https://test.com/test", nil)
+
+	originalReq := httptest.NewRequest(http.MethodGet, "https://test.com/test", nil)
+	originalReq.TLS = &tls.ConnectionState{} // Simulate TLS connection
+
+	endpoint := &Endpoint{
+		Address: "backend.example.com",
+		Port:    8080,
+		Healthy: true,
+	}
+
+	proxy.modifyRequest(req, originalReq, endpoint)
+
+	assert.Equal(t, "https", req.Header.Get("X-Forwarded-Proto"))
+}
+
+// ============================================================================
+// Test Cases for applyTimeout
+// ============================================================================
+
+func TestProxy_ApplyTimeout_ZeroTimeout(t *testing.T) {
+	config := testProxyConfig()
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+
+	// Zero timeout should not modify request
+	result := proxy.applyTimeout(req, 0)
+
+	assert.Equal(t, req, result)
+}
+
+func TestProxy_ApplyTimeout_PositiveTimeout(t *testing.T) {
+	config := testProxyConfig()
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+
+	// Positive timeout should create new request with timeout context
+	result := proxy.applyTimeout(req, 5*time.Second)
+
+	assert.NotEqual(t, req, result)
+	// Context should have deadline
+	_, hasDeadline := result.Context().Deadline()
+	assert.True(t, hasDeadline)
+}
+
+// ============================================================================
+// Test Cases for bufferRequestBody
+// ============================================================================
+
+func TestProxy_BufferRequestBody_NilBody(t *testing.T) {
+	config := testProxyConfig()
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	req.Body = nil
+
+	bodyBytes, err := proxy.bufferRequestBody(req)
+
+	assert.NoError(t, err)
+	assert.Nil(t, bodyBytes)
+}
+
+func TestProxy_BufferRequestBody_WithBody(t *testing.T) {
+	config := testProxyConfig()
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	body := "test request body"
+	req := httptest.NewRequest(http.MethodPost, "http://test.com/test", strings.NewReader(body))
+
+	bodyBytes, err := proxy.bufferRequestBody(req)
+
+	assert.NoError(t, err)
+	assert.Equal(t, []byte(body), bodyBytes)
+}
+
+// ============================================================================
+// Test Cases for Proxy PreserveHost
+// ============================================================================
+
+func TestProxy_ModifyRequest_PreserveHost(t *testing.T) {
+	config := testProxyConfig()
+	config.PreserveHost = true
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+	proxy := NewProxy(manager, logger, config)
+
+	req := httptest.NewRequest(http.MethodGet, "http://original.com/test", nil)
+	originalHost := req.Host
+
+	originalReq := httptest.NewRequest(http.MethodGet, "http://original.com/test", nil)
+
+	endpoint := &Endpoint{
+		Address: "backend.example.com",
+		Port:    8080,
+		Healthy: true,
+	}
+
+	proxy.modifyRequest(req, originalReq, endpoint)
+
+	// Host should be preserved
+	assert.Equal(t, originalHost, req.Host)
+}
+
+// ============================================================================
+// Test Cases for error handler
+// ============================================================================
+
+func TestProxy_ErrorHandler(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	proxyConfig := testProxyConfig()
+	proxy := NewProxy(manager, logger, proxyConfig)
+
+	backend := &Backend{
+		Name: "test-backend",
+		CircuitBreaker: NewCircuitBreaker(&CircuitBreakerConfig{
+			Enabled:           true,
+			ConsecutiveErrors: 5,
+			Interval:          30,
+			BaseEjectionTime:  30,
+			MaxEjectionPct:    50,
+		}),
+	}
+
+	errorHandler := proxy.errorHandler(backend)
+
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	rec := httptest.NewRecorder()
+
+	// Call error handler
+	errorHandler(rec, req, io.EOF)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Bad Gateway")
+}
+
+func TestProxy_ErrorHandler_WithoutCircuitBreaker(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	manager := NewManager(logger)
+
+	proxyConfig := testProxyConfig()
+	proxy := NewProxy(manager, logger, proxyConfig)
+
+	backend := &Backend{
+		Name:           "test-backend",
+		CircuitBreaker: nil,
+	}
+
+	errorHandler := proxy.errorHandler(backend)
+
+	req := httptest.NewRequest(http.MethodGet, "http://test.com/test", nil)
+	rec := httptest.NewRecorder()
+
+	// Call error handler - should not panic without circuit breaker
+	errorHandler(rec, req, io.EOF)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
 }
