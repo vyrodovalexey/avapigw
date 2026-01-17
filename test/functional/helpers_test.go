@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -61,7 +62,10 @@ func (b *HTTPRequestBuilder) WithBody(body string) *HTTPRequestBuilder {
 
 // WithJSONBody sets the request body as JSON
 func (b *HTTPRequestBuilder) WithJSONBody(v interface{}) *HTTPRequestBuilder {
-	data, _ := json.Marshal(v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal JSON body: %v", err))
+	}
 	b.body = bytes.NewReader(data)
 	b.headers["Content-Type"] = "application/json"
 	return b
@@ -214,9 +218,12 @@ func NewConcurrentRequester(client *http.Client, concurrency, requests int) *Con
 func (cr *ConcurrentRequester) Execute(t *testing.T, method, url string) []RequestResult {
 	results := make(chan RequestResult, cr.requests)
 	semaphore := make(chan struct{}, cr.concurrency)
+	var wg sync.WaitGroup
 
 	for i := 0; i < cr.requests; i++ {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
@@ -234,9 +241,9 @@ func (cr *ConcurrentRequester) Execute(t *testing.T, method, url string) []Reque
 				results <- RequestResult{Error: err, Duration: duration}
 				return
 			}
+			defer resp.Body.Close()
 
 			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
 
 			results <- RequestResult{
 				StatusCode: resp.StatusCode,
@@ -246,12 +253,19 @@ func (cr *ConcurrentRequester) Execute(t *testing.T, method, url string) []Reque
 		}()
 	}
 
-	// Collect results
-	cr.results = make([]RequestResult, 0, cr.requests)
-	for i := 0; i < cr.requests; i++ {
-		cr.results = append(cr.results, <-results)
+	// Wait for all goroutines to complete and close results channel
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results with proper synchronization
+	collectedResults := make([]RequestResult, 0, cr.requests)
+	for result := range results {
+		collectedResults = append(collectedResults, result)
 	}
 
+	cr.results = collectedResults
 	return cr.results
 }
 
@@ -530,16 +544,12 @@ func (mc *MetricsCollector) P99Latency() time.Duration {
 		return 0
 	}
 
-	// Sort latencies
+	// Sort latencies using standard library sort.Slice
 	sorted := make([]time.Duration, len(mc.latencies))
 	copy(sorted, mc.latencies)
-	for i := range sorted {
-		for j := i + 1; j < len(sorted); j++ {
-			if sorted[i] > sorted[j] {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
-			}
-		}
-	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i] < sorted[j]
+	})
 
 	idx := int(float64(len(sorted)) * 0.99)
 	if idx >= len(sorted) {

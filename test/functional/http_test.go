@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -158,18 +159,17 @@ func TestFunctional_HTTP_RouteMatching_ExactPath(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Test exact match
+	// Test exact match - route matches, handler returns 200 OK (no backend configured)
 	resp, err := client.Get(fmt.Sprintf("http://%s/api/v1/users", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request should not fail")
 	defer resp.Body.Close()
-	// Route matches but no backend configured, so we get a response from the handler
-	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "exact path match should return 200 OK")
 
-	// Test non-matching path
+	// Test non-matching path - should return 404 Not Found
 	resp2, err := client.Get(fmt.Sprintf("http://%s/api/v1/users/123", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request should not fail")
 	defer resp2.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp2.StatusCode, "non-matching path should return 404 Not Found")
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -217,7 +217,7 @@ func TestFunctional_HTTP_RouteMatching_PrefixPath(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Test prefix matches
+	// Test prefix matches - all should return 200 OK
 	testPaths := []string{
 		"/api/v1/users",
 		"/api/v2/products",
@@ -226,16 +226,16 @@ func TestFunctional_HTTP_RouteMatching_PrefixPath(t *testing.T) {
 
 	for _, path := range testPaths {
 		resp, err := client.Get(fmt.Sprintf("http://%s%s", addr, path))
-		require.NoError(t, err)
+		require.NoError(t, err, "request to %s should not fail", path)
 		resp.Body.Close()
-		assert.NotEqual(t, http.StatusNotFound, resp.StatusCode, "path %s should match", path)
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "path %s should match and return 200 OK", path)
 	}
 
-	// Test non-matching path
+	// Test non-matching path - should return 404 Not Found
 	resp, err := client.Get(fmt.Sprintf("http://%s/other/path", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request should not fail")
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "non-matching path should return 404 Not Found")
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -285,17 +285,17 @@ func TestFunctional_HTTP_RouteMatching_MethodMatch(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Test GET request - should match
+	// Test GET request - should match and return 200 OK
 	resp, err := client.Get(fmt.Sprintf("http://%s/api/users", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "GET request should not fail")
 	resp.Body.Close()
-	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "GET request should match and return 200 OK")
 
-	// Test POST request - should not match
+	// Test POST request - should not match and return 404 Not Found
 	resp2, err := client.Post(fmt.Sprintf("http://%s/api/users", addr), "application/json", strings.NewReader("{}"))
-	require.NoError(t, err)
+	require.NoError(t, err, "POST request should not fail")
 	defer resp2.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp2.StatusCode, "POST request should not match and return 404 Not Found")
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -350,19 +350,19 @@ func TestFunctional_HTTP_RouteMatching_HeaderMatch(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Test with matching header
+	// Test with matching header - should return 200 OK
 	req, _ := http.NewRequest("GET", fmt.Sprintf("http://%s/api/users", addr), nil)
 	req.Header.Set("X-API-Version", "v2")
 	resp, err := client.Do(req)
-	require.NoError(t, err)
+	require.NoError(t, err, "request with matching header should not fail")
 	resp.Body.Close()
-	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "request with matching header should return 200 OK")
 
-	// Test without header - should not match
+	// Test without header - should not match and return 404 Not Found
 	resp2, err := client.Get(fmt.Sprintf("http://%s/api/users", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request without header should not fail")
 	defer resp2.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp2.StatusCode, "request without matching header should return 404 Not Found")
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -417,17 +417,17 @@ func TestFunctional_HTTP_RouteMatching_QueryParamMatch(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Test with matching query param
+	// Test with matching query param - should return 200 OK
 	resp, err := client.Get(fmt.Sprintf("http://%s/api/users?version=2", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request with matching query param should not fail")
 	resp.Body.Close()
-	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "request with matching query param should return 200 OK")
 
-	// Test without query param - should not match
+	// Test without query param - should not match and return 404 Not Found
 	resp2, err := client.Get(fmt.Sprintf("http://%s/api/users", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request without query param should not fail")
 	defer resp2.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp2.StatusCode, "request without matching query param should return 404 Not Found")
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -475,21 +475,21 @@ func TestFunctional_HTTP_RouteMatching_HostnameMatch(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Test with matching host header
+	// Test with matching host header - should return 200 OK
 	req, _ := http.NewRequest("GET", fmt.Sprintf("http://%s/users", addr), nil)
 	req.Host = "api.example.com"
 	resp, err := client.Do(req)
-	require.NoError(t, err)
+	require.NoError(t, err, "request with matching host should not fail")
 	resp.Body.Close()
-	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "request with matching host should return 200 OK")
 
-	// Test with non-matching host - should not match
+	// Test with non-matching host - should not match and return 404 Not Found
 	req2, _ := http.NewRequest("GET", fmt.Sprintf("http://%s/users", addr), nil)
 	req2.Host = "other.example.com"
 	resp2, err := client.Do(req2)
-	require.NoError(t, err)
+	require.NoError(t, err, "request with non-matching host should not fail")
 	defer resp2.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusNotFound, resp2.StatusCode, "request with non-matching host should return 404 Not Found")
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -612,7 +612,7 @@ func TestFunctional_HTTP_RequestBodySizeLimit(t *testing.T) {
 
 	server := suite.CreateHTTPServer(config)
 
-	// Add a route that accepts POST
+	// Add a route that accepts POST and reads the body
 	route := &gwhttp.Route{
 		Name:      "post-route",
 		Hostnames: []string{"*"},
@@ -631,6 +631,19 @@ func TestFunctional_HTTP_RequestBodySizeLimit(t *testing.T) {
 	}
 	server.GetRouter().AddRoute(route)
 
+	// Add a middleware that reads the body to trigger the size limit check
+	server.Use(func(c *gin.Context) {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			// MaxBytesReader returns an error when limit is exceeded
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			c.Abort()
+			return
+		}
+		// Echo back the body size for verification
+		c.JSON(http.StatusOK, gin.H{"size": len(body)})
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -641,13 +654,44 @@ func TestFunctional_HTTP_RequestBodySizeLimit(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Small body - should succeed
-	smallBody := strings.Repeat("a", 100)
-	resp, err := client.Post(fmt.Sprintf("http://%s/test", addr), "text/plain", strings.NewReader(smallBody))
-	require.NoError(t, err)
-	resp.Body.Close()
-	// Route matches, request is processed
-	assert.NotEqual(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+	t.Run("small body succeeds", func(t *testing.T) {
+		smallBody := strings.Repeat("a", 100)
+		resp, err := client.Post(fmt.Sprintf("http://%s/test", addr), "text/plain", strings.NewReader(smallBody))
+		require.NoError(t, err, "request should not fail")
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "small body should be accepted")
+	})
+
+	t.Run("large body rejected", func(t *testing.T) {
+		// Create a body larger than the 1024 byte limit
+		largeBody := strings.Repeat("a", 2048)
+		resp, err := client.Post(fmt.Sprintf("http://%s/test", addr), "text/plain", strings.NewReader(largeBody))
+		require.NoError(t, err, "request should not fail at transport level")
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode, "large body should be rejected with 413 status")
+	})
+
+	t.Run("body at exact limit succeeds", func(t *testing.T) {
+		// Body exactly at the limit should succeed
+		exactBody := strings.Repeat("a", 1024)
+		resp, err := client.Post(fmt.Sprintf("http://%s/test", addr), "text/plain", strings.NewReader(exactBody))
+		require.NoError(t, err, "request should not fail")
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "body at exact limit should be accepted")
+	})
+
+	t.Run("body just over limit rejected", func(t *testing.T) {
+		// Body just over the limit should be rejected
+		overLimitBody := strings.Repeat("a", 1025)
+		resp, err := client.Post(fmt.Sprintf("http://%s/test", addr), "text/plain", strings.NewReader(overLimitBody))
+		require.NoError(t, err, "request should not fail at transport level")
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode, "body just over limit should be rejected with 413 status")
+	})
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -776,17 +820,17 @@ func TestFunctional_HTTP_RoutePriority(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Request to /api/v1/users should match high priority route
+	// Request to /api/v1/users should match high priority route and return 200 OK
 	resp, err := client.Get(fmt.Sprintf("http://%s/api/v1/users", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request to high priority route should not fail")
 	resp.Body.Close()
-	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "high priority route should match and return 200 OK")
 
-	// Request to /api/other should match low priority route
+	// Request to /api/other should match low priority route and return 200 OK
 	resp2, err := client.Get(fmt.Sprintf("http://%s/api/other", addr))
-	require.NoError(t, err)
+	require.NoError(t, err, "request to low priority route should not fail")
 	resp2.Body.Close()
-	assert.NotEqual(t, http.StatusNotFound, resp2.StatusCode)
+	assert.Equal(t, http.StatusOK, resp2.StatusCode, "low priority route should match and return 200 OK")
 
 	// Cleanup
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -838,7 +882,7 @@ func TestFunctional_HTTP_RouteMatching_RegexPath(t *testing.T) {
 
 	client := CreateTestHTTPClient(5 * time.Second)
 
-	// Test matching paths
+	// Test matching paths - all should return 200 OK
 	matchingPaths := []string{
 		"/api/v1/users/123",
 		"/api/v2/users/456",
@@ -847,12 +891,12 @@ func TestFunctional_HTTP_RouteMatching_RegexPath(t *testing.T) {
 
 	for _, path := range matchingPaths {
 		resp, err := client.Get(fmt.Sprintf("http://%s%s", addr, path))
-		require.NoError(t, err)
+		require.NoError(t, err, "request to %s should not fail", path)
 		resp.Body.Close()
-		assert.NotEqual(t, http.StatusNotFound, resp.StatusCode, "path %s should match", path)
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "path %s should match regex and return 200 OK", path)
 	}
 
-	// Test non-matching paths
+	// Test non-matching paths - all should return 404 Not Found
 	nonMatchingPaths := []string{
 		"/api/v1/users",
 		"/api/v1/users/abc",
@@ -861,9 +905,9 @@ func TestFunctional_HTTP_RouteMatching_RegexPath(t *testing.T) {
 
 	for _, path := range nonMatchingPaths {
 		resp, err := client.Get(fmt.Sprintf("http://%s%s", addr, path))
-		require.NoError(t, err)
+		require.NoError(t, err, "request to %s should not fail", path)
 		resp.Body.Close()
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "path %s should not match", path)
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "path %s should not match regex and return 404 Not Found", path)
 	}
 
 	// Cleanup
@@ -943,35 +987,53 @@ func TestFunctional_HTTP_RouteMatching_TableDriven(t *testing.T) {
 		name           string
 		path           string
 		expectedStatus int
+		description    string
 	}{
 		{
 			name:           "users route matches",
 			path:           "/users/123",
-			expectedStatus: http.StatusOK, // Route matches, handler returns OK
+			expectedStatus: http.StatusOK,
+			description:    "users route should match prefix /users and return 200 OK",
 		},
 		{
 			name:           "products route matches",
 			path:           "/products/456",
 			expectedStatus: http.StatusOK,
+			description:    "products route should match prefix /products and return 200 OK",
 		},
 		{
 			name:           "no route matches",
 			path:           "/orders/789",
 			expectedStatus: http.StatusNotFound,
+			description:    "orders path should not match any route and return 404 Not Found",
+		},
+		{
+			name:           "users root path matches",
+			path:           "/users",
+			expectedStatus: http.StatusOK,
+			description:    "users root path should match prefix /users and return 200 OK",
+		},
+		{
+			name:           "products root path matches",
+			path:           "/products",
+			expectedStatus: http.StatusOK,
+			description:    "products root path should match prefix /products and return 200 OK",
+		},
+		{
+			name:           "root path no match",
+			path:           "/",
+			expectedStatus: http.StatusNotFound,
+			description:    "root path should not match any route and return 404 Not Found",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resp, err := client.Get(fmt.Sprintf("http://%s%s", addr, tt.path))
-			require.NoError(t, err)
+			require.NoError(t, err, "request to %s should not fail", tt.path)
 			defer resp.Body.Close()
 
-			if tt.expectedStatus == http.StatusNotFound {
-				assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-			} else {
-				assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
-			}
+			assert.Equal(t, tt.expectedStatus, resp.StatusCode, tt.description)
 		})
 	}
 

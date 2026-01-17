@@ -154,7 +154,7 @@ func TestFunctional_GRPC_HealthCheck_Serving(t *testing.T) {
 	WaitForGRPCServer(t, addr, 10*time.Second)
 
 	// Create client
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -195,7 +195,7 @@ func TestFunctional_GRPC_HealthCheck_ServiceStatus(t *testing.T) {
 	server.SetServingStatus("test.Service", healthpb.HealthCheckResponse_SERVING)
 
 	// Create client
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -244,7 +244,7 @@ func TestFunctional_GRPC_HealthCheck_UnknownService(t *testing.T) {
 	WaitForGRPCServer(t, addr, 10*time.Second)
 
 	// Create client
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -623,7 +623,7 @@ func TestFunctional_GRPC_ConcurrentConnections(t *testing.T) {
 
 	for i := 0; i < numConnections; i++ {
 		go func(idx int) {
-			conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				errors <- err
 				return

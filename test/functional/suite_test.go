@@ -128,10 +128,8 @@ func (s *TestSuite) CreateMockBackend(opts ...MockBackendOption) *MockBackend {
 
 	if mb.Handler == nil {
 		mb.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Record request under lock
 			mb.mu.Lock()
-			defer mb.mu.Unlock()
-
-			// Record the request
 			body, _ := io.ReadAll(r.Body)
 			mb.Requests = append(mb.Requests, RecordedRequest{
 				Method:  r.Method,
@@ -140,19 +138,26 @@ func (s *TestSuite) CreateMockBackend(opts ...MockBackendOption) *MockBackend {
 				Body:    body,
 				Time:    time.Now(),
 			})
+			latency := mb.Latency
+			mb.mu.Unlock()
 
-			// Simulate latency
-			if mb.Latency > 0 {
-				time.Sleep(mb.Latency)
+			// Sleep outside lock to avoid holding mutex during latency simulation
+			if latency > 0 {
+				time.Sleep(latency)
 			}
 
-			// Check health
-			if !mb.Healthy {
+			// Check health under lock
+			mb.mu.Lock()
+			healthy := mb.Healthy
+			statusCode := mb.StatusCode
+			mb.mu.Unlock()
+
+			if !healthy {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
 
-			w.WriteHeader(mb.StatusCode)
+			w.WriteHeader(statusCode)
 			w.Write([]byte(`{"status":"ok"}`))
 		})
 	}
@@ -313,17 +318,21 @@ func WaitForServer(t *testing.T, addr string, timeout time.Duration) {
 func WaitForGRPCServer(t *testing.T, addr string, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
+		// Check health with timeout context
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		healthClient := healthpb.NewHealthClient(conn)
+		resp, err := healthClient.Check(ctx, &healthpb.HealthCheckRequest{})
 		cancel()
-		if err == nil {
-			// Check health
-			healthClient := healthpb.NewHealthClient(conn)
-			resp, err := healthClient.Check(context.Background(), &healthpb.HealthCheckRequest{})
-			conn.Close()
-			if err == nil && resp.Status == healthpb.HealthCheckResponse_SERVING {
-				return
-			}
+		conn.Close()
+
+		if err == nil && resp.Status == healthpb.HealthCheckResponse_SERVING {
+			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -391,11 +400,7 @@ func CreateTestHTTPClient(timeout time.Duration) *http.Client {
 
 // CreateTestGRPCClient creates a gRPC client connection for testing
 func CreateTestGRPCClient(t *testing.T, addr string) *grpc.ClientConn {
-	conn, err := grpc.Dial(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-		grpc.WithTimeout(5*time.Second),
-	)
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	return conn
 }
