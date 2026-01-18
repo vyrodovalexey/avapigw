@@ -64,14 +64,20 @@ var _ webhook.CustomDefaulter = &GatewayWebhook{}
 
 // Default implements webhook.CustomDefaulter
 func (w *GatewayWebhook) Default(ctx context.Context, obj runtime.Object) error {
+	timer := NewWebhookTimer("Gateway", OperationMutate)
+	defer timer.ObserveDuration()
+
 	gateway, ok := obj.(*avapigwv1alpha1.Gateway)
 	if !ok {
+		RecordMutation("Gateway", ResultError)
+		RecordError("Gateway", OperationMutate, "type_assertion_failed")
 		return fmt.Errorf("expected a Gateway but got %T", obj)
 	}
 
 	gatewaylog.Info("defaulting Gateway", "name", gateway.Name, "namespace", gateway.Namespace)
 	w.Defaulter.Default(gateway)
 
+	RecordMutation("Gateway", ResultSuccess)
 	return nil
 }
 
@@ -82,13 +88,20 @@ var _ webhook.CustomValidator = &GatewayWebhook{}
 
 // ValidateCreate implements webhook.CustomValidator
 func (w *GatewayWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	timer := NewWebhookTimer("Gateway", OperationValidateCreate)
+	defer timer.ObserveDuration()
+
 	gateway, ok := obj.(*avapigwv1alpha1.Gateway)
 	if !ok {
+		RecordValidation("Gateway", OperationValidateCreate, ResultError)
+		RecordError("Gateway", OperationValidateCreate, "type_assertion_failed")
 		return nil, fmt.Errorf("expected a Gateway but got %T", obj)
 	}
 
 	// Check rate limit
 	if err := GetGlobalWebhookRateLimiter().CheckRateLimit(ctx, "Gateway"); err != nil {
+		RecordValidation("Gateway", OperationValidateCreate, ResultDenied)
+		RecordError("Gateway", OperationValidateCreate, "rate_limit_exceeded")
 		return nil, err
 	}
 
@@ -98,21 +111,29 @@ func (w *GatewayWebhook) ValidateCreate(ctx context.Context, obj runtime.Object)
 
 	// Validate syntax
 	if err := w.validateSyntax(gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateCreate, ResultDenied)
+		RecordError("Gateway", OperationValidateCreate, "syntax_validation_failed")
 		return warnings, err
 	}
 
 	// Validate semantics
 	if err := w.validateSemantics(gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateCreate, ResultDenied)
+		RecordError("Gateway", OperationValidateCreate, "semantic_validation_failed")
 		return warnings, err
 	}
 
 	// Check for duplicates
 	if err := w.DuplicateChecker.CheckGatewayListenerDuplicates(ctx, gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateCreate, ResultDenied)
+		RecordError("Gateway", OperationValidateCreate, "duplicate_check_failed")
 		return warnings, err
 	}
 
 	// Validate references
 	if err := w.validateReferences(ctx, gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateCreate, ResultDenied)
+		RecordError("Gateway", OperationValidateCreate, "reference_validation_failed")
 		return warnings, err
 	}
 
@@ -121,6 +142,7 @@ func (w *GatewayWebhook) ValidateCreate(ctx context.Context, obj runtime.Object)
 		warnings = append(warnings, wildcardWarnings...)
 	}
 
+	RecordValidation("Gateway", OperationValidateCreate, ResultSuccess)
 	return warnings, nil
 }
 
@@ -129,13 +151,20 @@ func (w *GatewayWebhook) ValidateUpdate(
 	ctx context.Context,
 	oldObj, newObj runtime.Object,
 ) (admission.Warnings, error) {
+	timer := NewWebhookTimer("Gateway", OperationValidateUpdate)
+	defer timer.ObserveDuration()
+
 	gateway, ok := newObj.(*avapigwv1alpha1.Gateway)
 	if !ok {
+		RecordValidation("Gateway", OperationValidateUpdate, ResultError)
+		RecordError("Gateway", OperationValidateUpdate, "type_assertion_failed")
 		return nil, fmt.Errorf("expected a Gateway but got %T", newObj)
 	}
 
 	// Check rate limit
 	if err := GetGlobalWebhookRateLimiter().CheckRateLimit(ctx, "Gateway"); err != nil {
+		RecordValidation("Gateway", OperationValidateUpdate, ResultDenied)
+		RecordError("Gateway", OperationValidateUpdate, "rate_limit_exceeded")
 		return nil, err
 	}
 
@@ -146,21 +175,29 @@ func (w *GatewayWebhook) ValidateUpdate(
 
 	// Validate syntax
 	if err := w.validateSyntax(gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateUpdate, ResultDenied)
+		RecordError("Gateway", OperationValidateUpdate, "syntax_validation_failed")
 		return warnings, err
 	}
 
 	// Validate semantics
 	if err := w.validateSemantics(gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateUpdate, ResultDenied)
+		RecordError("Gateway", OperationValidateUpdate, "semantic_validation_failed")
 		return warnings, err
 	}
 
 	// Check for duplicates
 	if err := w.DuplicateChecker.CheckGatewayListenerDuplicates(ctx, gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateUpdate, ResultDenied)
+		RecordError("Gateway", OperationValidateUpdate, "duplicate_check_failed")
 		return warnings, err
 	}
 
 	// Validate references
 	if err := w.validateReferences(ctx, gateway); err != nil {
+		RecordValidation("Gateway", OperationValidateUpdate, ResultDenied)
+		RecordError("Gateway", OperationValidateUpdate, "reference_validation_failed")
 		return warnings, err
 	}
 
@@ -169,13 +206,19 @@ func (w *GatewayWebhook) ValidateUpdate(
 		warnings = append(warnings, wildcardWarnings...)
 	}
 
+	RecordValidation("Gateway", OperationValidateUpdate, ResultSuccess)
 	return warnings, nil
 }
 
 // ValidateDelete implements webhook.CustomValidator
 func (w *GatewayWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	timer := NewWebhookTimer("Gateway", OperationValidateDelete)
+	defer timer.ObserveDuration()
+
 	gateway, ok := obj.(*avapigwv1alpha1.Gateway)
 	if !ok {
+		RecordValidation("Gateway", OperationValidateDelete, ResultError)
+		RecordError("Gateway", OperationValidateDelete, "type_assertion_failed")
 		return nil, fmt.Errorf("expected a Gateway but got %T", obj)
 	}
 
@@ -184,13 +227,17 @@ func (w *GatewayWebhook) ValidateDelete(ctx context.Context, obj runtime.Object)
 	// Check for attached routes
 	hasRoutes, err := w.ReferenceValidator.CheckGatewayHasAttachedRoutes(ctx, gateway.Namespace, gateway.Name)
 	if err != nil {
+		RecordValidation("Gateway", OperationValidateDelete, ResultError)
+		RecordError("Gateway", OperationValidateDelete, "reference_check_failed")
 		return nil, fmt.Errorf("failed to check for attached routes: %w", err)
 	}
 
 	if hasRoutes {
+		RecordValidation("Gateway", OperationValidateDelete, ResultSuccess)
 		return admission.Warnings{"Gateway has attached routes that will be orphaned"}, nil
 	}
 
+	RecordValidation("Gateway", OperationValidateDelete, ResultSuccess)
 	return nil, nil
 }
 

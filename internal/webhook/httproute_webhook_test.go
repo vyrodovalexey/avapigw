@@ -1081,3 +1081,306 @@ func TestHTTPRouteWebhook_validateParentProtocols(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// HTTPRoute Webhook Edge Case Tests
+// ============================================================================
+
+func TestHTTPRouteWebhook_ValidateCreate_NilSpec(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	t.Run("route with empty spec", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec:       avapigwv1alpha1.HTTPRouteSpec{},
+		}
+
+		webhook := &HTTPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		// Empty spec should be valid (no parent refs required)
+		_, err = webhook.ValidateCreate(context.Background(), route)
+		assert.NoError(t, err)
+	})
+
+	t.Run("route with nil rules", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "test-gateway",
+				}},
+				Rules: nil,
+			},
+		}
+
+		webhook := &HTTPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), route)
+		assert.NoError(t, err)
+	})
+}
+
+func TestHTTPRouteWebhook_ValidateCreate_InvalidReferences(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	t.Run("route with non-existent parent gateway", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "non-existent-gateway",
+				}},
+			},
+		}
+
+		webhook := &HTTPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), route)
+		assert.Error(t, err)
+	})
+
+	t.Run("route with non-existent backend service", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "test-gateway",
+				}},
+				Rules: []avapigwv1alpha1.HTTPRouteRule{{
+					BackendRefs: []avapigwv1alpha1.HTTPBackendRef{{
+						BackendRef: avapigwv1alpha1.BackendRef{
+							Name: "non-existent-service",
+						},
+					}},
+				}},
+			},
+		}
+
+		webhook := &HTTPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), route)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+}
+
+func TestHTTPRouteWebhook_ValidateCreate_EdgeCases(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	t.Run("route with multiple parent refs", func(t *testing.T) {
+		gateway1 := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "gateway1", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+		gateway2 := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "gateway2", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     8080,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway1, gateway2).Build()
+
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "gateway1"},
+					{Name: "gateway2"},
+				},
+			},
+		}
+
+		webhook := &HTTPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), route)
+		assert.NoError(t, err)
+	})
+
+	t.Run("route with multiple hostnames", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "test-gateway",
+				}},
+				Hostnames: []avapigwv1alpha1.Hostname{
+					"example1.com",
+					"example2.com",
+					"*.example3.com",
+				},
+			},
+		}
+
+		webhook := &HTTPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), route)
+		assert.NoError(t, err)
+	})
+
+	t.Run("route with multiple rules and matches", func(t *testing.T) {
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "default"},
+		}
+
+		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, service).Build()
+
+		pathType := avapigwv1alpha1.PathMatchPathPrefix
+		pathValue := "/api"
+		headerType := avapigwv1alpha1.HeaderMatchExact
+
+		route := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-route", Namespace: "default"},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{{
+					Name: "test-gateway",
+				}},
+				Rules: []avapigwv1alpha1.HTTPRouteRule{
+					{
+						Matches: []avapigwv1alpha1.HTTPRouteMatch{
+							{
+								Path: &avapigwv1alpha1.HTTPPathMatch{
+									Type:  &pathType,
+									Value: &pathValue,
+								},
+							},
+							{
+								Headers: []avapigwv1alpha1.HTTPHeaderMatch{
+									{
+										Type:  &headerType,
+										Name:  "X-Custom-Header",
+										Value: "custom-value",
+									},
+								},
+							},
+						},
+						BackendRefs: []avapigwv1alpha1.HTTPBackendRef{{
+							BackendRef: avapigwv1alpha1.BackendRef{
+								Name: "my-service",
+							},
+						}},
+					},
+				},
+			},
+		}
+
+		webhook := &HTTPRouteWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewHTTPRouteDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), route)
+		assert.NoError(t, err)
+	})
+}

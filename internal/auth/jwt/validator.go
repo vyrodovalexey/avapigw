@@ -326,7 +326,7 @@ func (v *Validator) getSigningKey(kid string) (*JSONWebKey, error) {
 		if err == nil {
 			return key, nil
 		}
-		return nil, fmt.Errorf("%w: %v", ErrKeyNotFound, err)
+		return nil, fmt.Errorf("%w: %w", ErrKeyNotFound, err)
 	}
 
 	return nil, ErrKeyNotFound

@@ -459,25 +459,9 @@ func (r *GRPCRouteReconciler) hostnameMatches(
 // validateBackendRefs validates backend references for the GRPCRoute.
 // It extracts backend refs from all rules and delegates validation to the shared validator.
 func (r *GRPCRouteReconciler) validateBackendRefs(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) error {
-	backendRefs := r.extractBackendRefs(grpcRoute)
+	backendRefs := route.ExtractBackendRefsFromRoute(grpcRoute)
 	validator := route.NewBackendRefValidator(r.Client, r.Recorder)
 	return validator.ValidateBackendRefs(ctx, grpcRoute, backendRefs)
-}
-
-// extractBackendRefs extracts all backend references from a GRPCRoute's rules.
-func (r *GRPCRouteReconciler) extractBackendRefs(grpcRoute *avapigwv1alpha1.GRPCRoute) []route.BackendRefInfo {
-	var refs []route.BackendRefInfo
-	for _, rule := range grpcRoute.Spec.Rules {
-		for _, backendRef := range rule.BackendRefs {
-			refs = append(refs, route.BackendRefInfo{
-				Name:      backendRef.Name,
-				Namespace: backendRef.Namespace,
-				Kind:      backendRef.Kind,
-				Group:     backendRef.Group,
-			})
-		}
-	}
-	return refs
 }
 
 // SetupWithManager sets up the controller with the Manager

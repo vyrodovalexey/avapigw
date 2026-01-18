@@ -263,7 +263,7 @@ func (v *URLValidator) parseAndValidateURL(rawURL string) (*url.URL, error) {
 			zap.String("url", rawURL),
 			zap.Error(err),
 		)
-		return nil, fmt.Errorf("%w: %v", ErrInvalidURL, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
 
 	if err := v.validateScheme(parsedURL.Scheme); err != nil {
@@ -419,7 +419,7 @@ func (v *URLValidator) validateHostname(ctx context.Context, hostname string) er
 	resolver := net.DefaultResolver
 	ips, err := resolver.LookupIPAddr(resolveCtx, hostname)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrHostResolutionFailed, err)
+		return fmt.Errorf("%w: %w", ErrHostResolutionFailed, err)
 	}
 
 	if len(ips) == 0 {

@@ -57,14 +57,20 @@ var _ webhook.CustomDefaulter = &HTTPRouteWebhook{}
 
 // Default implements webhook.CustomDefaulter
 func (w *HTTPRouteWebhook) Default(ctx context.Context, obj runtime.Object) error {
+	timer := NewWebhookTimer("HTTPRoute", OperationMutate)
+	defer timer.ObserveDuration()
+
 	route, ok := obj.(*avapigwv1alpha1.HTTPRoute)
 	if !ok {
+		RecordMutation("HTTPRoute", ResultError)
+		RecordError("HTTPRoute", OperationMutate, "type_assertion_failed")
 		return fmt.Errorf("expected an HTTPRoute but got %T", obj)
 	}
 
 	httproutelog.Info("defaulting HTTPRoute", "name", route.Name, "namespace", route.Namespace)
 	w.Defaulter.Default(route)
 
+	RecordMutation("HTTPRoute", ResultSuccess)
 	return nil
 }
 
@@ -75,13 +81,20 @@ var _ webhook.CustomValidator = &HTTPRouteWebhook{}
 
 // ValidateCreate implements webhook.CustomValidator
 func (w *HTTPRouteWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	timer := NewWebhookTimer("HTTPRoute", OperationValidateCreate)
+	defer timer.ObserveDuration()
+
 	route, ok := obj.(*avapigwv1alpha1.HTTPRoute)
 	if !ok {
+		RecordValidation("HTTPRoute", OperationValidateCreate, ResultError)
+		RecordError("HTTPRoute", OperationValidateCreate, "type_assertion_failed")
 		return nil, fmt.Errorf("expected an HTTPRoute but got %T", obj)
 	}
 
 	// Check rate limit
 	if err := GetGlobalWebhookRateLimiter().CheckRateLimit(ctx, "HTTPRoute"); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateCreate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateCreate, "rate_limit_exceeded")
 		return nil, err
 	}
 
@@ -91,29 +104,40 @@ func (w *HTTPRouteWebhook) ValidateCreate(ctx context.Context, obj runtime.Objec
 
 	// Validate syntax
 	if err := w.validateSyntax(route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateCreate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateCreate, "syntax_validation_failed")
 		return warnings, err
 	}
 
 	// Validate parent references
 	if err := w.ReferenceValidator.ValidateParentRefs(ctx, route.Spec.ParentRefs, route.Namespace); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateCreate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateCreate, "parent_ref_validation_failed")
 		return warnings, err
 	}
 
 	// Validate parent gateway has HTTP/HTTPS protocol
 	if err := w.validateParentProtocols(ctx, route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateCreate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateCreate, "protocol_validation_failed")
 		return warnings, err
 	}
 
 	// Validate backend references
 	if err := w.validateBackendRefs(ctx, route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateCreate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateCreate, "backend_ref_validation_failed")
 		return warnings, err
 	}
 
 	// Check for duplicates
 	if err := w.DuplicateChecker.CheckHTTPRouteDuplicates(ctx, route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateCreate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateCreate, "duplicate_check_failed")
 		return warnings, err
 	}
 
+	RecordValidation("HTTPRoute", OperationValidateCreate, ResultSuccess)
 	return warnings, nil
 }
 
@@ -122,13 +146,20 @@ func (w *HTTPRouteWebhook) ValidateUpdate(
 	ctx context.Context,
 	oldObj, newObj runtime.Object,
 ) (admission.Warnings, error) {
+	timer := NewWebhookTimer("HTTPRoute", OperationValidateUpdate)
+	defer timer.ObserveDuration()
+
 	route, ok := newObj.(*avapigwv1alpha1.HTTPRoute)
 	if !ok {
+		RecordValidation("HTTPRoute", OperationValidateUpdate, ResultError)
+		RecordError("HTTPRoute", OperationValidateUpdate, "type_assertion_failed")
 		return nil, fmt.Errorf("expected an HTTPRoute but got %T", newObj)
 	}
 
 	// Check rate limit
 	if err := GetGlobalWebhookRateLimiter().CheckRateLimit(ctx, "HTTPRoute"); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateUpdate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateUpdate, "rate_limit_exceeded")
 		return nil, err
 	}
 
@@ -138,42 +169,59 @@ func (w *HTTPRouteWebhook) ValidateUpdate(
 
 	// Validate syntax
 	if err := w.validateSyntax(route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateUpdate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateUpdate, "syntax_validation_failed")
 		return warnings, err
 	}
 
 	// Validate parent references
 	if err := w.ReferenceValidator.ValidateParentRefs(ctx, route.Spec.ParentRefs, route.Namespace); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateUpdate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateUpdate, "parent_ref_validation_failed")
 		return warnings, err
 	}
 
 	// Validate parent gateway has HTTP/HTTPS protocol
 	if err := w.validateParentProtocols(ctx, route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateUpdate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateUpdate, "protocol_validation_failed")
 		return warnings, err
 	}
 
 	// Validate backend references
 	if err := w.validateBackendRefs(ctx, route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateUpdate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateUpdate, "backend_ref_validation_failed")
 		return warnings, err
 	}
 
 	// Check for duplicates
 	if err := w.DuplicateChecker.CheckHTTPRouteDuplicates(ctx, route); err != nil {
+		RecordValidation("HTTPRoute", OperationValidateUpdate, ResultDenied)
+		RecordError("HTTPRoute", OperationValidateUpdate, "duplicate_check_failed")
 		return warnings, err
 	}
 
+	RecordValidation("HTTPRoute", OperationValidateUpdate, ResultSuccess)
 	return warnings, nil
 }
 
 // ValidateDelete implements webhook.CustomValidator
 func (w *HTTPRouteWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	timer := NewWebhookTimer("HTTPRoute", OperationValidateDelete)
+	defer timer.ObserveDuration()
+
 	route, ok := obj.(*avapigwv1alpha1.HTTPRoute)
 	if !ok {
+		RecordValidation("HTTPRoute", OperationValidateDelete, ResultError)
+		RecordError("HTTPRoute", OperationValidateDelete, "type_assertion_failed")
 		return nil, fmt.Errorf("expected an HTTPRoute but got %T", obj)
 	}
 
 	httproutelog.Info("validating HTTPRoute delete", "name", route.Name, "namespace", route.Namespace)
 
 	// No special handling for delete
+	RecordValidation("HTTPRoute", OperationValidateDelete, ResultSuccess)
 	return nil, nil
 }
 
@@ -296,19 +344,11 @@ func (w *HTTPRouteWebhook) validateSyntax(route *avapigwv1alpha1.HTTPRoute) erro
 	return errs.ToError()
 }
 
-// validateDuration validates a duration string
+// validateDuration validates a duration string.
+// This function delegates to the shared validator.ValidateDuration which uses
+// a pre-compiled regex for better performance.
 func validateDuration(duration string) error {
-	if duration == "" {
-		return nil
-	}
-
-	// Simple validation for duration format (e.g., "30s", "5m", "1h")
-	durationRegex := regexp.MustCompile(`^(\d+)(ms|s|m|h)$`)
-	if !durationRegex.MatchString(duration) {
-		return fmt.Errorf("invalid duration format: %s (expected format like '30s', '5m', '1h')", duration)
-	}
-
-	return nil
+	return validator.ValidateDuration(duration)
 }
 
 // validateFilter validates a single filter

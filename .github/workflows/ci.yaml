@@ -46,7 +46,29 @@ jobs:
           git diff --exit-code go.mod go.sum
 
   # ============================================================================
-  # Job 2: Unit Tests
+  # Job 2: Sec
+  # ============================================================================
+  vulnerability:
+    name: vulnerability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+
+  # ============================================================================
+  # Job 3: Unit Tests
   # ============================================================================
   test-unit:
     name: Unit Tests
@@ -86,7 +108,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # ============================================================================
-  # Job 3: Functional Tests
+  # Job 4: Functional Tests
   # ============================================================================
   test-functional:
     name: Functional Tests
@@ -122,12 +144,12 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # ============================================================================
-  # Job 4: SonarCloud Analysis
+  # Job 5: SonarCloud Analysis
   # ============================================================================
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest
-    needs: [ test-functional, test-unit, lint ]
+    needs: [ test-functional, test-unit, lint, vulnerability ]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

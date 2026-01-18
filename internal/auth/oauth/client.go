@@ -272,7 +272,7 @@ func (c *Client) buildTokenRequest(ctx context.Context) (*http.Request, string, 
 func (c *Client) executeTokenRequest(req *http.Request) (body []byte, metricResult string, err error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, "network_error", fmt.Errorf("%w: %v", ErrTokenRequestFailed, err)
+		return nil, "network_error", fmt.Errorf("%w: %w", ErrTokenRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -296,7 +296,7 @@ func (c *Client) executeTokenRequest(req *http.Request) (body []byte, metricResu
 func (c *Client) parseTokenResponse(body []byte) (*TokenResponse, string, error) {
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, "parse_error", fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, "parse_error", fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	if tokenResp.ExpiresIn > 0 {

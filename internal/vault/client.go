@@ -279,7 +279,7 @@ func (c *Client) Authenticate(ctx context.Context) error {
 			zap.Error(err),
 		)
 		RecordAuthentication(c.authMethod.Name(), false)
-		return fmt.Errorf("%w: %v", ErrAuthenticationFailed, err)
+		return fmt.Errorf("%w: %w", ErrAuthenticationFailed, err)
 	}
 
 	if secret == nil || secret.Auth == nil {

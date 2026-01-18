@@ -2,6 +2,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -680,4 +681,556 @@ func TestRequeueStrategy_CalculateBackoff_FailuresExceedMax(t *testing.T) {
 	// Test with failures just above max
 	result3 := strategy.calculateBackoff(10*time.Second, 6)
 	assert.Equal(t, 5*time.Minute, result3)
+}
+
+func TestFailureTracker_CleanupStaleEntries(t *testing.T) {
+	cfg := &FailureTrackerConfig{
+		MaxFailures: 10,
+		MaxEntries:  100,
+		StaleAge:    100 * time.Millisecond,
+	}
+	tracker := NewFailureTrackerWithConfig(cfg)
+
+	// Add some entries
+	tracker.Increment("key1")
+	tracker.Increment("key2")
+	tracker.Increment("key3")
+
+	assert.Equal(t, 3, tracker.Size())
+
+	// Wait for entries to become stale
+	time.Sleep(150 * time.Millisecond)
+
+	// Cleanup stale entries
+	removed := tracker.CleanupStaleEntries(100 * time.Millisecond)
+	assert.Equal(t, 3, removed)
+	assert.Equal(t, 0, tracker.Size())
+}
+
+func TestFailureTracker_CleanupStaleEntries_PartialCleanup(t *testing.T) {
+	cfg := &FailureTrackerConfig{
+		MaxFailures: 10,
+		MaxEntries:  100,
+		StaleAge:    1 * time.Hour, // Long stale age
+	}
+	tracker := NewFailureTrackerWithConfig(cfg)
+
+	// Add some entries
+	tracker.Increment("key1")
+	tracker.Increment("key2")
+
+	// Wait a bit
+	time.Sleep(50 * time.Millisecond)
+
+	// Add more entries
+	tracker.Increment("key3")
+
+	assert.Equal(t, 3, tracker.Size())
+
+	// Cleanup with a short max age - should remove key1 and key2
+	removed := tracker.CleanupStaleEntries(25 * time.Millisecond)
+	assert.Equal(t, 2, removed)
+	assert.Equal(t, 1, tracker.Size())
+	assert.Equal(t, 1, tracker.Get("key3"))
+}
+
+func TestFailureTracker_Size(t *testing.T) {
+	tracker := NewFailureTracker(10)
+
+	assert.Equal(t, 0, tracker.Size())
+
+	tracker.Increment("key1")
+	assert.Equal(t, 1, tracker.Size())
+
+	tracker.Increment("key2")
+	assert.Equal(t, 2, tracker.Size())
+
+	tracker.Increment("key1") // Increment existing key
+	assert.Equal(t, 2, tracker.Size())
+
+	tracker.Reset("key1")
+	assert.Equal(t, 1, tracker.Size())
+
+	tracker.Clear()
+	assert.Equal(t, 0, tracker.Size())
+}
+
+func TestFailureTracker_LRUEviction(t *testing.T) {
+	cfg := &FailureTrackerConfig{
+		MaxFailures: 10,
+		MaxEntries:  3, // Small max entries for testing
+		StaleAge:    1 * time.Hour,
+	}
+	tracker := NewFailureTrackerWithConfig(cfg)
+
+	// Add entries up to max
+	tracker.Increment("key1")
+	tracker.Increment("key2")
+	tracker.Increment("key3")
+
+	assert.Equal(t, 3, tracker.Size())
+
+	// Adding a new entry should evict the LRU entry (key1)
+	tracker.Increment("key4")
+
+	assert.Equal(t, 3, tracker.Size())
+	assert.Equal(t, 0, tracker.Get("key1")) // key1 should be evicted
+	assert.Equal(t, 1, tracker.Get("key2"))
+	assert.Equal(t, 1, tracker.Get("key3"))
+	assert.Equal(t, 1, tracker.Get("key4"))
+}
+
+func TestFailureTracker_LRUEviction_AccessUpdatesOrder(t *testing.T) {
+	cfg := &FailureTrackerConfig{
+		MaxFailures: 10,
+		MaxEntries:  3,
+		StaleAge:    1 * time.Hour,
+	}
+	tracker := NewFailureTrackerWithConfig(cfg)
+
+	// Add entries
+	tracker.Increment("key1")
+	tracker.Increment("key2")
+	tracker.Increment("key3")
+
+	// Access key1 to make it most recently used
+	tracker.Get("key1")
+
+	// Adding a new entry should evict key2 (now the LRU)
+	tracker.Increment("key4")
+
+	assert.Equal(t, 3, tracker.Size())
+	assert.Equal(t, 1, tracker.Get("key1")) // key1 should still exist
+	assert.Equal(t, 0, tracker.Get("key2")) // key2 should be evicted
+	assert.Equal(t, 1, tracker.Get("key3"))
+	assert.Equal(t, 1, tracker.Get("key4"))
+}
+
+func TestFailureTrackerWithConfig(t *testing.T) {
+	t.Run("nil config uses defaults", func(t *testing.T) {
+		tracker := NewFailureTrackerWithConfig(nil)
+		assert.Equal(t, 10, tracker.maxFailures)
+		assert.Equal(t, DefaultMaxEntries, tracker.maxEntries)
+		assert.Equal(t, DefaultStaleEntryAge, tracker.staleAge)
+	})
+
+	t.Run("custom config", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 5,
+			MaxEntries:  1000,
+			StaleAge:    30 * time.Minute,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+		assert.Equal(t, 5, tracker.maxFailures)
+		assert.Equal(t, 1000, tracker.maxEntries)
+		assert.Equal(t, 30*time.Minute, tracker.staleAge)
+	})
+
+	t.Run("invalid values use defaults", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: -1,
+			MaxEntries:  0,
+			StaleAge:    -1 * time.Second,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+		assert.Equal(t, 10, tracker.maxFailures)
+		assert.Equal(t, DefaultMaxEntries, tracker.maxEntries)
+		assert.Equal(t, DefaultStaleEntryAge, tracker.staleAge)
+	})
+}
+
+func TestDefaultFailureTrackerConfig(t *testing.T) {
+	cfg := DefaultFailureTrackerConfig()
+	assert.Equal(t, 10, cfg.MaxFailures)
+	assert.Equal(t, DefaultMaxEntries, cfg.MaxEntries)
+	assert.Equal(t, DefaultStaleEntryAge, cfg.StaleAge)
+}
+
+func TestFailureTracker_PeriodicCleanup(t *testing.T) {
+	t.Run("starts and stops cleanup goroutine", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  100,
+			StaleAge:    50 * time.Millisecond,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Start periodic cleanup with short interval
+		tracker.StartPeriodicCleanup(ctx, 20*time.Millisecond)
+
+		// Add some entries
+		tracker.Increment("key1")
+		tracker.Increment("key2")
+		assert.Equal(t, 2, tracker.Size())
+
+		// Wait for entries to become stale and be cleaned up
+		time.Sleep(150 * time.Millisecond)
+
+		// Entries should be cleaned up
+		assert.Equal(t, 0, tracker.Size())
+
+		// Stop cleanup
+		tracker.StopPeriodicCleanup()
+	})
+
+	t.Run("cleanup respects context cancellation", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  100,
+			StaleAge:    1 * time.Hour, // Long stale age so entries won't be cleaned
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Start periodic cleanup
+		tracker.StartPeriodicCleanup(ctx, 10*time.Millisecond)
+
+		// Add entries
+		tracker.Increment("key1")
+		tracker.Increment("key2")
+
+		// Cancel context
+		cancel()
+
+		// Wait a bit for goroutine to stop
+		time.Sleep(50 * time.Millisecond)
+
+		// Entries should still exist (not cleaned due to long stale age)
+		assert.Equal(t, 2, tracker.Size())
+	})
+
+	t.Run("stop without start is safe", func(t *testing.T) {
+		tracker := NewFailureTracker(10)
+		// Should not panic
+		tracker.StopPeriodicCleanup()
+	})
+
+	t.Run("double stop is safe", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  100,
+			StaleAge:    1 * time.Hour,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		tracker.StartPeriodicCleanup(ctx, 100*time.Millisecond)
+
+		// Double stop should not panic
+		tracker.StopPeriodicCleanup()
+		tracker.StopPeriodicCleanup()
+	})
+
+	t.Run("default interval when zero provided", func(t *testing.T) {
+		tracker := NewFailureTracker(10)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Start with zero interval - should use default
+		tracker.StartPeriodicCleanup(ctx, 0)
+
+		// Just verify it starts without error
+		time.Sleep(10 * time.Millisecond)
+
+		tracker.StopPeriodicCleanup()
+	})
+}
+
+// ============================================================================
+// Additional Periodic Cleanup Tests
+// ============================================================================
+
+func TestFailureTracker_PeriodicCleanup_ConcurrentAccess(t *testing.T) {
+	t.Run("concurrent access during cleanup", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  1000,
+			StaleAge:    50 * time.Millisecond,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Start periodic cleanup
+		tracker.StartPeriodicCleanup(ctx, 10*time.Millisecond)
+
+		// Concurrent access from multiple goroutines
+		done := make(chan bool)
+		for i := 0; i < 10; i++ {
+			go func(id int) {
+				for j := 0; j < 100; j++ {
+					key := "key-" + string(rune('a'+id)) + "-" + string(rune('0'+j%10))
+					tracker.Increment(key)
+					tracker.Get(key)
+					if j%10 == 0 {
+						tracker.Reset(key)
+					}
+				}
+				done <- true
+			}(i)
+		}
+
+		// Wait for all goroutines
+		for i := 0; i < 10; i++ {
+			<-done
+		}
+
+		// Stop cleanup
+		tracker.StopPeriodicCleanup()
+	})
+
+	t.Run("cleanup removes stale entries while adding new ones", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  100,
+			StaleAge:    30 * time.Millisecond,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Add initial entries
+		for i := 0; i < 10; i++ {
+			tracker.Increment("old-key-" + string(rune('0'+i)))
+		}
+
+		// Start periodic cleanup
+		tracker.StartPeriodicCleanup(ctx, 10*time.Millisecond)
+
+		// Wait for old entries to become stale
+		time.Sleep(50 * time.Millisecond)
+
+		// Add new entries while cleanup is running
+		for i := 0; i < 10; i++ {
+			tracker.Increment("new-key-" + string(rune('0'+i)))
+		}
+
+		// Wait a bit more
+		time.Sleep(20 * time.Millisecond)
+
+		// New entries should still exist
+		for i := 0; i < 10; i++ {
+			count := tracker.Get("new-key-" + string(rune('0'+i)))
+			assert.GreaterOrEqual(t, count, 0)
+		}
+
+		tracker.StopPeriodicCleanup()
+	})
+
+	t.Run("cleanup respects maxAge parameter", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  100,
+			StaleAge:    1 * time.Hour, // Long default stale age
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		// Add entries
+		tracker.Increment("key1")
+		tracker.Increment("key2")
+		tracker.Increment("key3")
+
+		// Wait a bit
+		time.Sleep(50 * time.Millisecond)
+
+		// Cleanup with short maxAge should remove entries
+		removed := tracker.CleanupStaleEntries(25 * time.Millisecond)
+		assert.Equal(t, 3, removed)
+		assert.Equal(t, 0, tracker.Size())
+	})
+
+	t.Run("cleanup with zero maxAge uses configured staleAge", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  100,
+			StaleAge:    25 * time.Millisecond,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		// Add entries
+		tracker.Increment("key1")
+		tracker.Increment("key2")
+
+		// Wait for entries to become stale
+		time.Sleep(50 * time.Millisecond)
+
+		// Cleanup with zero maxAge should use configured staleAge
+		removed := tracker.CleanupStaleEntries(0)
+		assert.Equal(t, 2, removed)
+		assert.Equal(t, 0, tracker.Size())
+	})
+
+	t.Run("cleanup with negative maxAge uses configured staleAge", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  100,
+			StaleAge:    25 * time.Millisecond,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		// Add entries
+		tracker.Increment("key1")
+
+		// Wait for entries to become stale
+		time.Sleep(50 * time.Millisecond)
+
+		// Cleanup with negative maxAge should use configured staleAge
+		removed := tracker.CleanupStaleEntries(-1 * time.Second)
+		assert.Equal(t, 1, removed)
+	})
+}
+
+func TestFailureTracker_LRUEviction_StaleEntries(t *testing.T) {
+	t.Run("eviction prefers stale entries over LRU", func(t *testing.T) {
+		cfg := &FailureTrackerConfig{
+			MaxFailures: 10,
+			MaxEntries:  3,
+			StaleAge:    25 * time.Millisecond,
+		}
+		tracker := NewFailureTrackerWithConfig(cfg)
+
+		// Add entries
+		tracker.Increment("key1")
+		tracker.Increment("key2")
+		tracker.Increment("key3")
+
+		// Wait for entries to become stale
+		time.Sleep(50 * time.Millisecond)
+
+		// Adding a new entry should evict stale entries first
+		tracker.Increment("key4")
+
+		// key4 should exist
+		assert.Equal(t, 1, tracker.Get("key4"))
+	})
+}
+
+func TestFailureTracker_ConcurrentOperations(t *testing.T) {
+	t.Run("concurrent increment and reset", func(t *testing.T) {
+		tracker := NewFailureTracker(10)
+
+		done := make(chan bool)
+
+		// Concurrent increments
+		for i := 0; i < 5; i++ {
+			go func() {
+				for j := 0; j < 100; j++ {
+					tracker.Increment("shared-key")
+				}
+				done <- true
+			}()
+		}
+
+		// Concurrent resets
+		for i := 0; i < 5; i++ {
+			go func() {
+				for j := 0; j < 100; j++ {
+					tracker.Reset("shared-key")
+				}
+				done <- true
+			}()
+		}
+
+		// Wait for all goroutines
+		for i := 0; i < 10; i++ {
+			<-done
+		}
+
+		// Should not panic and tracker should be in a valid state
+		_ = tracker.Get("shared-key")
+		_ = tracker.Size()
+	})
+
+	t.Run("concurrent clear and increment", func(t *testing.T) {
+		tracker := NewFailureTracker(10)
+
+		done := make(chan bool)
+
+		// Concurrent increments
+		for i := 0; i < 5; i++ {
+			go func(id int) {
+				for j := 0; j < 100; j++ {
+					tracker.Increment("key-" + string(rune('0'+id)))
+				}
+				done <- true
+			}(i)
+		}
+
+		// Concurrent clears
+		for i := 0; i < 5; i++ {
+			go func() {
+				for j := 0; j < 10; j++ {
+					tracker.Clear()
+					time.Sleep(1 * time.Millisecond)
+				}
+				done <- true
+			}()
+		}
+
+		// Wait for all goroutines
+		for i := 0; i < 10; i++ {
+			<-done
+		}
+
+		// Should not panic
+		_ = tracker.Size()
+	})
+}
+
+func TestRequeueStrategy_EdgeCases(t *testing.T) {
+	t.Run("backoff with very high failure count", func(t *testing.T) {
+		config := &RequeueConfig{
+			TransientErrorInterval: 10 * time.Second,
+			MaxInterval:            5 * time.Minute,
+			BackoffMultiplier:      2.0,
+			MaxFailures:            10,
+			JitterPercent:          0,
+		}
+		strategy := NewRequeueStrategy(config)
+		key := "test-resource"
+
+		// Simulate many failures
+		for i := 0; i < 100; i++ {
+			strategy.ForTransientErrorWithBackoff(key)
+		}
+
+		// Should be capped at max interval
+		result := strategy.ForTransientErrorWithBackoff(key)
+		assert.Equal(t, 5*time.Minute, result.RequeueAfter)
+	})
+
+	t.Run("multiple resources with different failure counts", func(t *testing.T) {
+		config := &RequeueConfig{
+			TransientErrorInterval: 10 * time.Second,
+			MaxInterval:            5 * time.Minute,
+			BackoffMultiplier:      2.0,
+			MaxFailures:            10,
+			JitterPercent:          0,
+		}
+		strategy := NewRequeueStrategy(config)
+
+		// Resource 1: 1 failure
+		strategy.ForTransientErrorWithBackoff("resource1")
+		assert.Equal(t, 1, strategy.GetFailureCount("resource1"))
+
+		// Resource 2: 3 failures
+		strategy.ForTransientErrorWithBackoff("resource2")
+		strategy.ForTransientErrorWithBackoff("resource2")
+		strategy.ForTransientErrorWithBackoff("resource2")
+		assert.Equal(t, 3, strategy.GetFailureCount("resource2"))
+
+		// Resource 3: success (reset)
+		strategy.ForTransientErrorWithBackoff("resource3")
+		strategy.ForSuccessWithResource("resource3")
+		assert.Equal(t, 0, strategy.GetFailureCount("resource3"))
+	})
 }

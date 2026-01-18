@@ -46,7 +46,7 @@ func NewLocalProvider(cfg *LocalProviderConfig) (*LocalProvider, error) {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: base path does not exist: %s", ErrProviderNotConfigured, cfg.BasePath)
 		}
-		return nil, fmt.Errorf("%w: failed to access base path: %v", ErrProviderNotConfigured, err)
+		return nil, fmt.Errorf("%w: failed to access base path: %w", ErrProviderNotConfigured, err)
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%w: base path is not a directory: %s", ErrProviderNotConfigured, cfg.BasePath)

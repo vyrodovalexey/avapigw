@@ -40,6 +40,30 @@ const (
 	DefaultServiceName = "avapigw"
 )
 
+// Size constants for buffer and message sizes.
+const (
+	// BytesPerKilobyte is the number of bytes in a kilobyte.
+	BytesPerKilobyte = 1024
+	// BytesPerMegabyte is the number of bytes in a megabyte.
+	BytesPerMegabyte = BytesPerKilobyte * 1024
+	// DefaultGRPCMaxMsgSize is the default maximum message size for gRPC (4 MB).
+	DefaultGRPCMaxMsgSize = 4 * BytesPerMegabyte
+)
+
+// Time constants for durations.
+const (
+	// SecondsPerMinute is the number of seconds in a minute.
+	SecondsPerMinute = 60
+	// SecondsPerHour is the number of seconds in an hour.
+	SecondsPerHour = SecondsPerMinute * 60
+	// SecondsPerDay is the number of seconds in a day.
+	SecondsPerDay = SecondsPerHour * 24
+	// SecondsPerYear is the approximate number of seconds in a year (365 days).
+	SecondsPerYear = SecondsPerDay * 365
+	// DefaultHSTSMaxAge is the default HSTS max-age in seconds (1 year).
+	DefaultHSTSMaxAge = SecondsPerYear
+)
+
 // Config holds all configuration settings for the API Gateway.
 type Config struct {
 	// Server settings
@@ -388,8 +412,8 @@ func applyDefaultHealthConfig(cfg *Config) {
 // applyDefaultGRPCConfig sets default gRPC server settings.
 func applyDefaultGRPCConfig(cfg *Config) {
 	cfg.GRPCEnabled = true
-	cfg.GRPCMaxRecvMsgSize = 4 * 1024 * 1024 // 4 MB
-	cfg.GRPCMaxSendMsgSize = 4 * 1024 * 1024 // 4 MB
+	cfg.GRPCMaxRecvMsgSize = DefaultGRPCMaxMsgSize
+	cfg.GRPCMaxSendMsgSize = DefaultGRPCMaxMsgSize
 	cfg.GRPCMaxConcurrentStreams = 1000
 	cfg.GRPCEnableReflection = false
 	cfg.GRPCEnableHealthCheck = true
@@ -445,7 +469,7 @@ func applyDefaultAuthConfig(cfg *Config) {
 func applyDefaultSecurityConfig(cfg *Config) {
 	cfg.SecurityHeadersEnabled = true
 	cfg.HSTSEnabled = true
-	cfg.HSTSMaxAge = 31536000 // 1 year
+	cfg.HSTSMaxAge = DefaultHSTSMaxAge
 	cfg.HSTSIncludeSubDomains = true
 	cfg.HSTSPreload = false
 	cfg.CSPPolicy = ""
