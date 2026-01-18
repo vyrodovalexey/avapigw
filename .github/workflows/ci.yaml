@@ -51,7 +51,6 @@ jobs:
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -63,6 +62,7 @@ jobs:
           cache: true
 
       - name: Run unit tests
+        timeout-minutes: 15
         run: |
           go test -v -race -coverprofile=coverage-unit.tmp -covermode=atomic ./...
           cat coverage-unit.tmp | grep -vE "cmd|v1alpha1" > coverage-unit.out
