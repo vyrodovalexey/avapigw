@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vyrodovalexey/avapigw/internal/circuitbreaker"
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -483,5 +484,267 @@ func TestCircuitBreakerConfig(t *testing.T) {
 		assert.NotNil(t, config.NameFunc)
 		assert.NotNil(t, config.Logger)
 		assert.Len(t, config.SkipMethods, 1)
+	})
+}
+
+// TestUnaryCircuitBreakerInterceptorWithCore tests the core-based unary circuit breaker interceptor
+func TestUnaryCircuitBreakerInterceptorWithCore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips circuit breaker for configured methods", func(t *testing.T) {
+		coreConfig := core.CircuitBreakerCoreConfig{
+			BaseConfig: core.BaseConfig{
+				SkipPaths: []string{"/test.Service/SkippedMethod"},
+			},
+		}
+
+		interceptor := UnaryCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/SkippedMethod"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+
+	t.Run("allows request when circuit is closed", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := UnaryCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+
+	t.Run("rejects request when circuit is open", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+
+		// Open the circuit
+		cb := registry.GetOrCreate("/test.Service/OpenMethod")
+		for i := 0; i < 10; i++ {
+			cb.RecordFailure()
+		}
+
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := UnaryCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/OpenMethod"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.Error(t, err)
+		assert.Nil(t, resp)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
+	})
+
+	t.Run("records success on successful request", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := UnaryCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/SuccessMethod"}
+
+		_, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+
+		cb := registry.Get("/test.Service/SuccessMethod")
+		assert.NotNil(t, cb)
+		stats := cb.Stats()
+		assert.Equal(t, 1, stats.Successes)
+	})
+
+	t.Run("records failure on error", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := UnaryCircuitBreakerInterceptorWithCore(coreConfig)
+
+		errorHandler := func(ctx context.Context, req interface{}) (interface{}, error) {
+			return nil, status.Error(codes.Unavailable, "service unavailable")
+		}
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/FailureMethod"}
+
+		_, err := interceptor(ctx, "request", info, errorHandler)
+
+		assert.Error(t, err)
+
+		cb := registry.Get("/test.Service/FailureMethod")
+		assert.NotNil(t, cb)
+		stats := cb.Stats()
+		assert.Equal(t, 1, stats.Failures)
+	})
+
+	t.Run("uses nil registry gracefully", func(t *testing.T) {
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: nil, // Will create default registry
+		}
+
+		interceptor := UnaryCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+}
+
+// TestStreamCircuitBreakerInterceptorWithCore tests the core-based stream circuit breaker interceptor
+func TestStreamCircuitBreakerInterceptorWithCore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips circuit breaker for configured methods", func(t *testing.T) {
+		coreConfig := core.CircuitBreakerCoreConfig{
+			BaseConfig: core.BaseConfig{
+				SkipPaths: []string{"/test.Service/SkippedMethod"},
+			},
+		}
+
+		interceptor := StreamCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/SkippedMethod"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("allows stream when circuit is closed", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := StreamCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("rejects stream when circuit is open", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+
+		// Open the circuit
+		cb := registry.GetOrCreate("/test.Service/OpenStreamMethod")
+		for i := 0; i < 10; i++ {
+			cb.RecordFailure()
+		}
+
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := StreamCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/OpenStreamMethod"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.Error(t, err)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unavailable, st.Code())
+	})
+
+	t.Run("records success on successful stream", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := StreamCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/StreamSuccessMethod"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+
+		cb := registry.Get("/test.Service/StreamSuccessMethod")
+		assert.NotNil(t, cb)
+		stats := cb.Stats()
+		assert.Equal(t, 1, stats.Successes)
+	})
+
+	t.Run("records failure on stream error", func(t *testing.T) {
+		registry := circuitbreaker.NewRegistry(nil, nil)
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: registry,
+		}
+
+		interceptor := StreamCircuitBreakerInterceptorWithCore(coreConfig)
+
+		errorHandler := func(srv interface{}, ss grpc.ServerStream) error {
+			return status.Error(codes.Unavailable, "service unavailable")
+		}
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/StreamFailureMethod"}
+
+		err := interceptor(nil, stream, info, errorHandler)
+
+		assert.Error(t, err)
+
+		cb := registry.Get("/test.Service/StreamFailureMethod")
+		assert.NotNil(t, cb)
+		stats := cb.Stats()
+		assert.Equal(t, 1, stats.Failures)
+	})
+
+	t.Run("uses nil registry gracefully", func(t *testing.T) {
+		coreConfig := core.CircuitBreakerCoreConfig{
+			Registry: nil, // Will create default registry
+		}
+
+		interceptor := StreamCircuitBreakerInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
 	})
 }

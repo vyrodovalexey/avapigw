@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"regexp"
 	"sync"
 	"testing"
 
@@ -1243,4 +1244,295 @@ func TestHostnameToRegexInvalidPattern(t *testing.T) {
 		assert.NotNil(t, regex)
 		assert.True(t, regex.MatchString("api123.example.com"))
 	})
+}
+
+// ============================================================================
+// Additional HostnameToRegex Tests
+// ============================================================================
+
+// TestHostnameToRegexEdgeCases tests edge cases for hostnameToRegex
+func TestHostnameToRegexEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name        string
+		hostname    string
+		shouldMatch []string
+		shouldNot   []string
+		expectNil   bool
+	}{
+		{
+			name:      "empty hostname returns nil",
+			hostname:  "",
+			expectNil: true,
+		},
+		{
+			name:      "wildcard returns nil",
+			hostname:  "*",
+			expectNil: true,
+		},
+		{
+			name:        "simple hostname",
+			hostname:    "example.com",
+			shouldMatch: []string{"example.com"},
+			shouldNot:   []string{"other.com", "sub.example.com"},
+		},
+		{
+			name:        "wildcard subdomain",
+			hostname:    "*.example.com",
+			shouldMatch: []string{"api.example.com", "www.example.com", "test.example.com"},
+			shouldNot:   []string{"example.com", "api.other.com"},
+		},
+		{
+			name:        "hostname with port-like suffix",
+			hostname:    "api.example.com",
+			shouldMatch: []string{"api.example.com"},
+			shouldNot:   []string{"api.example.com:8080"},
+		},
+		{
+			name:        "hostname with multiple wildcards",
+			hostname:    "*.*.example.com",
+			shouldMatch: []string{"a.b.example.com", "x.y.example.com"},
+			shouldNot:   []string{"example.com", "a.example.com"},
+		},
+		{
+			name:        "hostname with underscore",
+			hostname:    "api_v1.example.com",
+			shouldMatch: []string{"api_v1.example.com"},
+			shouldNot:   []string{"api-v1.example.com"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			regex := hostnameToRegex(tc.hostname)
+
+			if tc.expectNil {
+				assert.Nil(t, regex)
+				return
+			}
+
+			require.NotNil(t, regex)
+
+			for _, match := range tc.shouldMatch {
+				assert.True(t, regex.MatchString(match), "expected %q to match %q", tc.hostname, match)
+			}
+
+			for _, noMatch := range tc.shouldNot {
+				assert.False(t, regex.MatchString(noMatch), "expected %q to NOT match %q", tc.hostname, noMatch)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Additional Router Match Tests
+// ============================================================================
+
+// TestRouterMatchWithAuthorityPort tests matching with authority containing port
+func TestRouterMatchWithAuthorityPort(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	route := &GRPCRoute{
+		Name:      "authority-port-route",
+		Hostnames: []string{"api.example.com"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "*", Method: "*"},
+				},
+				BackendRefs: []BackendRef{{Name: "backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	t.Run("matches with port in authority", func(t *testing.T) {
+		md := metadata.MD{
+			":authority": []string{"api.example.com:443"},
+		}
+		matchedRoute, matchedRule := router.Match("test.Service", "TestMethod", md)
+
+		assert.NotNil(t, matchedRoute)
+		assert.NotNil(t, matchedRule)
+	})
+
+	t.Run("matches without port in authority", func(t *testing.T) {
+		md := metadata.MD{
+			":authority": []string{"api.example.com"},
+		}
+		matchedRoute, matchedRule := router.Match("test.Service", "TestMethod", md)
+
+		assert.NotNil(t, matchedRoute)
+		assert.NotNil(t, matchedRule)
+	})
+}
+
+// TestRouterMatchWithMultipleRules tests matching with multiple rules
+func TestRouterMatchWithMultipleRules(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	route := &GRPCRoute{
+		Name:      "multi-rule-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "users.UserService", Method: "GetUser"},
+				},
+				BackendRefs: []BackendRef{{Name: "users-backend"}},
+			},
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "orders.OrderService", Method: "GetOrder"},
+				},
+				BackendRefs: []BackendRef{{Name: "orders-backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	t.Run("matches first rule", func(t *testing.T) {
+		md := metadata.MD{}
+		matchedRoute, matchedRule := router.Match("users.UserService", "GetUser", md)
+
+		assert.NotNil(t, matchedRoute)
+		assert.NotNil(t, matchedRule)
+		assert.Equal(t, "users-backend", matchedRule.BackendRefs[0].Name)
+	})
+
+	t.Run("matches second rule", func(t *testing.T) {
+		md := metadata.MD{}
+		matchedRoute, matchedRule := router.Match("orders.OrderService", "GetOrder", md)
+
+		assert.NotNil(t, matchedRoute)
+		assert.NotNil(t, matchedRule)
+		assert.Equal(t, "orders-backend", matchedRule.BackendRefs[0].Name)
+	})
+}
+
+// TestRouterMatchWithMultipleMatches tests matching with multiple matches in a rule
+func TestRouterMatchWithMultipleMatches(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	router := NewRouter(logger)
+
+	route := &GRPCRoute{
+		Name:      "multi-match-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "users.UserService", Method: "GetUser"},
+					{Service: "users.UserService", Method: "ListUsers"},
+				},
+				BackendRefs: []BackendRef{{Name: "users-backend"}},
+			},
+		},
+	}
+
+	err := router.AddRoute(route)
+	require.NoError(t, err)
+
+	// Note: Current implementation only uses first match
+	md := metadata.MD{}
+	matchedRoute, matchedRule := router.Match("users.UserService", "GetUser", md)
+
+	assert.NotNil(t, matchedRoute)
+	assert.NotNil(t, matchedRule)
+}
+
+// TestGRPCRouteMatcherMatchHostnameEdgeCases tests matchHostname edge cases
+func TestGRPCRouteMatcherMatchHostnameEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	_ = zap.NewNop() // Suppress unused warning
+	matcher := &GRPCRouteMatcher{}
+
+	t.Run("matches when no hostnames and no regexes", func(t *testing.T) {
+		compiled := &CompiledGRPCRoute{
+			Route: &GRPCRoute{
+				Hostnames: []string{},
+			},
+			HostRegexes: []*regexp.Regexp{},
+		}
+
+		result := matcher.matchHostname(compiled, "any.host.com")
+		assert.True(t, result)
+	})
+
+	t.Run("matches wildcard hostname", func(t *testing.T) {
+		compiled := &CompiledGRPCRoute{
+			Route: &GRPCRoute{
+				Hostnames: []string{"*"},
+			},
+			HostRegexes: []*regexp.Regexp{},
+		}
+
+		result := matcher.matchHostname(compiled, "any.host.com")
+		assert.True(t, result)
+	})
+
+	t.Run("matches with regex", func(t *testing.T) {
+		regex := regexp.MustCompile("^api\\.example\\.com$")
+		compiled := &CompiledGRPCRoute{
+			Route: &GRPCRoute{
+				Hostnames: []string{"api.example.com"},
+			},
+			HostRegexes: []*regexp.Regexp{regex},
+		}
+
+		result := matcher.matchHostname(compiled, "api.example.com")
+		assert.True(t, result)
+	})
+
+	t.Run("no match with different hostname", func(t *testing.T) {
+		regex := regexp.MustCompile("^api\\.example\\.com$")
+		compiled := &CompiledGRPCRoute{
+			Route: &GRPCRoute{
+				Hostnames: []string{"api.example.com"},
+			},
+			HostRegexes: []*regexp.Regexp{regex},
+		}
+
+		result := matcher.matchHostname(compiled, "other.example.com")
+		assert.False(t, result)
+	})
+}
+
+// TestCompileGRPCRouteWithNilHostnameRegex tests compileGRPCRoute with nil hostname regex
+func TestCompileGRPCRouteWithNilHostnameRegex(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+
+	route := &GRPCRoute{
+		Name:      "nil-regex-route",
+		Hostnames: []string{"*", ""}, // Both should return nil regex
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "*", Method: "*"},
+				},
+			},
+		},
+	}
+
+	compiled := compileGRPCRoute(route, logger)
+
+	assert.NotNil(t, compiled)
+	assert.Empty(t, compiled.HostRegexes) // Both wildcards should result in nil regexes
 }

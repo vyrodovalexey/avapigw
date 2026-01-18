@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -490,9 +491,10 @@ func TestManager_EnsureCertificates(t *testing.T) {
 }
 
 func TestManager_InjectCABundle_AfterStart(t *testing.T) {
-	// Create a fake k8s client
+	// Create a fake k8s client with admissionregistration types for webhook injection
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
 
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -529,4 +531,420 @@ func TestManager_InjectCABundle_AfterStart(t *testing.T) {
 		// This is acceptable - webhooks don't exist
 		t.Logf("InjectCABundle returned expected error: %v", err)
 	}
+}
+
+func TestManager_Start_WithWebhooks(t *testing.T) {
+	// Create a fake k8s client with webhooks
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	reinvocationPolicy := admissionregistrationv1.NeverReinvocationPolicy
+
+	validatingWebhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-validating-webhook",
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "avapigw-operator",
+			},
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
+			{
+				Name:        "validating.webhook.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	mutatingWebhook := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-mutating-webhook",
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "avapigw-operator",
+			},
+		},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{
+			{
+				Name:               "mutating.webhook.example.com",
+				SideEffects:        &sideEffects,
+				ReinvocationPolicy: &reinvocationPolicy,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(validatingWebhook, mutatingWebhook).
+		Build()
+
+	logger := zap.NewNop()
+	certDir := t.TempDir()
+
+	cfg := &ManagerConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		SecretName:       "webhook-certs",
+		CertDir:          certDir,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start the manager
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Verify CA bundle was injected
+	assert.NotNil(t, manager.GetCABundle())
+}
+
+func TestManager_Start_RotatorCallback(t *testing.T) {
+	// Create a fake k8s client
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	logger := zap.NewNop()
+	certDir := t.TempDir()
+
+	cfg := &ManagerConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		SecretName:       "webhook-certs",
+		CertDir:          certDir,
+		CheckInterval:    100 * time.Millisecond,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start the manager
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Verify rotator callback was registered
+	assert.True(t, manager.IsStarted())
+}
+
+func TestManager_NeedsRotation_WithBundle(t *testing.T) {
+	// Create a fake k8s client
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	logger := zap.NewNop()
+	certDir := t.TempDir()
+
+	cfg := &ManagerConfig{
+		ServiceName:       "webhook-service",
+		ServiceNamespace:  "default",
+		SecretName:        "webhook-certs",
+		CertDir:           certDir,
+		Validity:          365 * 24 * time.Hour,
+		RotationThreshold: 30 * 24 * time.Hour,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start the manager to generate certificates
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Check needs rotation (should be false for fresh cert)
+	needsRotation, err := manager.NeedsRotation()
+	require.NoError(t, err)
+	assert.False(t, needsRotation)
+}
+
+func TestManager_GetCertificateExpiry_WithBundle(t *testing.T) {
+	// Create a fake k8s client
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	logger := zap.NewNop()
+	certDir := t.TempDir()
+
+	cfg := &ManagerConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		SecretName:       "webhook-certs",
+		CertDir:          certDir,
+		Validity:         365 * 24 * time.Hour,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start the manager to generate certificates
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Get certificate expiry
+	expiry, err := manager.GetCertificateExpiry()
+	require.NoError(t, err)
+	assert.True(t, expiry.After(time.Now()))
+
+	// Verify expiry is approximately correct
+	expectedExpiry := time.Now().Add(365 * 24 * time.Hour)
+	assert.WithinDuration(t, expectedExpiry, expiry, 5*time.Second)
+}
+
+func TestManager_Stop_AfterStart(t *testing.T) {
+	// Create a fake k8s client
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	logger := zap.NewNop()
+	certDir := t.TempDir()
+
+	cfg := &ManagerConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		SecretName:       "webhook-certs",
+		CertDir:          certDir,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start the manager
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	assert.True(t, manager.IsStarted())
+
+	// Stop the manager
+	err = manager.Stop()
+	require.NoError(t, err)
+	assert.False(t, manager.IsStarted())
+
+	// Stop again should be a no-op
+	err = manager.Stop()
+	require.NoError(t, err)
+}
+
+func TestManager_InjectCABundle_WithWebhooks(t *testing.T) {
+	// Create a fake k8s client with webhooks
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+
+	validatingWebhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-validating-webhook",
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "avapigw-operator",
+			},
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
+			{
+				Name:        "validating.webhook.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(validatingWebhook).
+		Build()
+
+	logger := zap.NewNop()
+	certDir := t.TempDir()
+
+	cfg := &ManagerConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		SecretName:       "webhook-certs",
+		CertDir:          certDir,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start the manager
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Inject CA bundle
+	err = manager.InjectCABundle(ctx)
+	require.NoError(t, err)
+}
+
+func TestManagerConfig_Validate_NegativeValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  *ManagerConfig
+		wantErr bool
+	}{
+		{
+			name: "negative validity gets default",
+			config: &ManagerConfig{
+				ServiceName:      "webhook-service",
+				ServiceNamespace: "default",
+				SecretName:       "webhook-certs",
+				CertDir:          "/tmp/certs",
+				Validity:         -1 * time.Hour,
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative rotation threshold gets default",
+			config: &ManagerConfig{
+				ServiceName:       "webhook-service",
+				ServiceNamespace:  "default",
+				SecretName:        "webhook-certs",
+				CertDir:           "/tmp/certs",
+				RotationThreshold: -1 * time.Hour,
+			},
+			wantErr: false,
+		},
+		{
+			name: "negative check interval gets default",
+			config: &ManagerConfig{
+				ServiceName:      "webhook-service",
+				ServiceNamespace: "default",
+				SecretName:       "webhook-certs",
+				CertDir:          "/tmp/certs",
+				CheckInterval:    -1 * time.Hour,
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestManager_ConcurrentAccess(t *testing.T) {
+	// Create a fake k8s client
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	logger := zap.NewNop()
+	certDir := t.TempDir()
+
+	cfg := &ManagerConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		SecretName:       "webhook-certs",
+		CertDir:          certDir,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start the manager
+	err = manager.Start(ctx)
+	require.NoError(t, err)
+	defer manager.Stop()
+
+	// Test concurrent access
+	done := make(chan bool)
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = manager.IsStarted()
+				_ = manager.GetCABundle()
+				_ = manager.GetCurrentBundle()
+				_ = manager.GetCertDir()
+			}
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+func TestManager_Start_RotatorStartError(t *testing.T) {
+	// Create a fake k8s client
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	logger := zap.NewNop()
+
+	// Use an invalid directory that can't be created
+	invalidDir := "/nonexistent/path/that/cannot/be/created"
+
+	cfg := &ManagerConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		SecretName:       "webhook-certs",
+		CertDir:          invalidDir,
+	}
+
+	manager, err := NewManager(cfg, fakeClient, logger)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Start should fail due to invalid directory
+	err = manager.Start(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to start certificate rotator")
 }

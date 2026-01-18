@@ -589,3 +589,164 @@ func TestInitGlobalTracer_Error(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, provider)
 }
+
+// TestInitGlobalTracer_Success tests InitGlobalTracer with success.
+func TestInitGlobalTracer_Success(t *testing.T) {
+	// Save original provider
+	originalProvider := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(originalProvider)
+
+	config := &Config{
+		ServiceName:    "test-service",
+		ServiceVersion: "1.0.0",
+		Environment:    "test",
+		ExporterType:   ExporterOTLPGRPC,
+		Endpoint:       "localhost:4317",
+		Insecure:       true,
+		SampleRate:     1.0,
+		BatchTimeout:   5 * time.Second,
+	}
+
+	provider, err := InitGlobalTracer(context.Background(), config, zap.NewNop())
+	require.NoError(t, err)
+	assert.NotNil(t, provider)
+
+	// Cleanup
+	_ = provider.Stop(context.Background())
+}
+
+// TestProvider_Start_Success tests Provider.Start with success.
+func TestProvider_Start_Success(t *testing.T) {
+	// Save original provider
+	originalProvider := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(originalProvider)
+
+	tests := []struct {
+		name   string
+		config *Config
+	}{
+		{
+			name: "gRPC exporter",
+			config: &Config{
+				ServiceName:    "test-service",
+				ServiceVersion: "1.0.0",
+				Environment:    "test",
+				ExporterType:   ExporterOTLPGRPC,
+				Endpoint:       "localhost:4317",
+				Insecure:       true,
+				SampleRate:     1.0,
+				BatchTimeout:   5 * time.Second,
+			},
+		},
+		{
+			name: "HTTP exporter",
+			config: &Config{
+				ServiceName:    "test-service",
+				ServiceVersion: "1.0.0",
+				Environment:    "test",
+				ExporterType:   ExporterOTLPHTTP,
+				Endpoint:       "localhost:4318",
+				Insecure:       true,
+				SampleRate:     0.5,
+				BatchTimeout:   5 * time.Second,
+			},
+		},
+		{
+			name: "with custom attributes",
+			config: &Config{
+				ServiceName:    "test-service",
+				ServiceVersion: "1.0.0",
+				Environment:    "test",
+				ExporterType:   ExporterOTLPGRPC,
+				Endpoint:       "localhost:4317",
+				Insecure:       true,
+				SampleRate:     1.0,
+				BatchTimeout:   5 * time.Second,
+				Attributes: map[string]string{
+					"custom.attr": "value",
+				},
+			},
+		},
+		{
+			name: "with headers",
+			config: &Config{
+				ServiceName:    "test-service",
+				ServiceVersion: "1.0.0",
+				Environment:    "test",
+				ExporterType:   ExporterOTLPGRPC,
+				Endpoint:       "localhost:4317",
+				Insecure:       true,
+				SampleRate:     1.0,
+				BatchTimeout:   5 * time.Second,
+				Headers: map[string]string{
+					"Authorization": "Bearer token",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, err := NewProvider(tt.config, zap.NewNop())
+			require.NoError(t, err)
+
+			err = provider.Start(context.Background())
+			require.NoError(t, err)
+
+			// Verify tracer provider is set
+			assert.NotNil(t, provider.tracerProvider)
+
+			// Cleanup
+			_ = provider.Stop(context.Background())
+		})
+	}
+}
+
+// TestProvider_Tracer_AfterStart tests getting tracer after start.
+func TestProvider_Tracer_AfterStart(t *testing.T) {
+	// Save original provider
+	originalProvider := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(originalProvider)
+
+	config := &Config{
+		ServiceName:    "test-service",
+		ServiceVersion: "1.0.0",
+		Environment:    "test",
+		ExporterType:   ExporterOTLPGRPC,
+		Endpoint:       "localhost:4317",
+		Insecure:       true,
+		SampleRate:     1.0,
+		BatchTimeout:   5 * time.Second,
+	}
+
+	provider, err := NewProvider(config, zap.NewNop())
+	require.NoError(t, err)
+
+	err = provider.Start(context.Background())
+	require.NoError(t, err)
+
+	// Get tracer after start
+	tracer := provider.Tracer("test-tracer")
+	assert.NotNil(t, tracer)
+
+	// Cleanup
+	_ = provider.Stop(context.Background())
+}
+
+// TestProvider_createExporter_OTLPHTTP tests creating HTTP exporter.
+func TestProvider_createExporter_OTLPHTTP(t *testing.T) {
+	config := &Config{
+		ExporterType: ExporterOTLPHTTP,
+		Endpoint:     "localhost:4318",
+		Insecure:     true,
+	}
+	provider := &Provider{
+		config: config,
+		logger: zap.NewNop(),
+	}
+
+	exporter, err := provider.createExporter(context.Background())
+	require.NoError(t, err)
+	assert.NotNil(t, exporter)
+	_ = exporter.Shutdown(context.Background())
+}

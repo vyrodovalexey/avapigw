@@ -224,6 +224,49 @@ func TestServer_Use(t *testing.T) {
 
 		assert.Len(t, server.middlewares, 50)
 	})
+
+	t.Run("returns ErrServerAlreadyRunning after server starts", func(t *testing.T) {
+		config := &ServerConfig{
+			Port:               0, // Use random port
+			Address:            "127.0.0.1",
+			MaxRequestBodySize: 0,
+		}
+		server := NewServer(config, logger)
+
+		// Start server in goroutine
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		go func() {
+			_ = server.Start(ctx)
+		}()
+
+		// Wait for server to start
+		time.Sleep(100 * time.Millisecond)
+
+		// Try to add middleware after server has started
+		middleware := func(c *gin.Context) { c.Next() }
+		err := server.Use(middleware)
+
+		// Should return ErrServerAlreadyRunning
+		assert.Error(t, err)
+		assert.Equal(t, ErrServerAlreadyRunning, err)
+
+		// Stop the server
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		_ = server.Stop(stopCtx)
+	})
+
+	t.Run("returns nil error before server starts", func(t *testing.T) {
+		config := &ServerConfig{MaxRequestBodySize: 0}
+		server := NewServer(config, logger)
+
+		middleware := func(c *gin.Context) { c.Next() }
+		err := server.Use(middleware)
+
+		assert.NoError(t, err)
+	})
 }
 
 // =============================================================================

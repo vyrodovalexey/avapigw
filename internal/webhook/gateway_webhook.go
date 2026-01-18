@@ -26,6 +26,13 @@ var gatewaylog = logf.Log.WithName("gateway-webhook")
 // improving performance for high-frequency webhook operations.
 var hostnameRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 
+// listenerNameRegex validates listener names (RFC 1123 label format).
+// Listener names must be lowercase alphanumeric with optional hyphens, not starting or ending with a hyphen.
+var listenerNameRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// maxListenerNameLength is the maximum allowed length for a listener name (RFC 1123 label).
+const maxListenerNameLength = 63
+
 // GatewayWebhook implements admission webhooks for Gateway
 type GatewayWebhook struct {
 	Client             client.Client
@@ -219,6 +226,21 @@ func (w *GatewayWebhook) validateListenerSyntax(
 	listenerNames map[string]bool,
 	errs *validator.ValidationErrors,
 ) {
+	// Validate listener name is not empty
+	if listener.Name == "" {
+		errs.Add(
+			fmt.Sprintf("spec.listeners[%d].name", index), "listener name is required and cannot be empty")
+		return // Skip further validation for this listener
+	}
+
+	// Validate listener name format (RFC 1123 label)
+	if !isValidListenerName(listener.Name) {
+		errs.Add(
+			fmt.Sprintf("spec.listeners[%d].name", index),
+			fmt.Sprintf("invalid listener name format: %s (must be lowercase alphanumeric with hyphens, max %d chars)",
+				listener.Name, maxListenerNameLength))
+	}
+
 	if listenerNames[listener.Name] {
 		errs.Add(
 			fmt.Sprintf("spec.listeners[%d].name", index), fmt.Sprintf("duplicate listener name: %s", listener.Name))
@@ -227,6 +249,13 @@ func (w *GatewayWebhook) validateListenerSyntax(
 
 	if listener.Port < 1 || listener.Port > 65535 {
 		errs.Add(fmt.Sprintf("spec.listeners[%d].port", index), "port must be between 1 and 65535")
+	}
+
+	// Validate protocol is one of the supported types
+	if !isValidProtocol(listener.Protocol) {
+		errs.Add(
+			fmt.Sprintf("spec.listeners[%d].protocol", index),
+			fmt.Sprintf("unsupported protocol: %s (must be HTTP, HTTPS, GRPC, GRPCS, TCP, or TLS)", listener.Protocol))
 	}
 
 	if listener.Hostname != nil {
@@ -360,4 +389,28 @@ func validateHostname(hostname string) error {
 	}
 
 	return nil
+}
+
+// isValidListenerName checks if a listener name follows RFC 1123 label format.
+// Valid names are lowercase alphanumeric with optional hyphens, not starting or ending with a hyphen.
+func isValidListenerName(name string) bool {
+	if len(name) > maxListenerNameLength {
+		return false
+	}
+	return listenerNameRegex.MatchString(name)
+}
+
+// isValidProtocol checks if the protocol is one of the supported types.
+func isValidProtocol(protocol avapigwv1alpha1.ProtocolType) bool {
+	switch protocol {
+	case avapigwv1alpha1.ProtocolHTTP,
+		avapigwv1alpha1.ProtocolHTTPS,
+		avapigwv1alpha1.ProtocolGRPC,
+		avapigwv1alpha1.ProtocolGRPCS,
+		avapigwv1alpha1.ProtocolTCP,
+		avapigwv1alpha1.ProtocolTLS:
+		return true
+	default:
+		return false
+	}
 }

@@ -17,11 +17,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// Helper function to create a test backend
+// Helper function to create a test backend with a default RoundRobin load balancer.
+// LoadBalancer is now guaranteed to be non-nil for all backends.
 func createTestBackend(name string) *Backend {
 	return &Backend{
-		Name:      name,
-		Endpoints: make([]*Endpoint, 0),
+		Name:         name,
+		Endpoints:    make([]*Endpoint, 0),
+		LoadBalancer: NewLoadBalancer(DefaultLoadBalancerAlgorithm, nil),
 	}
 }
 

@@ -13,6 +13,29 @@ import (
 	"go.uber.org/zap"
 )
 
+// Default server configuration limits.
+const (
+	// DefaultMaxHeaderBytes is the default maximum size of request headers (1 MB).
+	// This limits the total size of all headers in a single request.
+	DefaultMaxHeaderBytes = 1 << 20 // 1 MB
+
+	// DefaultMaxRequestBodySize is the default maximum size of request body (10 MB).
+	// Requests with bodies larger than this will be rejected with 413 Request Entity Too Large.
+	DefaultMaxRequestBodySize = 10 << 20 // 10 MB
+
+	// DefaultHTTPPort is the default port for the HTTP server.
+	DefaultHTTPPort = 8080
+
+	// DefaultReadTimeout is the default timeout for reading the entire request.
+	DefaultReadTimeout = 30 * time.Second
+
+	// DefaultWriteTimeout is the default timeout for writing the response.
+	DefaultWriteTimeout = 30 * time.Second
+
+	// DefaultIdleTimeout is the default timeout for idle connections.
+	DefaultIdleTimeout = 120 * time.Second
+)
+
 // ginModeOnce ensures gin.SetMode is only called once to avoid race conditions
 var ginModeOnce sync.Once
 
@@ -45,13 +68,13 @@ type ServerConfig struct {
 // DefaultServerConfig returns a ServerConfig with default values.
 func DefaultServerConfig() *ServerConfig {
 	return &ServerConfig{
-		Port:               8080,
+		Port:               DefaultHTTPPort,
 		Address:            "",
-		ReadTimeout:        30 * time.Second,
-		WriteTimeout:       30 * time.Second,
-		IdleTimeout:        120 * time.Second,
-		MaxHeaderBytes:     1 << 20,  // 1 MB
-		MaxRequestBodySize: 10 << 20, // 10 MB default request body limit
+		ReadTimeout:        DefaultReadTimeout,
+		WriteTimeout:       DefaultWriteTimeout,
+		IdleTimeout:        DefaultIdleTimeout,
+		MaxHeaderBytes:     DefaultMaxHeaderBytes,
+		MaxRequestBodySize: DefaultMaxRequestBodySize,
 	}
 }
 
@@ -77,8 +100,9 @@ func NewServer(config *ServerConfig, logger *zap.Logger) *Server {
 	}
 
 	// Add request body size limit middleware if configured
+	// This is safe to ignore the error since the server is not running yet
 	if config.MaxRequestBodySize > 0 {
-		s.Use(s.maxRequestBodySizeMiddleware())
+		_ = s.Use(s.maxRequestBodySizeMiddleware())
 	}
 
 	return s
@@ -93,15 +117,25 @@ func (s *Server) maxRequestBodySizeMiddleware() gin.HandlerFunc {
 	}
 }
 
+// ErrServerAlreadyRunning is returned when attempting to add middleware after the server has started.
+var ErrServerAlreadyRunning = fmt.Errorf("cannot add middleware after server has started")
+
 // Use adds middleware to the server.
-func (s *Server) Use(middleware ...gin.HandlerFunc) {
+// Must be called before Start() - returns error if server is already running.
+// This prevents race conditions with gin.Engine.Use() which is not thread-safe.
+func (s *Server) Use(middleware ...gin.HandlerFunc) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.running {
+		return ErrServerAlreadyRunning
+	}
 
 	s.middlewares = append(s.middlewares, middleware...)
 	for _, m := range middleware {
 		s.engine.Use(m)
 	}
+	return nil
 }
 
 // GetEngine returns the underlying Gin engine.

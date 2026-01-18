@@ -681,3 +681,668 @@ func TestRotator_SaveToSecret_Update(t *testing.T) {
 	assert.NotNil(t, bundle)
 	assert.NotEqual(t, []byte("old-server-cert"), bundle.ServerCert)
 }
+
+func TestRotator_PerformRotation(t *testing.T) {
+	rotator, _ := setupTestRotator(t)
+	ctx := context.Background()
+
+	// First ensure certificates exist
+	err := rotator.EnsureCertificates(ctx)
+	require.NoError(t, err)
+
+	originalBundle := rotator.GetCurrentBundle()
+	require.NotNil(t, originalBundle)
+
+	// Perform rotation
+	newBundle, err := rotator.performRotation(ctx, originalBundle.ExpiresAt)
+	require.NoError(t, err)
+	assert.NotNil(t, newBundle)
+
+	// Verify new bundle is different
+	assert.NotEqual(t, originalBundle.ServerCert, newBundle.ServerCert)
+	assert.NotEqual(t, originalBundle.ServerKey, newBundle.ServerKey)
+}
+
+func TestRotator_CheckRotationNeeded(t *testing.T) {
+	tests := []struct {
+		name              string
+		validity          time.Duration
+		rotationThreshold time.Duration
+		expectRotation    bool
+	}{
+		{
+			name:              "no rotation needed - fresh cert",
+			validity:          365 * 24 * time.Hour,
+			rotationThreshold: 30 * 24 * time.Hour,
+			expectRotation:    false,
+		},
+		{
+			name:              "rotation needed - threshold exceeds validity",
+			validity:          1 * time.Hour,
+			rotationThreshold: 2 * time.Hour,
+			expectRotation:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+			tmpDir := t.TempDir()
+
+			generatorCfg := &GeneratorConfig{
+				ServiceName:      "webhook-service",
+				ServiceNamespace: "default",
+				Validity:         tt.validity,
+				KeySize:          2048,
+			}
+			generator := NewGenerator(generatorCfg)
+
+			rotatorCfg := &RotatorConfig{
+				SecretName:        "webhook-certs",
+				SecretNamespace:   "default",
+				CertDir:           tmpDir,
+				RotationThreshold: tt.rotationThreshold,
+				CheckInterval:     1 * time.Hour,
+			}
+
+			logger := zap.NewNop()
+			rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+			ctx := context.Background()
+			err := rotator.EnsureCertificates(ctx)
+			require.NoError(t, err)
+
+			bundle := rotator.GetCurrentBundle()
+			require.NotNil(t, bundle)
+
+			needsRotation, err := rotator.checkRotationNeeded(bundle)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectRotation, needsRotation)
+		})
+	}
+}
+
+func TestRotator_UpdateBundleAndNotify(t *testing.T) {
+	rotator, _ := setupTestRotator(t)
+
+	// Register multiple callbacks
+	callbackCount := 0
+	var receivedBundles []*CertificateBundle
+
+	rotator.OnRotate(func(bundle *CertificateBundle) {
+		callbackCount++
+		receivedBundles = append(receivedBundles, bundle)
+	})
+
+	rotator.OnRotate(func(bundle *CertificateBundle) {
+		callbackCount++
+		receivedBundles = append(receivedBundles, bundle)
+	})
+
+	// Create a test bundle
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+	}
+	generator := NewGenerator(generatorCfg)
+	bundle, err := generator.Generate()
+	require.NoError(t, err)
+
+	// Update bundle and notify
+	rotator.updateBundleAndNotify(bundle)
+
+	// Verify callbacks were called
+	assert.Equal(t, 2, callbackCount)
+	assert.Len(t, receivedBundles, 2)
+	for _, received := range receivedBundles {
+		assert.Equal(t, bundle, received)
+	}
+
+	// Verify current bundle was updated
+	assert.Equal(t, bundle, rotator.GetCurrentBundle())
+}
+
+func TestRotator_RotationLoop_TickerFires(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	tmpDir := t.TempDir()
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           tmpDir,
+		RotationThreshold: 30 * 24 * time.Hour,
+		CheckInterval:     50 * time.Millisecond, // Very short for testing
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start the rotator
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- rotator.Start(ctx)
+	}()
+
+	// Wait for a few check intervals to ensure ticker fires
+	time.Sleep(200 * time.Millisecond)
+
+	// Cancel the context
+	cancel()
+
+	// Wait for Start to return
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotator did not stop in time")
+	}
+}
+
+func TestRotator_RotationLoop_StopChannel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	tmpDir := t.TempDir()
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           tmpDir,
+		RotationThreshold: 30 * 24 * time.Hour,
+		CheckInterval:     50 * time.Millisecond,
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+	ctx := context.Background()
+
+	// Start the rotator
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- rotator.Start(ctx)
+	}()
+
+	// Wait a bit
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop via stop channel
+	err := rotator.Stop()
+	assert.NoError(t, err)
+
+	// Wait for Start to return
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotator did not stop in time")
+	}
+}
+
+func TestRotator_WriteCertificatesToDir_FilePermissions(t *testing.T) {
+	rotator, tmpDir := setupTestRotator(t)
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+	}
+	generator := NewGenerator(generatorCfg)
+	bundle, err := generator.Generate()
+	require.NoError(t, err)
+
+	err = rotator.WriteCertificatesToDir(bundle)
+	require.NoError(t, err)
+
+	// Verify file permissions
+	certPath := filepath.Join(tmpDir, CertFileName)
+	keyPath := filepath.Join(tmpDir, KeyFileName)
+
+	certInfo, err := os.Stat(certPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), certInfo.Mode().Perm())
+
+	keyInfo, err := os.Stat(keyPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), keyInfo.Mode().Perm())
+}
+
+func TestRotator_LoadFromSecret_MissingCAKey(t *testing.T) {
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			SecretKeyCACert: []byte("some-ca-cert"),
+			// Missing SecretKeyCAKey
+			SecretKeyTLSCert: []byte("some-server-cert"),
+			SecretKeyTLSKey:  []byte("some-server-key"),
+		},
+	}
+
+	rotator, _ := setupTestRotator(t, existingSecret)
+	ctx := context.Background()
+
+	// Should generate new certificates because CA key is missing
+	err := rotator.EnsureCertificates(ctx)
+	require.NoError(t, err)
+
+	bundle := rotator.GetCurrentBundle()
+	assert.NotNil(t, bundle)
+}
+
+func TestRotator_LoadFromSecret_MissingTLSCert(t *testing.T) {
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			SecretKeyCACert: []byte("some-ca-cert"),
+			SecretKeyCAKey:  []byte("some-ca-key"),
+			// Missing SecretKeyTLSCert
+			SecretKeyTLSKey: []byte("some-server-key"),
+		},
+	}
+
+	rotator, _ := setupTestRotator(t, existingSecret)
+	ctx := context.Background()
+
+	// Should generate new certificates because TLS cert is missing
+	err := rotator.EnsureCertificates(ctx)
+	require.NoError(t, err)
+
+	bundle := rotator.GetCurrentBundle()
+	assert.NotNil(t, bundle)
+}
+
+func TestRotator_LoadFromSecret_MissingTLSKey(t *testing.T) {
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			SecretKeyCACert:  []byte("some-ca-cert"),
+			SecretKeyCAKey:   []byte("some-ca-key"),
+			SecretKeyTLSCert: []byte("some-server-cert"),
+			// Missing SecretKeyTLSKey
+		},
+	}
+
+	rotator, _ := setupTestRotator(t, existingSecret)
+	ctx := context.Background()
+
+	// Should generate new certificates because TLS key is missing
+	err := rotator.EnsureCertificates(ctx)
+	require.NoError(t, err)
+
+	bundle := rotator.GetCurrentBundle()
+	assert.NotNil(t, bundle)
+}
+
+func TestRotator_RotateIfNeeded_RotationWithCallbacks(t *testing.T) {
+	// Create a certificate that's about to expire
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         1 * time.Hour, // Very short validity
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+	bundle, err := generator.Generate()
+	require.NoError(t, err)
+
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			SecretKeyCACert:  bundle.CACert,
+			SecretKeyCAKey:   bundle.CAKey,
+			SecretKeyTLSCert: bundle.ServerCert,
+			SecretKeyTLSKey:  bundle.ServerKey,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(existingSecret).
+		Build()
+
+	tmpDir := t.TempDir()
+
+	// Use a new generator with longer validity for rotation
+	newGeneratorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	newGenerator := NewGenerator(newGeneratorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           tmpDir,
+		RotationThreshold: 2 * time.Hour, // Threshold > validity means rotation needed
+		CheckInterval:     1 * time.Hour,
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, newGenerator, client, logger)
+
+	ctx := context.Background()
+
+	// First ensure certificates exist (loads the short-lived cert)
+	err = rotator.EnsureCertificates(ctx)
+	require.NoError(t, err)
+
+	// Track callbacks
+	callbackCount := 0
+	var receivedBundle *CertificateBundle
+	rotator.OnRotate(func(b *CertificateBundle) {
+		callbackCount++
+		receivedBundle = b
+	})
+
+	// Now rotation should be needed
+	rotated, err := rotator.RotateIfNeeded(ctx)
+	require.NoError(t, err)
+	assert.True(t, rotated)
+	assert.Equal(t, 1, callbackCount)
+	assert.NotNil(t, receivedBundle)
+}
+
+func TestRotator_ConcurrentAccess(t *testing.T) {
+	rotator, _ := setupTestRotator(t)
+	ctx := context.Background()
+
+	// Ensure certificates exist first
+	err := rotator.EnsureCertificates(ctx)
+	require.NoError(t, err)
+
+	// Test concurrent access to GetCurrentBundle and GetCABundle
+	done := make(chan bool)
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = rotator.GetCurrentBundle()
+				_ = rotator.GetCABundle()
+			}
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+func TestRotator_MultipleCallbacks(t *testing.T) {
+	rotator, _ := setupTestRotator(t)
+
+	// Register multiple callbacks
+	callbacks := make([]bool, 3)
+	for i := range callbacks {
+		idx := i
+		rotator.OnRotate(func(bundle *CertificateBundle) {
+			callbacks[idx] = true
+		})
+	}
+
+	assert.Len(t, rotator.onRotateCallbacks, 3)
+}
+
+func TestRotator_RotationLoop_RotationError(t *testing.T) {
+	// Create a rotator with a very short check interval
+	// and a certificate that needs rotation but will fail
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	// Create a secret with invalid certificate data that will cause rotation check to fail
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "webhook-certs",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			SecretKeyCACert:  []byte("invalid"),
+			SecretKeyCAKey:   []byte("invalid"),
+			SecretKeyTLSCert: []byte("invalid"),
+			SecretKeyTLSKey:  []byte("invalid"),
+		},
+	}
+
+	client := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(existingSecret).
+		Build()
+
+	tmpDir := t.TempDir()
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           tmpDir,
+		RotationThreshold: 30 * 24 * time.Hour,
+		CheckInterval:     50 * time.Millisecond,
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start the rotator
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- rotator.Start(ctx)
+	}()
+
+	// Wait for a few check intervals
+	time.Sleep(200 * time.Millisecond)
+
+	// Cancel the context
+	cancel()
+
+	// Wait for Start to return
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("rotator did not stop in time")
+	}
+}
+
+func TestRotator_PerformRotation_WriteError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Use a directory that doesn't exist and can't be created
+	invalidDir := "/nonexistent/path/that/cannot/be/created"
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           invalidDir,
+		RotationThreshold: 30 * 24 * time.Hour,
+		CheckInterval:     1 * time.Hour,
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+	ctx := context.Background()
+
+	// Try to perform rotation - should fail due to invalid directory
+	_, err := rotator.performRotation(ctx, time.Now())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to write new certificates to directory")
+}
+
+func TestRotator_EnsureCertificates_WriteError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Use a directory that doesn't exist and can't be created
+	invalidDir := "/nonexistent/path/that/cannot/be/created"
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           invalidDir,
+		RotationThreshold: 30 * 24 * time.Hour,
+		CheckInterval:     1 * time.Hour,
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+	ctx := context.Background()
+
+	// Try to ensure certificates - should fail due to invalid directory
+	err := rotator.EnsureCertificates(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to write certificates to directory")
+}
+
+func TestRotator_Start_EnsureCertificatesError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Use a directory that doesn't exist and can't be created
+	invalidDir := "/nonexistent/path/that/cannot/be/created"
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           invalidDir,
+		RotationThreshold: 30 * 24 * time.Hour,
+		CheckInterval:     1 * time.Hour,
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+	ctx := context.Background()
+
+	// Start should fail due to invalid directory
+	err := rotator.Start(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to ensure certificates on startup")
+}
+
+func TestRotator_RotateIfNeeded_CheckRotationError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	tmpDir := t.TempDir()
+
+	generatorCfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(generatorCfg)
+
+	rotatorCfg := &RotatorConfig{
+		SecretName:        "webhook-certs",
+		SecretNamespace:   "default",
+		CertDir:           tmpDir,
+		RotationThreshold: 30 * 24 * time.Hour,
+		CheckInterval:     1 * time.Hour,
+	}
+
+	logger := zap.NewNop()
+	rotator := NewRotator(rotatorCfg, generator, client, logger)
+
+	// Manually set an invalid bundle to trigger check error
+	rotator.currentBundle = &CertificateBundle{
+		CACert:     []byte("invalid"),
+		CAKey:      []byte("invalid"),
+		ServerCert: []byte("invalid"),
+		ServerKey:  []byte("invalid"),
+		ExpiresAt:  time.Now().Add(365 * 24 * time.Hour),
+	}
+
+	ctx := context.Background()
+
+	// RotateIfNeeded should fail due to invalid certificate
+	_, err := rotator.RotateIfNeeded(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to check if rotation is needed")
+}

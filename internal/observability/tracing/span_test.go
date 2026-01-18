@@ -1280,3 +1280,70 @@ func TestAddStackTrace(t *testing.T) {
 func TestDefaultTracerName(t *testing.T) {
 	assert.Equal(t, "avapigw", DefaultTracerName)
 }
+
+// TestStartSpan_WithLinks tests starting span with links.
+func TestStartSpan_WithLinks(t *testing.T) {
+	exporter, cleanup := setupTestTracer(t)
+	defer cleanup()
+
+	// Create a link span context
+	linkSpanCtx := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:  trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+	})
+
+	link := trace.Link{
+		SpanContext: linkSpanCtx,
+		Attributes:  []attribute.KeyValue{attribute.String("link.type", "test")},
+	}
+
+	ctx, span := StartSpan(context.Background(), "test-span-with-links", WithLinks(link))
+	assert.NotNil(t, ctx)
+	assert.NotNil(t, span)
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	// Links are recorded in the span
+	assert.NotEmpty(t, spans[0].Links)
+}
+
+// TestTraceIDFromContext_NilSpan tests TraceIDFromContext with nil span.
+func TestTraceIDFromContext_NilSpan(t *testing.T) {
+	// Context without any span
+	ctx := context.Background()
+	traceID := TraceIDFromContext(ctx)
+	// Returns invalid trace ID string (all zeros)
+	assert.Len(t, traceID, 32)
+}
+
+// TestSpanIDFromContext_NilSpan tests SpanIDFromContext with nil span.
+func TestSpanIDFromContext_NilSpan(t *testing.T) {
+	// Context without any span
+	ctx := context.Background()
+	spanID := SpanIDFromContext(ctx)
+	// Returns invalid span ID string (all zeros)
+	assert.Len(t, spanID, 16)
+}
+
+// TestIsTracingEnabled_NilSpan tests IsTracingEnabled with nil span.
+func TestIsTracingEnabled_NilSpan(t *testing.T) {
+	// Context without any span
+	ctx := context.Background()
+	enabled := IsTracingEnabled(ctx)
+	assert.False(t, enabled)
+}
+
+// TestWrapError_NilSpan tests WrapError with nil span in context.
+func TestWrapError_NilSpan(t *testing.T) {
+	// Context without any span
+	ctx := context.Background()
+	err := errors.New("test error")
+	wrappedErr := WrapError(ctx, err)
+
+	// Should still wrap the error with trace info (invalid IDs)
+	assert.NotNil(t, wrappedErr)
+	assert.Contains(t, wrappedErr.Error(), "test error")
+	assert.Contains(t, wrappedErr.Error(), "trace_id=")
+	assert.Contains(t, wrappedErr.Error(), "span_id=")
+}

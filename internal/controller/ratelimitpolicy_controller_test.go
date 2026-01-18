@@ -1236,3 +1236,245 @@ func TestRateLimitPolicyReconciler_reconcileRateLimitPolicy(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// RateLimitPolicyReconciler Error Path Tests
+// ============================================================================
+
+// rateLimitPolicyErrorClient - Mock client that returns errors for RateLimitPolicy tests
+type rateLimitPolicyErrorClient struct {
+	client.Client
+	getError    error
+	updateError error
+	listError   error
+}
+
+func (c *rateLimitPolicyErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if c.getError != nil {
+		return c.getError
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *rateLimitPolicyErrorClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.updateError != nil {
+		return c.updateError
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *rateLimitPolicyErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if c.listError != nil {
+		return c.listError
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func TestRateLimitPolicyReconciler_fetchRateLimitPolicy_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &rateLimitPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &RateLimitPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-policy"
+
+	policy, result, err := r.fetchRateLimitPolicy(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-policy", Namespace: "default"},
+	}, strategy, resourceKey)
+
+	assert.Nil(t, policy)
+	assert.NotNil(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestRateLimitPolicyReconciler_Reconcile_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &rateLimitPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &RateLimitPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-policy", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestRateLimitPolicyReconciler_Reconcile_DeletionWithError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	now := metav1.Now()
+	policy := &avapigwv1alpha1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-policy",
+			Namespace:         "default",
+			Finalizers:        []string{rateLimitPolicyFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: avapigwv1alpha1.RateLimitPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "test-gateway",
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &rateLimitPolicyErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &RateLimitPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-policy", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestRateLimitPolicyReconciler_ensureFinalizerAndReconcile_FinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	policy := &avapigwv1alpha1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.RateLimitPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "test-gateway",
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer)
+	cl := &rateLimitPolicyErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &RateLimitPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-policy"
+	var reconcileErr *ReconcileError
+
+	result, err := r.ensureFinalizerAndReconcile(context.Background(), policy, strategy, resourceKey, &reconcileErr)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestRateLimitPolicyReconciler_handleDeletion_RemoveFinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	policy := &avapigwv1alpha1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{rateLimitPolicyFinalizer},
+		},
+		Spec: avapigwv1alpha1.RateLimitPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "test-gateway",
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &rateLimitPolicyErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &RateLimitPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.handleDeletion(context.Background(), policy)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestRateLimitPolicyReconciler_validateRedisConfig_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &rateLimitPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &RateLimitPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	policy := &avapigwv1alpha1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.RateLimitPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "test-gateway",
+			},
+			Storage: &avapigwv1alpha1.RateLimitStorageConfig{
+				Redis: &avapigwv1alpha1.RedisStorageConfig{
+					Address: "redis:6379",
+					SecretRef: &avapigwv1alpha1.SecretObjectReference{
+						Name: "redis-secret",
+					},
+				},
+			},
+		},
+	}
+
+	err := r.validateRedisConfig(context.Background(), policy)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get Redis secret")
+}

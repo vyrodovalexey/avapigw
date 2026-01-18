@@ -72,11 +72,13 @@ type ReconcileError struct {
 }
 
 // Error implements the error interface.
+// Error messages follow Go conventions: lowercase, no trailing punctuation, include context.
 func (e *ReconcileError) Error() string {
+	errType := strings.ToLower(string(e.Type))
 	if e.Resource != "" {
-		return fmt.Sprintf("%s: %s on %s: %v", e.Type, e.Op, e.Resource, e.Err)
+		return fmt.Sprintf("%s error during %s for %s: %v", errType, e.Op, e.Resource, e.Err)
 	}
-	return fmt.Sprintf("%s: %s: %v", e.Type, e.Op, e.Err)
+	return fmt.Sprintf("%s error during %s: %v", errType, e.Op, e.Err)
 }
 
 // Unwrap returns the underlying error for errors.Is/As support.
@@ -474,15 +476,19 @@ func (h *ErrorHandler) determineResult(err *ReconcileError, strategy *RequeueStr
 // ============================================================================
 
 // Common error messages for consistent error reporting.
+// Error messages follow Go conventions:
+// - lowercase
+// - no trailing punctuation
+// - include relevant context
 const (
 	ErrMsgResourceNotFound     = "resource not found"
-	ErrMsgInvalidConfiguration = "invalid configuration"
+	ErrMsgInvalidConfiguration = "configuration is invalid"
 	ErrMsgReferenceNotFound    = "referenced resource not found"
 	ErrMsgAuthenticationFailed = "authentication failed"
-	ErrMsgConnectionFailed     = "connection failed"
+	ErrMsgConnectionFailed     = "failed to establish connection"
 	ErrMsgTimeout              = "operation timed out"
-	ErrMsgRateLimited          = "rate limited"
-	ErrMsgInternalError        = "internal error"
+	ErrMsgRateLimited          = "request rate limited"
+	ErrMsgInternalError        = "internal error occurred"
 )
 
 // Metric result labels for controller reconciliation.
@@ -498,11 +504,15 @@ const (
 )
 
 // WrapWithContext wraps an error with additional context.
+// Uses consistent formatting: "ctx: operation for resource: error"
 func WrapWithContext(err error, op, resource, ctx string) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%s: %s on %s: %w", ctx, op, resource, err)
+	if resource != "" {
+		return fmt.Errorf("%s: %s for %s: %w", ctx, op, resource, err)
+	}
+	return fmt.Errorf("%s: %s: %w", ctx, op, err)
 }
 
 // ============================================================================

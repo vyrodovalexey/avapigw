@@ -2101,3 +2101,193 @@ func TestHTTPRouteReconciler_Reconcile_ErrorClassification(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// HTTPRouteReconciler Error Path Tests
+// ============================================================================
+
+// httpRouteErrorClient - Mock client that returns errors for HTTPRoute tests
+type httpRouteErrorClient struct {
+	client.Client
+	getError    error
+	updateError error
+	listError   error
+}
+
+func (c *httpRouteErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if c.getError != nil {
+		return c.getError
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *httpRouteErrorClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.updateError != nil {
+		return c.updateError
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *httpRouteErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if c.listError != nil {
+		return c.listError
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func TestHTTPRouteReconciler_fetchHTTPRoute_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &httpRouteErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: errors.New("connection refused"),
+	}
+
+	r := &HTTPRouteReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-route"
+
+	route, result, err := r.fetchHTTPRoute(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-route", Namespace: "default"},
+	}, strategy, resourceKey)
+
+	assert.Nil(t, route)
+	assert.NotNil(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestHTTPRouteReconciler_ensureFinalizerAndReconcileHTTPRoute_FinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	httpRoute := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{
+				{
+					Name: "test-gateway",
+				},
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer)
+	cl := &httpRouteErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(httpRoute).Build(),
+		updateError: errors.New("update failed"),
+	}
+
+	r := &HTTPRouteReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-route"
+	var reconcileErr *ReconcileError
+
+	result, err := r.ensureFinalizerAndReconcileHTTPRoute(context.Background(), httpRoute, strategy, resourceKey, &reconcileErr)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestHTTPRouteReconciler_handleDeletion_RemoveFinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	httpRoute := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-route",
+			Namespace:  "default",
+			Finalizers: []string{httpRouteFinalizer},
+		},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			ParentRefs: []avapigwv1alpha1.ParentRef{
+				{
+					Name: "test-gateway",
+				},
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &httpRouteErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(httpRoute).Build(),
+		updateError: errors.New("update failed"),
+	}
+
+	r := &HTTPRouteReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.handleDeletion(context.Background(), httpRoute)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestHTTPRouteReconciler_findHTTPRoutesForGateway_ListError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on List
+	cl := &httpRouteErrorClient{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		listError: errors.New("list failed"),
+	}
+
+	r := &HTTPRouteReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	requests := r.findHTTPRoutesForGateway(context.Background(), gateway)
+
+	assert.Empty(t, requests)
+}
+
+func TestHTTPRouteReconciler_findHTTPRoutesForBackend_ListError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on List
+	cl := &httpRouteErrorClient{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		listError: errors.New("list failed"),
+	}
+
+	r := &HTTPRouteReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+	}
+
+	requests := r.findHTTPRoutesForBackend(context.Background(), backend)
+
+	assert.Empty(t, requests)
+}

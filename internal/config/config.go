@@ -8,12 +8,34 @@ import (
 	"time"
 )
 
+// Vault authentication methods.
+const (
+	// VaultAuthMethodKubernetes is the Kubernetes authentication method for Vault.
+	VaultAuthMethodKubernetes = "kubernetes"
+	// VaultAuthMethodToken is the token authentication method for Vault.
+	VaultAuthMethodToken = "token"
+	// VaultAuthMethodAppRole is the AppRole authentication method for Vault.
+	VaultAuthMethodAppRole = "approle"
+)
+
+// Secrets provider types.
+const (
+	// SecretsProviderKubernetes uses Kubernetes secrets as the secrets provider.
+	SecretsProviderKubernetes = "kubernetes"
+	// SecretsProviderVault uses HashiCorp Vault as the secrets provider.
+	SecretsProviderVault = "vault"
+	// SecretsProviderLocal uses local filesystem as the secrets provider.
+	SecretsProviderLocal = "local"
+	// SecretsProviderEnv uses environment variables as the secrets provider.
+	SecretsProviderEnv = "env"
+)
+
 // Configuration constants for default values.
 const (
 	// DefaultVaultRole is the default Vault role name.
 	DefaultVaultRole = "avapigw"
 	// DefaultVaultAuthMethod is the default Vault authentication method.
-	DefaultVaultAuthMethod = "kubernetes"
+	DefaultVaultAuthMethod = VaultAuthMethodKubernetes
 	// DefaultServiceName is the default service name for observability.
 	DefaultServiceName = "avapigw"
 )
@@ -546,9 +568,9 @@ func (c *Config) validateVaultConfig() error {
 		return fmt.Errorf("VaultAddress is required when Vault is enabled")
 	}
 	validAuthMethods := map[string]bool{
-		DefaultVaultAuthMethod: true,
-		"token":                true,
-		"approle":              true,
+		VaultAuthMethodKubernetes: true,
+		VaultAuthMethodToken:      true,
+		VaultAuthMethodAppRole:    true,
 	}
 	if !validAuthMethods[c.VaultAuthMethod] {
 		return fmt.Errorf("invalid VaultAuthMethod: %s, must be one of: kubernetes, token, approle", c.VaultAuthMethod)
@@ -571,16 +593,16 @@ func (c *Config) validateSecretsProviderConfig() error {
 		return nil
 	}
 	validProviders := map[string]bool{
-		DefaultVaultAuthMethod: true,
-		"vault":                true,
-		"local":                true,
-		"env":                  true,
+		SecretsProviderKubernetes: true,
+		SecretsProviderVault:      true,
+		SecretsProviderLocal:      true,
+		SecretsProviderEnv:        true,
 	}
 	if !validProviders[c.SecretsProvider] {
 		return fmt.Errorf(
 			"invalid SecretsProvider: %s, must be one of: kubernetes, vault, local, env", c.SecretsProvider)
 	}
-	if c.SecretsProvider == "vault" && !c.VaultEnabled {
+	if c.SecretsProvider == SecretsProviderVault && !c.VaultEnabled {
 		return fmt.Errorf("VaultEnabled must be true when SecretsProvider is vault")
 	}
 	return nil

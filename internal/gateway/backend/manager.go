@@ -58,7 +58,9 @@ type Endpoint struct {
 	mu       sync.RWMutex
 }
 
-// BackendConfig holds configuration for creating a backend.
+// BackendConfig holds configuration for creating a backend service.
+// It defines the endpoints, load balancing strategy, health checking,
+// circuit breaker settings, and connection pooling for a backend.
 type BackendConfig struct {
 	Name           string
 	Namespace      string
@@ -69,7 +71,8 @@ type BackendConfig struct {
 	ConnectionPool *ConnectionPoolConfig
 }
 
-// EndpointConfig holds configuration for an endpoint.
+// EndpointConfig holds configuration for a single backend endpoint.
+// Each endpoint represents a network address that can receive traffic.
 type EndpointConfig struct {
 	Address  string
 	Port     int
@@ -77,7 +80,8 @@ type EndpointConfig struct {
 	Metadata map[string]string
 }
 
-// LoadBalancingConfig holds load balancing configuration.
+// LoadBalancingConfig holds load balancing configuration for a backend.
+// Supported algorithms: RoundRobin, Random, LeastConnections, ConsistentHash.
 type LoadBalancingConfig struct {
 	Algorithm      string
 	ConsistentHash *ConsistentHashConfig
@@ -90,7 +94,9 @@ type ConsistentHashConfig struct {
 	Cookie string
 }
 
-// HealthCheckConfig holds health check configuration.
+// HealthCheckConfig holds health check configuration for backend endpoints.
+// When enabled, endpoints are periodically checked and marked unhealthy
+// if they fail to respond within the configured thresholds.
 type HealthCheckConfig struct {
 	Enabled            bool
 	Interval           int
@@ -101,7 +107,9 @@ type HealthCheckConfig struct {
 	Port               int
 }
 
-// CircuitBreakerConfig holds circuit breaker configuration.
+// CircuitBreakerConfig holds circuit breaker configuration for a backend.
+// The circuit breaker prevents cascading failures by temporarily stopping
+// requests to unhealthy backends after consecutive errors.
 type CircuitBreakerConfig struct {
 	Enabled           bool
 	ConsecutiveErrors int
@@ -110,7 +118,9 @@ type CircuitBreakerConfig struct {
 	MaxEjectionPct    int
 }
 
-// ConnectionPoolConfig holds connection pool configuration.
+// ConnectionPoolConfig holds connection pool configuration for a backend.
+// Connection pooling improves performance by reusing TCP connections
+// instead of creating new ones for each request.
 type ConnectionPoolConfig struct {
 	MaxConnections        int
 	MaxIdleConnections    int
@@ -340,14 +350,18 @@ func (m *Manager) createEndpoints(configs []EndpointConfig) []*Endpoint {
 	return endpoints
 }
 
+// DefaultLoadBalancerAlgorithm is the default load balancing algorithm used when none is specified.
+const DefaultLoadBalancerAlgorithm = "RoundRobin"
+
 // createLoadBalancer creates a load balancer from the configuration.
+// Always returns a non-nil LoadBalancer, using RoundRobin as the default.
 func (m *Manager) createLoadBalancer(config *LoadBalancingConfig) LoadBalancer {
-	if config != nil {
+	if config != nil && config.Algorithm != "" {
 		return NewLoadBalancer(config.Algorithm, &LBConfig{
 			ConsistentHash: config.ConsistentHash,
 		})
 	}
-	return NewLoadBalancer("RoundRobin", nil)
+	return NewLoadBalancer(DefaultLoadBalancerAlgorithm, nil)
 }
 
 // setupHealthChecker configures the health checker for the backend if enabled.
@@ -458,7 +472,9 @@ func (m *Manager) ListBackends() []string {
 	return names
 }
 
-// GetHealthyEndpoint returns a healthy endpoint from the backend.
+// GetHealthyEndpoint returns a healthy endpoint from the backend using the configured load balancer.
+// Returns nil if no healthy endpoints are available.
+// The LoadBalancer is guaranteed to be non-nil as it is always set during backend creation.
 func (b *Backend) GetHealthyEndpoint() *Endpoint {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -476,11 +492,7 @@ func (b *Backend) GetHealthyEndpoint() *Endpoint {
 		return nil
 	}
 
-	if b.LoadBalancer != nil {
-		return b.LoadBalancer.Select(healthyEndpoints)
-	}
-
-	return healthyEndpoints[0]
+	return b.LoadBalancer.Select(healthyEndpoints)
 }
 
 // GetAllEndpoints returns all endpoints.
@@ -523,7 +535,9 @@ func (e *Endpoint) IsHealthy() bool {
 	return e.Healthy
 }
 
-// Address returns the full address of the endpoint.
+// FullAddress returns the complete network address of the endpoint in "host:port" format.
+// This is suitable for use with net.Dial and similar functions.
+// Example: "192.168.1.1:8080" or "backend-service.default.svc:80"
 func (e *Endpoint) FullAddress() string {
 	return fmt.Sprintf("%s:%d", e.Address, e.Port)
 }

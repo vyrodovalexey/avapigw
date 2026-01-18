@@ -656,3 +656,28 @@ func TestRequeueStrategy_ForInternalErrorWithBackoff_MaxInterval(t *testing.T) {
 	result := strategy.ForInternalErrorWithBackoff(key)
 	assert.Equal(t, 5*time.Minute, result.RequeueAfter)
 }
+
+func TestRequeueStrategy_CalculateBackoff_FailuresExceedMax(t *testing.T) {
+	config := &RequeueConfig{
+		BaseInterval:      10 * time.Second,
+		MaxInterval:       5 * time.Minute,
+		BackoffMultiplier: 2.0,
+		MaxFailures:       5, // Set a low max for testing
+	}
+	strategy := NewRequeueStrategy(config)
+
+	// Test with failures exceeding max - should be capped at MaxFailures
+	// With MaxFailures=5, failures=10 should be treated as failures=5
+	// 10s * 2^5 = 10s * 32 = 320s = 5m20s, but capped at MaxInterval (5m)
+	result := strategy.calculateBackoff(10*time.Second, 10)
+	assert.Equal(t, 5*time.Minute, result)
+
+	// Test with failures exactly at max
+	// 10s * 2^5 = 320s, capped at 5m
+	result2 := strategy.calculateBackoff(10*time.Second, 5)
+	assert.Equal(t, 5*time.Minute, result2)
+
+	// Test with failures just above max
+	result3 := strategy.calculateBackoff(10*time.Second, 6)
+	assert.Equal(t, 5*time.Minute, result3)
+}

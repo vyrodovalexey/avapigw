@@ -2,10 +2,15 @@ package config
 
 import (
 	"flag"
+	"log"
 	"os"
 	"strconv"
 	"time"
 )
+
+// configLogger is used for logging configuration loading warnings.
+// Using standard log package to avoid circular dependencies with zap logger initialization.
+var configLogger = log.New(os.Stderr, "[config] ", log.LstdFlags)
 
 // Loader handles loading configuration from various sources.
 type Loader struct {
@@ -392,20 +397,30 @@ func (l *Loader) loadServerTimeouts() {
 }
 
 // loadEnvInt loads an integer from an environment variable, returning the default if not set or invalid.
+// Logs a warning if the value cannot be parsed.
 func loadEnvInt(envVar string, defaultValue int) int {
 	if v := os.Getenv(envVar); v != "" {
-		if port, err := strconv.Atoi(v); err == nil {
-			return port
+		if val, err := strconv.Atoi(v); err == nil {
+			return val
+		} else {
+			configLogger.Printf(
+				"warning: failed to parse %s=%q as int: %v, using default %d",
+				envVar, v, err, defaultValue)
 		}
 	}
 	return defaultValue
 }
 
 // loadEnvDuration loads a duration from an environment variable, returning the default if not set or invalid.
+// Logs a warning if the value cannot be parsed.
 func loadEnvDuration(envVar string, defaultValue time.Duration) time.Duration {
 	if v := os.Getenv(envVar); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		} else {
+			configLogger.Printf(
+				"warning: failed to parse %s=%q as duration: %v, using default %v",
+				envVar, v, err, defaultValue)
 		}
 	}
 	return defaultValue

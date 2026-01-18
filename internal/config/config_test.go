@@ -1242,3 +1242,224 @@ func TestValidatePort(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// TASK-004: Tests for Config Constants
+// ============================================================================
+
+func TestVaultAuthMethodConstants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		constant string
+		expected string
+	}{
+		{
+			name:     "VaultAuthMethodKubernetes has correct value",
+			constant: VaultAuthMethodKubernetes,
+			expected: "kubernetes",
+		},
+		{
+			name:     "VaultAuthMethodToken has correct value",
+			constant: VaultAuthMethodToken,
+			expected: "token",
+		},
+		{
+			name:     "VaultAuthMethodAppRole has correct value",
+			constant: VaultAuthMethodAppRole,
+			expected: "approle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.constant)
+		})
+	}
+}
+
+func TestSecretsProviderConstants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		constant string
+		expected string
+	}{
+		{
+			name:     "SecretsProviderKubernetes has correct value",
+			constant: SecretsProviderKubernetes,
+			expected: "kubernetes",
+		},
+		{
+			name:     "SecretsProviderVault has correct value",
+			constant: SecretsProviderVault,
+			expected: "vault",
+		},
+		{
+			name:     "SecretsProviderLocal has correct value",
+			constant: SecretsProviderLocal,
+			expected: "local",
+		},
+		{
+			name:     "SecretsProviderEnv has correct value",
+			constant: SecretsProviderEnv,
+			expected: "env",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.constant)
+		})
+	}
+}
+
+func TestDefaultConfigConstants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		constant string
+		expected string
+	}{
+		{
+			name:     "DefaultVaultRole has correct value",
+			constant: DefaultVaultRole,
+			expected: "avapigw",
+		},
+		{
+			name:     "DefaultVaultAuthMethod has correct value",
+			constant: DefaultVaultAuthMethod,
+			expected: VaultAuthMethodKubernetes,
+		},
+		{
+			name:     "DefaultServiceName has correct value",
+			constant: DefaultServiceName,
+			expected: "avapigw",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.constant)
+		})
+	}
+}
+
+func TestValidateVaultConfig_UsesConstants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		authMethod string
+		wantError  bool
+	}{
+		{
+			name:       "accepts VaultAuthMethodKubernetes constant",
+			authMethod: VaultAuthMethodKubernetes,
+			wantError:  false,
+		},
+		{
+			name:       "accepts VaultAuthMethodToken constant",
+			authMethod: VaultAuthMethodToken,
+			wantError:  false,
+		},
+		{
+			name:       "accepts VaultAuthMethodAppRole constant",
+			authMethod: VaultAuthMethodAppRole,
+			wantError:  false,
+		},
+		{
+			name:       "rejects invalid auth method",
+			authMethod: "invalid-method",
+			wantError:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := DefaultConfig()
+			cfg.VaultEnabled = true
+			cfg.VaultAuthMethod = tt.authMethod
+
+			err := cfg.Validate()
+
+			if tt.wantError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid VaultAuthMethod")
+			} else {
+				// For kubernetes auth, we need a role
+				if tt.authMethod == VaultAuthMethodKubernetes && cfg.VaultRole == "" {
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "VaultRole is required")
+				} else {
+					assert.NoError(t, err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateSecretsProviderConfig_UsesConstants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		provider string
+		wantErr  bool
+	}{
+		{
+			name:     "accepts SecretsProviderKubernetes constant",
+			provider: SecretsProviderKubernetes,
+			wantErr:  false,
+		},
+		{
+			name:     "accepts SecretsProviderVault constant with vault enabled",
+			provider: SecretsProviderVault,
+			wantErr:  false,
+		},
+		{
+			name:     "accepts SecretsProviderLocal constant",
+			provider: SecretsProviderLocal,
+			wantErr:  false,
+		},
+		{
+			name:     "accepts SecretsProviderEnv constant",
+			provider: SecretsProviderEnv,
+			wantErr:  false,
+		},
+		{
+			name:     "rejects invalid provider",
+			provider: "invalid-provider",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := DefaultConfig()
+			cfg.SecretsProvider = tt.provider
+
+			// Enable vault if using vault provider
+			if tt.provider == SecretsProviderVault {
+				cfg.VaultEnabled = true
+			}
+
+			err := cfg.Validate()
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid SecretsProvider")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}

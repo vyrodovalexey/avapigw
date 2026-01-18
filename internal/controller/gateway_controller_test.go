@@ -5774,3 +5774,89 @@ func TestGatewayReconciler_CountAttachedRoutes_TLSRouteListError(t *testing.T) {
 	assert.Nil(t, counts)
 	assert.Contains(t, err.Error(), "failed to list TLSRoutes")
 }
+
+func TestGatewayReconciler_reconcileGateway_TLSValidationError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+							{Name: "non-existent-tls-config"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(gateway).
+		WithStatusSubresource(&avapigwv1alpha1.Gateway{}).
+		Build()
+
+	r := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	err := r.reconcileGateway(context.Background(), gateway)
+
+	assert.Error(t, err)
+	// The error should be a validation or dependency error
+	var reconcileErr *ReconcileError
+	assert.True(t, errors.As(err, &reconcileErr))
+}
+
+func TestGatewayReconciler_reconcileGateway_UpdateListenerStatusesError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-gateway",
+			Namespace:  "default",
+			Finalizers: []string{gatewayFinalizer},
+		},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				},
+			},
+		},
+	}
+
+	// Create a client that will return an error on List (for updateListenerStatuses)
+	cl := &errorClient{
+		Client:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build(),
+		listErr: assert.AnError,
+	}
+
+	r := &GatewayReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	err := r.reconcileGateway(context.Background(), gateway)
+
+	assert.Error(t, err)
+	var reconcileErr *ReconcileError
+	assert.True(t, errors.As(err, &reconcileErr))
+}

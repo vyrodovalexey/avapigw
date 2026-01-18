@@ -1116,22 +1116,25 @@ func TestBackend_GetHealthyEndpoint_UsesLoadBalancer(t *testing.T) {
 	assert.Greater(t, results["host3"], 0)
 }
 
-func TestBackend_GetHealthyEndpoint_NoLoadBalancer(t *testing.T) {
+func TestBackend_GetHealthyEndpoint_DefaultLoadBalancer(t *testing.T) {
 	endpoints := []*Endpoint{
 		{Address: "host1", Port: 8080, Healthy: true},
 		{Address: "host2", Port: 8081, Healthy: true},
 	}
 
+	// Use the default RoundRobin load balancer (LoadBalancer is now guaranteed non-nil)
 	backend := &Backend{
 		Name:         "test-backend",
 		Endpoints:    endpoints,
-		LoadBalancer: nil, // No load balancer
+		LoadBalancer: NewLoadBalancer(DefaultLoadBalancerAlgorithm, nil),
 	}
 
-	// Should return first healthy endpoint
+	// Should return a healthy endpoint using the load balancer
 	endpoint := backend.GetHealthyEndpoint()
 	require.NotNil(t, endpoint)
-	assert.Equal(t, "host1", endpoint.Address)
+	// With RoundRobin, should return one of the healthy endpoints
+	assert.True(t, endpoint.Address == "host1" || endpoint.Address == "host2",
+		"expected endpoint to be host1 or host2, got %s", endpoint.Address)
 }
 
 // ============================================================================
@@ -2023,4 +2026,255 @@ func TestManager_MonitorLoop_StopChannel(t *testing.T) {
 
 	// Verify manager is stopped
 	assert.False(t, manager.IsRunning())
+}
+
+// ============================================================================
+// TASK-003: Tests for Backend Manager Default Load Balancer
+// ============================================================================
+
+func TestManager_CreateBackend_DefaultLoadBalancer(t *testing.T) {
+	tests := []struct {
+		name          string
+		lbConfig      *LoadBalancingConfig
+		expectDefault bool
+	}{
+		{
+			name:          "creates default RoundRobin when LoadBalancing is nil",
+			lbConfig:      nil,
+			expectDefault: true,
+		},
+		{
+			name: "creates default RoundRobin when Algorithm is empty",
+			lbConfig: &LoadBalancingConfig{
+				Algorithm: "",
+			},
+			expectDefault: true,
+		},
+		{
+			name: "creates specified load balancer when Algorithm is set",
+			lbConfig: &LoadBalancingConfig{
+				Algorithm: "LeastConnections",
+			},
+			expectDefault: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := zap.NewNop()
+			manager := NewManager(logger)
+
+			config := BackendConfig{
+				Name: "test-backend",
+				Endpoints: []EndpointConfig{
+					{Address: "localhost", Port: 8080},
+				},
+				LoadBalancing: tt.lbConfig,
+			}
+
+			err := manager.AddBackend(config)
+			require.NoError(t, err)
+
+			backend := manager.GetBackend("test-backend")
+			require.NotNil(t, backend)
+			require.NotNil(t, backend.LoadBalancer, "LoadBalancer should never be nil")
+
+			if tt.expectDefault {
+				// Should be RoundRobin (the default)
+				assert.IsType(t, &RoundRobinLB{}, backend.LoadBalancer)
+			} else {
+				// Should be the specified type
+				assert.IsType(t, &LeastConnectionsLB{}, backend.LoadBalancer)
+			}
+		})
+	}
+}
+
+func TestBackend_GetHealthyEndpoint_UsesLoadBalancerAlgorithms(t *testing.T) {
+	tests := []struct {
+		name         string
+		lbAlgorithm  string
+		endpoints    []*Endpoint
+		callCount    int
+		expectUnique bool // Whether we expect different endpoints to be selected
+	}{
+		{
+			name:        "RoundRobin distributes across endpoints",
+			lbAlgorithm: "RoundRobin",
+			endpoints: []*Endpoint{
+				{Address: "host1", Port: 8080, Healthy: true},
+				{Address: "host2", Port: 8081, Healthy: true},
+				{Address: "host3", Port: 8082, Healthy: true},
+			},
+			callCount:    6,
+			expectUnique: true,
+		},
+		{
+			name:        "LeastConnections selects endpoints",
+			lbAlgorithm: "LeastConnections",
+			endpoints: []*Endpoint{
+				{Address: "host1", Port: 8080, Healthy: true},
+				{Address: "host2", Port: 8081, Healthy: true},
+			},
+			callCount:    4,
+			expectUnique: false, // May select same endpoint if connections are equal
+		},
+		{
+			name:        "Random selects endpoints",
+			lbAlgorithm: "Random",
+			endpoints: []*Endpoint{
+				{Address: "host1", Port: 8080, Healthy: true},
+				{Address: "host2", Port: 8081, Healthy: true},
+				{Address: "host3", Port: 8082, Healthy: true},
+			},
+			callCount:    10,
+			expectUnique: true, // With enough calls, should hit multiple endpoints
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &Backend{
+				Name:         "test-backend",
+				Endpoints:    tt.endpoints,
+				LoadBalancer: NewLoadBalancer(tt.lbAlgorithm, nil),
+			}
+
+			results := make(map[string]int)
+			for i := 0; i < tt.callCount; i++ {
+				ep := backend.GetHealthyEndpoint()
+				require.NotNil(t, ep)
+				results[ep.Address]++
+			}
+
+			// Verify we got results
+			assert.NotEmpty(t, results)
+
+			if tt.expectUnique && tt.callCount >= len(tt.endpoints) {
+				// For algorithms that distribute, we should see multiple endpoints
+				assert.Greater(t, len(results), 1,
+					"expected multiple endpoints to be selected for %s", tt.lbAlgorithm)
+			}
+		})
+	}
+}
+
+func TestBackend_GetHealthyEndpoint_LoadBalancerNeverNil(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	configs := []BackendConfig{
+		{
+			Name: "backend-no-lb-config",
+			Endpoints: []EndpointConfig{
+				{Address: "localhost", Port: 8080},
+			},
+			LoadBalancing: nil,
+		},
+		{
+			Name: "backend-empty-algorithm",
+			Endpoints: []EndpointConfig{
+				{Address: "localhost", Port: 8081},
+			},
+			LoadBalancing: &LoadBalancingConfig{
+				Algorithm: "",
+			},
+		},
+		{
+			Name: "backend-with-algorithm",
+			Endpoints: []EndpointConfig{
+				{Address: "localhost", Port: 8082},
+			},
+			LoadBalancing: &LoadBalancingConfig{
+				Algorithm: "Random",
+			},
+		},
+	}
+
+	for _, config := range configs {
+		err := manager.AddBackend(config)
+		require.NoError(t, err)
+
+		backend := manager.GetBackend(config.Name)
+		require.NotNil(t, backend)
+		require.NotNil(t, backend.LoadBalancer,
+			"LoadBalancer should never be nil for backend %s", config.Name)
+
+		// Verify GetHealthyEndpoint works without panic
+		ep := backend.GetHealthyEndpoint()
+		require.NotNil(t, ep, "should return healthy endpoint for backend %s", config.Name)
+	}
+}
+
+func TestDefaultLoadBalancerAlgorithm_Constant(t *testing.T) {
+	// Verify the default load balancer algorithm constant
+	assert.Equal(t, "RoundRobin", DefaultLoadBalancerAlgorithm)
+}
+
+func TestManager_CreateLoadBalancer_AllAlgorithms(t *testing.T) {
+	logger := zap.NewNop()
+	manager := NewManager(logger)
+
+	tests := []struct {
+		name         string
+		config       *LoadBalancingConfig
+		expectedType interface{}
+	}{
+		{
+			name: "RoundRobin",
+			config: &LoadBalancingConfig{
+				Algorithm: "RoundRobin",
+			},
+			expectedType: &RoundRobinLB{},
+		},
+		{
+			name: "LeastConnections",
+			config: &LoadBalancingConfig{
+				Algorithm: "LeastConnections",
+			},
+			expectedType: &LeastConnectionsLB{},
+		},
+		{
+			name: "Random",
+			config: &LoadBalancingConfig{
+				Algorithm: "Random",
+			},
+			expectedType: &RandomLB{},
+		},
+		{
+			name: "WeightedRoundRobin",
+			config: &LoadBalancingConfig{
+				Algorithm: "WeightedRoundRobin",
+			},
+			expectedType: &WeightedRoundRobinLB{},
+		},
+		{
+			name: "ConsistentHash_WithConfig",
+			config: &LoadBalancingConfig{
+				Algorithm: "ConsistentHash",
+				ConsistentHash: &ConsistentHashConfig{
+					Type:   "header",
+					Header: "X-Request-ID",
+				},
+			},
+			expectedType: &ConsistentHashLB{},
+		},
+		{
+			name: "ConsistentHash_NoConfig_FallsBackToRoundRobin",
+			config: &LoadBalancingConfig{
+				Algorithm: "ConsistentHash",
+				// No ConsistentHash config - should fall back to RoundRobin
+			},
+			expectedType: &RoundRobinLB{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lb := manager.createLoadBalancer(tt.config)
+
+			require.NotNil(t, lb)
+			assert.IsType(t, tt.expectedType, lb)
+		})
+	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 	"github.com/vyrodovalexey/avapigw/internal/ratelimit"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -560,5 +561,214 @@ func TestNewLimiterFromRatelimit(t *testing.T) {
 		allowed, err := adapter.Allow(context.Background(), "test")
 		assert.NoError(t, err)
 		assert.True(t, allowed)
+	})
+}
+
+// TestUnaryRateLimitInterceptorWithCore tests the core-based unary rate limit interceptor
+func TestUnaryRateLimitInterceptorWithCore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips rate limiting for configured methods", func(t *testing.T) {
+		coreConfig := core.RateLimitCoreConfig{
+			BaseConfig: core.BaseConfig{
+				SkipPaths: []string{"/test.Service/SkippedMethod"},
+			},
+		}
+
+		interceptor := UnaryRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/SkippedMethod"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+
+	t.Run("allows request when rate limit not exceeded", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 10, 10, nil)
+		defer limiter.Close()
+
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: limiter,
+		}
+
+		interceptor := UnaryRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+
+	t.Run("rejects request when rate limit exceeded", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 1, 1, nil)
+		defer limiter.Close()
+
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: limiter,
+		}
+
+		interceptor := UnaryRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		// First request should succeed
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+
+		// Second request should be rate limited
+		resp, err = interceptor(ctx, "request", info, mockUnaryHandler)
+		assert.Error(t, err)
+		assert.Nil(t, resp)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.ResourceExhausted, st.Code())
+	})
+
+	t.Run("handles missing metadata gracefully", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 10, 10, nil)
+		defer limiter.Close()
+
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: limiter,
+		}
+
+		interceptor := UnaryRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background() // No metadata
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+
+	t.Run("uses nil limiter gracefully", func(t *testing.T) {
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: nil, // Will use noop limiter
+		}
+
+		interceptor := UnaryRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+}
+
+// TestStreamRateLimitInterceptorWithCore tests the core-based stream rate limit interceptor
+func TestStreamRateLimitInterceptorWithCore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips rate limiting for configured methods", func(t *testing.T) {
+		coreConfig := core.RateLimitCoreConfig{
+			BaseConfig: core.BaseConfig{
+				SkipPaths: []string{"/test.Service/SkippedMethod"},
+			},
+		}
+
+		interceptor := StreamRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/SkippedMethod"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("allows stream when rate limit not exceeded", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 10, 10, nil)
+		defer limiter.Close()
+
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: limiter,
+		}
+
+		interceptor := StreamRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("rejects stream when rate limit exceeded", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 1, 1, nil)
+		defer limiter.Close()
+
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: limiter,
+		}
+
+		interceptor := StreamRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		// First request should succeed
+		err := interceptor(nil, stream, info, mockStreamHandler)
+		assert.NoError(t, err)
+
+		// Second request should be rate limited
+		err = interceptor(nil, stream, info, mockStreamHandler)
+		assert.Error(t, err)
+
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.ResourceExhausted, st.Code())
+	})
+
+	t.Run("handles missing metadata gracefully", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 10, 10, nil)
+		defer limiter.Close()
+
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: limiter,
+		}
+
+		interceptor := StreamRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background() // No metadata
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("uses nil limiter gracefully", func(t *testing.T) {
+		coreConfig := core.RateLimitCoreConfig{
+			Limiter: nil, // Will use noop limiter
+		}
+
+		interceptor := StreamRateLimitInterceptorWithCore(coreConfig)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
 	})
 }

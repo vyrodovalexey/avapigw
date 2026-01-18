@@ -1141,3 +1141,492 @@ func TestReferenceValidator_CheckBackendHasReferences(t *testing.T) {
 		})
 	}
 }
+
+func TestReferenceValidator_CheckGatewayHasAttachedRoutes_AllRouteTypes(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-gateway", Namespace: "default"},
+	}
+
+	// Test GRPCRoute attachment
+	t.Run("GRPCRoute attached", func(t *testing.T) {
+		grpcRoute := &avapigwv1alpha1.GRPCRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-grpcroute", Namespace: "default"},
+			Spec: avapigwv1alpha1.GRPCRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "my-gateway"},
+				},
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, grpcRoute).Build()
+		v := NewReferenceValidator(client)
+
+		attached, err := v.CheckGatewayHasAttachedRoutes(ctx, "default", "my-gateway")
+		assert.NoError(t, err)
+		assert.True(t, attached)
+	})
+
+	// Test TCPRoute attachment
+	t.Run("TCPRoute attached", func(t *testing.T) {
+		tcpRoute := &avapigwv1alpha1.TCPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-tcproute", Namespace: "default"},
+			Spec: avapigwv1alpha1.TCPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "my-gateway"},
+				},
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, tcpRoute).Build()
+		v := NewReferenceValidator(client)
+
+		attached, err := v.CheckGatewayHasAttachedRoutes(ctx, "default", "my-gateway")
+		assert.NoError(t, err)
+		assert.True(t, attached)
+	})
+
+	// Test TLSRoute attachment
+	t.Run("TLSRoute attached", func(t *testing.T) {
+		tlsRoute := &avapigwv1alpha1.TLSRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-tlsroute", Namespace: "default"},
+			Spec: avapigwv1alpha1.TLSRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "my-gateway"},
+				},
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, tlsRoute).Build()
+		v := NewReferenceValidator(client)
+
+		attached, err := v.CheckGatewayHasAttachedRoutes(ctx, "default", "my-gateway")
+		assert.NoError(t, err)
+		assert.True(t, attached)
+	})
+
+	// Test route with explicit namespace in parentRef
+	t.Run("route with explicit namespace in parentRef", func(t *testing.T) {
+		httpRoute := &avapigwv1alpha1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-httproute", Namespace: "other"},
+			Spec: avapigwv1alpha1.HTTPRouteSpec{
+				ParentRefs: []avapigwv1alpha1.ParentRef{
+					{Name: "my-gateway", Namespace: func() *string { s := "default"; return &s }()},
+				},
+			},
+		}
+		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway, httpRoute).Build()
+		v := NewReferenceValidator(client)
+
+		attached, err := v.CheckGatewayHasAttachedRoutes(ctx, "default", "my-gateway")
+		assert.NoError(t, err)
+		assert.True(t, attached)
+	})
+}
+
+func TestReferenceValidator_ValidateTargetRef_NotFoundCases(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	tests := []struct {
+		name            string
+		targetRef       *avapigwv1alpha1.TargetRef
+		policyNamespace string
+		expectError     bool
+		errorContains   string
+	}{
+		{
+			name: "HTTPRoute not found",
+			targetRef: &avapigwv1alpha1.TargetRef{
+				Kind: "HTTPRoute",
+				Name: "missing-httproute",
+			},
+			policyNamespace: "default",
+			expectError:     true,
+			errorContains:   "HTTPRoute default/missing-httproute not found",
+		},
+		{
+			name: "GRPCRoute not found",
+			targetRef: &avapigwv1alpha1.TargetRef{
+				Kind: "GRPCRoute",
+				Name: "missing-grpcroute",
+			},
+			policyNamespace: "default",
+			expectError:     true,
+			errorContains:   "GRPCRoute default/missing-grpcroute not found",
+		},
+		{
+			name: "TCPRoute not found",
+			targetRef: &avapigwv1alpha1.TargetRef{
+				Kind: "TCPRoute",
+				Name: "missing-tcproute",
+			},
+			policyNamespace: "default",
+			expectError:     true,
+			errorContains:   "TCPRoute default/missing-tcproute not found",
+		},
+		{
+			name: "TLSRoute not found",
+			targetRef: &avapigwv1alpha1.TargetRef{
+				Kind: "TLSRoute",
+				Name: "missing-tlsroute",
+			},
+			policyNamespace: "default",
+			expectError:     true,
+			errorContains:   "TLSRoute default/missing-tlsroute not found",
+		},
+		{
+			name: "target with explicit namespace",
+			targetRef: &avapigwv1alpha1.TargetRef{
+				Kind:      "HTTPRoute",
+				Name:      "missing-httproute",
+				Namespace: func() *string { s := "other-ns"; return &s }(),
+			},
+			policyNamespace: "default",
+			expectError:     true,
+			errorContains:   "HTTPRoute other-ns/missing-httproute not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+			v := NewReferenceValidator(client)
+
+			err := v.ValidateTargetRef(ctx, tt.targetRef, tt.policyNamespace)
+			if tt.expectError {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errorContains)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestReferenceValidator_ValidateGatewayListenerHasTLSPassthrough_GatewayNotFound(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	v := NewReferenceValidator(client)
+
+	err := v.ValidateGatewayListenerHasTLSPassthrough(ctx, "default", "missing-gateway", "tls")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "gateway default/missing-gateway not found")
+}
+
+func TestReferenceValidator_ValidateGatewayListenerHasTLSPassthrough_TLSNilMode(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	// Gateway with TLS listener but nil Mode
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-gateway", Namespace: "default"},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "tls-nil-mode",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolTLS,
+					TLS:      &avapigwv1alpha1.GatewayTLSConfig{Mode: nil},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+	v := NewReferenceValidator(client)
+
+	err := v.ValidateGatewayListenerHasTLSPassthrough(ctx, "default", "my-gateway", "tls-nil-mode")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured for TLS passthrough")
+}
+
+func TestReferenceValidator_ValidateGatewayListenerHasTLSPassthrough_NilTLS(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	// Gateway with TLS protocol but nil TLS config
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-gateway", Namespace: "default"},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "tls-nil-config",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolTLS,
+					TLS:      nil,
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+	v := NewReferenceValidator(client)
+
+	err := v.ValidateGatewayListenerHasTLSPassthrough(ctx, "default", "my-gateway", "tls-nil-config")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured for TLS passthrough")
+}
+
+func TestReferenceValidator_ValidateParentRefs_WithExplicitNamespace(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	gateway := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-gateway", Namespace: "gateway-ns"},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{Name: "http", Port: 80, Protocol: avapigwv1alpha1.ProtocolHTTP},
+			},
+		},
+	}
+
+	tests := []struct {
+		name           string
+		parentRefs     []avapigwv1alpha1.ParentRef
+		routeNamespace string
+		expectError    bool
+	}{
+		{
+			name: "valid parent ref with explicit namespace",
+			parentRefs: []avapigwv1alpha1.ParentRef{
+				{
+					Name:      "my-gateway",
+					Namespace: func() *string { s := "gateway-ns"; return &s }(),
+				},
+			},
+			routeNamespace: "route-ns",
+			expectError:    false,
+		},
+		{
+			name: "invalid parent ref with wrong explicit namespace",
+			parentRefs: []avapigwv1alpha1.ParentRef{
+				{
+					Name:      "my-gateway",
+					Namespace: func() *string { s := "wrong-ns"; return &s }(),
+				},
+			},
+			routeNamespace: "route-ns",
+			expectError:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(gateway).Build()
+			v := NewReferenceValidator(client)
+
+			err := v.ValidateParentRefs(ctx, tt.parentRefs, tt.routeNamespace)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestReferenceValidator_ValidateBackendRefs_WithExplicitNamespace(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "service-ns"},
+	}
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-backend", Namespace: "backend-ns"},
+	}
+
+	tests := []struct {
+		name           string
+		backendRefs    []avapigwv1alpha1.BackendRef
+		routeNamespace string
+		expectError    bool
+	}{
+		{
+			name: "valid service backend ref with explicit namespace",
+			backendRefs: []avapigwv1alpha1.BackendRef{
+				{
+					Name:      "my-service",
+					Namespace: func() *string { s := "service-ns"; return &s }(),
+				},
+			},
+			routeNamespace: "route-ns",
+			expectError:    false,
+		},
+		{
+			name: "valid Backend backend ref with explicit namespace",
+			backendRefs: []avapigwv1alpha1.BackendRef{
+				{
+					Name:      "my-backend",
+					Namespace: func() *string { s := "backend-ns"; return &s }(),
+					Group:     func() *string { s := avapigwv1alpha1.GroupVersion.Group; return &s }(),
+					Kind:      func() *string { s := "Backend"; return &s }(),
+				},
+			},
+			routeNamespace: "route-ns",
+			expectError:    false,
+		},
+		{
+			name: "invalid service backend ref with wrong namespace",
+			backendRefs: []avapigwv1alpha1.BackendRef{
+				{
+					Name:      "my-service",
+					Namespace: func() *string { s := "wrong-ns"; return &s }(),
+				},
+			},
+			routeNamespace: "route-ns",
+			expectError:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(service, backend).Build()
+			v := NewReferenceValidator(client)
+
+			err := v.ValidateBackendRefs(ctx, tt.backendRefs, tt.routeNamespace)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestReferenceValidator_CheckTLSConfigHasReferences_WithExplicitNamespace(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-tls-config", Namespace: "tls-ns"},
+	}
+
+	gatewayWithCrossNsRef := &avapigwv1alpha1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gateway-cross-ns", Namespace: "gateway-ns"},
+		Spec: avapigwv1alpha1.GatewaySpec{
+			Listeners: []avapigwv1alpha1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: avapigwv1alpha1.ProtocolHTTPS,
+					TLS: &avapigwv1alpha1.GatewayTLSConfig{
+						CertificateRefs: []avapigwv1alpha1.SecretObjectReference{
+							{
+								Name:      "my-tls-config",
+								Namespace: func() *string { s := "tls-ns"; return &s }(),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name               string
+		gateways           []*avapigwv1alpha1.Gateway
+		tlsConfigNamespace string
+		tlsConfigName      string
+		expectReferenced   bool
+	}{
+		{
+			name:               "gateway references TLSConfig with explicit namespace",
+			gateways:           []*avapigwv1alpha1.Gateway{gatewayWithCrossNsRef},
+			tlsConfigNamespace: "tls-ns",
+			tlsConfigName:      "my-tls-config",
+			expectReferenced:   true,
+		},
+		{
+			name:               "gateway references TLSConfig but wrong namespace",
+			gateways:           []*avapigwv1alpha1.Gateway{gatewayWithCrossNsRef},
+			tlsConfigNamespace: "wrong-ns",
+			tlsConfigName:      "my-tls-config",
+			expectReferenced:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsConfig)
+			for _, gw := range tt.gateways {
+				builder = builder.WithObjects(gw)
+			}
+			client := builder.Build()
+			v := NewReferenceValidator(client)
+
+			referenced, err := v.CheckTLSConfigHasReferences(ctx, tt.tlsConfigNamespace, tt.tlsConfigName)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectReferenced, referenced)
+		})
+	}
+}
+
+func TestReferenceValidator_CheckBackendHasReferences_WithExplicitNamespace(t *testing.T) {
+	scheme := setupReferenceTestScheme()
+	ctx := context.Background()
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-backend", Namespace: "backend-ns"},
+	}
+
+	httpRouteWithCrossNsRef := &avapigwv1alpha1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "route-cross-ns", Namespace: "route-ns"},
+		Spec: avapigwv1alpha1.HTTPRouteSpec{
+			Rules: []avapigwv1alpha1.HTTPRouteRule{
+				{
+					BackendRefs: []avapigwv1alpha1.HTTPBackendRef{
+						{
+							BackendRef: avapigwv1alpha1.BackendRef{
+								Name:      "my-backend",
+								Namespace: func() *string { s := "backend-ns"; return &s }(),
+								Kind:      func() *string { s := "Backend"; return &s }(),
+								Group:     func() *string { s := avapigwv1alpha1.GroupVersion.Group; return &s }(),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name             string
+		routes           []*avapigwv1alpha1.HTTPRoute
+		backendNamespace string
+		backendName      string
+		expectReferenced bool
+	}{
+		{
+			name:             "route references Backend with explicit namespace",
+			routes:           []*avapigwv1alpha1.HTTPRoute{httpRouteWithCrossNsRef},
+			backendNamespace: "backend-ns",
+			backendName:      "my-backend",
+			expectReferenced: true,
+		},
+		{
+			name:             "route references Backend but wrong namespace",
+			routes:           []*avapigwv1alpha1.HTTPRoute{httpRouteWithCrossNsRef},
+			backendNamespace: "wrong-ns",
+			backendName:      "my-backend",
+			expectReferenced: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(backend)
+			for _, route := range tt.routes {
+				builder = builder.WithObjects(route)
+			}
+			client := builder.Build()
+			v := NewReferenceValidator(client)
+
+			referenced, err := v.CheckBackendHasReferences(ctx, tt.backendNamespace, tt.backendName)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectReferenced, referenced)
+		})
+	}
+}

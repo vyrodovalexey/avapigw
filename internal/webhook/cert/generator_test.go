@@ -439,3 +439,260 @@ func TestConstants(t *testing.T) {
 	assert.Equal(t, "avapigw-webhook-ca", CACommonName)
 	assert.Equal(t, "avapigw", CAOrganization)
 }
+
+func TestParsePrivateKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		keyPEM  []byte
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "invalid PEM",
+			keyPEM:  []byte("not a pem"),
+			wantErr: true,
+			errMsg:  "failed to decode PEM block",
+		},
+		{
+			name: "wrong PEM type",
+			keyPEM: []byte(`-----BEGIN CERTIFICATE-----
+MIIBOgIBAAJBALRiMLAHudeSA2ai
+-----END CERTIFICATE-----`),
+			wantErr: true,
+			errMsg:  "expected RSA PRIVATE KEY PEM block",
+		},
+		{
+			name: "invalid key data",
+			keyPEM: []byte(`-----BEGIN RSA PRIVATE KEY-----
+aW52YWxpZGtleWRhdGE=
+-----END RSA PRIVATE KEY-----`),
+			wantErr: true,
+			errMsg:  "failed to parse private key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parsePrivateKey(tt.keyPEM)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestParsePrivateKey_ValidKey(t *testing.T) {
+	cfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+	}
+	generator := NewGenerator(cfg)
+
+	_, caKeyPEM, err := generator.GenerateCA()
+	require.NoError(t, err)
+
+	key, err := parsePrivateKey(caKeyPEM)
+	require.NoError(t, err)
+	assert.NotNil(t, key)
+}
+
+func TestParseCertificate_InvalidCertData(t *testing.T) {
+	// Test with valid PEM structure but invalid certificate data
+	invalidCertPEM := []byte(`-----BEGIN CERTIFICATE-----
+aW52YWxpZGNlcnRkYXRh
+-----END CERTIFICATE-----`)
+
+	_, err := ParseCertificate(invalidCertPEM)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse certificate")
+}
+
+func TestCertificateBundle_Fields(t *testing.T) {
+	cfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(cfg)
+
+	bundle, err := generator.Generate()
+	require.NoError(t, err)
+
+	// Verify all fields are populated
+	assert.NotEmpty(t, bundle.CACert, "CACert should not be empty")
+	assert.NotEmpty(t, bundle.CAKey, "CAKey should not be empty")
+	assert.NotEmpty(t, bundle.ServerCert, "ServerCert should not be empty")
+	assert.NotEmpty(t, bundle.ServerKey, "ServerKey should not be empty")
+	assert.False(t, bundle.ExpiresAt.IsZero(), "ExpiresAt should not be zero")
+
+	// Verify expiry is in the future
+	assert.True(t, bundle.ExpiresAt.After(time.Now()))
+}
+
+func TestGenerator_GenerateCA_KeyUsage(t *testing.T) {
+	cfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(cfg)
+
+	caCertPEM, _, err := generator.GenerateCA()
+	require.NoError(t, err)
+
+	caCert, err := ParseCertificate(caCertPEM)
+	require.NoError(t, err)
+
+	// Verify CA properties
+	assert.True(t, caCert.IsCA)
+	assert.True(t, caCert.BasicConstraintsValid)
+	assert.Equal(t, 1, caCert.MaxPathLen)
+
+	// Verify key usage flags
+	expectedKeyUsage := x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature
+	assert.Equal(t, expectedKeyUsage, caCert.KeyUsage)
+}
+
+func TestGenerator_GenerateServerCert_KeyUsage(t *testing.T) {
+	cfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+	}
+	generator := NewGenerator(cfg)
+
+	caCertPEM, caKeyPEM, err := generator.GenerateCA()
+	require.NoError(t, err)
+
+	serverCertPEM, _, _, err := generator.GenerateServerCert(caCertPEM, caKeyPEM)
+	require.NoError(t, err)
+
+	serverCert, err := ParseCertificate(serverCertPEM)
+	require.NoError(t, err)
+
+	// Verify server cert properties
+	assert.False(t, serverCert.IsCA)
+	assert.True(t, serverCert.BasicConstraintsValid)
+
+	// Verify key usage flags
+	expectedKeyUsage := x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+	assert.Equal(t, expectedKeyUsage, serverCert.KeyUsage)
+
+	// Verify extended key usage
+	assert.Contains(t, serverCert.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
+}
+
+func TestGenerator_Generate_WithDifferentKeySizes(t *testing.T) {
+	tests := []struct {
+		name    string
+		keySize int
+	}{
+		{
+			name:    "2048 bit key",
+			keySize: 2048,
+		},
+		{
+			name:    "4096 bit key",
+			keySize: 4096,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &GeneratorConfig{
+				ServiceName:      "webhook-service",
+				ServiceNamespace: "default",
+				Validity:         365 * 24 * time.Hour,
+				KeySize:          tt.keySize,
+			}
+			generator := NewGenerator(cfg)
+
+			bundle, err := generator.Generate()
+			require.NoError(t, err)
+			assert.NotNil(t, bundle)
+
+			// Verify certificates are valid
+			caCert, err := ParseCertificate(bundle.CACert)
+			require.NoError(t, err)
+			assert.True(t, caCert.IsCA)
+
+			serverCert, err := ParseCertificate(bundle.ServerCert)
+			require.NoError(t, err)
+			assert.False(t, serverCert.IsCA)
+		})
+	}
+}
+
+func TestGenerator_Generate_WithDifferentValidities(t *testing.T) {
+	tests := []struct {
+		name     string
+		validity time.Duration
+	}{
+		{
+			name:     "1 day validity",
+			validity: 24 * time.Hour,
+		},
+		{
+			name:     "30 days validity",
+			validity: 30 * 24 * time.Hour,
+		},
+		{
+			name:     "365 days validity",
+			validity: 365 * 24 * time.Hour,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &GeneratorConfig{
+				ServiceName:      "webhook-service",
+				ServiceNamespace: "default",
+				Validity:         tt.validity,
+				KeySize:          2048,
+			}
+			generator := NewGenerator(cfg)
+
+			bundle, err := generator.Generate()
+			require.NoError(t, err)
+
+			// Verify expiry is approximately correct
+			expectedExpiry := time.Now().Add(tt.validity)
+			assert.WithinDuration(t, expectedExpiry, bundle.ExpiresAt, 5*time.Second)
+		})
+	}
+}
+
+func TestBuildServerCertTemplate(t *testing.T) {
+	cfg := &GeneratorConfig{
+		ServiceName:      "webhook-service",
+		ServiceNamespace: "default",
+		Validity:         365 * 24 * time.Hour,
+		KeySize:          2048,
+		DNSNames:         []string{"extra.dns.name"},
+	}
+	generator := NewGenerator(cfg)
+
+	expiresAt := time.Now().Add(cfg.Validity)
+	template := generator.buildServerCertTemplate(nil, expiresAt)
+
+	assert.Equal(t, "webhook-service", template.Subject.CommonName)
+	assert.Contains(t, template.Subject.Organization, CAOrganization)
+	assert.False(t, template.IsCA)
+	assert.True(t, template.BasicConstraintsValid)
+	assert.Equal(t, x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment, template.KeyUsage)
+	assert.Contains(t, template.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
+
+	// Verify DNS names
+	assert.Contains(t, template.DNSNames, "webhook-service")
+	assert.Contains(t, template.DNSNames, "webhook-service.default")
+	assert.Contains(t, template.DNSNames, "webhook-service.default.svc")
+	assert.Contains(t, template.DNSNames, "webhook-service.default.svc.cluster.local")
+	assert.Contains(t, template.DNSNames, "extra.dns.name")
+}

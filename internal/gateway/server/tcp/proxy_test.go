@@ -105,8 +105,9 @@ func TestProxy_Proxy(t *testing.T) {
 
 		// Create backend with no endpoints
 		backendSvc := &backend.Backend{
-			Name:      "test-backend",
-			Endpoints: []*backend.Endpoint{},
+			Name:         "test-backend",
+			Endpoints:    []*backend.Endpoint{},
+			LoadBalancer: backend.NewRoundRobinLB(),
 		}
 
 		err := proxy.Proxy(context.Background(), client, backendSvc, time.Second)
@@ -121,12 +122,13 @@ func TestProxy_Proxy(t *testing.T) {
 		defer server.Close()
 		defer client.Close()
 
-		// Create backend with unreachable endpoint
+		// Create backend with unreachable endpoint and properly initialized LoadBalancer
 		backendSvc := &backend.Backend{
 			Name: "test-backend",
 			Endpoints: []*backend.Endpoint{
 				{Address: "127.0.0.1", Port: 59999, Healthy: true}, // Unlikely to be listening
 			},
+			LoadBalancer: backend.NewRoundRobinLB(), // Initialize LoadBalancer to avoid nil pointer
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -177,6 +179,7 @@ func TestProxy_Proxy(t *testing.T) {
 			Endpoints: []*backend.Endpoint{
 				{Address: "127.0.0.1", Port: backendAddr.Port, Healthy: true},
 			},
+			LoadBalancer: backend.NewRoundRobinLB(),
 		}
 
 		// Start proxy in goroutine
@@ -299,8 +302,9 @@ func TestProxy_ProxyWithIdleTimeout(t *testing.T) {
 		defer client.Close()
 
 		backendSvc := &backend.Backend{
-			Name:      "test-backend",
-			Endpoints: []*backend.Endpoint{},
+			Name:         "test-backend",
+			Endpoints:    []*backend.Endpoint{},
+			LoadBalancer: backend.NewRoundRobinLB(),
 		}
 
 		err := proxy.ProxyWithIdleTimeout(context.Background(), client, backendSvc, time.Second, time.Second)
@@ -340,6 +344,7 @@ func TestProxy_ProxyWithIdleTimeout(t *testing.T) {
 			Endpoints: []*backend.Endpoint{
 				{Address: "127.0.0.1", Port: backendAddr.Port, Healthy: true},
 			},
+			LoadBalancer: backend.NewRoundRobinLB(),
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1125,6 +1130,7 @@ func TestProxy_ProxyWithIdleTimeout_Success(t *testing.T) {
 			Endpoints: []*backend.Endpoint{
 				{Address: "127.0.0.1", Port: backendAddr.Port, Healthy: true},
 			},
+			LoadBalancer: backend.NewRoundRobinLB(),
 		}
 
 		// Start proxy in goroutine

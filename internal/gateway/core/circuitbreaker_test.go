@@ -298,3 +298,100 @@ func TestCircuitBreakerCore_WithLogger(t *testing.T) {
 	// Just ensure it doesn't panic when logging
 	core.Allow("test-service")
 }
+
+func TestCircuitBreakerCore_ShouldSkip_NilMap(t *testing.T) {
+	t.Parallel()
+
+	// Create core without initializing skip paths to test nil map case
+	core := &CircuitBreakerCore{
+		skipPaths: nil,
+	}
+
+	assert.False(t, core.ShouldSkip("/any/path"))
+}
+
+func TestCircuitBreakerCore_Execute_WithNameFunc(t *testing.T) {
+	t.Parallel()
+
+	registry := circuitbreaker.NewRegistry(nil, nil)
+	core := NewCircuitBreakerCore(CircuitBreakerCoreConfig{
+		Registry: registry,
+		NameFunc: func(identifier string) string {
+			return "prefix:" + identifier
+		},
+	})
+
+	executed := false
+	err := core.Execute(context.Background(), "test-service", func() error {
+		executed = true
+		return nil
+	})
+
+	assert.NoError(t, err)
+	assert.True(t, executed)
+
+	// Verify the circuit breaker was created with the prefixed name
+	cb := registry.Get("prefix:test-service")
+	assert.NotNil(t, cb)
+}
+
+func TestCircuitBreakerCore_RecordSuccess_WithNameFunc(t *testing.T) {
+	t.Parallel()
+
+	registry := circuitbreaker.NewRegistry(nil, nil)
+	core := NewCircuitBreakerCore(CircuitBreakerCoreConfig{
+		Registry: registry,
+		NameFunc: func(identifier string) string {
+			return "prefix:" + identifier
+		},
+	})
+
+	// Create the circuit breaker first
+	core.Allow("test-service")
+	core.RecordSuccess("test-service")
+
+	// Verify the circuit breaker was updated with the prefixed name
+	cb := registry.Get("prefix:test-service")
+	assert.NotNil(t, cb)
+	stats := cb.Stats()
+	assert.Equal(t, 1, stats.Successes)
+}
+
+func TestCircuitBreakerCore_RecordFailure_WithNameFunc(t *testing.T) {
+	t.Parallel()
+
+	registry := circuitbreaker.NewRegistry(nil, nil)
+	core := NewCircuitBreakerCore(CircuitBreakerCoreConfig{
+		Registry: registry,
+		NameFunc: func(identifier string) string {
+			return "prefix:" + identifier
+		},
+	})
+
+	// Create the circuit breaker first
+	core.Allow("test-service")
+	core.RecordFailure("test-service")
+
+	// Verify the circuit breaker was updated with the prefixed name
+	cb := registry.Get("prefix:test-service")
+	assert.NotNil(t, cb)
+	stats := cb.Stats()
+	assert.Equal(t, 1, stats.Failures)
+}
+
+func TestCircuitBreakerCore_GetCircuitBreaker_WithNameFunc(t *testing.T) {
+	t.Parallel()
+
+	registry := circuitbreaker.NewRegistry(nil, nil)
+	core := NewCircuitBreakerCore(CircuitBreakerCoreConfig{
+		Registry: registry,
+		NameFunc: func(identifier string) string {
+			return "prefix:" + identifier
+		},
+	})
+
+	cb := core.GetCircuitBreaker("test-service")
+
+	assert.NotNil(t, cb)
+	assert.Equal(t, "prefix:test-service", cb.Name())
+}

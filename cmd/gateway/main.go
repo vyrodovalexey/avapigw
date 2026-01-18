@@ -93,7 +93,7 @@ func main() {
 
 	sigCh := setupSignalHandler()
 
-	components := createServerComponents(ctx, cfg, state, configFilePath, logger, cancel)
+	components := createServerComponents(ctx, cfg, logger, cancel)
 
 	g, gCtx := errgroup.WithContext(ctx)
 	startAllServers(g, gCtx, cfg, components, state, configFilePath, logger)
@@ -155,8 +155,6 @@ func setupSignalHandler() chan os.Signal {
 func createServerComponents(
 	ctx context.Context,
 	cfg *config.Config,
-	_ *configState,
-	_ string,
 	logger *zap.Logger,
 	cancel context.CancelFunc,
 ) *serverComponents {
@@ -517,35 +515,51 @@ func newLogger(level, format string) (*zap.Logger, error) {
 }
 
 // setupMiddleware configures middleware for the HTTP server.
+// All middleware must be registered before the server starts.
+// Panics if middleware registration fails (indicates programming error).
 func setupMiddleware(server *httpserver.Server, cfg *config.Config, logger *zap.Logger) {
 	// Recovery middleware (should be first)
-	server.Use(middleware.Recovery(logger))
+	if err := server.Use(middleware.Recovery(logger)); err != nil {
+		logger.Fatal("failed to register recovery middleware", zap.Error(err))
+	}
 
 	// Request ID middleware
-	server.Use(middleware.RequestID())
+	if err := server.Use(middleware.RequestID()); err != nil {
+		logger.Fatal("failed to register request ID middleware", zap.Error(err))
+	}
 
 	// Logging middleware
-	server.Use(middleware.LoggingWithConfig(middleware.LoggingConfig{
+	if err := server.Use(middleware.LoggingWithConfig(middleware.LoggingConfig{
 		Logger:          logger,
 		SkipHealthCheck: true,
-	}))
+	})); err != nil {
+		logger.Fatal("failed to register logging middleware", zap.Error(err))
+	}
 
 	// Tracing middleware (if enabled)
 	if cfg.TracingEnabled {
-		server.Use(middleware.TracingWithConfig(middleware.TracingConfig{
+		if err := server.Use(middleware.TracingWithConfig(middleware.TracingConfig{
 			ServiceName: cfg.ServiceName,
 			SkipPaths:   []string{"/health", "/healthz", "/readyz", "/livez", "/metrics"},
-		}))
+		})); err != nil {
+			logger.Fatal("failed to register tracing middleware", zap.Error(err))
+		}
 	}
 
 	// CORS middleware
-	server.Use(middleware.CORS())
+	if err := server.Use(middleware.CORS()); err != nil {
+		logger.Fatal("failed to register CORS middleware", zap.Error(err))
+	}
 
 	// Security headers middleware
-	server.Use(middleware.SecurityHeaders())
+	if err := server.Use(middleware.SecurityHeaders()); err != nil {
+		logger.Fatal("failed to register security headers middleware", zap.Error(err))
+	}
 
 	// Timeout middleware
-	server.Use(middleware.Timeout(cfg.ReadTimeout))
+	if err := server.Use(middleware.Timeout(cfg.ReadTimeout)); err != nil {
+		logger.Fatal("failed to register timeout middleware", zap.Error(err))
+	}
 }
 
 // startHealthServer starts the health check server on a separate port.
@@ -573,6 +587,7 @@ func startHealthServer(ctx context.Context, cfg *config.Config, handler *health.
 	errCh := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("health server failed to start", zap.Error(err))
 			errCh <- err
 		}
 	}()
@@ -582,8 +597,14 @@ func startHealthServer(ctx context.Context, cfg *config.Config, handler *health.
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HealthServerShutdownTimeout)
 		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("failed to shutdown health server gracefully", zap.Error(err))
+			return err
+		}
+		logger.Info("health server shutdown complete")
+		return nil
 	case err := <-errCh:
+		logger.Error("health server error", zap.Error(err))
 		return err
 	}
 }
@@ -640,6 +661,7 @@ func startMetricsServer(ctx context.Context, cfg *config.Config, logger *zap.Log
 	errCh := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("metrics server failed to start", zap.Error(err))
 			errCh <- err
 		}
 	}()
@@ -649,8 +671,14 @@ func startMetricsServer(ctx context.Context, cfg *config.Config, logger *zap.Log
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.MetricsServerShutdownTimeout)
 		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("failed to shutdown metrics server gracefully", zap.Error(err))
+			return err
+		}
+		logger.Info("metrics server shutdown complete")
+		return nil
 	case err := <-errCh:
+		logger.Error("metrics server error", zap.Error(err))
 		return err
 	}
 }

@@ -860,3 +860,283 @@ func TestProviderManagerCloseWithMultipleProviders(t *testing.T) {
 	err = pm.Close()
 	assert.Error(t, err)
 }
+
+// TestCachingProvider_CacheHitAndMiss tests cache hit and miss scenarios
+func TestCachingProvider_CacheHitAndMiss(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create env provider
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "CACHE_HIT_MISS_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	// Set env var
+	os.Setenv("CACHE_HIT_MISS_TEST_SECRET", "value")
+	defer os.Unsetenv("CACHE_HIT_MISS_TEST_SECRET")
+
+	// Wrap with caching
+	cachingProvider := NewCachingProvider(envProvider, 1*time.Minute, logger)
+
+	// First call - cache miss
+	secret1, err := cachingProvider.GetSecret(ctx, "secret")
+	require.NoError(t, err)
+	assert.NotNil(t, secret1)
+
+	// Second call - cache hit
+	secret2, err := cachingProvider.GetSecret(ctx, "secret")
+	require.NoError(t, err)
+	assert.NotNil(t, secret2)
+
+	// Should be the same object (from cache)
+	assert.Equal(t, secret1.Name, secret2.Name)
+}
+
+// TestCachingProvider_CacheInvalidation tests cache invalidation
+func TestCachingProvider_CacheInvalidation(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create local provider
+	tmpDir, err := os.MkdirTemp("", "cache-invalidation-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	localProvider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   logger,
+	})
+	require.NoError(t, err)
+
+	// Wrap with caching
+	cachingProvider := NewCachingProvider(localProvider, 1*time.Minute, logger)
+
+	// Write initial secret
+	err = cachingProvider.WriteSecret(ctx, "invalidation-test", map[string][]byte{
+		"key": []byte("initial"),
+	})
+	require.NoError(t, err)
+
+	// Read it (should be cached)
+	secret1, err := cachingProvider.GetSecret(ctx, "invalidation-test")
+	require.NoError(t, err)
+	val1, _ := secret1.GetString("key")
+	assert.Equal(t, "initial", val1)
+
+	// Write new value (should invalidate cache)
+	err = cachingProvider.WriteSecret(ctx, "invalidation-test", map[string][]byte{
+		"key": []byte("updated"),
+	})
+	require.NoError(t, err)
+
+	// Read again (should get new value)
+	secret2, err := cachingProvider.GetSecret(ctx, "invalidation-test")
+	require.NoError(t, err)
+	val2, _ := secret2.GetString("key")
+	assert.Equal(t, "updated", val2)
+}
+
+// TestCachingProvider_DeleteInvalidatesCache tests that delete invalidates cache
+func TestCachingProvider_DeleteInvalidatesCache(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create local provider
+	tmpDir, err := os.MkdirTemp("", "cache-delete-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	localProvider, err := NewLocalProvider(&LocalProviderConfig{
+		BasePath: tmpDir,
+		Logger:   logger,
+	})
+	require.NoError(t, err)
+
+	// Wrap with caching
+	cachingProvider := NewCachingProvider(localProvider, 1*time.Minute, logger)
+
+	// Write secret
+	err = cachingProvider.WriteSecret(ctx, "delete-cache-test", map[string][]byte{
+		"key": []byte("value"),
+	})
+	require.NoError(t, err)
+
+	// Read it (should be cached)
+	_, err = cachingProvider.GetSecret(ctx, "delete-cache-test")
+	require.NoError(t, err)
+
+	// Delete (should invalidate cache)
+	err = cachingProvider.DeleteSecret(ctx, "delete-cache-test")
+	require.NoError(t, err)
+
+	// Read again (should fail)
+	_, err = cachingProvider.GetSecret(ctx, "delete-cache-test")
+	assert.Error(t, err)
+}
+
+// TestProviderManager_HealthCheckAllProviders tests health check for all providers
+func TestProviderManager_HealthCheckAllProviders(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create multiple providers
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "HEALTH_ALL_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	noopProvider := NewNoopProvider(logger)
+
+	pm := NewProviderManager(envProvider, logger)
+	pm.AddProvider(noopProvider)
+
+	// Health check all
+	results := pm.HealthCheck(ctx)
+	assert.Len(t, results, 2)
+	assert.NoError(t, results[ProviderTypeEnv])
+	assert.NoError(t, results[ProviderType("noop")])
+}
+
+// TestNewProviderFromConfig_VaultWithTLS tests creating vault provider with TLS config
+func TestNewProviderFromConfig_VaultWithTLS(t *testing.T) {
+	ctx := context.Background()
+	logger := zap.NewNop()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := config.DefaultConfig()
+	cfg.SecretsProvider = ""
+	cfg.VaultEnabled = true
+	cfg.VaultAddress = "https://vault.example.com:8200"
+	cfg.VaultAuthMethod = "token"
+	cfg.VaultCACert = "/path/to/ca.crt"
+	cfg.VaultTLSSkipVerify = true
+
+	// This will fail because we can't connect to Vault, but it tests the TLS config path
+	_, err := NewProviderFromConfig(ctx, cfg, k8sClient, logger)
+	assert.Error(t, err)
+}
+
+// TestBuildVaultConfig_AllFields tests buildVaultConfig with all fields
+func TestBuildVaultConfig_AllFields(t *testing.T) {
+	logger := zap.NewNop()
+
+	cfg := config.DefaultConfig()
+	cfg.VaultAddress = "https://vault.example.com:8200"
+	cfg.VaultNamespace = "my-namespace"
+	cfg.VaultAuthMethod = "kubernetes"
+	cfg.VaultRole = "my-role"
+	cfg.VaultMountPath = "kubernetes"
+	cfg.VaultSecretMountPoint = "kv"
+	cfg.VaultTimeout = 60 * time.Second
+	cfg.VaultMaxRetries = 5
+	cfg.VaultRetryWaitMin = 1 * time.Second
+	cfg.VaultRetryWaitMax = 10 * time.Second
+	cfg.VaultCACert = "/path/to/ca.crt"
+	cfg.VaultClientCert = "/path/to/client.crt"
+	cfg.VaultTLSSkipVerify = false
+
+	vaultCfg := buildVaultConfig(cfg, logger)
+
+	assert.Equal(t, "https://vault.example.com:8200", vaultCfg.Address)
+	assert.Equal(t, "my-namespace", vaultCfg.Namespace)
+	assert.Equal(t, "kubernetes", vaultCfg.AuthMethod)
+	assert.Equal(t, "my-role", vaultCfg.Role)
+	assert.Equal(t, "kubernetes", vaultCfg.MountPath)
+	assert.Equal(t, "kv", vaultCfg.SecretMountPoint)
+	assert.Equal(t, 60*time.Second, vaultCfg.Timeout)
+	assert.Equal(t, 5, vaultCfg.MaxRetries)
+	assert.Equal(t, 1*time.Second, vaultCfg.RetryWaitMin)
+	assert.Equal(t, 10*time.Second, vaultCfg.RetryWaitMax)
+	assert.NotNil(t, vaultCfg.TLSConfig)
+	assert.False(t, vaultCfg.TLSConfig.InsecureSkipVerify)
+}
+
+// TestBuildVaultConfig_NoTLS tests buildVaultConfig without TLS
+func TestBuildVaultConfig_NoTLS(t *testing.T) {
+	logger := zap.NewNop()
+
+	cfg := config.DefaultConfig()
+	cfg.VaultAddress = "http://vault.example.com:8200"
+	cfg.VaultCACert = ""
+	cfg.VaultClientCert = ""
+	cfg.VaultTLSSkipVerify = false
+
+	vaultCfg := buildVaultConfig(cfg, logger)
+
+	assert.Nil(t, vaultCfg.TLSConfig)
+}
+
+// TestNoopProvider_AllMethods tests all NoopProvider methods
+func TestNoopProvider_AllMethods(t *testing.T) {
+	logger := zap.NewNop()
+	provider := NewNoopProvider(logger)
+	ctx := context.Background()
+
+	// Type
+	assert.Equal(t, ProviderType("noop"), provider.Type())
+
+	// GetSecret
+	secret, err := provider.GetSecret(ctx, "any-path")
+	assert.Nil(t, secret)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrSecretNotFound)
+
+	// ListSecrets
+	secrets, err := provider.ListSecrets(ctx, "any-path")
+	assert.NoError(t, err)
+	assert.Empty(t, secrets)
+
+	// WriteSecret
+	err = provider.WriteSecret(ctx, "any-path", map[string][]byte{"key": []byte("value")})
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrReadOnly)
+
+	// DeleteSecret
+	err = provider.DeleteSecret(ctx, "any-path")
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrReadOnly)
+
+	// IsReadOnly
+	assert.True(t, provider.IsReadOnly())
+
+	// HealthCheck
+	err = provider.HealthCheck(ctx)
+	assert.NoError(t, err)
+
+	// Close
+	err = provider.Close()
+	assert.NoError(t, err)
+}
+
+// TestProviderManager_GetSecretFromProvider_Success tests getting secret from specific provider
+func TestProviderManager_GetSecretFromProvider_Success(t *testing.T) {
+	logger := zap.NewNop()
+	ctx := context.Background()
+
+	// Create env provider
+	envProvider, err := NewEnvProvider(&EnvProviderConfig{
+		Prefix: "GET_FROM_PROVIDER_TEST_",
+		Logger: logger,
+	})
+	require.NoError(t, err)
+
+	// Set env var
+	os.Setenv("GET_FROM_PROVIDER_TEST_SECRET", "value")
+	defer os.Unsetenv("GET_FROM_PROVIDER_TEST_SECRET")
+
+	pm := NewProviderManager(envProvider, logger)
+
+	// Get secret from specific provider
+	secret, err := pm.GetSecretFromProvider(ctx, ProviderTypeEnv, "secret")
+	require.NoError(t, err)
+	assert.NotNil(t, secret)
+	val, ok := secret.GetString("value")
+	assert.True(t, ok)
+	assert.Equal(t, "value", val)
+}

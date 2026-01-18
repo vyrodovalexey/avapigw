@@ -495,3 +495,548 @@ func TestInjectorConstants(t *testing.T) {
 	assert.Equal(t, "app.kubernetes.io/managed-by", WebhookConfigLabelKey)
 	assert.Equal(t, "avapigw-operator", WebhookConfigLabelValue)
 }
+
+func TestInjector_InjectIntoValidatingWebhooks_WebhookNotFound(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := &InjectorConfig{
+		Namespace:                   "default",
+		ValidatingWebhookConfigName: "non-existent-webhook",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	caBundle := []byte("test-ca-bundle")
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoValidatingWebhooks(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get ValidatingWebhookConfiguration")
+}
+
+func TestInjector_InjectIntoMutatingWebhooks_WebhookNotFound(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := &InjectorConfig{
+		Namespace:                 "default",
+		MutatingWebhookConfigName: "non-existent-webhook",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	caBundle := []byte("test-ca-bundle")
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoMutatingWebhooks(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get MutatingWebhookConfiguration")
+}
+
+func TestInjector_InjectIntoMutatingWebhooks_AlreadyHasCorrectCABundle(t *testing.T) {
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	reinvocationPolicy := admissionregistrationv1.NeverReinvocationPolicy
+	caBundle := []byte("test-ca-bundle")
+
+	webhook := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-mutating-webhook",
+		},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{
+			{
+				Name:               "test.webhook.example.com",
+				SideEffects:        &sideEffects,
+				ReinvocationPolicy: &reinvocationPolicy,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+					CABundle: caBundle, // Already has the correct CA bundle
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(webhook).
+		Build()
+
+	cfg := &InjectorConfig{
+		Namespace:                 "default",
+		MutatingWebhookConfigName: "test-mutating-webhook",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoMutatingWebhooks(ctx)
+	require.NoError(t, err)
+}
+
+func TestInjector_InjectIntoValidatingWebhooks_MultipleWebhooks(t *testing.T) {
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+
+	webhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-validating-webhook",
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
+			{
+				Name:        "webhook1.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+			{
+				Name:        "webhook2.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(webhook).
+		Build()
+
+	cfg := &InjectorConfig{
+		Namespace:                   "default",
+		ValidatingWebhookConfigName: "test-validating-webhook",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	caBundle := []byte("test-ca-bundle")
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoValidatingWebhooks(ctx)
+	require.NoError(t, err)
+
+	// Verify CA bundle was injected into all webhooks
+	updatedWebhook := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+	err = k8sClient.Get(ctx, client.ObjectKey{Name: "test-validating-webhook"}, updatedWebhook)
+	require.NoError(t, err)
+	assert.Equal(t, caBundle, updatedWebhook.Webhooks[0].ClientConfig.CABundle)
+	assert.Equal(t, caBundle, updatedWebhook.Webhooks[1].ClientConfig.CABundle)
+}
+
+func TestInjector_InjectIntoMutatingWebhooks_MultipleWebhooks(t *testing.T) {
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	reinvocationPolicy := admissionregistrationv1.NeverReinvocationPolicy
+
+	webhook := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-mutating-webhook",
+		},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{
+			{
+				Name:               "webhook1.example.com",
+				SideEffects:        &sideEffects,
+				ReinvocationPolicy: &reinvocationPolicy,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+			{
+				Name:               "webhook2.example.com",
+				SideEffects:        &sideEffects,
+				ReinvocationPolicy: &reinvocationPolicy,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(webhook).
+		Build()
+
+	cfg := &InjectorConfig{
+		Namespace:                 "default",
+		MutatingWebhookConfigName: "test-mutating-webhook",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	caBundle := []byte("test-ca-bundle")
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoMutatingWebhooks(ctx)
+	require.NoError(t, err)
+
+	// Verify CA bundle was injected into all webhooks
+	updatedWebhook := &admissionregistrationv1.MutatingWebhookConfiguration{}
+	err = k8sClient.Get(ctx, client.ObjectKey{Name: "test-mutating-webhook"}, updatedWebhook)
+	require.NoError(t, err)
+	assert.Equal(t, caBundle, updatedWebhook.Webhooks[0].ClientConfig.CABundle)
+	assert.Equal(t, caBundle, updatedWebhook.Webhooks[1].ClientConfig.CABundle)
+}
+
+func TestInjector_IsManaged_NilLabels(t *testing.T) {
+	webhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "test-webhook",
+			Labels: nil, // No labels
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := &InjectorConfig{
+		Namespace: "default",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	assert.False(t, injector.isManaged(webhook))
+}
+
+func TestInjector_IsManaged_EmptyLabels(t *testing.T) {
+	webhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "test-webhook",
+			Labels: map[string]string{}, // Empty labels
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := &InjectorConfig{
+		Namespace: "default",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	assert.False(t, injector.isManaged(webhook))
+}
+
+func TestInjector_IsManaged_WrongLabelValue(t *testing.T) {
+	webhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-webhook",
+			Labels: map[string]string{
+				WebhookConfigLabelKey: "wrong-value",
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := &InjectorConfig{
+		Namespace: "default",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	assert.False(t, injector.isManaged(webhook))
+}
+
+func TestInjector_IsManaged_AppNameLabel(t *testing.T) {
+	webhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-webhook",
+			Labels: map[string]string{
+				"app.kubernetes.io/name": "avapigw",
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := &InjectorConfig{
+		Namespace: "default",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	assert.True(t, injector.isManaged(webhook))
+}
+
+func TestInjector_InjectIntoValidatingWebhooks_PartialUpdate(t *testing.T) {
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	oldCABundle := []byte("old-ca-bundle")
+	newCABundle := []byte("new-ca-bundle")
+
+	webhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-validating-webhook",
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
+			{
+				Name:        "webhook1.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+					CABundle: oldCABundle, // Has old CA bundle
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+			{
+				Name:        "webhook2.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+					// No CA bundle
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(webhook).
+		Build()
+
+	cfg := &InjectorConfig{
+		Namespace:                   "default",
+		ValidatingWebhookConfigName: "test-validating-webhook",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+	injector.SetCABundle(newCABundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoValidatingWebhooks(ctx)
+	require.NoError(t, err)
+
+	// Verify both webhooks now have the new CA bundle
+	updatedWebhook := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+	err = k8sClient.Get(ctx, client.ObjectKey{Name: "test-validating-webhook"}, updatedWebhook)
+	require.NoError(t, err)
+	assert.Equal(t, newCABundle, updatedWebhook.Webhooks[0].ClientConfig.CABundle)
+	assert.Equal(t, newCABundle, updatedWebhook.Webhooks[1].ClientConfig.CABundle)
+}
+
+func TestInjector_InjectAll_PartialFailure(t *testing.T) {
+	// Create only validating webhook, mutating webhook doesn't exist
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	validatingWebhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "validating-webhook",
+			Labels: map[string]string{
+				WebhookConfigLabelKey: WebhookConfigLabelValue,
+			},
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
+			{
+				Name:        "validating.webhook.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(validatingWebhook).
+		Build()
+
+	cfg := &InjectorConfig{
+		Namespace:                   "default",
+		ValidatingWebhookConfigName: "validating-webhook",
+		MutatingWebhookConfigName:   "non-existent-mutating-webhook",
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	caBundle := []byte("test-ca-bundle")
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectAll(ctx)
+	// Should return error because mutating webhook doesn't exist
+	assert.Error(t, err)
+
+	// But validating webhook should still be updated
+	updatedValidating := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+	err = k8sClient.Get(ctx, client.ObjectKey{Name: "validating-webhook"}, updatedValidating)
+	require.NoError(t, err)
+	assert.Equal(t, caBundle, updatedValidating.Webhooks[0].ClientConfig.CABundle)
+}
+
+func TestInjector_InjectIntoValidatingWebhooks_NoManagedWebhooks(t *testing.T) {
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+
+	// Create webhook without managed-by label
+	unmanagedWebhook := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unmanaged-webhook",
+			Labels: map[string]string{
+				"some-other-label": "some-value",
+			},
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
+			{
+				Name:        "unmanaged.webhook.example.com",
+				SideEffects: &sideEffects,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(unmanagedWebhook).
+		Build()
+
+	cfg := &InjectorConfig{
+		Namespace: "default",
+		// No specific webhook name, should look for managed webhooks
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	caBundle := []byte("test-ca-bundle")
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoValidatingWebhooks(ctx)
+	require.NoError(t, err)
+
+	// Verify unmanaged webhook was not modified
+	updatedWebhook := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+	err = k8sClient.Get(ctx, client.ObjectKey{Name: "unmanaged-webhook"}, updatedWebhook)
+	require.NoError(t, err)
+	assert.Nil(t, updatedWebhook.Webhooks[0].ClientConfig.CABundle)
+}
+
+func TestInjector_InjectIntoMutatingWebhooks_NoManagedWebhooks(t *testing.T) {
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	reinvocationPolicy := admissionregistrationv1.NeverReinvocationPolicy
+
+	// Create webhook without managed-by label
+	unmanagedWebhook := &admissionregistrationv1.MutatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unmanaged-webhook",
+			Labels: map[string]string{
+				"some-other-label": "some-value",
+			},
+		},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{
+			{
+				Name:               "unmanaged.webhook.example.com",
+				SideEffects:        &sideEffects,
+				ReinvocationPolicy: &reinvocationPolicy,
+				ClientConfig: admissionregistrationv1.WebhookClientConfig{
+					Service: &admissionregistrationv1.ServiceReference{
+						Name:      "webhook-service",
+						Namespace: "default",
+					},
+				},
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, admissionregistrationv1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(unmanagedWebhook).
+		Build()
+
+	cfg := &InjectorConfig{
+		Namespace: "default",
+		// No specific webhook name, should look for managed webhooks
+	}
+
+	logger := zap.NewNop()
+	injector := NewInjector(cfg, k8sClient, logger)
+
+	caBundle := []byte("test-ca-bundle")
+	injector.SetCABundle(caBundle)
+
+	ctx := context.Background()
+	err := injector.InjectIntoMutatingWebhooks(ctx)
+	require.NoError(t, err)
+
+	// Verify unmanaged webhook was not modified
+	updatedWebhook := &admissionregistrationv1.MutatingWebhookConfiguration{}
+	err = k8sClient.Get(ctx, client.ObjectKey{Name: "unmanaged-webhook"}, updatedWebhook)
+	require.NoError(t, err)
+	assert.Nil(t, updatedWebhook.Webhooks[0].ClientConfig.CABundle)
+}

@@ -28,7 +28,7 @@ func TestNewTransientError(t *testing.T) {
 	assert.Equal(t, "default/my-secret", reconcileErr.Resource)
 	assert.True(t, reconcileErr.Retryable)
 	assert.False(t, reconcileErr.UserActionRequired)
-	assert.Contains(t, reconcileErr.Error(), "Transient")
+	assert.Contains(t, reconcileErr.Error(), "transient")
 	assert.Contains(t, reconcileErr.Error(), "syncSecret")
 	assert.Contains(t, reconcileErr.Error(), "default/my-secret")
 }
@@ -85,7 +85,7 @@ func TestReconcileError_Error(t *testing.T) {
 				Resource: "default/my-secret",
 				Err:      errors.New("timeout"),
 			},
-			contains: []string{"Transient", "syncSecret", "default/my-secret", "timeout"},
+			contains: []string{"transient", "syncSecret", "default/my-secret", "timeout"},
 		},
 		{
 			name: "without resource",
@@ -94,7 +94,7 @@ func TestReconcileError_Error(t *testing.T) {
 				Op:   "validateConfig",
 				Err:  errors.New("invalid"),
 			},
-			contains: []string{"Permanent", "validateConfig", "invalid"},
+			contains: []string{"permanent", "validateConfig", "invalid"},
 		},
 	}
 
@@ -787,4 +787,361 @@ func TestErrorHandler_DetermineResult_AllErrorTypes(t *testing.T) {
 			assert.Equal(t, tt.expectRequeue, result.Requeue)
 		})
 	}
+}
+
+// ============================================================================
+// safeIntToInt32 Tests
+// ============================================================================
+
+func TestSafeIntToInt32(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    int
+		expected int32
+	}{
+		{
+			name:     "zero",
+			input:    0,
+			expected: 0,
+		},
+		{
+			name:     "positive small number",
+			input:    100,
+			expected: 100,
+		},
+		{
+			name:     "negative number returns zero",
+			input:    -1,
+			expected: 0,
+		},
+		{
+			name:     "negative large number returns zero",
+			input:    -1000000,
+			expected: 0,
+		},
+		{
+			name:     "max int32",
+			input:    2147483647,
+			expected: 2147483647,
+		},
+		{
+			name:     "overflow - larger than max int32",
+			input:    2147483648, // max int32 + 1
+			expected: 2147483647, // clamped to max int32
+		},
+		{
+			name:     "very large number",
+			input:    9999999999,
+			expected: 2147483647, // clamped to max int32
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := safeIntToInt32(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// ============================================================================
+// IsTransient/IsPermanent/IsValidation/IsDependency with non-ReconcileError Tests
+// ============================================================================
+
+func TestIsTransient_NonReconcileError(t *testing.T) {
+	// Test with a regular error (not ReconcileError)
+	regularErr := errors.New("some regular error")
+	assert.False(t, IsTransient(regularErr))
+}
+
+func TestIsPermanent_NonReconcileError(t *testing.T) {
+	// Test with a regular error (not ReconcileError)
+	regularErr := errors.New("some regular error")
+	assert.False(t, IsPermanent(regularErr))
+}
+
+func TestIsValidation_NonReconcileError(t *testing.T) {
+	// Test with a regular error (not ReconcileError)
+	regularErr := errors.New("some regular error")
+	assert.False(t, IsValidation(regularErr))
+}
+
+func TestIsDependency_NonReconcileError(t *testing.T) {
+	// Test with a regular error (not ReconcileError)
+	regularErr := errors.New("some regular error")
+	assert.False(t, IsDependency(regularErr))
+}
+
+// ============================================================================
+// isNetworkError Additional Tests
+// ============================================================================
+
+func TestIsNetworkError_SyscallECONNREFUSED(t *testing.T) {
+	// Test with syscall.ECONNREFUSED directly
+	err := syscall.ECONNREFUSED
+	assert.True(t, isNetworkError(err))
+}
+
+func TestIsNetworkError_NetError(t *testing.T) {
+	// Test with a net.Error implementation
+	netErr := &net.DNSError{
+		Err:         "no such host",
+		Name:        "example.com",
+		IsTemporary: true,
+	}
+	assert.True(t, isNetworkError(netErr))
+}
+
+func TestIsNetworkError_NetworkUnreachable(t *testing.T) {
+	// Test with "network is unreachable" message
+	err := errors.New("dial tcp: network is unreachable")
+	assert.True(t, isNetworkError(err))
+}
+
+func TestIsNetworkError_ConnectionTimedOut(t *testing.T) {
+	// Test with "connection timed out" message
+	err := errors.New("dial tcp: connection timed out")
+	assert.True(t, isNetworkError(err))
+}
+
+// ============================================================================
+// logError Additional Tests
+// ============================================================================
+
+func TestErrorHandler_LogError_AllErrorTypes(t *testing.T) {
+	logger := logr.Discard()
+	handler := NewErrorHandler(logger, nil)
+
+	obj := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-resource",
+			Namespace: "default",
+		},
+	}
+
+	tests := []struct {
+		name      string
+		errorType ErrorType
+	}{
+		{name: "transient", errorType: ErrorTypeTransient},
+		{name: "permanent", errorType: ErrorTypePermanent},
+		{name: "validation", errorType: ErrorTypeValidation},
+		{name: "dependency", errorType: ErrorTypeDependency},
+		{name: "internal", errorType: ErrorTypeInternal},
+		{name: "unknown", errorType: ErrorType("unknown")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &ReconcileError{
+				Type:               tt.errorType,
+				Op:                 "test",
+				Resource:           "default/test",
+				Err:                errors.New("test error"),
+				Message:            "test message",
+				Retryable:          true,
+				UserActionRequired: false,
+			}
+			// Should not panic
+			handler.logError(obj, err)
+		})
+	}
+}
+
+// ============================================================================
+// ClassifyError Additional Tests
+// ============================================================================
+
+func TestClassifyError_InvalidAPIError(t *testing.T) {
+	// Test with apierrors.IsInvalid
+	invalidErr := apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "Secret"},
+		"my-secret",
+		nil,
+	)
+	result := ClassifyError("testOp", "testResource", invalidErr)
+	assert.Equal(t, ErrorTypeValidation, result.Type)
+	assert.False(t, result.Retryable)
+}
+
+func TestClassifyError_TimeoutAPIError(t *testing.T) {
+	// Test with apierrors.IsTimeout
+	timeoutErr := apierrors.NewTimeoutError("timeout", 30)
+	result := ClassifyError("testOp", "testResource", timeoutErr)
+	assert.Equal(t, ErrorTypeTransient, result.Type)
+	assert.True(t, result.Retryable)
+}
+
+// ============================================================================
+// TASK-007: Tests for Error Formatting
+// ============================================================================
+
+func TestReconcileError_Error_LowercaseFormat(t *testing.T) {
+	tests := []struct {
+		name         string
+		errorType    ErrorType
+		op           string
+		resource     string
+		err          error
+		wantContains []string
+	}{
+		{
+			name:      "transient error is lowercase",
+			errorType: ErrorTypeTransient,
+			op:        "syncSecret",
+			resource:  "default/my-secret",
+			err:       errors.New("connection timeout"),
+			wantContains: []string{
+				"transient", // lowercase error type
+				"syncSecret",
+				"default/my-secret",
+				"connection timeout",
+			},
+		},
+		{
+			name:      "permanent error is lowercase",
+			errorType: ErrorTypePermanent,
+			op:        "validateConfig",
+			resource:  "default/my-gateway",
+			err:       errors.New("invalid configuration"),
+			wantContains: []string{
+				"permanent", // lowercase error type
+				"validateConfig",
+				"default/my-gateway",
+				"invalid configuration",
+			},
+		},
+		{
+			name:      "validation error is lowercase",
+			errorType: ErrorTypeValidation,
+			op:        "validateTLS",
+			resource:  "default/my-gateway",
+			err:       errors.New("invalid TLS config"),
+			wantContains: []string{
+				"validation", // lowercase error type
+				"validateTLS",
+				"default/my-gateway",
+				"invalid TLS config",
+			},
+		},
+		{
+			name:      "dependency error is lowercase",
+			errorType: ErrorTypeDependency,
+			op:        "getSecret",
+			resource:  "default/my-secret",
+			err:       errors.New("secret not found"),
+			wantContains: []string{
+				"dependency", // lowercase error type
+				"getSecret",
+				"default/my-secret",
+				"secret not found",
+			},
+		},
+		{
+			name:      "internal error is lowercase",
+			errorType: ErrorTypeInternal,
+			op:        "processRoute",
+			resource:  "default/my-route",
+			err:       errors.New("unexpected nil pointer"),
+			wantContains: []string{
+				"internal", // lowercase error type
+				"processRoute",
+				"default/my-route",
+				"unexpected nil pointer",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconcileErr := &ReconcileError{
+				Type:     tt.errorType,
+				Op:       tt.op,
+				Resource: tt.resource,
+				Err:      tt.err,
+			}
+
+			errStr := reconcileErr.Error()
+
+			for _, want := range tt.wantContains {
+				assert.Contains(t, errStr, want)
+			}
+
+			// Verify the error type is lowercase in the output
+			assert.NotContains(t, errStr, string(tt.errorType), "error type should be lowercase")
+		})
+	}
+}
+
+func TestWrapWithContext_EmptyResource(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		op           string
+		resource     string
+		ctx          string
+		wantContains []string
+		wantFormat   string
+	}{
+		{
+			name:     "with empty resource",
+			err:      errors.New("original error"),
+			op:       "syncSecret",
+			resource: "",
+			ctx:      "failed to sync",
+			wantContains: []string{
+				"failed to sync",
+				"syncSecret",
+				"original error",
+			},
+			wantFormat: "failed to sync: syncSecret: original error",
+		},
+		{
+			name:     "with resource",
+			err:      errors.New("original error"),
+			op:       "syncSecret",
+			resource: "default/my-secret",
+			ctx:      "failed to sync",
+			wantContains: []string{
+				"failed to sync",
+				"syncSecret",
+				"default/my-secret",
+				"original error",
+			},
+			wantFormat: "failed to sync: syncSecret for default/my-secret: original error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := WrapWithContext(tt.err, tt.op, tt.resource, tt.ctx)
+
+			require.NotNil(t, wrapped)
+
+			for _, want := range tt.wantContains {
+				assert.Contains(t, wrapped.Error(), want)
+			}
+
+			// Verify exact format
+			assert.Equal(t, tt.wantFormat, wrapped.Error())
+
+			// Verify the original error is still accessible
+			assert.True(t, errors.Is(wrapped, tt.err))
+		})
+	}
+}
+
+func TestReconcileError_Error_WithoutResource(t *testing.T) {
+	reconcileErr := &ReconcileError{
+		Type:     ErrorTypeTransient,
+		Op:       "syncSecret",
+		Resource: "", // empty resource
+		Err:      errors.New("timeout"),
+	}
+
+	errStr := reconcileErr.Error()
+
+	// Should not contain "for" when resource is empty
+	assert.Contains(t, errStr, "transient error during syncSecret: timeout")
+	assert.NotContains(t, errStr, "for")
 }

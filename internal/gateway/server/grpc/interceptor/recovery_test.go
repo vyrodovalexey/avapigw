@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -465,4 +466,92 @@ func TestRecoveryDoesNotRecoverFromNormalErrors(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, normalError, err)
 	assert.Nil(t, resp)
+}
+
+// TestStreamRecoveryInterceptorWithConfigNilLogger tests stream recovery with nil logger
+func TestStreamRecoveryInterceptorWithConfigNilLogger(t *testing.T) {
+	t.Parallel()
+
+	config := RecoveryConfig{
+		Logger:           nil,
+		EnableStackTrace: true,
+	}
+
+	interceptor := StreamRecoveryInterceptorWithConfig(config)
+
+	panicHandler := func(srv interface{}, ss grpc.ServerStream) error {
+		panic("stream panic with nil logger")
+	}
+
+	ctx := context.Background()
+	stream := &mockServerStream{ctx: ctx}
+	info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+	err := interceptor(nil, stream, info, panicHandler)
+
+	assert.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.Internal, st.Code())
+}
+
+// TestHandlePanicWithRequestID tests handlePanic with request ID in context
+func TestHandlePanicWithRequestID(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.ErrorLevel)
+	logger := zap.New(core)
+
+	config := RecoveryConfig{
+		Logger:           logger,
+		EnableStackTrace: false,
+	}
+
+	// Create context with request ID
+	md := metadata.MD{
+		RequestIDKey: []string{"test-request-id-456"},
+	}
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+
+	err := handlePanic(ctx, "test panic", "/test.Service/Method", config)
+
+	assert.Error(t, err)
+	assert.GreaterOrEqual(t, logs.Len(), 1)
+
+	// Check that request ID is in log
+	logEntry := logs.All()[0]
+	hasRequestID := false
+	for _, field := range logEntry.Context {
+		if field.Key == "requestID" && field.String == "test-request-id-456" {
+			hasRequestID = true
+			break
+		}
+	}
+	assert.True(t, hasRequestID, "request ID should be in log")
+}
+
+// TestRecoveryWithRuntimeError tests recovery from runtime errors
+func TestRecoveryWithRuntimeError(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	interceptor := UnaryRecoveryInterceptor(logger)
+
+	// Handler that causes a runtime panic (nil pointer dereference)
+	panicHandler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		var nilPtr *string
+		_ = *nilPtr // This will panic
+		return "response", nil
+	}
+
+	ctx := context.Background()
+	info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+	resp, err := interceptor(ctx, "request", info, panicHandler)
+
+	assert.Error(t, err)
+	assert.Nil(t, resp)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.Internal, st.Code())
 }

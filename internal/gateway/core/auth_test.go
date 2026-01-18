@@ -524,3 +524,123 @@ func TestAuthCore_WithLogger(t *testing.T) {
 	// Just ensure it doesn't panic
 	assert.NotNil(t, core)
 }
+
+func TestAuthCore_ShouldSkip_NilMap(t *testing.T) {
+	t.Parallel()
+
+	// Create core without initializing skip paths to test nil map case
+	core := &AuthCore{
+		skipPaths: nil,
+	}
+
+	assert.False(t, core.ShouldSkip("/any/path"))
+}
+
+func TestAuthCore_IsAnonymousPath_NilMap(t *testing.T) {
+	t.Parallel()
+
+	// Create core with AllowAnonymous=true but nil anonymousPaths map
+	core := &AuthCore{
+		config: AuthCoreConfig{
+			AllowAnonymous: true,
+		},
+		anonymousPaths: nil,
+	}
+
+	assert.False(t, core.IsAnonymousPath("/any/path"))
+}
+
+func TestAuthCore_Authenticate_APIKeyValidationFails(t *testing.T) {
+	t.Parallel()
+
+	core := NewAuthCore(AuthCoreConfig{
+		APIKeyEnabled: true,
+		BaseConfig: BaseConfig{
+			Logger: zap.NewNop(),
+		},
+	})
+	core.WithAPIKeyValidator(&mockAPIKeyValidator{
+		validateFunc: func(ctx context.Context, key string) (*apikey.APIKey, error) {
+			return nil, errors.New("invalid api key")
+		},
+	})
+
+	result := core.Authenticate(context.Background(), AuthCredentials{
+		APIKey: "invalid-key",
+	})
+
+	assert.False(t, result.Authenticated)
+}
+
+func TestAuthCore_Authenticate_BasicValidationFails(t *testing.T) {
+	t.Parallel()
+
+	core := NewAuthCore(AuthCoreConfig{
+		BasicEnabled: true,
+		BaseConfig: BaseConfig{
+			Logger: zap.NewNop(),
+		},
+	})
+	core.WithBasicValidator(&mockBasicValidator{
+		validateFunc: func(ctx context.Context, username, password string) (*basic.User, error) {
+			return nil, errors.New("invalid credentials")
+		},
+	})
+
+	result := core.Authenticate(context.Background(), AuthCredentials{
+		BasicAuth: &BasicCredentials{
+			Username: "user",
+			Password: "wrong",
+		},
+	})
+
+	assert.False(t, result.Authenticated)
+}
+
+func TestAuthCore_AuthenticateJWT_ValidationFails(t *testing.T) {
+	t.Parallel()
+
+	core := NewAuthCore(AuthCoreConfig{})
+	core.WithJWTValidator(&mockJWTValidator{
+		validateFunc: func(ctx context.Context, token string) (*jwt.Claims, error) {
+			return nil, errors.New("invalid token")
+		},
+	})
+
+	result := core.AuthenticateJWT(context.Background(), "invalid-token")
+
+	assert.False(t, result.Authenticated)
+	assert.Error(t, result.Error)
+}
+
+func TestAuthCore_AuthenticateAPIKey_ValidationFails(t *testing.T) {
+	t.Parallel()
+
+	core := NewAuthCore(AuthCoreConfig{})
+	core.WithAPIKeyValidator(&mockAPIKeyValidator{
+		validateFunc: func(ctx context.Context, key string) (*apikey.APIKey, error) {
+			return nil, errors.New("invalid key")
+		},
+	})
+
+	result := core.AuthenticateAPIKey(context.Background(), "invalid-key")
+
+	assert.False(t, result.Authenticated)
+	assert.Error(t, result.Error)
+}
+
+func TestAuthCore_AuthenticateBasic_ValidationFails(t *testing.T) {
+	t.Parallel()
+
+	core := NewAuthCore(AuthCoreConfig{})
+	core.WithBasicValidator(&mockBasicValidator{
+		validateFunc: func(ctx context.Context, username, password string) (*basic.User, error) {
+			return nil, errors.New("invalid credentials")
+		},
+	})
+
+	result := core.AuthenticateBasic(context.Background(), "user", "wrong")
+
+	assert.False(t, result.Authenticated)
+	assert.Error(t, result.Error)
+}

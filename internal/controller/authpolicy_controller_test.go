@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -2048,6 +2049,411 @@ func TestAuthPolicyReconciler_findPoliciesForSecret(t *testing.T) {
 // ============================================================================
 // AuthPolicyReconciler.policyReferencesSecret with Namespace Tests
 // ============================================================================
+
+// ============================================================================
+// AuthPolicyReconciler.Reconcile Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_Reconcile_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &authPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: errors.New("connection refused"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-policy", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestAuthPolicyReconciler_Reconcile_DeletionWithError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	now := metav1.Now()
+	policy := &avapigwv1alpha1.AuthPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-policy",
+			Namespace:         "default",
+			Finalizers:        []string{authPolicyFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: avapigwv1alpha1.AuthPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "test-gateway",
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &authPolicyErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build(),
+		updateError: errors.New("update failed"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-policy", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+// ============================================================================
+// AuthPolicyReconciler.fetchAuthPolicy Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_fetchAuthPolicy_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &authPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: errors.New("connection refused"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-policy"
+
+	policy, result, err := r.fetchAuthPolicy(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-policy", Namespace: "default"},
+	}, strategy, resourceKey)
+
+	assert.Nil(t, policy)
+	assert.NotNil(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+// ============================================================================
+// AuthPolicyReconciler.ensureFinalizerAndReconcile Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_ensureFinalizerAndReconcile_FinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	policy := &avapigwv1alpha1.AuthPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.AuthPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "test-gateway",
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer)
+	cl := &authPolicyErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build(),
+		updateError: errors.New("update failed"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-policy"
+	var reconcileErr *ReconcileError
+
+	result, err := r.ensureFinalizerAndReconcile(context.Background(), policy, strategy, resourceKey, &reconcileErr)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestAuthPolicyReconciler_ensureFinalizerAndReconcile_ReconcileError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	policy := &avapigwv1alpha1.AuthPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{authPolicyFinalizer},
+		},
+		Spec: avapigwv1alpha1.AuthPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "missing-gateway", // This will cause validation error
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy).
+		WithStatusSubresource(&avapigwv1alpha1.AuthPolicy{}).
+		Build()
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-policy"
+	var reconcileErr *ReconcileError
+
+	// This should fail because the gateway doesn't exist
+	result, err := r.ensureFinalizerAndReconcile(context.Background(), policy, strategy, resourceKey, &reconcileErr)
+
+	// The reconcile should succeed (status update works) but the policy should be in error state
+	assert.NoError(t, err)
+	assert.True(t, result.RequeueAfter > 0)
+}
+
+// ============================================================================
+// AuthPolicyReconciler.handleDeletion Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_handleDeletion_RemoveFinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	policy := &avapigwv1alpha1.AuthPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-policy",
+			Namespace:  "default",
+			Finalizers: []string{authPolicyFinalizer},
+		},
+		Spec: avapigwv1alpha1.AuthPolicySpec{
+			TargetRef: avapigwv1alpha1.TargetRef{
+				Group: avapigwv1alpha1.GroupVersion.Group,
+				Kind:  "Gateway",
+				Name:  "test-gateway",
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &authPolicyErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).Build(),
+		updateError: errors.New("update failed"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.handleDeletion(context.Background(), policy)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+// ============================================================================
+// AuthPolicyReconciler.validateAPIKeySecretRef Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_validateAPIKeySecretRef_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &authPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: errors.New("connection refused"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	validation := &avapigwv1alpha1.APIKeyValidationConfig{
+		Type: avapigwv1alpha1.APIKeyValidationSecret,
+		SecretRef: &avapigwv1alpha1.SecretObjectReference{
+			Name: "api-key-secret",
+		},
+	}
+
+	err := r.validateAPIKeySecretRef(context.Background(), "default", validation)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get API Key secret")
+}
+
+// ============================================================================
+// AuthPolicyReconciler.validateJWTConfig Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_validateJWTConfig_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &authPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: errors.New("connection refused"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	policy := &avapigwv1alpha1.AuthPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	jwt := &avapigwv1alpha1.JWTAuthConfig{
+		JWKS: &avapigwv1alpha1.SecretObjectReference{
+			Name: "jwks-secret",
+		},
+	}
+
+	err := r.validateJWTConfig(context.Background(), policy, jwt)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get JWKS secret")
+}
+
+// ============================================================================
+// AuthPolicyReconciler.validateBasicAuthConfig Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_validateBasicAuthConfig_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &authPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: errors.New("connection refused"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	policy := &avapigwv1alpha1.AuthPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	basic := &avapigwv1alpha1.BasicAuthConfig{
+		SecretRef: &avapigwv1alpha1.SecretObjectReference{
+			Name: "basic-auth-secret",
+		},
+	}
+
+	err := r.validateBasicAuthConfig(context.Background(), policy, basic)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get Basic Auth secret")
+}
+
+// ============================================================================
+// AuthPolicyReconciler.validateOAuth2Config Error Path Tests
+// ============================================================================
+
+func TestAuthPolicyReconciler_validateOAuth2Config_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &authPolicyErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: errors.New("connection refused"),
+	}
+
+	r := &AuthPolicyReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	policy := &avapigwv1alpha1.AuthPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-policy",
+			Namespace: "default",
+		},
+	}
+
+	oauth2 := &avapigwv1alpha1.OAuth2Config{
+		TokenEndpoint: ptrString("https://auth.example.com/token"),
+		ClientID:      ptrString("my-client-id"),
+		ClientSecretRef: &avapigwv1alpha1.SecretObjectReference{
+			Name: "oauth2-secret",
+		},
+	}
+
+	err := r.validateOAuth2Config(context.Background(), policy, oauth2)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get OAuth2 client secret")
+}
+
+// ============================================================================
+// authPolicyErrorClient - Mock client that returns errors
+// ============================================================================
+
+type authPolicyErrorClient struct {
+	client.Client
+	getError    error
+	updateError error
+	listError   error
+}
+
+func (c *authPolicyErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if c.getError != nil {
+		return c.getError
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *authPolicyErrorClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.updateError != nil {
+		return c.updateError
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *authPolicyErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if c.listError != nil {
+		return c.listError
+	}
+	return c.Client.List(ctx, list, opts...)
+}
 
 func TestAuthPolicyReconciler_policyReferencesSecret_WithNamespace(t *testing.T) {
 	tests := []struct {

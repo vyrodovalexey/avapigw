@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 func strPtr(s string) *string {
@@ -2889,6 +2890,1634 @@ func TestVaultSecretReconciler_cleanupTargetSecretIfNeeded(t *testing.T) {
 				assert.True(t, apierrors.IsNotFound(err), "Target secret should be deleted")
 			} else if tt.targetSecretExists {
 				assert.NoError(t, err, "Target secret should still exist")
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for resolveTargetNamespace
+// ============================================================================
+
+func TestVaultSecretReconciler_resolveTargetNamespace(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+
+	tests := []struct {
+		name             string
+		defaultNamespace string
+		targetNamespace  *string
+		want             string
+	}{
+		{
+			name:             "uses default namespace when target is nil",
+			defaultNamespace: "default",
+			targetNamespace:  nil,
+			want:             "default",
+		},
+		{
+			name:             "uses target namespace when specified",
+			defaultNamespace: "default",
+			targetNamespace:  strPtr("custom-ns"),
+			want:             "custom-ns",
+		},
+		{
+			name:             "uses empty target namespace when specified",
+			defaultNamespace: "default",
+			targetNamespace:  strPtr(""),
+			want:             "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := reconciler.resolveTargetNamespace(tt.defaultNamespace, tt.targetNamespace)
+			assert.Equal(t, tt.want, result)
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for buildVaultClientConfig
+// ============================================================================
+
+func TestVaultSecretReconciler_buildVaultClientConfig(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+
+	tests := []struct {
+		name      string
+		conn      avapigwv1alpha1.VaultConnectionConfig
+		tlsConfig *vault.TLSConfig
+		wantAddr  string
+		wantNs    string
+	}{
+		{
+			name: "basic config without namespace",
+			conn: avapigwv1alpha1.VaultConnectionConfig{
+				Address: "http://vault:8200",
+			},
+			tlsConfig: nil,
+			wantAddr:  "http://vault:8200",
+			wantNs:    "",
+		},
+		{
+			name: "config with namespace",
+			conn: avapigwv1alpha1.VaultConnectionConfig{
+				Address:   "https://vault:8200",
+				Namespace: strPtr("my-namespace"),
+			},
+			tlsConfig: nil,
+			wantAddr:  "https://vault:8200",
+			wantNs:    "my-namespace",
+		},
+		{
+			name: "config with TLS",
+			conn: avapigwv1alpha1.VaultConnectionConfig{
+				Address: "https://vault:8200",
+			},
+			tlsConfig: &vault.TLSConfig{
+				InsecureSkipVerify: true,
+			},
+			wantAddr: "https://vault:8200",
+			wantNs:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := reconciler.buildVaultClientConfig(tt.conn, tt.tlsConfig)
+
+			assert.Equal(t, tt.wantAddr, config.Address)
+			assert.Equal(t, tt.wantNs, config.Namespace)
+			assert.Equal(t, tt.tlsConfig, config.TLSConfig)
+			assert.NotZero(t, config.Timeout)
+			assert.NotZero(t, config.MaxRetries)
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for createKubernetesAuthMethod
+// ============================================================================
+
+func TestVaultSecretReconciler_createKubernetesAuthMethod(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+
+	tests := []struct {
+		name      string
+		k8sAuth   *avapigwv1alpha1.KubernetesAuthConfig
+		wantErr   bool
+		wantMount string
+	}{
+		{
+			name: "basic kubernetes auth",
+			k8sAuth: &avapigwv1alpha1.KubernetesAuthConfig{
+				Role: "my-role",
+			},
+			wantErr:   false,
+			wantMount: "kubernetes",
+		},
+		{
+			name: "kubernetes auth with custom mount path",
+			k8sAuth: &avapigwv1alpha1.KubernetesAuthConfig{
+				Role:      "my-role",
+				MountPath: strPtr("custom-k8s"),
+			},
+			wantErr:   false,
+			wantMount: "custom-k8s",
+		},
+		{
+			name: "kubernetes auth with custom token path",
+			k8sAuth: &avapigwv1alpha1.KubernetesAuthConfig{
+				Role:      "my-role",
+				TokenPath: strPtr("/custom/token/path"),
+			},
+			wantErr:   false,
+			wantMount: "kubernetes",
+		},
+		{
+			name: "kubernetes auth with empty role fails",
+			k8sAuth: &avapigwv1alpha1.KubernetesAuthConfig{
+				Role: "",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authMethod, err := reconciler.createKubernetesAuthMethod(tt.k8sAuth)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, authMethod)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, authMethod)
+				assert.Equal(t, "kubernetes", authMethod.Name())
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for createTokenAuthMethod
+// ============================================================================
+
+func TestVaultSecretReconciler_createTokenAuthMethod(t *testing.T) {
+	scheme := setupScheme(t)
+
+	tests := []struct {
+		name             string
+		defaultNamespace string
+		tokenAuth        *avapigwv1alpha1.TokenAuthConfig
+		secrets          []client.Object
+		wantErr          bool
+		errContains      string
+	}{
+		{
+			name:             "successful token auth with default key",
+			defaultNamespace: "default",
+			tokenAuth: &avapigwv1alpha1.TokenAuthConfig{
+				SecretRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "vault-token",
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vault-token",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"token": []byte("my-vault-token"),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:             "successful token auth with custom key",
+			defaultNamespace: "default",
+			tokenAuth: &avapigwv1alpha1.TokenAuthConfig{
+				SecretRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "vault-token",
+				},
+				TokenKey: strPtr("custom-token-key"),
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vault-token",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"custom-token-key": []byte("my-vault-token"),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:             "successful token auth with custom namespace",
+			defaultNamespace: "default",
+			tokenAuth: &avapigwv1alpha1.TokenAuthConfig{
+				SecretRef: avapigwv1alpha1.SecretObjectReference{
+					Name:      "vault-token",
+					Namespace: strPtr("other-ns"),
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vault-token",
+						Namespace: "other-ns",
+					},
+					Data: map[string][]byte{
+						"token": []byte("my-vault-token"),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:             "fails when secret not found",
+			defaultNamespace: "default",
+			tokenAuth: &avapigwv1alpha1.TokenAuthConfig{
+				SecretRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "non-existent",
+				},
+			},
+			secrets:     []client.Object{},
+			wantErr:     true,
+			errContains: "failed to get token secret",
+		},
+		{
+			name:             "fails when token is empty",
+			defaultNamespace: "default",
+			tokenAuth: &avapigwv1alpha1.TokenAuthConfig{
+				SecretRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "vault-token",
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vault-token",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"token": []byte(""),
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: "token is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.secrets...).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client: cl,
+				Scheme: scheme,
+			}
+
+			authMethod, err := reconciler.createTokenAuthMethod(context.Background(), tt.defaultNamespace, tt.tokenAuth)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, authMethod)
+				assert.Equal(t, "token", authMethod.Name())
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for createAppRoleAuthMethod
+// ============================================================================
+
+func TestVaultSecretReconciler_createAppRoleAuthMethod(t *testing.T) {
+	scheme := setupScheme(t)
+
+	tests := []struct {
+		name             string
+		defaultNamespace string
+		appRole          *avapigwv1alpha1.AppRoleAuthConfig
+		secrets          []client.Object
+		wantErr          bool
+		errContains      string
+	}{
+		{
+			name:             "successful approle auth with default key",
+			defaultNamespace: "default",
+			appRole: &avapigwv1alpha1.AppRoleAuthConfig{
+				RoleID: "my-role-id",
+				SecretIDRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "approle-secret",
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "approle-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"secret-id": []byte("my-secret-id"),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:             "successful approle auth with custom key",
+			defaultNamespace: "default",
+			appRole: &avapigwv1alpha1.AppRoleAuthConfig{
+				RoleID: "my-role-id",
+				SecretIDRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "approle-secret",
+				},
+				SecretIDKey: strPtr("custom-secret-key"),
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "approle-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"custom-secret-key": []byte("my-secret-id"),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:             "successful approle auth with custom mount path",
+			defaultNamespace: "default",
+			appRole: &avapigwv1alpha1.AppRoleAuthConfig{
+				RoleID: "my-role-id",
+				SecretIDRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "approle-secret",
+				},
+				MountPath: strPtr("custom-approle"),
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "approle-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"secret-id": []byte("my-secret-id"),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:             "successful approle auth with custom namespace",
+			defaultNamespace: "default",
+			appRole: &avapigwv1alpha1.AppRoleAuthConfig{
+				RoleID: "my-role-id",
+				SecretIDRef: avapigwv1alpha1.SecretObjectReference{
+					Name:      "approle-secret",
+					Namespace: strPtr("other-ns"),
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "approle-secret",
+						Namespace: "other-ns",
+					},
+					Data: map[string][]byte{
+						"secret-id": []byte("my-secret-id"),
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:             "fails when secret not found",
+			defaultNamespace: "default",
+			appRole: &avapigwv1alpha1.AppRoleAuthConfig{
+				RoleID: "my-role-id",
+				SecretIDRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "non-existent",
+				},
+			},
+			secrets:     []client.Object{},
+			wantErr:     true,
+			errContains: "failed to get AppRole secret",
+		},
+		{
+			name:             "fails when secret-id is empty",
+			defaultNamespace: "default",
+			appRole: &avapigwv1alpha1.AppRoleAuthConfig{
+				RoleID: "my-role-id",
+				SecretIDRef: avapigwv1alpha1.SecretObjectReference{
+					Name: "approle-secret",
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "approle-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"secret-id": []byte(""),
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: "secretID is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.secrets...).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client: cl,
+				Scheme: scheme,
+			}
+
+			authMethod, err := reconciler.createAppRoleAuthMethod(context.Background(), tt.defaultNamespace, tt.appRole)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, authMethod)
+				assert.Equal(t, "approle", authMethod.Name())
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for createAuthMethod
+// ============================================================================
+
+func TestVaultSecretReconciler_createAuthMethod(t *testing.T) {
+	scheme := setupScheme(t)
+
+	tests := []struct {
+		name        string
+		vaultSecret *avapigwv1alpha1.VaultSecret
+		secrets     []client.Object
+		wantErr     bool
+		errContains string
+		wantName    string
+	}{
+		{
+			name: "creates kubernetes auth method",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					VaultConnection: avapigwv1alpha1.VaultConnectionConfig{
+						Address: "http://vault:8200",
+						Auth: avapigwv1alpha1.VaultAuthConfig{
+							Kubernetes: &avapigwv1alpha1.KubernetesAuthConfig{
+								Role: "my-role",
+							},
+						},
+					},
+				},
+			},
+			secrets:  []client.Object{},
+			wantErr:  false,
+			wantName: "kubernetes",
+		},
+		{
+			name: "creates token auth method",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					VaultConnection: avapigwv1alpha1.VaultConnectionConfig{
+						Address: "http://vault:8200",
+						Auth: avapigwv1alpha1.VaultAuthConfig{
+							Token: &avapigwv1alpha1.TokenAuthConfig{
+								SecretRef: avapigwv1alpha1.SecretObjectReference{
+									Name: "vault-token",
+								},
+							},
+						},
+					},
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vault-token",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"token": []byte("my-token"),
+					},
+				},
+			},
+			wantErr:  false,
+			wantName: "token",
+		},
+		{
+			name: "creates approle auth method",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					VaultConnection: avapigwv1alpha1.VaultConnectionConfig{
+						Address: "http://vault:8200",
+						Auth: avapigwv1alpha1.VaultAuthConfig{
+							AppRole: &avapigwv1alpha1.AppRoleAuthConfig{
+								RoleID: "my-role-id",
+								SecretIDRef: avapigwv1alpha1.SecretObjectReference{
+									Name: "approle-secret",
+								},
+							},
+						},
+					},
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "approle-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"secret-id": []byte("my-secret-id"),
+					},
+				},
+			},
+			wantErr:  false,
+			wantName: "approle",
+		},
+		{
+			name: "fails when no auth method configured",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Path: "secret/test",
+					VaultConnection: avapigwv1alpha1.VaultConnectionConfig{
+						Address: "http://vault:8200",
+						Auth:    avapigwv1alpha1.VaultAuthConfig{},
+					},
+				},
+			},
+			secrets:     []client.Object{},
+			wantErr:     true,
+			errContains: "no authentication method configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.secrets...).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client: cl,
+				Scheme: scheme,
+			}
+
+			authMethod, err := reconciler.createAuthMethod(context.Background(), tt.vaultSecret)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, authMethod)
+				assert.Equal(t, tt.wantName, authMethod.Name())
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for buildVaultTLSConfig
+// ============================================================================
+
+func TestVaultSecretReconciler_buildVaultTLSConfig(t *testing.T) {
+	scheme := setupScheme(t)
+
+	tests := []struct {
+		name             string
+		defaultNamespace string
+		tlsSpec          *avapigwv1alpha1.VaultTLSConfig
+		secrets          []client.Object
+		wantErr          bool
+		errContains      string
+		wantNil          bool
+		wantSkipVerify   bool
+		wantServerName   string
+	}{
+		{
+			name:             "returns nil when tlsSpec is nil",
+			defaultNamespace: "default",
+			tlsSpec:          nil,
+			secrets:          []client.Object{},
+			wantErr:          false,
+			wantNil:          true,
+		},
+		{
+			name:             "basic TLS config with insecure skip verify",
+			defaultNamespace: "default",
+			tlsSpec: &avapigwv1alpha1.VaultTLSConfig{
+				InsecureSkipVerify: boolPtr(true),
+			},
+			secrets:        []client.Object{},
+			wantErr:        false,
+			wantNil:        false,
+			wantSkipVerify: true,
+		},
+		{
+			name:             "TLS config with server name",
+			defaultNamespace: "default",
+			tlsSpec: &avapigwv1alpha1.VaultTLSConfig{
+				ServerName: strPtr("vault.example.com"),
+			},
+			secrets:        []client.Object{},
+			wantErr:        false,
+			wantNil:        false,
+			wantServerName: "vault.example.com",
+		},
+		{
+			name:             "TLS config with CA cert",
+			defaultNamespace: "default",
+			tlsSpec: &avapigwv1alpha1.VaultTLSConfig{
+				CACertRef: &avapigwv1alpha1.SecretObjectReference{
+					Name: "ca-secret",
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ca-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"ca.crt": []byte("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"),
+					},
+				},
+			},
+			wantErr: false,
+			wantNil: false,
+		},
+		{
+			name:             "TLS config with client cert and key",
+			defaultNamespace: "default",
+			tlsSpec: &avapigwv1alpha1.VaultTLSConfig{
+				ClientCertRef: &avapigwv1alpha1.SecretObjectReference{
+					Name: "client-cert-secret",
+				},
+				ClientKeyRef: &avapigwv1alpha1.SecretObjectReference{
+					Name: "client-key-secret",
+				},
+			},
+			secrets: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "client-cert-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"tls.crt": []byte("-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----"),
+					},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "client-key-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"tls.key": []byte("-----BEGIN RSA PRIVATE KEY-----\nkey\n-----END RSA PRIVATE KEY-----"),
+					},
+				},
+			},
+			wantErr: false,
+			wantNil: false,
+		},
+		{
+			name:             "fails when CA cert secret not found",
+			defaultNamespace: "default",
+			tlsSpec: &avapigwv1alpha1.VaultTLSConfig{
+				CACertRef: &avapigwv1alpha1.SecretObjectReference{
+					Name: "non-existent",
+				},
+			},
+			secrets:     []client.Object{},
+			wantErr:     true,
+			errContains: "failed to get CA cert",
+		},
+		{
+			name:             "fails when client cert secret not found",
+			defaultNamespace: "default",
+			tlsSpec: &avapigwv1alpha1.VaultTLSConfig{
+				ClientCertRef: &avapigwv1alpha1.SecretObjectReference{
+					Name: "non-existent",
+				},
+			},
+			secrets:     []client.Object{},
+			wantErr:     true,
+			errContains: "failed to get client cert",
+		},
+		{
+			name:             "fails when client key secret not found",
+			defaultNamespace: "default",
+			tlsSpec: &avapigwv1alpha1.VaultTLSConfig{
+				ClientKeyRef: &avapigwv1alpha1.SecretObjectReference{
+					Name: "non-existent",
+				},
+			},
+			secrets:     []client.Object{},
+			wantErr:     true,
+			errContains: "failed to get client key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.secrets...).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client: cl,
+				Scheme: scheme,
+			}
+
+			tlsConfig, err := reconciler.buildVaultTLSConfig(context.Background(), tt.defaultNamespace, tt.tlsSpec)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+			} else {
+				assert.NoError(t, err)
+				if tt.wantNil {
+					assert.Nil(t, tlsConfig)
+				} else {
+					assert.NotNil(t, tlsConfig)
+					assert.Equal(t, tt.wantSkipVerify, tlsConfig.InsecureSkipVerify)
+					assert.Equal(t, tt.wantServerName, tlsConfig.ServerName)
+				}
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for mapVaultDataToSecret
+// ============================================================================
+
+func TestVaultSecretReconciler_mapVaultDataToSecret(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+	logger := ctrl.Log.WithName("test")
+
+	tests := []struct {
+		name            string
+		vaultSecret     *avapigwv1alpha1.VaultSecret
+		vaultSecretData *vault.Secret
+		wantData        map[string][]byte
+	}{
+		{
+			name: "copies all keys when no explicit mapping",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: nil,
+				},
+			},
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"username": "admin",
+					"password": "secret123",
+				},
+			},
+			wantData: map[string][]byte{
+				"username": []byte("admin"),
+				"password": []byte("secret123"),
+			},
+		},
+		{
+			name: "uses explicit key mappings",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: []avapigwv1alpha1.VaultKeyMapping{
+						{VaultKey: "username", TargetKey: "user"},
+						{VaultKey: "password", TargetKey: "pass"},
+					},
+				},
+			},
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"username": "admin",
+					"password": "secret123",
+					"extra":    "ignored",
+				},
+			},
+			wantData: map[string][]byte{
+				"user": []byte("admin"),
+				"pass": []byte("secret123"),
+			},
+		},
+		{
+			name: "handles missing vault keys gracefully",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: []avapigwv1alpha1.VaultKeyMapping{
+						{VaultKey: "username", TargetKey: "user"},
+						{VaultKey: "non-existent", TargetKey: "missing"},
+					},
+				},
+			},
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"username": "admin",
+				},
+			},
+			wantData: map[string][]byte{
+				"user": []byte("admin"),
+			},
+		},
+		{
+			name: "applies base64 encoding when specified",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: []avapigwv1alpha1.VaultKeyMapping{
+						{
+							VaultKey:  "data",
+							TargetKey: "encoded",
+							Encoding: func() *avapigwv1alpha1.VaultValueEncoding {
+								e := avapigwv1alpha1.VaultValueEncodingBase64
+								return &e
+							}(),
+						},
+					},
+				},
+			},
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"data": "hello",
+				},
+			},
+			wantData: map[string][]byte{
+				"encoded": []byte("aGVsbG8="), // base64 of "hello"
+			},
+		},
+		{
+			name: "skips non-string values when copying all",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: nil,
+				},
+			},
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"string_val": "text",
+					"int_val":    123,
+					"bool_val":   true,
+				},
+			},
+			wantData: map[string][]byte{
+				"string_val": []byte("text"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := reconciler.mapVaultDataToSecret(tt.vaultSecret, tt.vaultSecretData, logger)
+			assert.Equal(t, tt.wantData, result)
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for setSecretLabelsAndAnnotations
+// ============================================================================
+
+func TestVaultSecretReconciler_setSecretLabelsAndAnnotations(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+
+	tests := []struct {
+		name            string
+		secret          *corev1.Secret
+		vaultSecret     *avapigwv1alpha1.VaultSecret
+		target          *avapigwv1alpha1.VaultTargetConfig
+		vaultSecretData *vault.Secret
+		wantLabels      map[string]string
+		wantAnnotations map[string]string
+	}{
+		{
+			name:   "sets default labels",
+			secret: &corev1.Secret{},
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-vault-secret",
+				},
+			},
+			target:          &avapigwv1alpha1.VaultTargetConfig{},
+			vaultSecretData: &vault.Secret{},
+			wantLabels: map[string]string{
+				"app.kubernetes.io/managed-by":                 "avapigw",
+				"avapigw.vyrodovalexey.github.com/vaultsecret": "my-vault-secret",
+			},
+			wantAnnotations: map[string]string{},
+		},
+		{
+			name:   "merges target labels with defaults",
+			secret: &corev1.Secret{},
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-vault-secret",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Labels: map[string]string{
+					"custom-label": "custom-value",
+				},
+			},
+			vaultSecretData: &vault.Secret{},
+			wantLabels: map[string]string{
+				"custom-label":                                 "custom-value",
+				"app.kubernetes.io/managed-by":                 "avapigw",
+				"avapigw.vyrodovalexey.github.com/vaultsecret": "my-vault-secret",
+			},
+			wantAnnotations: map[string]string{},
+		},
+		{
+			name:   "sets target annotations",
+			secret: &corev1.Secret{},
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-vault-secret",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Annotations: map[string]string{
+					"custom-annotation": "custom-value",
+				},
+			},
+			vaultSecretData: &vault.Secret{},
+			wantLabels: map[string]string{
+				"app.kubernetes.io/managed-by":                 "avapigw",
+				"avapigw.vyrodovalexey.github.com/vaultsecret": "my-vault-secret",
+			},
+			wantAnnotations: map[string]string{
+				"custom-annotation": "custom-value",
+			},
+		},
+		{
+			name:   "adds vault metadata to annotations",
+			secret: &corev1.Secret{},
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-vault-secret",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{},
+			vaultSecretData: &vault.Secret{
+				Metadata: &vault.SecretMetadata{
+					Version:     5,
+					CreatedTime: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
+				},
+			},
+			wantLabels: map[string]string{
+				"app.kubernetes.io/managed-by":                 "avapigw",
+				"avapigw.vyrodovalexey.github.com/vaultsecret": "my-vault-secret",
+			},
+			wantAnnotations: map[string]string{
+				"avapigw.vyrodovalexey.github.com/vault-version":      "5",
+				"avapigw.vyrodovalexey.github.com/vault-created-time": "2024-01-15T10:30:00Z",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler.setSecretLabelsAndAnnotations(tt.secret, tt.vaultSecret, tt.target, tt.vaultSecretData)
+
+			assert.Equal(t, tt.wantLabels, tt.secret.Labels)
+			for k, v := range tt.wantAnnotations {
+				assert.Equal(t, v, tt.secret.Annotations[k])
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for setOwnerReferenceIfNeeded
+// ============================================================================
+
+func TestVaultSecretReconciler_setOwnerReferenceIfNeeded(t *testing.T) {
+	scheme := setupScheme(t)
+
+	tests := []struct {
+		name         string
+		vaultSecret  *avapigwv1alpha1.VaultSecret
+		secret       *corev1.Secret
+		target       *avapigwv1alpha1.VaultTargetConfig
+		wantOwnerRef bool
+		wantErr      bool
+	}{
+		{
+			name: "sets owner reference with Owner policy",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+					UID:       "test-uid",
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "target-secret",
+					Namespace: "default",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				CreationPolicy: func() *avapigwv1alpha1.SecretCreationPolicy {
+					p := avapigwv1alpha1.SecretCreationPolicyOwner
+					return &p
+				}(),
+			},
+			wantOwnerRef: true,
+			wantErr:      false,
+		},
+		{
+			name: "sets owner reference with default policy (nil)",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+					UID:       "test-uid",
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "target-secret",
+					Namespace: "default",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				CreationPolicy: nil,
+			},
+			wantOwnerRef: true,
+			wantErr:      false,
+		},
+		{
+			name: "does not set owner reference with Merge policy",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+					UID:       "test-uid",
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "target-secret",
+					Namespace: "default",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				CreationPolicy: func() *avapigwv1alpha1.SecretCreationPolicy {
+					p := avapigwv1alpha1.SecretCreationPolicyMerge
+					return &p
+				}(),
+			},
+			wantOwnerRef: false,
+			wantErr:      false,
+		},
+		{
+			name: "does not set owner reference with Orphan policy",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+					UID:       "test-uid",
+				},
+			},
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "target-secret",
+					Namespace: "default",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				CreationPolicy: func() *avapigwv1alpha1.SecretCreationPolicy {
+					p := avapigwv1alpha1.SecretCreationPolicyOrphan
+					return &p
+				}(),
+			},
+			wantOwnerRef: false,
+			wantErr:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler := &VaultSecretReconciler{
+				Scheme: scheme,
+			}
+
+			err := reconciler.setOwnerReferenceIfNeeded(tt.vaultSecret, tt.secret, tt.target)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				if tt.wantOwnerRef {
+					assert.Len(t, tt.secret.OwnerReferences, 1)
+					assert.Equal(t, tt.vaultSecret.Name, tt.secret.OwnerReferences[0].Name)
+				} else {
+					assert.Len(t, tt.secret.OwnerReferences, 0)
+				}
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for buildTargetSecret
+// ============================================================================
+
+func TestVaultSecretReconciler_buildTargetSecret(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+	logger := ctrl.Log.WithName("test")
+
+	tests := []struct {
+		name            string
+		vaultSecret     *avapigwv1alpha1.VaultSecret
+		target          *avapigwv1alpha1.VaultTargetConfig
+		targetNamespace string
+		vaultSecretData *vault.Secret
+		wantName        string
+		wantNamespace   string
+		wantType        corev1.SecretType
+	}{
+		{
+			name: "builds basic target secret",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: nil,
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Name: "target-secret",
+			},
+			targetNamespace: "default",
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"username": "admin",
+				},
+			},
+			wantName:      "target-secret",
+			wantNamespace: "default",
+			wantType:      corev1.SecretTypeOpaque,
+		},
+		{
+			name: "builds target secret with custom type",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: nil,
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Name: "tls-secret",
+				Type: strPtr("kubernetes.io/tls"),
+			},
+			targetNamespace: "default",
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"tls.crt": "cert-data",
+					"tls.key": "key-data",
+				},
+			},
+			wantName:      "tls-secret",
+			wantNamespace: "default",
+			wantType:      corev1.SecretTypeTLS,
+		},
+		{
+			name: "builds target secret in different namespace",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+				},
+				Spec: avapigwv1alpha1.VaultSecretSpec{
+					Keys: nil,
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Name: "target-secret",
+			},
+			targetNamespace: "other-namespace",
+			vaultSecretData: &vault.Secret{
+				Data: map[string]interface{}{
+					"data": "value",
+				},
+			},
+			wantName:      "target-secret",
+			wantNamespace: "other-namespace",
+			wantType:      corev1.SecretTypeOpaque,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := reconciler.buildTargetSecret(tt.vaultSecret, tt.target, tt.targetNamespace, tt.vaultSecretData, logger)
+
+			assert.Equal(t, tt.wantName, secret.Name)
+			assert.Equal(t, tt.wantNamespace, secret.Namespace)
+			assert.Equal(t, tt.wantType, secret.Type)
+			assert.NotNil(t, secret.Labels)
+			assert.NotNil(t, secret.Data)
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for updateSyncStatus
+// ============================================================================
+
+func TestVaultSecretReconciler_updateSyncStatus(t *testing.T) {
+	reconciler := &VaultSecretReconciler{}
+
+	tests := []struct {
+		name            string
+		vaultSecret     *avapigwv1alpha1.VaultSecret
+		target          *avapigwv1alpha1.VaultTargetConfig
+		targetNamespace string
+		vaultSecretData *vault.Secret
+		wantSecretName  string
+		wantNamespace   string
+		wantVersion     string
+	}{
+		{
+			name: "updates status with basic info",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Name: "target-secret",
+			},
+			targetNamespace: "default",
+			vaultSecretData: &vault.Secret{},
+			wantSecretName:  "target-secret",
+			wantNamespace:   "default",
+			wantVersion:     "",
+		},
+		{
+			name: "updates status with version from metadata",
+			vaultSecret: &avapigwv1alpha1.VaultSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-vault-secret",
+					Namespace: "default",
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Name: "target-secret",
+			},
+			targetNamespace: "other-ns",
+			vaultSecretData: &vault.Secret{
+				Metadata: &vault.SecretMetadata{
+					Version: 42,
+				},
+			},
+			wantSecretName: "target-secret",
+			wantNamespace:  "other-ns",
+			wantVersion:    "42",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler.updateSyncStatus(tt.vaultSecret, tt.target, tt.targetNamespace, tt.vaultSecretData)
+
+			assert.NotNil(t, tt.vaultSecret.Status.TargetSecretName)
+			assert.Equal(t, tt.wantSecretName, *tt.vaultSecret.Status.TargetSecretName)
+			assert.NotNil(t, tt.vaultSecret.Status.TargetSecretNamespace)
+			assert.Equal(t, tt.wantNamespace, *tt.vaultSecret.Status.TargetSecretNamespace)
+
+			if tt.wantVersion != "" {
+				assert.NotNil(t, tt.vaultSecret.Status.SecretVersion)
+				assert.Equal(t, tt.wantVersion, *tt.vaultSecret.Status.SecretVersion)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for createOrUpdateSecret
+// ============================================================================
+
+func TestVaultSecretReconciler_createOrUpdateSecret(t *testing.T) {
+	scheme := setupScheme(t)
+	logger := ctrl.Log.WithName("test")
+
+	tests := []struct {
+		name            string
+		secret          *corev1.Secret
+		target          *avapigwv1alpha1.VaultTargetConfig
+		targetNamespace string
+		existingSecret  *corev1.Secret
+		wantErr         bool
+		wantCreate      bool
+		wantUpdate      bool
+	}{
+		{
+			name: "creates new secret when not exists",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "new-secret",
+					Namespace: "default",
+				},
+				Data: map[string][]byte{
+					"key": []byte("value"),
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Name: "new-secret",
+			},
+			targetNamespace: "default",
+			existingSecret:  nil,
+			wantErr:         false,
+			wantCreate:      true,
+			wantUpdate:      false,
+		},
+		{
+			name: "updates existing secret",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "existing-secret",
+					Namespace: "default",
+				},
+				Data: map[string][]byte{
+					"key": []byte("new-value"),
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				Name: "existing-secret",
+			},
+			targetNamespace: "default",
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "existing-secret",
+					Namespace:       "default",
+					ResourceVersion: "12345",
+				},
+				Data: map[string][]byte{
+					"key": []byte("old-value"),
+				},
+			},
+			wantErr:    false,
+			wantCreate: false,
+			wantUpdate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			if tt.existingSecret != nil {
+				objects = append(objects, tt.existingSecret)
+			}
+
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client: cl,
+				Scheme: scheme,
+			}
+
+			err := reconciler.createOrUpdateSecret(context.Background(), tt.secret, tt.target, tt.targetNamespace, logger)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+
+				// Verify secret exists
+				resultSecret := &corev1.Secret{}
+				err := cl.Get(context.Background(), client.ObjectKey{
+					Namespace: tt.targetNamespace,
+					Name:      tt.target.Name,
+				}, resultSecret)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.secret.Data, resultSecret.Data)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// Test Cases for updateExistingSecret
+// ============================================================================
+
+func TestVaultSecretReconciler_updateExistingSecret(t *testing.T) {
+	scheme := setupScheme(t)
+	logger := ctrl.Log.WithName("test")
+
+	tests := []struct {
+		name           string
+		secret         *corev1.Secret
+		existingSecret *corev1.Secret
+		target         *avapigwv1alpha1.VaultTargetConfig
+		wantData       map[string][]byte
+		wantErr        bool
+	}{
+		{
+			name: "replaces data with Owner policy",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "default",
+				},
+				Data: map[string][]byte{
+					"new-key": []byte("new-value"),
+				},
+			},
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-secret",
+					Namespace:       "default",
+					ResourceVersion: "12345",
+				},
+				Data: map[string][]byte{
+					"old-key": []byte("old-value"),
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				CreationPolicy: func() *avapigwv1alpha1.SecretCreationPolicy {
+					p := avapigwv1alpha1.SecretCreationPolicyOwner
+					return &p
+				}(),
+			},
+			wantData: map[string][]byte{
+				"new-key": []byte("new-value"),
+			},
+			wantErr: false,
+		},
+		{
+			name: "merges data with Merge policy",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "default",
+				},
+				Data: map[string][]byte{
+					"new-key": []byte("new-value"),
+				},
+			},
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-secret",
+					Namespace:       "default",
+					ResourceVersion: "12345",
+				},
+				Data: map[string][]byte{
+					"old-key": []byte("old-value"),
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				CreationPolicy: func() *avapigwv1alpha1.SecretCreationPolicy {
+					p := avapigwv1alpha1.SecretCreationPolicyMerge
+					return &p
+				}(),
+			},
+			wantData: map[string][]byte{
+				"new-key": []byte("new-value"),
+				"old-key": []byte("old-value"),
+			},
+			wantErr: false,
+		},
+		{
+			name: "new value takes precedence in merge",
+			secret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "default",
+				},
+				Data: map[string][]byte{
+					"shared-key": []byte("new-value"),
+				},
+			},
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-secret",
+					Namespace:       "default",
+					ResourceVersion: "12345",
+				},
+				Data: map[string][]byte{
+					"shared-key": []byte("old-value"),
+					"other-key":  []byte("other-value"),
+				},
+			},
+			target: &avapigwv1alpha1.VaultTargetConfig{
+				CreationPolicy: func() *avapigwv1alpha1.SecretCreationPolicy {
+					p := avapigwv1alpha1.SecretCreationPolicyMerge
+					return &p
+				}(),
+			},
+			wantData: map[string][]byte{
+				"shared-key": []byte("new-value"),
+				"other-key":  []byte("other-value"),
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingSecret).
+				Build()
+
+			reconciler := &VaultSecretReconciler{
+				Client: cl,
+				Scheme: scheme,
+			}
+
+			err := reconciler.updateExistingSecret(
+				context.Background(),
+				tt.secret,
+				tt.existingSecret,
+				tt.target,
+				"default",
+				logger,
+			)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+
+				// Verify updated secret
+				resultSecret := &corev1.Secret{}
+				err := cl.Get(context.Background(), client.ObjectKey{
+					Namespace: "default",
+					Name:      "test-secret",
+				}, resultSecret)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantData, resultSecret.Data)
 			}
 		})
 	}

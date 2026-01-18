@@ -964,3 +964,200 @@ func TestLoadWithLocalConfig(t *testing.T) {
 	assert.Nil(t, loader.GetLocalConfig())
 	assert.Empty(t, loader.GetConfigFilePath())
 }
+
+// ============================================================================
+// TASK-006: Tests for Config Loader Logging
+// ============================================================================
+
+func TestLoadEnvInt_InvalidValue_LogsWarning(t *testing.T) {
+	// Set an invalid integer value
+	os.Setenv("AVAPIGW_TEST_INT", "not-a-number")
+	defer os.Unsetenv("AVAPIGW_TEST_INT")
+
+	// loadEnvInt should return the default value and log a warning
+	result := loadEnvInt("AVAPIGW_TEST_INT", 42)
+
+	// Should return the default value
+	assert.Equal(t, 42, result)
+}
+
+func TestLoadEnvInt_ValidValue(t *testing.T) {
+	os.Setenv("AVAPIGW_TEST_INT", "100")
+	defer os.Unsetenv("AVAPIGW_TEST_INT")
+
+	result := loadEnvInt("AVAPIGW_TEST_INT", 42)
+
+	assert.Equal(t, 100, result)
+}
+
+func TestLoadEnvInt_EmptyValue(t *testing.T) {
+	// Ensure the env var is not set
+	os.Unsetenv("AVAPIGW_TEST_INT_EMPTY")
+
+	result := loadEnvInt("AVAPIGW_TEST_INT_EMPTY", 42)
+
+	// Should return the default value
+	assert.Equal(t, 42, result)
+}
+
+func TestLoadEnvDuration_InvalidValue_LogsWarning(t *testing.T) {
+	// Set an invalid duration value
+	os.Setenv("AVAPIGW_TEST_DURATION", "not-a-duration")
+	defer os.Unsetenv("AVAPIGW_TEST_DURATION")
+
+	// loadEnvDuration should return the default value and log a warning
+	result := loadEnvDuration("AVAPIGW_TEST_DURATION", 30*time.Second)
+
+	// Should return the default value
+	assert.Equal(t, 30*time.Second, result)
+}
+
+func TestLoadEnvDuration_ValidValue(t *testing.T) {
+	os.Setenv("AVAPIGW_TEST_DURATION", "1m30s")
+	defer os.Unsetenv("AVAPIGW_TEST_DURATION")
+
+	result := loadEnvDuration("AVAPIGW_TEST_DURATION", 30*time.Second)
+
+	assert.Equal(t, 90*time.Second, result)
+}
+
+func TestLoadEnvDuration_EmptyValue(t *testing.T) {
+	// Ensure the env var is not set
+	os.Unsetenv("AVAPIGW_TEST_DURATION_EMPTY")
+
+	result := loadEnvDuration("AVAPIGW_TEST_DURATION_EMPTY", 30*time.Second)
+
+	// Should return the default value
+	assert.Equal(t, 30*time.Second, result)
+}
+
+func TestLoadEnvBool_NonStandardValue_LogsWarning(t *testing.T) {
+	// Test various non-standard boolean values
+	tests := []struct {
+		name     string
+		value    string
+		expected bool
+	}{
+		{
+			name:     "maybe returns false",
+			value:    "maybe",
+			expected: false,
+		},
+		{
+			name:     "on returns false (not recognized)",
+			value:    "on",
+			expected: false,
+		},
+		{
+			name:     "off returns false",
+			value:    "off",
+			expected: false,
+		},
+		{
+			name:     "empty string returns false",
+			value:    "",
+			expected: false,
+		},
+		{
+			name:     "random string returns false",
+			value:    "random",
+			expected: false,
+		},
+		{
+			name:     "true returns true",
+			value:    "true",
+			expected: true,
+		},
+		{
+			name:     "True returns true",
+			value:    "True",
+			expected: true,
+		},
+		{
+			name:     "TRUE returns true",
+			value:    "TRUE",
+			expected: true,
+		},
+		{
+			name:     "1 returns true",
+			value:    "1",
+			expected: true,
+		},
+		{
+			name:     "yes returns true",
+			value:    "yes",
+			expected: true,
+		},
+		{
+			name:     "Yes returns true",
+			value:    "Yes",
+			expected: true,
+		},
+		{
+			name:     "YES returns true",
+			value:    "YES",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseBool(tt.value)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestLoader_LoadFromEnv_InvalidIntValues(t *testing.T) {
+	// Test that invalid integer values in environment variables
+	// are handled gracefully (use default values)
+	envVars := map[string]string{
+		"AVAPIGW_HTTP_PORT":    "invalid",
+		"AVAPIGW_GRPC_PORT":    "not-a-port",
+		"AVAPIGW_METRICS_PORT": "abc",
+	}
+
+	for key, value := range envVars {
+		os.Setenv(key, value)
+	}
+	defer func() {
+		for key := range envVars {
+			os.Unsetenv(key)
+		}
+	}()
+
+	loader := NewLoader()
+	cfg, err := loader.LoadConfig([]string{})
+	require.NoError(t, err)
+
+	// Should use default values when parsing fails
+	assert.Equal(t, 8080, cfg.HTTPPort)
+	assert.Equal(t, 9090, cfg.GRPCPort)
+	assert.Equal(t, 9091, cfg.MetricsPort)
+}
+
+func TestLoader_LoadFromEnv_InvalidDurationValues(t *testing.T) {
+	// Test that invalid duration values in environment variables
+	// are handled gracefully (use default values)
+	envVars := map[string]string{
+		"AVAPIGW_READ_TIMEOUT":  "invalid",
+		"AVAPIGW_WRITE_TIMEOUT": "not-a-duration",
+	}
+
+	for key, value := range envVars {
+		os.Setenv(key, value)
+	}
+	defer func() {
+		for key := range envVars {
+			os.Unsetenv(key)
+		}
+	}()
+
+	loader := NewLoader()
+	cfg, err := loader.LoadConfig([]string{})
+	require.NoError(t, err)
+
+	// Should use default values when parsing fails
+	assert.Equal(t, 30*time.Second, cfg.ReadTimeout)
+	assert.Equal(t, 30*time.Second, cfg.WriteTimeout)
+}

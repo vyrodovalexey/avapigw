@@ -608,3 +608,174 @@ func TestTracingContextPropagation(t *testing.T) {
 	assert.Equal(t, "response", resp)
 	assert.NotNil(t, capturedSpan)
 }
+
+// TestSetUnarySpanAttributesWithRequestID tests span attributes with request ID
+func TestSetUnarySpanAttributesWithRequestID(t *testing.T) {
+	t.Parallel()
+
+	tp, exporter := setupTestTracer()
+	defer tp.Shutdown(context.Background())
+
+	config := TracingConfig{
+		TracerProvider: tp,
+	}
+
+	interceptor := UnaryTracingInterceptorWithConfig(config)
+
+	// Create context with request ID in metadata
+	md := metadata.MD{
+		RequestIDKey: []string{"test-request-id-123"},
+	}
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+	info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+	resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "response", resp)
+
+	spans := exporter.GetSpans()
+	assert.GreaterOrEqual(t, len(spans), 1)
+}
+
+// TestSetStreamSpanAttributesWithPeer tests stream span attributes with peer info
+func TestSetStreamSpanAttributesWithPeer(t *testing.T) {
+	t.Parallel()
+
+	tp, exporter := setupTestTracer()
+	defer tp.Shutdown(context.Background())
+
+	config := TracingConfig{
+		TracerProvider: tp,
+	}
+
+	interceptor := StreamTracingInterceptorWithConfig(config)
+
+	addr := &net.TCPAddr{IP: net.ParseIP("192.168.1.1"), Port: 12345}
+	ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: addr})
+	stream := &mockServerStream{ctx: ctx}
+	info := &grpc.StreamServerInfo{
+		FullMethod:     "/test.Service/Method",
+		IsClientStream: true,
+		IsServerStream: true,
+	}
+
+	err := interceptor(nil, stream, info, mockStreamHandler)
+
+	assert.NoError(t, err)
+
+	spans := exporter.GetSpans()
+	assert.GreaterOrEqual(t, len(spans), 1)
+}
+
+// TestAddSpanAttributeWithUnsupportedType tests AddSpanAttribute with unsupported type
+func TestAddSpanAttributeWithUnsupportedType(t *testing.T) {
+	t.Parallel()
+
+	tp, _ := setupTestTracer()
+	defer tp.Shutdown(context.Background())
+
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Test with unsupported type (struct)
+	type customStruct struct {
+		Field string
+	}
+	AddSpanAttribute(ctx, "struct-key", customStruct{Field: "value"})
+
+	// Test with slice (unsupported)
+	AddSpanAttribute(ctx, "slice-key", []string{"a", "b"})
+
+	// Should not panic, just ignore unsupported types
+}
+
+// TestNormalizeTracingConfigDefaults tests normalizeTracingConfig with all defaults
+func TestNormalizeTracingConfigDefaults(t *testing.T) {
+	t.Parallel()
+
+	config := TracingConfig{}
+
+	normalizedConfig, tracer, skipMethods := normalizeTracingConfig(config)
+
+	assert.NotNil(t, normalizedConfig.TracerProvider)
+	assert.NotNil(t, normalizedConfig.Propagators)
+	assert.Equal(t, TracerName, normalizedConfig.ServiceName)
+	assert.NotNil(t, tracer)
+	assert.Empty(t, skipMethods)
+}
+
+// TestExtractTraceContextWithNoMetadata tests extractTraceContext with no metadata
+func TestExtractTraceContextWithNoMetadata(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	propagators := propagation.TraceContext{}
+
+	resultCtx := extractTraceContext(ctx, propagators)
+
+	assert.NotNil(t, resultCtx)
+}
+
+// TestStartUnarySpan tests startUnarySpan function
+func TestStartUnarySpan(t *testing.T) {
+	t.Parallel()
+
+	tp, _ := setupTestTracer()
+	defer tp.Shutdown(context.Background())
+
+	tracer := tp.Tracer("test")
+
+	ctx, span := startUnarySpan(context.Background(), tracer, "/test.Service/Method")
+	defer span.End()
+
+	assert.NotNil(t, ctx)
+	assert.NotNil(t, span)
+}
+
+// TestStartStreamSpan tests startStreamSpan function
+func TestStartStreamSpan(t *testing.T) {
+	t.Parallel()
+
+	tp, _ := setupTestTracer()
+	defer tp.Shutdown(context.Background())
+
+	tracer := tp.Tracer("test")
+
+	ctx, span := startStreamSpan(context.Background(), tracer, "/test.Service/StreamMethod")
+	defer span.End()
+
+	assert.NotNil(t, ctx)
+	assert.NotNil(t, span)
+}
+
+// TestSetSpanStatusWithNilError tests setSpanStatus with nil error
+func TestSetSpanStatusWithNilError(t *testing.T) {
+	t.Parallel()
+
+	tp, _ := setupTestTracer()
+	defer tp.Shutdown(context.Background())
+
+	tracer := tp.Tracer("test")
+	_, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	// Should not panic
+	setSpanStatus(span, nil)
+}
+
+// TestSetSpanStatusWithGRPCError tests setSpanStatus with gRPC error
+func TestSetSpanStatusWithGRPCError(t *testing.T) {
+	t.Parallel()
+
+	tp, _ := setupTestTracer()
+	defer tp.Shutdown(context.Background())
+
+	tracer := tp.Tracer("test")
+	_, span := tracer.Start(context.Background(), "test-span")
+	defer span.End()
+
+	err := status.Error(1, "not found")
+	setSpanStatus(span, err)
+}

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -207,4 +208,87 @@ func TestRateLimitCore_LogExceeded(t *testing.T) {
 	})
 
 	core.LogExceeded("test-key", 100)
+}
+
+func TestRateLimitCore_Limiter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns underlying limiter", func(t *testing.T) {
+		limiter := ratelimit.NewTokenBucketLimiter(nil, 10, 10, nil)
+		defer limiter.Close()
+
+		core := NewRateLimitCore(RateLimitCoreConfig{
+			Limiter: limiter,
+		})
+
+		assert.Equal(t, limiter, core.Limiter())
+	})
+
+	t.Run("returns noop limiter when created with nil", func(t *testing.T) {
+		core := NewRateLimitCore(RateLimitCoreConfig{})
+
+		// Should return a noop limiter, not nil
+		assert.NotNil(t, core.Limiter())
+	})
+}
+
+func TestRateLimitCore_ShouldSkip_NilMap(t *testing.T) {
+	t.Parallel()
+
+	// Create core without initializing skip paths to test nil map case
+	core := &RateLimitCore{
+		skipPaths: nil,
+	}
+
+	assert.False(t, core.ShouldSkip("/any/path"))
+}
+
+// mockErrorLimiter is a limiter that returns errors for testing
+type mockErrorLimiter struct{}
+
+func (m *mockErrorLimiter) Allow(ctx context.Context, key string) (*ratelimit.Result, error) {
+	return nil, errors.New("limiter error")
+}
+
+func (m *mockErrorLimiter) AllowN(ctx context.Context, key string, n int) (*ratelimit.Result, error) {
+	return nil, errors.New("limiter error")
+}
+
+func (m *mockErrorLimiter) GetLimit(key string) *ratelimit.Limit {
+	return nil
+}
+
+func (m *mockErrorLimiter) Reset(ctx context.Context, key string) error {
+	return nil
+}
+
+func TestRateLimitCore_Check_Error(t *testing.T) {
+	t.Parallel()
+
+	core := NewRateLimitCore(RateLimitCoreConfig{
+		Limiter: &mockErrorLimiter{},
+		BaseConfig: BaseConfig{
+			Logger: zap.NewNop(),
+		},
+	})
+
+	ctx := context.Background()
+	result, err := core.Check(ctx, "test-key")
+
+	// Should return allowed=true on error to avoid blocking
+	assert.Error(t, err)
+	assert.True(t, result.Allowed)
+}
+
+func TestLimiterAdapter_Allow_Error(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewLimiterAdapter(&mockErrorLimiter{})
+
+	ctx := context.Background()
+	allowed, err := adapter.Allow(ctx, "test-key")
+
+	// Should return allowed=true on error
+	assert.Error(t, err)
+	assert.True(t, allowed)
 }

@@ -3053,3 +3053,660 @@ var _ = apierrors.IsNotFound
 
 // Ensure we're using ctrl import
 var _ = ctrl.Result{}
+
+// ============================================================================
+// TLSConfigReconciler Error Path Tests
+// ============================================================================
+
+// tlsConfigErrorClient - Mock client that returns errors for TLSConfig tests
+type tlsConfigErrorClient struct {
+	client.Client
+	getError    error
+	updateError error
+	listError   error
+}
+
+func (c *tlsConfigErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if c.getError != nil {
+		return c.getError
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *tlsConfigErrorClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.updateError != nil {
+		return c.updateError
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *tlsConfigErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if c.listError != nil {
+		return c.listError
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func TestTLSConfigReconciler_fetchTLSConfig_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &tlsConfigErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &TLSConfigReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-config"
+
+	config, result, err := r.fetchTLSConfig(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-config", Namespace: "default"},
+	}, strategy, resourceKey)
+
+	assert.Nil(t, config)
+	assert.NotNil(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestTLSConfigReconciler_ensureFinalizerAndReconcileTLSConfig_FinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-config",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.TLSConfigSpec{
+			CertificateSource: avapigwv1alpha1.CertificateSource{
+				Secret: &avapigwv1alpha1.SecretCertificateSource{
+					Name: "test-secret",
+				},
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer)
+	cl := &tlsConfigErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsConfig).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &TLSConfigReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-config"
+	var reconcileErr *ReconcileError
+
+	result, err := r.ensureFinalizerAndReconcileTLSConfig(context.Background(), tlsConfig, strategy, resourceKey, &reconcileErr)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestTLSConfigReconciler_handleDeletion_RemoveFinalizerError_ErrorClient(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-config",
+			Namespace:  "default",
+			Finalizers: []string{tlsConfigFinalizer},
+		},
+		Spec: avapigwv1alpha1.TLSConfigSpec{
+			CertificateSource: avapigwv1alpha1.CertificateSource{
+				Secret: &avapigwv1alpha1.SecretCertificateSource{
+					Name: "test-secret",
+				},
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &tlsConfigErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsConfig).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &TLSConfigReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.handleDeletion(context.Background(), tlsConfig)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+// ============================================================================
+// Additional Coverage Tests for updateCertificateExpirationStatus
+// ============================================================================
+
+func TestTLSConfigReconciler_updateCertificateExpirationStatus_NilNotAfter(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+	}
+
+	// Certificate info with nil NotAfter
+	certInfo := &avapigwv1alpha1.CertificateInfo{
+		NotAfter: nil,
+	}
+
+	// Act
+	reconciler.updateCertificateExpirationStatus(tlsConfig, certInfo)
+
+	// Assert - should set Ready status when NotAfter is nil
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, tlsConfig.Status.Phase)
+	condition := tlsConfig.Status.GetCondition(avapigwv1alpha1.ConditionTypeReady)
+	assert.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+}
+
+func TestTLSConfigReconciler_updateCertificateExpirationStatus_ExpiredCertificate(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+	}
+
+	// Certificate info with expired NotAfter
+	expiredTime := metav1.NewTime(time.Now().Add(-24 * time.Hour))
+	certInfo := &avapigwv1alpha1.CertificateInfo{
+		NotAfter: &expiredTime,
+	}
+
+	// Act
+	reconciler.updateCertificateExpirationStatus(tlsConfig, certInfo)
+
+	// Assert - should set Error status when certificate is expired
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusError, tlsConfig.Status.Phase)
+	condition := tlsConfig.Status.GetCondition(avapigwv1alpha1.ConditionTypeReady)
+	assert.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Contains(t, condition.Message, "expired")
+}
+
+func TestTLSConfigReconciler_updateCertificateExpirationStatus_ExpiringSoon(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+	}
+
+	// Certificate info expiring in 7 days (within default 30-day renewBefore)
+	expiringTime := metav1.NewTime(time.Now().Add(7 * 24 * time.Hour))
+	certInfo := &avapigwv1alpha1.CertificateInfo{
+		NotAfter: &expiringTime,
+	}
+
+	// Act
+	reconciler.updateCertificateExpirationStatus(tlsConfig, certInfo)
+
+	// Assert - should set Degraded status when certificate is expiring soon
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusDegraded, tlsConfig.Status.Phase)
+	condition := tlsConfig.Status.GetCondition(avapigwv1alpha1.ConditionTypeReady)
+	assert.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, string(avapigwv1alpha1.ReasonDegraded), condition.Reason)
+}
+
+func TestTLSConfigReconciler_updateCertificateExpirationStatus_ValidCertificate(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+	}
+
+	// Certificate info valid for 1 year
+	validTime := metav1.NewTime(time.Now().Add(365 * 24 * time.Hour))
+	certInfo := &avapigwv1alpha1.CertificateInfo{
+		NotAfter: &validTime,
+	}
+
+	// Act
+	reconciler.updateCertificateExpirationStatus(tlsConfig, certInfo)
+
+	// Assert - should set Ready status when certificate is valid
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusReady, tlsConfig.Status.Phase)
+	condition := tlsConfig.Status.GetCondition(avapigwv1alpha1.ConditionTypeReady)
+	assert.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, string(avapigwv1alpha1.ReasonReady), condition.Reason)
+}
+
+func TestTLSConfigReconciler_updateCertificateExpirationStatus_CustomRenewBefore(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	// Set custom renewBefore to 3 days
+	renewBefore := "72h"
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.TLSConfigSpec{
+			Rotation: &avapigwv1alpha1.CertificateRotationConfig{
+				RenewBefore: &renewBefore,
+			},
+		},
+	}
+
+	// Certificate info expiring in 2 days (within 3-day renewBefore)
+	expiringTime := metav1.NewTime(time.Now().Add(2 * 24 * time.Hour))
+	certInfo := &avapigwv1alpha1.CertificateInfo{
+		NotAfter: &expiringTime,
+	}
+
+	// Act
+	reconciler.updateCertificateExpirationStatus(tlsConfig, certInfo)
+
+	// Assert - should set Degraded status
+	assert.Equal(t, avapigwv1alpha1.PhaseStatusDegraded, tlsConfig.Status.Phase)
+}
+
+// ============================================================================
+// Additional Coverage Tests for getVaultSecret
+// ============================================================================
+
+func TestTLSConfigReconciler_getVaultSecret_Success(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	vaultSecret := &avapigwv1alpha1.VaultSecret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vault-secret",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.VaultSecretSpec{
+			Path: "secret/test",
+			VaultConnection: avapigwv1alpha1.VaultConnectionConfig{
+				Address: "http://vault:8200",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(vaultSecret).
+		Build()
+
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	// Act
+	result, err := reconciler.getVaultSecret(context.Background(), "default", "test-vault-secret")
+
+	// Assert
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Equal(t, "test-vault-secret", result.Name)
+}
+
+func TestTLSConfigReconciler_getVaultSecret_NotFound(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	// Act
+	result, err := reconciler.getVaultSecret(context.Background(), "default", "non-existent")
+
+	// Assert
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestTLSConfigReconciler_getVaultSecret_GetError(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &tlsConfigErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &TLSConfigReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	// Act
+	result, err := r.getVaultSecret(context.Background(), "default", "test-vault-secret")
+
+	// Assert
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "failed to get VaultSecret")
+}
+
+// ============================================================================
+// Additional Coverage Tests for loadCertificateFromTargetSecret
+// ============================================================================
+
+func TestTLSConfigReconciler_loadCertificateFromTargetSecret_Success(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	certPEM, _, err := generateTestCertificate(
+		time.Now().Add(-24*time.Hour),
+		time.Now().Add(365*24*time.Hour),
+		[]string{"test.example.com"},
+	)
+	require.NoError(t, err)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "target-secret",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"certificate": certPEM,
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(secret).
+		Build()
+
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	// Act
+	certInfo, err := reconciler.loadCertificateFromTargetSecret(context.Background(), "default", "target-secret", nil)
+
+	// Assert
+	assert.NoError(t, err)
+	assert.NotNil(t, certInfo)
+}
+
+func TestTLSConfigReconciler_loadCertificateFromTargetSecret_NotFound(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	// Act
+	certInfo, err := reconciler.loadCertificateFromTargetSecret(context.Background(), "default", "non-existent", nil)
+
+	// Assert
+	assert.Error(t, err)
+	assert.Nil(t, certInfo)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestTLSConfigReconciler_loadCertificateFromTargetSecret_MissingCertKey(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "target-secret",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"other-key": []byte("data"),
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(secret).
+		Build()
+
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	// Act
+	certInfo, err := reconciler.loadCertificateFromTargetSecret(context.Background(), "default", "target-secret", nil)
+
+	// Assert
+	assert.Error(t, err)
+	assert.Nil(t, certInfo)
+	assert.Contains(t, err.Error(), "certificate key")
+}
+
+func TestTLSConfigReconciler_loadCertificateFromTargetSecret_CustomCertKey(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	certPEM, _, err := generateTestCertificate(
+		time.Now().Add(-24*time.Hour),
+		time.Now().Add(365*24*time.Hour),
+		[]string{"test.example.com"},
+	)
+	require.NoError(t, err)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "target-secret",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"custom-cert": certPEM,
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(secret).
+		Build()
+
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	customKey := "custom-cert"
+
+	// Act
+	certInfo, err := reconciler.loadCertificateFromTargetSecret(context.Background(), "default", "target-secret", &customKey)
+
+	// Assert
+	assert.NoError(t, err)
+	assert.NotNil(t, certInfo)
+}
+
+func TestTLSConfigReconciler_loadCertificateFromTargetSecret_GetError(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &tlsConfigErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &TLSConfigReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	// Act
+	certInfo, err := r.loadCertificateFromTargetSecret(context.Background(), "default", "target-secret", nil)
+
+	// Assert
+	assert.Error(t, err)
+	assert.Nil(t, certInfo)
+	assert.Contains(t, err.Error(), "failed to get target secret")
+}
+
+// ============================================================================
+// Additional Coverage Tests for getRenewBeforeDuration
+// ============================================================================
+
+func TestTLSConfigReconciler_getRenewBeforeDuration_Default(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+	}
+
+	// Act
+	duration := reconciler.getRenewBeforeDuration(tlsConfig)
+
+	// Assert - default is 30 days
+	assert.Equal(t, 30*24*time.Hour, duration)
+}
+
+func TestTLSConfigReconciler_getRenewBeforeDuration_Custom(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	renewBefore := "72h"
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.TLSConfigSpec{
+			Rotation: &avapigwv1alpha1.CertificateRotationConfig{
+				RenewBefore: &renewBefore,
+			},
+		},
+	}
+
+	// Act
+	duration := reconciler.getRenewBeforeDuration(tlsConfig)
+
+	// Assert
+	assert.Equal(t, 72*time.Hour, duration)
+}
+
+func TestTLSConfigReconciler_getRenewBeforeDuration_InvalidFormat(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	invalidRenewBefore := "invalid"
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.TLSConfigSpec{
+			Rotation: &avapigwv1alpha1.CertificateRotationConfig{
+				RenewBefore: &invalidRenewBefore,
+			},
+		},
+	}
+
+	// Act
+	duration := reconciler.getRenewBeforeDuration(tlsConfig)
+
+	// Assert - should return default when parsing fails
+	assert.Equal(t, 30*24*time.Hour, duration)
+}
+
+// ============================================================================
+// Additional Coverage Tests for calculateRequeueInterval
+// ============================================================================
+
+func TestTLSConfigReconciler_calculateRequeueInterval_Default(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+	}
+
+	// Act
+	interval := reconciler.calculateRequeueInterval(tlsConfig)
+
+	// Assert - default is 1 hour
+	assert.Equal(t, 1*time.Hour, interval)
+}
+
+func TestTLSConfigReconciler_calculateRequeueInterval_Custom(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	checkInterval := avapigwv1alpha1.Duration("30m")
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.TLSConfigSpec{
+			Rotation: &avapigwv1alpha1.CertificateRotationConfig{
+				CheckInterval: &checkInterval,
+			},
+		},
+	}
+
+	// Act
+	interval := reconciler.calculateRequeueInterval(tlsConfig)
+
+	// Assert
+	assert.Equal(t, 30*time.Minute, interval)
+}
+
+func TestTLSConfigReconciler_calculateRequeueInterval_InvalidFormat(t *testing.T) {
+	scheme := setupTLSConfigScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := createTLSConfigReconciler(cl, scheme)
+
+	invalidInterval := avapigwv1alpha1.Duration("invalid")
+	tlsConfig := &avapigwv1alpha1.TLSConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-tls",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.TLSConfigSpec{
+			Rotation: &avapigwv1alpha1.CertificateRotationConfig{
+				CheckInterval: &invalidInterval,
+			},
+		},
+	}
+
+	// Act
+	interval := reconciler.calculateRequeueInterval(tlsConfig)
+
+	// Assert - should return default when parsing fails
+	assert.Equal(t, 1*time.Hour, interval)
+}

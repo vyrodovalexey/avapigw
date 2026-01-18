@@ -3,15 +3,18 @@ package interceptor
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
-	"net"
+	"google.golang.org/grpc/status"
 )
 
 // TestUnaryLoggingInterceptor tests the basic unary logging interceptor
@@ -485,4 +488,326 @@ func TestRequestIDKey(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, "x-request-id", RequestIDKey)
+}
+
+// TestStreamLoggingInterceptorWithPeerInfo tests stream logging with peer info
+func TestStreamLoggingInterceptorWithPeerInfo(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+
+	config := LoggingConfig{
+		Logger: logger,
+	}
+
+	interceptor := StreamLoggingInterceptorWithConfig(config)
+
+	addr := &net.TCPAddr{IP: net.ParseIP("192.168.1.1"), Port: 12345}
+	ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: addr})
+	stream := &mockServerStream{ctx: ctx}
+	info := &grpc.StreamServerInfo{
+		FullMethod:     "/test.Service/Method",
+		IsClientStream: true,
+		IsServerStream: true,
+	}
+
+	err := interceptor(nil, stream, info, mockStreamHandler)
+
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, logs.Len(), 1)
+
+	// Check that peer info is in log
+	logEntry := logs.All()[0]
+	hasPeer := false
+	for _, field := range logEntry.Context {
+		if field.Key == "peer" {
+			hasPeer = true
+			break
+		}
+	}
+	assert.True(t, hasPeer, "peer info should be in log")
+}
+
+// TestStreamLoggingInterceptorWithRequestID tests stream logging with request ID
+func TestStreamLoggingInterceptorWithRequestID(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+
+	config := LoggingConfig{
+		Logger: logger,
+	}
+
+	interceptor := StreamLoggingInterceptorWithConfig(config)
+
+	md := metadata.MD{
+		RequestIDKey: []string{"stream-request-id-123"},
+	}
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+	stream := &mockServerStream{ctx: ctx}
+	info := &grpc.StreamServerInfo{
+		FullMethod:     "/test.Service/Method",
+		IsClientStream: false,
+		IsServerStream: true,
+	}
+
+	err := interceptor(nil, stream, info, mockStreamHandler)
+
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, logs.Len(), 1)
+
+	// Check that request ID is in log
+	logEntry := logs.All()[0]
+	hasRequestID := false
+	for _, field := range logEntry.Context {
+		if field.Key == "requestID" && field.String == "stream-request-id-123" {
+			hasRequestID = true
+			break
+		}
+	}
+	assert.True(t, hasRequestID, "request ID should be in log")
+}
+
+// TestBuildStreamLogFieldsWithPeer tests buildStreamLogFields with peer info
+func TestBuildStreamLogFieldsWithPeer(t *testing.T) {
+	t.Parallel()
+
+	addr := &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 8080}
+	ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: addr})
+
+	info := &grpc.StreamServerInfo{
+		FullMethod:     "/test.Service/Method",
+		IsClientStream: true,
+		IsServerStream: false,
+	}
+
+	wrappedStream := &loggingServerStream{
+		requestID: "test-id",
+		recvCount: 5,
+		sentCount: 3,
+	}
+
+	fields := buildStreamLogFields("test-id", info, wrappedStream, 100*time.Millisecond, ctx, nil)
+
+	assert.NotEmpty(t, fields)
+
+	// Check for peer field
+	hasPeer := false
+	for _, field := range fields {
+		if field.Key == "peer" {
+			hasPeer = true
+			break
+		}
+	}
+	assert.True(t, hasPeer, "peer field should be present")
+}
+
+// TestBuildUnaryLogFieldsWithPeer tests buildUnaryLogFields with peer info
+func TestBuildUnaryLogFieldsWithPeer(t *testing.T) {
+	t.Parallel()
+
+	addr := &net.TCPAddr{IP: net.ParseIP("172.16.0.1"), Port: 9090}
+	ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: addr})
+
+	fields := buildUnaryLogFields("request-123", "/test.Service/Method", 50*time.Millisecond, ctx, nil)
+
+	assert.NotEmpty(t, fields)
+
+	// Check for peer field
+	hasPeer := false
+	for _, field := range fields {
+		if field.Key == "peer" {
+			hasPeer = true
+			break
+		}
+	}
+	assert.True(t, hasPeer, "peer field should be present")
+}
+
+// TestBuildUnaryLogFieldsWithError tests buildUnaryLogFields with error
+func TestBuildUnaryLogFieldsWithError(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	err := status.Error(codes.NotFound, "not found")
+
+	fields := buildUnaryLogFields("request-456", "/test.Service/Method", 75*time.Millisecond, ctx, err)
+
+	assert.NotEmpty(t, fields)
+
+	// Check for grpcCode field
+	hasGRPCCode := false
+	for _, field := range fields {
+		if field.Key == "grpcCode" && field.String == "NotFound" {
+			hasGRPCCode = true
+			break
+		}
+	}
+	assert.True(t, hasGRPCCode, "grpcCode field should be present with NotFound")
+}
+
+// TestShouldSkipUnaryLoggingEdgeCases tests shouldSkipUnaryLogging edge cases
+func TestShouldSkipUnaryLoggingEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips when method in skip list", func(t *testing.T) {
+		skipMethods := map[string]bool{
+			"/test.Service/Skip": true,
+		}
+
+		result := shouldSkipUnaryLogging(skipMethods, "/test.Service/Skip", false)
+		assert.True(t, result)
+	})
+
+	t.Run("does not skip when method not in skip list", func(t *testing.T) {
+		skipMethods := map[string]bool{
+			"/test.Service/Skip": true,
+		}
+
+		result := shouldSkipUnaryLogging(skipMethods, "/test.Service/Other", false)
+		assert.False(t, result)
+	})
+
+	t.Run("skips health check when configured", func(t *testing.T) {
+		skipMethods := map[string]bool{}
+
+		result := shouldSkipUnaryLogging(skipMethods, "/grpc.health.v1.Health/Check", true)
+		assert.True(t, result)
+	})
+
+	t.Run("does not skip health check when not configured", func(t *testing.T) {
+		skipMethods := map[string]bool{}
+
+		result := shouldSkipUnaryLogging(skipMethods, "/grpc.health.v1.Health/Check", false)
+		assert.False(t, result)
+	})
+}
+
+// TestShouldSkipStreamLoggingEdgeCases tests shouldSkipStreamLogging edge cases
+func TestShouldSkipStreamLoggingEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips when method in skip list", func(t *testing.T) {
+		skipMethods := map[string]bool{
+			"/test.Service/Skip": true,
+		}
+
+		result := shouldSkipStreamLogging(skipMethods, "/test.Service/Skip", false)
+		assert.True(t, result)
+	})
+
+	t.Run("does not skip when method not in skip list", func(t *testing.T) {
+		skipMethods := map[string]bool{
+			"/test.Service/Skip": true,
+		}
+
+		result := shouldSkipStreamLogging(skipMethods, "/test.Service/Other", false)
+		assert.False(t, result)
+	})
+
+	t.Run("skips health watch when configured", func(t *testing.T) {
+		skipMethods := map[string]bool{}
+
+		result := shouldSkipStreamLogging(skipMethods, "/grpc.health.v1.Health/Watch", true)
+		assert.True(t, result)
+	})
+}
+
+// TestBuildSkipMethodsMap tests buildSkipMethodsMap function
+func TestBuildSkipMethodsMap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("builds map from slice", func(t *testing.T) {
+		methods := []string{"/test.Service/Method1", "/test.Service/Method2"}
+
+		result := buildSkipMethodsMap(methods)
+
+		assert.Len(t, result, 2)
+		assert.True(t, result["/test.Service/Method1"])
+		assert.True(t, result["/test.Service/Method2"])
+	})
+
+	t.Run("handles empty slice", func(t *testing.T) {
+		methods := []string{}
+
+		result := buildSkipMethodsMap(methods)
+
+		assert.Empty(t, result)
+	})
+
+	t.Run("handles nil slice", func(t *testing.T) {
+		var methods []string
+
+		result := buildSkipMethodsMap(methods)
+
+		assert.Empty(t, result)
+	})
+}
+
+// TestLogUnaryResult tests logUnaryResult function
+func TestLogUnaryResult(t *testing.T) {
+	t.Parallel()
+
+	t.Run("logs info on success", func(t *testing.T) {
+		core, logs := observer.New(zap.InfoLevel)
+		logger := zap.New(core)
+
+		fields := []zap.Field{
+			zap.String("method", "/test.Service/Method"),
+		}
+
+		logUnaryResult(logger, nil, fields)
+
+		assert.Equal(t, 1, logs.Len())
+		assert.Equal(t, "gRPC request completed", logs.All()[0].Message)
+	})
+
+	t.Run("logs error on failure", func(t *testing.T) {
+		core, logs := observer.New(zap.ErrorLevel)
+		logger := zap.New(core)
+
+		fields := []zap.Field{
+			zap.String("method", "/test.Service/Method"),
+		}
+
+		logUnaryResult(logger, errors.New("test error"), fields)
+
+		assert.Equal(t, 1, logs.Len())
+		assert.Equal(t, "gRPC request failed", logs.All()[0].Message)
+	})
+}
+
+// TestLogStreamResult tests logStreamResult function
+func TestLogStreamResult(t *testing.T) {
+	t.Parallel()
+
+	t.Run("logs info on success", func(t *testing.T) {
+		core, logs := observer.New(zap.InfoLevel)
+		logger := zap.New(core)
+
+		fields := []zap.Field{
+			zap.String("method", "/test.Service/Method"),
+		}
+
+		logStreamResult(logger, nil, fields)
+
+		assert.Equal(t, 1, logs.Len())
+		assert.Equal(t, "gRPC stream completed", logs.All()[0].Message)
+	})
+
+	t.Run("logs error on failure", func(t *testing.T) {
+		core, logs := observer.New(zap.ErrorLevel)
+		logger := zap.New(core)
+
+		fields := []zap.Field{
+			zap.String("method", "/test.Service/Method"),
+		}
+
+		logStreamResult(logger, errors.New("stream error"), fields)
+
+		assert.Equal(t, 1, logs.Len())
+		assert.Equal(t, "gRPC stream failed", logs.All()[0].Message)
+	})
 }

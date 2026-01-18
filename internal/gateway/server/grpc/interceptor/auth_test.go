@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vyrodovalexey/avapigw/internal/gateway/core"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -50,9 +51,239 @@ func TestUnaryAuthInterceptor(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "response", resp)
 	})
+}
 
-	t.Run("passes with nil validator", func(t *testing.T) {
-		interceptor := UnaryAuthInterceptor(nil)
+// TestExtractCredentialsFromMetadata tests the extractCredentialsFromMetadata function
+func TestExtractCredentialsFromMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("extracts bearer token", func(t *testing.T) {
+		md := metadata.MD{
+			"authorization": []string{"Bearer my-jwt-token"},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Equal(t, "my-jwt-token", credentials.BearerToken)
+		assert.Empty(t, credentials.APIKey)
+		assert.Nil(t, credentials.BasicAuth)
+	})
+
+	t.Run("extracts bearer token with lowercase prefix", func(t *testing.T) {
+		md := metadata.MD{
+			"authorization": []string{"bearer my-jwt-token"},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Equal(t, "my-jwt-token", credentials.BearerToken)
+	})
+
+	t.Run("extracts basic auth credentials", func(t *testing.T) {
+		// "user:password" base64 encoded
+		encoded := "dXNlcjpwYXNzd29yZA=="
+		md := metadata.MD{
+			"authorization": []string{"Basic " + encoded},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Empty(t, credentials.BearerToken)
+		assert.NotNil(t, credentials.BasicAuth)
+		assert.Equal(t, "user", credentials.BasicAuth.Username)
+		assert.Equal(t, "password", credentials.BasicAuth.Password)
+	})
+
+	t.Run("extracts basic auth with lowercase prefix", func(t *testing.T) {
+		// "admin:secret" base64 encoded
+		encoded := "YWRtaW46c2VjcmV0"
+		md := metadata.MD{
+			"authorization": []string{"basic " + encoded},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.NotNil(t, credentials.BasicAuth)
+		assert.Equal(t, "admin", credentials.BasicAuth.Username)
+		assert.Equal(t, "secret", credentials.BasicAuth.Password)
+	})
+
+	t.Run("extracts API key", func(t *testing.T) {
+		md := metadata.MD{
+			"x-api-key": []string{"my-api-key"},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Equal(t, "my-api-key", credentials.APIKey)
+		assert.Empty(t, credentials.BearerToken)
+		assert.Nil(t, credentials.BasicAuth)
+	})
+
+	t.Run("extracts both bearer token and API key", func(t *testing.T) {
+		md := metadata.MD{
+			"authorization": []string{"Bearer my-token"},
+			"x-api-key":     []string{"my-api-key"},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Equal(t, "my-token", credentials.BearerToken)
+		assert.Equal(t, "my-api-key", credentials.APIKey)
+	})
+
+	t.Run("handles empty metadata", func(t *testing.T) {
+		md := metadata.MD{}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Empty(t, credentials.BearerToken)
+		assert.Empty(t, credentials.APIKey)
+		assert.Nil(t, credentials.BasicAuth)
+	})
+
+	t.Run("handles invalid basic auth encoding", func(t *testing.T) {
+		md := metadata.MD{
+			"authorization": []string{"Basic invalid-base64!!!"},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Nil(t, credentials.BasicAuth)
+	})
+
+	t.Run("handles basic auth without colon", func(t *testing.T) {
+		// "useronly" base64 encoded (no colon)
+		encoded := "dXNlcm9ubHk="
+		md := metadata.MD{
+			"authorization": []string{"Basic " + encoded},
+		}
+
+		credentials := extractCredentialsFromMetadata(md)
+
+		assert.Nil(t, credentials.BasicAuth)
+	})
+}
+
+// TestDecodeBasicAuth tests the decodeBasicAuth function
+func TestDecodeBasicAuth(t *testing.T) {
+	t.Parallel()
+
+	t.Run("decodes valid credentials", func(t *testing.T) {
+		// "user:password" base64 encoded
+		encoded := "dXNlcjpwYXNzd29yZA=="
+
+		username, password, ok := decodeBasicAuth(encoded)
+
+		assert.True(t, ok)
+		assert.Equal(t, "user", username)
+		assert.Equal(t, "password", password)
+	})
+
+	t.Run("decodes credentials with colon in password", func(t *testing.T) {
+		// "user:pass:word" base64 encoded
+		encoded := "dXNlcjpwYXNzOndvcmQ="
+
+		username, password, ok := decodeBasicAuth(encoded)
+
+		assert.True(t, ok)
+		assert.Equal(t, "user", username)
+		assert.Equal(t, "pass:word", password)
+	})
+
+	t.Run("decodes credentials with empty password", func(t *testing.T) {
+		// "user:" base64 encoded
+		encoded := "dXNlcjo="
+
+		username, password, ok := decodeBasicAuth(encoded)
+
+		assert.True(t, ok)
+		assert.Equal(t, "user", username)
+		assert.Empty(t, password)
+	})
+
+	t.Run("returns false for invalid base64", func(t *testing.T) {
+		encoded := "not-valid-base64!!!"
+
+		_, _, ok := decodeBasicAuth(encoded)
+
+		assert.False(t, ok)
+	})
+
+	t.Run("returns false for missing colon", func(t *testing.T) {
+		// "useronly" base64 encoded
+		encoded := "dXNlcm9ubHk="
+
+		_, _, ok := decodeBasicAuth(encoded)
+
+		assert.False(t, ok)
+	})
+}
+
+// TestUnaryAuthInterceptorWithCore tests the core-based unary auth interceptor
+func TestUnaryAuthInterceptorWithCore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips auth for configured methods", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			BaseConfig: core.BaseConfig{
+				SkipPaths: []string{"/test.Service/SkippedMethod"},
+			},
+		})
+
+		interceptor := UnaryAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/SkippedMethod"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+
+	t.Run("allows anonymous access for configured paths", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			AllowAnonymous: true,
+			AnonymousPaths: []string{"/test.Service/PublicMethod"},
+		})
+
+		interceptor := UnaryAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/PublicMethod"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+
+	t.Run("returns unauthenticated when auth required and no credentials", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			RequireAuth: true,
+		})
+
+		interceptor := UnaryAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background()
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.Error(t, err)
+		assert.Nil(t, resp)
+		st, ok := status.FromError(err)
+		assert.True(t, ok)
+		assert.Equal(t, codes.Unauthenticated, st.Code())
+	})
+
+	t.Run("allows request when auth not required", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			RequireAuth: false,
+		})
+
+		interceptor := UnaryAuthInterceptorWithCore(authCore)
 
 		ctx := context.Background()
 		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
@@ -62,6 +293,128 @@ func TestUnaryAuthInterceptor(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "response", resp)
 	})
+
+	t.Run("handles missing metadata gracefully", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			RequireAuth: false,
+		})
+
+		interceptor := UnaryAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background() // No metadata
+		info := &grpc.UnaryServerInfo{FullMethod: "/test.Service/Method"}
+
+		resp, err := interceptor(ctx, "request", info, mockUnaryHandler)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "response", resp)
+	})
+}
+
+// TestStreamAuthInterceptorWithCore tests the core-based stream auth interceptor
+func TestStreamAuthInterceptorWithCore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skips auth for configured methods", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			BaseConfig: core.BaseConfig{
+				SkipPaths: []string{"/test.Service/SkippedMethod"},
+			},
+		})
+
+		interceptor := StreamAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/SkippedMethod"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("allows anonymous access for configured paths", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			AllowAnonymous: true,
+			AnonymousPaths: []string{"/test.Service/PublicMethod"},
+		})
+
+		interceptor := StreamAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/PublicMethod"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("returns unauthenticated when auth required and no credentials", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			RequireAuth: true,
+		})
+
+		interceptor := StreamAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.Error(t, err)
+		st, ok := status.FromError(err)
+		assert.True(t, ok)
+		assert.Equal(t, codes.Unauthenticated, st.Code())
+	})
+
+	t.Run("allows stream when auth not required", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			RequireAuth: false,
+		})
+
+		interceptor := StreamAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background()
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+
+	t.Run("handles missing metadata gracefully", func(t *testing.T) {
+		authCore := core.NewAuthCore(core.AuthCoreConfig{
+			RequireAuth: false,
+		})
+
+		interceptor := StreamAuthInterceptorWithCore(authCore)
+
+		ctx := context.Background() // No metadata
+		stream := &mockServerStream{ctx: ctx}
+		info := &grpc.StreamServerInfo{FullMethod: "/test.Service/Method"}
+
+		err := interceptor(nil, stream, info, mockStreamHandler)
+
+		assert.NoError(t, err)
+	})
+}
+
+// TestCompositeModeAnyWithNoValidators tests CompositeModeAny with no validators
+func TestCompositeModeAnyWithNoValidators(t *testing.T) {
+	t.Parallel()
+
+	validator := &CompositeValidator{
+		Validators: []AuthValidator{},
+		Mode:       CompositeModeAny,
+	}
+
+	err := validator.Validate(context.Background(), "/test.Service/Method", metadata.MD{})
+
+	// Empty validators should pass
+	assert.NoError(t, err)
 }
 
 // TestUnaryAuthInterceptorWithConfig tests the configurable unary auth interceptor

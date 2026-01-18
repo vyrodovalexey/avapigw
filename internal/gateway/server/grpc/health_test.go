@@ -458,3 +458,140 @@ func TestHealthServerConcurrentAccess(t *testing.T) {
 		<-done
 	}
 }
+
+// ============================================================================
+// Additional Watch Tests
+// ============================================================================
+
+// TestHealthServerWatch_SendError tests Watch when Send returns error
+func TestHealthServerWatch_SendError(t *testing.T) {
+	t.Parallel()
+
+	server := NewHealthServer()
+	server.SetServingStatus("send-error-service", healthpb.HealthCheckResponse_SERVING)
+
+	ctx := context.Background()
+	stream := &mockHealthWatchServer{
+		ctx:     ctx,
+		sendErr: assert.AnError,
+	}
+
+	req := &healthpb.HealthCheckRequest{Service: "send-error-service"}
+	err := server.Watch(req, stream)
+
+	assert.Error(t, err)
+	assert.Empty(t, stream.sent)
+}
+
+// TestHealthServerWatch_WithStaticStatus tests Watch with static status
+func TestHealthServerWatch_WithStaticStatus(t *testing.T) {
+	t.Parallel()
+
+	server := NewHealthServer()
+	server.SetServingStatus("static-watch-service", healthpb.HealthCheckResponse_NOT_SERVING)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	stream := &mockHealthWatchServer{
+		ctx: ctx,
+	}
+
+	req := &healthpb.HealthCheckRequest{Service: "static-watch-service"}
+	err := server.Watch(req, stream)
+
+	assert.Error(t, err) // Context timeout
+	require.Len(t, stream.sent, 1)
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, stream.sent[0].Status)
+}
+
+// TestHealthServerWatch_EmptyServiceWithStatus tests Watch for empty service with status set
+func TestHealthServerWatch_EmptyServiceWithStatus(t *testing.T) {
+	t.Parallel()
+
+	server := NewHealthServer()
+	server.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	stream := &mockHealthWatchServer{
+		ctx: ctx,
+	}
+
+	req := &healthpb.HealthCheckRequest{Service: ""}
+	err := server.Watch(req, stream)
+
+	assert.Error(t, err) // Context timeout
+	require.Len(t, stream.sent, 1)
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, stream.sent[0].Status)
+}
+
+// ============================================================================
+// Additional HealthChecker Tests
+// ============================================================================
+
+// TestHealthChecker_FirstCheckFails tests HealthChecker when first check fails
+func TestHealthChecker_FirstCheckFails(t *testing.T) {
+	t.Parallel()
+
+	checker := NewHealthChecker()
+	checker.AddCheck(func() bool { return false })
+	checker.AddCheck(func() bool { return true })
+
+	status := checker.Check()
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, status)
+}
+
+// TestHealthChecker_LastCheckFails tests HealthChecker when last check fails
+func TestHealthChecker_LastCheckFails(t *testing.T) {
+	t.Parallel()
+
+	checker := NewHealthChecker()
+	checker.AddCheck(func() bool { return true })
+	checker.AddCheck(func() bool { return true })
+	checker.AddCheck(func() bool { return false })
+
+	status := checker.Check()
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, status)
+}
+
+// TestHealthChecker_AllChecksFail tests HealthChecker when all checks fail
+func TestHealthChecker_AllChecksFail(t *testing.T) {
+	t.Parallel()
+
+	checker := NewHealthChecker()
+	checker.AddCheck(func() bool { return false })
+	checker.AddCheck(func() bool { return false })
+	checker.AddCheck(func() bool { return false })
+
+	status := checker.Check()
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, status)
+}
+
+// TestHealthChecker_IntegrationWithHealthServer tests HealthChecker integration
+func TestHealthChecker_IntegrationWithHealthServer(t *testing.T) {
+	t.Parallel()
+
+	server := NewHealthServer()
+	checker := NewHealthChecker()
+
+	isHealthy := true
+	checker.AddCheck(func() bool { return isHealthy })
+
+	server.SetCheck("checker-service", checker.ToCheckFunc())
+
+	ctx := context.Background()
+
+	// Check when healthy
+	req := &healthpb.HealthCheckRequest{Service: "checker-service"}
+	resp, err := server.Check(ctx, req)
+	assert.NoError(t, err)
+	assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.Status)
+
+	// Change to unhealthy
+	isHealthy = false
+	resp, err = server.Check(ctx, req)
+	assert.NoError(t, err)
+	assert.Equal(t, healthpb.HealthCheckResponse_NOT_SERVING, resp.Status)
+}

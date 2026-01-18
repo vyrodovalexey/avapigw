@@ -1552,3 +1552,356 @@ func TestProxyCloseMultipleTimes(t *testing.T) {
 	assert.NoError(t, err2)
 	assert.NoError(t, err3)
 }
+
+// ============================================================================
+// Additional ProxyStream Tests
+// ============================================================================
+
+// TestProxyStream_WithValidConnection tests ProxyStream with a valid connection
+func TestProxyStream_WithValidConnection(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	err := manager.AddBackend(backend.BackendConfig{
+		Name:      "stream-valid-backend",
+		Namespace: "default",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50070},
+		},
+	})
+	require.NoError(t, err)
+
+	proxy := NewProxy(manager, logger)
+	defer proxy.Close()
+
+	ctx := context.Background()
+	desc := &grpc.StreamDesc{
+		ServerStreams: true,
+		ClientStreams: true,
+	}
+	backendRef := &BackendRef{
+		Name:      "stream-valid-backend",
+		Namespace: "default",
+		Port:      50070,
+	}
+
+	// Create mock server stream
+	stream := &mockServerStream{
+		ctx:      ctx,
+		recvMsgs: []interface{}{},
+	}
+
+	// This will fail when trying to create the client stream since no server is running
+	err = proxy.ProxyStream(ctx, desc, "/test.Service/Method", backendRef, stream)
+
+	// Should fail with stream creation error
+	assert.Error(t, err)
+}
+
+// TestProxyStream_WithIncomingMetadata tests ProxyStream with incoming metadata
+func TestProxyStream_WithIncomingMetadata(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	err := manager.AddBackend(backend.BackendConfig{
+		Name:      "stream-metadata-backend",
+		Namespace: "default",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50071},
+		},
+	})
+	require.NoError(t, err)
+
+	proxy := NewProxy(manager, logger)
+	defer proxy.Close()
+
+	// Create context with incoming metadata
+	md := metadata.New(map[string]string{
+		"x-request-id":  "test-123",
+		"authorization": "Bearer token",
+	})
+	ctx := metadata.NewIncomingContext(context.Background(), md)
+
+	desc := &grpc.StreamDesc{
+		ServerStreams: true,
+		ClientStreams: true,
+	}
+	backendRef := &BackendRef{
+		Name:      "stream-metadata-backend",
+		Namespace: "default",
+		Port:      50071,
+	}
+
+	stream := &mockServerStream{ctx: ctx}
+
+	// Will fail because no actual server, but tests metadata forwarding path
+	err = proxy.ProxyStream(ctx, desc, "/test.Service/Method", backendRef, stream)
+
+	assert.Error(t, err)
+}
+
+// ============================================================================
+// Additional CreateNewConnection Tests
+// ============================================================================
+
+// TestCreateNewConnection_DoubleCheck tests the double-check pattern in createNewConnection
+func TestCreateNewConnection_DoubleCheck(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	err := manager.AddBackend(backend.BackendConfig{
+		Name:      "double-check-backend",
+		Namespace: "default",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50072},
+		},
+	})
+	require.NoError(t, err)
+
+	proxy := NewProxy(manager, logger)
+	defer proxy.Close()
+
+	ctx := context.Background()
+	backendRef := &BackendRef{
+		Name:      "double-check-backend",
+		Namespace: "default",
+		Port:      50072,
+	}
+
+	// Create multiple connections concurrently to test double-check pattern
+	var wg sync.WaitGroup
+	connections := make([]*grpc.ClientConn, 20)
+	errors := make([]error, 20)
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			conn, err := proxy.GetConnection(ctx, backendRef)
+			connections[idx] = conn
+			errors[idx] = err
+		}(i)
+	}
+
+	wg.Wait()
+
+	// All should succeed and return the same connection
+	for i := 0; i < 20; i++ {
+		assert.NoError(t, errors[i])
+		assert.NotNil(t, connections[i])
+	}
+
+	// Verify all connections are the same (cached)
+	for i := 1; i < 20; i++ {
+		assert.Same(t, connections[0], connections[i])
+	}
+}
+
+// ============================================================================
+// Additional DialBackend Tests
+// ============================================================================
+
+// TestDialBackend_Success tests successful backend dialing
+func TestDialBackend_Success(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	err := manager.AddBackend(backend.BackendConfig{
+		Name:      "dial-success-backend",
+		Namespace: "default",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50073},
+		},
+	})
+	require.NoError(t, err)
+
+	proxy := NewProxy(manager, logger)
+	defer proxy.Close()
+
+	be := manager.GetBackend("default/dial-success-backend")
+	require.NotNil(t, be)
+
+	endpoint := be.GetHealthyEndpoint()
+	require.NotNil(t, endpoint)
+
+	conn, err := proxy.dialBackend(endpoint, "default/dial-success-backend")
+
+	assert.NoError(t, err)
+	assert.NotNil(t, conn)
+
+	conn.Close()
+}
+
+// ============================================================================
+// Additional ProxyUnary Tests
+// ============================================================================
+
+// TestProxyUnary_WithValidConnection tests ProxyUnary with a valid connection
+func TestProxyUnary_WithValidConnection(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	err := manager.AddBackend(backend.BackendConfig{
+		Name:      "unary-valid-backend",
+		Namespace: "default",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50074},
+		},
+	})
+	require.NoError(t, err)
+
+	proxy := NewProxy(manager, logger)
+	defer proxy.Close()
+
+	ctx := context.Background()
+	backendRef := &BackendRef{
+		Name:      "unary-valid-backend",
+		Namespace: "default",
+		Port:      50074,
+	}
+
+	// This will fail when trying to invoke since no server is running
+	resp, md, err := proxy.ProxyUnary(ctx, "/test.Service/Method", []byte("request"), backendRef)
+
+	// Should fail with connection error
+	assert.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Nil(t, md)
+}
+
+// ============================================================================
+// Additional TransparentHandler Tests
+// ============================================================================
+
+// TestTransparentHandler_WithBackendConnectionError tests handler when backend connection fails
+func TestTransparentHandler_WithBackendConnectionError(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	// Add backend with unhealthy endpoint
+	err := manager.AddBackend(backend.BackendConfig{
+		Name:      "handler-unhealthy-backend",
+		Namespace: "default",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50075},
+		},
+	})
+	require.NoError(t, err)
+
+	be := manager.GetBackend("default/handler-unhealthy-backend")
+	require.NotNil(t, be)
+	endpoints := be.GetAllEndpoints()
+	require.Len(t, endpoints, 1)
+	endpoints[0].SetHealthy(false)
+
+	proxy := NewProxy(manager, logger)
+	router := NewRouter(logger)
+
+	// Add route with backend ref
+	route := &GRPCRoute{
+		Name:      "handler-route",
+		Hostnames: []string{"*"},
+		Rules: []GRPCRouteRule{
+			{
+				Matches: []GRPCMethodMatch{
+					{Service: "test.Service", Method: "*"},
+				},
+				BackendRefs: []BackendRef{
+					{Name: "handler-unhealthy-backend", Namespace: "default", Port: 50075},
+				},
+			},
+		},
+	}
+	err = router.AddRoute(route)
+	require.NoError(t, err)
+
+	handler := proxy.TransparentHandler(router)
+
+	ctx := grpc.NewContextWithServerTransportStream(
+		context.Background(),
+		&mockServerTransportStream{method: "/test.Service/Method"},
+	)
+	stream := &mockServerStream{ctx: ctx}
+
+	err = handler(nil, stream)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get connection")
+}
+
+// ============================================================================
+// Additional GetBackendEndpoint Tests
+// ============================================================================
+
+// TestGetBackendEndpoint_WithNamespace tests getBackendEndpoint with namespace
+func TestGetBackendEndpoint_WithNamespace(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	err := manager.AddBackend(backend.BackendConfig{
+		Name:      "endpoint-ns-backend",
+		Namespace: "production",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50076},
+		},
+	})
+	require.NoError(t, err)
+
+	proxy := NewProxy(manager, logger)
+
+	backendRef := &BackendRef{
+		Name:      "endpoint-ns-backend",
+		Namespace: "production",
+		Port:      50076,
+	}
+
+	endpoint, key, err := proxy.getBackendEndpoint(backendRef)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, endpoint)
+	assert.Equal(t, "production/endpoint-ns-backend", key)
+}
+
+// TestGetBackendEndpoint_WithoutNamespace tests getBackendEndpoint without namespace
+func TestGetBackendEndpoint_WithoutNamespace(t *testing.T) {
+	t.Parallel()
+
+	logger := zap.NewNop()
+	manager := backend.NewManager(logger)
+
+	err := manager.AddBackend(backend.BackendConfig{
+		Name: "endpoint-no-ns-backend",
+		Endpoints: []backend.EndpointConfig{
+			{Address: "127.0.0.1", Port: 50077},
+		},
+	})
+	require.NoError(t, err)
+
+	proxy := NewProxy(manager, logger)
+
+	backendRef := &BackendRef{
+		Name:      "endpoint-no-ns-backend",
+		Namespace: "",
+		Port:      50077,
+	}
+
+	endpoint, key, err := proxy.getBackendEndpoint(backendRef)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, endpoint)
+	assert.Equal(t, "endpoint-no-ns-backend", key)
+}

@@ -943,3 +943,271 @@ func TestGatewayWebhook_ValidateListenerHostname(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid hostname")
 	})
 }
+
+// ============================================================================
+// Listener Name Validation Tests
+// ============================================================================
+
+func TestIsValidListenerName(t *testing.T) {
+	tests := []struct {
+		name         string
+		listenerName string
+		expectValid  bool
+	}{
+		// Valid cases
+		{"valid simple name", "http", true},
+		{"valid name with hyphen", "http-listener", true},
+		{"valid name with numbers", "http8080", true},
+		{"valid name with hyphen and numbers", "http-8080-listener", true},
+		{"valid single character", "a", true},
+		{"valid single digit", "1", true},
+		{"valid max length name", "a" + string(make([]byte, 61)) + "z", false}, // 63 chars but invalid due to null bytes
+
+		// Invalid cases - exceeding max length
+		{"invalid - exceeds 63 chars", "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01234", false},
+		{"invalid - exactly 64 chars", "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123", false},
+
+		// Invalid cases - format issues
+		{"invalid - starts with hyphen", "-http", false},
+		{"invalid - ends with hyphen", "http-", false},
+		{"invalid - uppercase letters", "HTTP", false},
+		{"invalid - mixed case", "Http", false},
+		{"invalid - contains underscore", "http_listener", false},
+		{"invalid - contains dot", "http.listener", false},
+		{"invalid - contains space", "http listener", false},
+		{"invalid - contains special char", "http@listener", false},
+		{"invalid - empty string", "", false},
+		{"invalid - only hyphen", "-", false},
+		{"invalid - double hyphen", "http--listener", true}, // Actually valid per RFC 1123
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isValidListenerName(tt.listenerName)
+			assert.Equal(t, tt.expectValid, result, "isValidListenerName(%q) = %v, want %v", tt.listenerName, result, tt.expectValid)
+		})
+	}
+}
+
+func TestGatewayWebhook_ValidateListenerName(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	t.Run("invalid - listener name exceeds max length", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		// Create a name that exceeds 63 characters
+		longName := "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123"
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     longName,
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid listener name format")
+	})
+
+	t.Run("invalid - listener name starts with hyphen", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "-http",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid listener name format")
+	})
+
+	t.Run("invalid - listener name ends with hyphen", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "http-",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid listener name format")
+	})
+
+	t.Run("invalid - listener name with uppercase", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "HTTP",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid listener name format")
+	})
+
+	t.Run("invalid - empty listener name", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "listener name is required")
+	})
+
+	t.Run("valid - listener name at max length (63 chars)", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		// Create a valid name that is exactly 63 characters
+		maxLengthName := "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0"
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     maxLengthName,
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolHTTP,
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.NoError(t, err)
+	})
+}
+
+// ============================================================================
+// Protocol Validation Tests
+// ============================================================================
+
+func TestIsValidProtocol(t *testing.T) {
+	tests := []struct {
+		name        string
+		protocol    avapigwv1alpha1.ProtocolType
+		expectValid bool
+	}{
+		{"valid HTTP", avapigwv1alpha1.ProtocolHTTP, true},
+		{"valid HTTPS", avapigwv1alpha1.ProtocolHTTPS, true},
+		{"valid GRPC", avapigwv1alpha1.ProtocolGRPC, true},
+		{"valid GRPCS", avapigwv1alpha1.ProtocolGRPCS, true},
+		{"valid TCP", avapigwv1alpha1.ProtocolTCP, true},
+		{"valid TLS", avapigwv1alpha1.ProtocolTLS, true},
+		{"invalid protocol", avapigwv1alpha1.ProtocolType("INVALID"), false},
+		{"invalid empty protocol", avapigwv1alpha1.ProtocolType(""), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isValidProtocol(tt.protocol)
+			assert.Equal(t, tt.expectValid, result)
+		})
+	}
+}
+
+func TestGatewayWebhook_ValidateInvalidProtocol(t *testing.T) {
+	scheme, err := avapigwv1alpha1.SchemeBuilder.Build()
+	require.NoError(t, err)
+
+	t.Run("invalid - unsupported protocol", func(t *testing.T) {
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		gateway := &avapigwv1alpha1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "default"},
+			Spec: avapigwv1alpha1.GatewaySpec{
+				Listeners: []avapigwv1alpha1.Listener{{
+					Name:     "invalid-protocol",
+					Port:     80,
+					Protocol: avapigwv1alpha1.ProtocolType("INVALID"),
+				}},
+			},
+		}
+
+		webhook := &GatewayWebhook{
+			Client:             cl,
+			Defaulter:          defaulter.NewGatewayDefaulter(),
+			DuplicateChecker:   validator.NewDuplicateChecker(cl),
+			ReferenceValidator: validator.NewReferenceValidator(cl),
+		}
+
+		_, err = webhook.ValidateCreate(context.Background(), gateway)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported protocol")
+	})
+}

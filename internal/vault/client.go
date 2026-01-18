@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -619,8 +620,14 @@ func extractMetadata(metadata map[string]interface{}) *SecretMetadata {
 		}
 	}
 
-	if version, ok := metadata["version"].(float64); ok {
-		m.Version = int(version)
+	// Handle version as both float64 (from direct map creation) and json.Number (from Vault API)
+	switch v := metadata["version"].(type) {
+	case float64:
+		m.Version = int(v)
+	case json.Number:
+		if intVal, err := v.Int64(); err == nil {
+			m.Version = int(intVal)
+		}
 	}
 
 	if deletedTime, ok := metadata["deletion_time"].(string); ok && deletedTime != "" {

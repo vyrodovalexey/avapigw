@@ -2063,3 +2063,373 @@ func TestBackendReconciler_Reconcile_ErrorClassification(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// BackendReconciler Error Path Tests
+// ============================================================================
+
+// backendErrorClient - Mock client that returns errors for backend tests
+type backendErrorClient struct {
+	client.Client
+	getError    error
+	updateError error
+	listError   error
+}
+
+func (c *backendErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if c.getError != nil {
+		return c.getError
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *backendErrorClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.updateError != nil {
+		return c.updateError
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *backendErrorClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if c.listError != nil {
+		return c.listError
+	}
+	return c.Client.List(ctx, list, opts...)
+}
+
+func TestBackendReconciler_fetchBackend_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &backendErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-backend"
+
+	backend, result, err := r.fetchBackend(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-backend", Namespace: "default"},
+	}, strategy, resourceKey)
+
+	assert.Nil(t, backend)
+	assert.NotNil(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestBackendReconciler_Reconcile_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &backendErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-backend", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestBackendReconciler_Reconcile_DeletionWithError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	now := metav1.Now()
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-backend",
+			Namespace:         "default",
+			Finalizers:        []string{backendFinalizer},
+			DeletionTimestamp: &now,
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Endpoints: []avapigwv1alpha1.EndpointConfig{
+				{Address: "10.0.0.1", Port: 8080},
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &backendErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(backend).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-backend", Namespace: "default"},
+	})
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestBackendReconciler_ensureFinalizerAndReconcileBackend_FinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Endpoints: []avapigwv1alpha1.EndpointConfig{
+				{Address: "10.0.0.1", Port: 8080},
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer)
+	cl := &backendErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(backend).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	r.initBaseComponents()
+
+	strategy := DefaultRequeueStrategy()
+	resourceKey := "default/test-backend"
+	var reconcileErr *ReconcileError
+
+	result, err := r.ensureFinalizerAndReconcileBackend(context.Background(), backend, strategy, resourceKey, &reconcileErr)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestBackendReconciler_handleDeletion_RemoveFinalizerError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-backend",
+			Namespace:  "default",
+			Finalizers: []string{backendFinalizer},
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Endpoints: []avapigwv1alpha1.EndpointConfig{
+				{Address: "10.0.0.1", Port: 8080},
+			},
+		},
+	}
+
+	// Create a client that will return an error on Update (for finalizer removal)
+	cl := &backendErrorClient{
+		Client:      fake.NewClientBuilder().WithScheme(scheme).WithObjects(backend).Build(),
+		updateError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	result, err := r.handleDeletion(context.Background(), backend)
+
+	assert.Error(t, err)
+	assert.True(t, result.Requeue || result.RequeueAfter > 0)
+}
+
+func TestBackendReconciler_discoverFromEndpoints_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &backendErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	serviceRef := &avapigwv1alpha1.ServiceRef{
+		Name: "test-service",
+		Port: 8080,
+	}
+
+	endpoints, err := r.discoverFromEndpoints(context.Background(), "default", serviceRef)
+
+	assert.Error(t, err)
+	assert.Nil(t, endpoints)
+}
+
+func TestBackendReconciler_discoverFromEndpointSlices_ListError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on List
+	cl := &backendErrorClient{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		listError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	serviceRef := &avapigwv1alpha1.ServiceRef{
+		Name: "test-service",
+		Port: 8080,
+	}
+
+	// discoverFromEndpointSlices returns (endpoints, found) not (endpoints, error)
+	endpoints, found := r.discoverFromEndpointSlices(context.Background(), "default", serviceRef)
+
+	assert.False(t, found)
+	assert.Nil(t, endpoints)
+}
+
+func TestBackendReconciler_verifyServiceExists_GetError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on Get
+	cl := &backendErrorClient{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		getError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	err := r.verifyServiceExists(context.Background(), "default", "test-service")
+
+	assert.Error(t, err)
+}
+
+func TestBackendReconciler_findBackendsForService_ListError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on List
+	cl := &backendErrorClient{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		listError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-service",
+			Namespace: "default",
+		},
+	}
+
+	requests := r.findBackendsForService(context.Background(), service)
+
+	assert.Empty(t, requests)
+}
+
+func TestBackendReconciler_findBackendsForEndpoints_ListError(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	// Create a client that will return an error on List
+	cl := &backendErrorClient{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		listError: assert.AnError,
+	}
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	endpoints := &corev1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-endpoints",
+			Namespace: "default",
+		},
+	}
+
+	requests := r.findBackendsForEndpoints(context.Background(), endpoints)
+
+	assert.Empty(t, requests)
+}
+
+func TestBackendReconciler_findMatchingSubsetPort(t *testing.T) {
+	scheme := newTestScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &BackendReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+
+	tests := []struct {
+		name       string
+		ports      []corev1.EndpointPort
+		targetPort int32
+		wantPort   int32
+	}{
+		{
+			name: "matching port found",
+			ports: []corev1.EndpointPort{
+				{Port: 8080},
+				{Port: 9090},
+			},
+			targetPort: 8080,
+			wantPort:   8080,
+		},
+		{
+			name: "no matching port - returns target",
+			ports: []corev1.EndpointPort{
+				{Port: 8080},
+				{Port: 9090},
+			},
+			targetPort: 3000,
+			wantPort:   3000,
+		},
+		{
+			name:       "empty ports - returns target",
+			ports:      []corev1.EndpointPort{},
+			targetPort: 8080,
+			wantPort:   8080,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := r.findMatchingSubsetPort(tt.ports, tt.targetPort)
+			assert.Equal(t, tt.wantPort, result)
+		})
+	}
+}
