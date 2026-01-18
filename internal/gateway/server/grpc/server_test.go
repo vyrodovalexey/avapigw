@@ -957,7 +957,8 @@ func TestServerCreateListenerSuccess(t *testing.T) {
 
 	server := NewServer(config, backendManager, logger)
 
-	err := server.createListener()
+	ctx := context.Background()
+	err := server.createListener(ctx)
 	assert.NoError(t, err)
 	assert.NotNil(t, server.listener)
 
@@ -979,7 +980,8 @@ func TestServerCreateListenerInvalidAddress(t *testing.T) {
 
 	server := NewServer(config, backendManager, logger)
 
-	err := server.createListener()
+	ctx := context.Background()
+	err := server.createListener(ctx)
 	assert.Error(t, err)
 }
 
@@ -1070,7 +1072,8 @@ func TestServerInitializeGRPCServer(t *testing.T) {
 		server := NewServer(config, backendManager, logger)
 		server.running = true
 
-		err := server.initializeGRPCServer()
+		ctx := context.Background()
+		err := server.initializeGRPCServer(ctx)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "already running")
 	})

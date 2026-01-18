@@ -162,7 +162,7 @@ func (s *Server) GetHealthServer() *health.Server {
 
 // Start starts the gRPC server.
 func (s *Server) Start(ctx context.Context) error {
-	if err := s.initializeGRPCServer(); err != nil {
+	if err := s.initializeGRPCServer(ctx); err != nil {
 		return err
 	}
 
@@ -179,7 +179,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // initializeGRPCServer initializes the gRPC server and listener.
-func (s *Server) initializeGRPCServer() error {
+func (s *Server) initializeGRPCServer(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -187,7 +187,7 @@ func (s *Server) initializeGRPCServer() error {
 		return fmt.Errorf("server already running")
 	}
 
-	if err := s.createListener(); err != nil {
+	if err := s.createListener(ctx); err != nil {
 		return err
 	}
 
@@ -199,10 +199,10 @@ func (s *Server) initializeGRPCServer() error {
 }
 
 // createListener creates the TCP listener for the gRPC server.
-func (s *Server) createListener() error {
+func (s *Server) createListener(ctx context.Context) error {
 	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
 	lc := &net.ListenConfig{}
-	listener, err := lc.Listen(context.Background(), "tcp", addr)
+	listener, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}

@@ -164,7 +164,7 @@ func (s *Server) initializeServer(ctx context.Context) error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
-	listener, err := s.createListener(addr)
+	listener, err := s.createListener(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
@@ -179,12 +179,12 @@ func (s *Server) initializeServer(ctx context.Context) error {
 }
 
 // createListener creates a TCP listener with optional TLS.
-func (s *Server) createListener(addr string) (net.Listener, error) {
+func (s *Server) createListener(ctx context.Context, addr string) (net.Listener, error) {
 	if s.config.TLS != nil {
 		return tls.Listen("tcp", addr, s.config.TLS)
 	}
 	lc := &net.ListenConfig{}
-	return lc.Listen(context.Background(), "tcp", addr)
+	return lc.Listen(ctx, "tcp", addr)
 }
 
 // getServerContext returns the server context and accept deadline.
