@@ -1,0 +1,48 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "avapigw.fullname" . }}-gateway-config
+  namespace: {{ include "avapigw.namespace" . }}
+  labels:
+    {{- include "avapigw.gateway.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    # Gateway Configuration
+    server:
+      httpPort: {{ .Values.gateway.service.httpPort }}
+      healthPort: {{ .Values.gateway.service.healthPort }}
+      metricsPort: {{ .Values.gateway.service.metricsPort }}
+      {{- if .Values.gateway.config.grpcEnabled }}
+      grpcPort: {{ .Values.gateway.service.grpcPort }}
+      grpcEnabled: true
+      {{- end }}
+      {{- if .Values.gateway.config.tcpEnabled }}
+      tcpPort: {{ .Values.gateway.service.tcpPort }}
+      tcpEnabled: true
+      {{- end }}
+      {{- if .Values.gateway.config.tlsPassthroughEnabled }}
+      tlsPassthroughPort: {{ .Values.gateway.service.tlsPort }}
+      tlsPassthroughEnabled: true
+      {{- end }}
+    
+    logging:
+      level: {{ .Values.gateway.config.logLevel }}
+      format: {{ .Values.gateway.config.logFormat }}
+    
+    metrics:
+      enabled: {{ .Values.gateway.config.metricsEnabled }}
+    
+    tracing:
+      enabled: {{ .Values.gateway.config.tracingEnabled }}
+    
+    {{- if .Values.vault.enabled }}
+    vault:
+      address: {{ .Values.vault.address | quote }}
+      role: {{ .Values.vault.role | quote }}
+      authPath: {{ .Values.vault.authPath | quote }}
+      {{- if .Values.vault.namespace }}
+      namespace: {{ .Values.vault.namespace | quote }}
+      {{- end }}
+    {{- end }}
+{{- end }}

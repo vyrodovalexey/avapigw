@@ -1,0 +1,101 @@
+# Sample GRPCRoute resource
+# This GRPCRoute defines routing rules for gRPC traffic
+apiVersion: avapigw.vyrodovalexey.github.com/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: sample-grpcroute
+  namespace: default
+  labels:
+    app: api-gateway
+spec:
+  # Reference to the parent Gateway
+  parentRefs:
+    - name: sample-gateway
+      sectionName: grpc
+
+  # Hostnames to match (gRPC authority header)
+  hostnames:
+    - "grpc.example.com"
+
+  # Routing rules
+  rules:
+    # Rule 1: Route specific service/method
+    - matches:
+        - method:
+            type: Exact
+            service: "myapp.UserService"
+            method: "GetUser"
+        - method:
+            type: Exact
+            service: "myapp.UserService"
+            method: "ListUsers"
+      filters:
+        # Add metadata headers
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            add:
+              - name: x-request-id
+                value: "${request_id}"
+      backendRefs:
+        - name: user-service
+          port: 9090
+          weight: 100
+
+    # Rule 2: Route all methods of a service
+    - matches:
+        - method:
+            type: Exact
+            service: "myapp.OrderService"
+      backendRefs:
+        - name: order-service
+          port: 9090
+      retryPolicy:
+        numRetries: 3
+        retryOn:
+          - unavailable
+          - resource-exhausted
+        perTryTimeout: "5s"
+        backoff:
+          baseInterval: "100ms"
+          maxInterval: "5s"
+
+    # Rule 3: Route with header matching
+    - matches:
+        - headers:
+            - name: x-tenant-id
+              type: Exact
+              value: "premium"
+      backendRefs:
+        - name: premium-service
+          port: 9090
+      sessionAffinity:
+        type: Header
+        header:
+          name: x-session-id
+        absoluteTimeout: "1h"
+        idleTimeout: "15m"
+
+    # Rule 4: Regex matching for service names
+    - matches:
+        - method:
+            type: RegularExpression
+            service: "myapp\\..*Service"
+      backendRefs:
+        - name: default-backend
+          port: 9090
+
+    # Rule 5: Request mirroring for testing
+    - matches:
+        - method:
+            type: Exact
+            service: "myapp.PaymentService"
+      filters:
+        - type: RequestMirror
+          requestMirror:
+            backendRef:
+              name: payment-service-shadow
+              port: 9090
+            percent: 10
+      backendRefs:
+        - name: payment-service
+          port: 9090

@@ -1,0 +1,15 @@
+{{- if .Values.operator.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "avapigw.fullname" . }}-operator-config
+  namespace: {{ include "avapigw.namespace" . }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+data:
+  # Operator configuration
+  LOG_LEVEL: "info"
+  METRICS_ENABLED: "{{ .Values.operator.metrics.enabled }}"
+  LEADER_ELECTION_ENABLED: "{{ .Values.operator.leaderElection.enabled }}"
+  WEBHOOK_ENABLED: "{{ .Values.webhook.enabled }}"
+{{- end }}

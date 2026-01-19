@@ -1,0 +1,60 @@
+# Sample Gateway resource
+# This Gateway defines HTTP and HTTPS listeners for the API Gateway
+apiVersion: avapigw.vyrodovalexey.github.com/v1alpha1
+kind: Gateway
+metadata:
+  name: sample-gateway
+  namespace: default
+  labels:
+    app: api-gateway
+    environment: development
+spec:
+  # Listeners define the network endpoints for the gateway
+  listeners:
+    # HTTP listener on port 8080
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - kind: HTTPRoute
+
+    # HTTPS listener on port 8443 with TLS termination
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hostname: "*.example.com"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: gateway-tls-secret
+      allowedRoutes:
+        namespaces:
+          from: All
+        kinds:
+          - kind: HTTPRoute
+
+    # gRPC listener on port 9090
+    - name: grpc
+      port: 9090
+      protocol: GRPC
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - kind: GRPCRoute
+
+  # Optional: Specify addresses for the gateway
+  addresses:
+    - type: IPAddress
+      value: "0.0.0.0"
+
+  # Optional: Infrastructure configuration
+  infrastructure:
+    labels:
+      tier: frontend
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9090"

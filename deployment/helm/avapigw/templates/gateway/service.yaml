@@ -1,0 +1,48 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "avapigw.gateway.serviceName" . }}
+  namespace: {{ include "avapigw.namespace" . }}
+  labels:
+    {{- include "avapigw.gateway.labels" . | nindent 4 }}
+  {{- with .Values.gateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: health
+      port: {{ .Values.gateway.service.healthPort }}
+      targetPort: health
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.gateway.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    {{- if .Values.gateway.config.grpcEnabled }}
+    - name: grpc
+      port: {{ .Values.gateway.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.gateway.config.tcpEnabled }}
+    - name: tcp
+      port: {{ .Values.gateway.service.tcpPort }}
+      targetPort: tcp
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.gateway.config.tlsPassthroughEnabled }}
+    - name: tls
+      port: {{ .Values.gateway.service.tlsPort }}
+      targetPort: tls
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "avapigw.gateway.selectorLabels" . | nindent 4 }}
+{{- end }}

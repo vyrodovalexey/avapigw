@@ -1,0 +1,97 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: false
+
+linters:
+  default: none
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - ineffassign
+    - bodyclose
+    - noctx
+    - gosec
+    - unconvert
+    - goconst
+    - asciicheck
+    - goheader
+    - gocognit
+    - lll
+    - unparam
+    - dogsled
+    - nakedret
+    - prealloc
+    - gocritic
+    - whitespace
+    - goprintffuncname
+    - testpackage
+    - nestif
+    - sqlclosecheck
+    - gocyclo
+    - funlen
+    - asciicheck
+    - bidichk
+    - bodyclose
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    paths:
+      - bin
+      - hack
+      - test
+      - vendor
+      - third_party
+      - ".*generate\\.go$"
+    rules:
+      - linters:
+          - gosec
+        text: 'G(201):'
+      # Exclude lll for kubebuilder markers and long struct tags
+      - linters:
+          - lll
+        source: "^//\\s*\\+kubebuilder:"
+      - linters:
+          - lll
+        source: "`json:.*yaml:.*`"
+      # Exclude lll for API types (kubebuilder annotations)
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprint
+    goconst:
+      min-len: 2
+      min-occurrences: 3
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+      disabled-checks:
+        - wrapperFunc
+        - paramTypeCombine
+      settings:
+        hugeParam:
+          sizeThreshold: 512
+        rangeValCopy:
+          sizeThreshold: 512
+    funlen:
+      lines: 300
+      statements: 90
+    lll:
+      line-length: 120
+      tab-width: 4
+    nestif:
+      min-complexity: 6
+    gocyclo:
+      min-complexity: 15
+    gocognit:
+      min-complexity: 20

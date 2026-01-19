@@ -1,0 +1,167 @@
+# Sample RateLimitPolicy resource
+# This RateLimitPolicy defines rate limiting configuration for a target resource
+apiVersion: avapigw.vyrodovalexey.github.com/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: sample-ratelimitpolicy
+  namespace: default
+  labels:
+    app: api-gateway
+spec:
+  # Target resource to apply rate limiting to
+  targetRef:
+    group: avapigw.vyrodovalexey.github.com
+    kind: HTTPRoute
+    name: sample-httproute
+
+  # Rate limiting rules
+  rules:
+    # Rule 1: Global rate limit per IP
+    - name: global-per-ip
+      limit:
+        requests: 1000
+        unit: Minute
+      algorithm: TokenBucket
+      tokenBucket:
+        tokens: 1000
+        fillInterval: "1s"
+        tokensPerFill: 17
+      clientIdentifier:
+        type: RemoteAddress
+      fallback:
+        type: Header
+        header: X-Forwarded-For
+
+    # Rule 2: Per-user rate limit using JWT claim
+    - name: per-user
+      limit:
+        requests: 100
+        unit: Minute
+      algorithm: SlidingWindow
+      slidingWindow:
+        windowSize: "1m"
+        precision: 10
+      clientIdentifier:
+        type: JWTClaim
+        claim: sub
+      match:
+        paths:
+          - type: PathPrefix
+            value: "/api"
+
+    # Rule 3: Per-API-key rate limit
+    - name: per-api-key
+      limit:
+        requests: 500
+        unit: Hour
+      clientIdentifier:
+        type: Header
+        header: X-API-Key
+      match:
+        headers:
+          - name: X-API-Key
+            type: RegularExpression
+            value: "^[a-zA-Z0-9]{32}$"
+
+    # Rule 4: Tiered rate limits based on subscription
+    - name: tiered-limits
+      limit:
+        requests: 100
+        unit: Minute
+      clientIdentifier:
+        type: JWTClaim
+        claim: sub
+      tiers:
+        - name: premium
+          match:
+            claims:
+              - name: subscription
+                value: premium
+          limit:
+            requests: 10000
+            unit: Minute
+        - name: standard
+          match:
+            claims:
+              - name: subscription
+                value: standard
+          limit:
+            requests: 1000
+            unit: Minute
+        - name: free
+          match:
+            claims:
+              - name: subscription
+                value: free
+          limit:
+            requests: 100
+            unit: Minute
+
+    # Rule 5: Method-specific rate limit
+    - name: write-operations
+      limit:
+        requests: 50
+        unit: Minute
+      clientIdentifier:
+        type: RemoteAddress
+      match:
+        methods:
+          - POST
+          - PUT
+          - DELETE
+          - PATCH
+
+  # Response configuration when rate limited
+  rateLimitResponse:
+    statusCode: 429
+    headers:
+      - name: Content-Type
+        value: application/json
+      - name: Retry-After
+        value: "60"
+    body: '{"error": "rate_limit_exceeded", "message": "Too many requests. Please try again later."}'
+    includeRateLimitHeaders: true
+
+  # Storage backend configuration
+  storage:
+    type: Redis
+    redis:
+      address: "redis.default.svc.cluster.local:6379"
+      database: 0
+      secretRef:
+        name: redis-credentials
+      tls:
+        enabled: true
+        insecureSkipVerify: false
+      poolSize: 10
+      timeout: "5s"
+
+---
+# Simple rate limit policy with in-memory storage
+apiVersion: avapigw.vyrodovalexey.github.com/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: simple-ratelimit
+  namespace: default
+spec:
+  targetRef:
+    group: avapigw.vyrodovalexey.github.com
+    kind: Gateway
+    name: sample-gateway
+    sectionName: http
+
+  rules:
+    - name: default
+      limit:
+        requests: 100
+        unit: Second
+      algorithm: TokenBucket
+      tokenBucket:
+        tokens: 100
+        fillInterval: "1s"
+        tokensPerFill: 100
+      clientIdentifier:
+        type: RemoteAddress
+
+  storage:
+    type: Memory

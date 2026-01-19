@@ -1,0 +1,409 @@
+# Sample YAML Configuration for AVAPIGW API Gateway
+# This file demonstrates all available configuration options.
+# 
+# Usage:
+#   avapigw --config-file=/path/to/config.yaml
+#   or
+#   AVAPIGW_CONFIG_FILE=/path/to/config.yaml avapigw
+#
+# Priority: YAML file > Environment variables > Command-line flags > Defaults
+
+# Gateway configuration
+gateway:
+  name: my-api-gateway
+  listeners:
+    # HTTP listener
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hostname: api.example.com
+    
+    # HTTPS listener with TLS termination
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hostname: api.example.com
+      tls:
+        mode: terminate
+        certificateRef:
+          name: api-tls-cert
+          namespace: default
+          kind: Secret
+        minVersion: "1.2"
+        maxVersion: "1.3"
+    
+    # gRPC listener
+    - name: grpc
+      port: 9090
+      protocol: GRPC
+    
+    # TCP listener for raw TCP traffic
+    - name: tcp
+      port: 8444
+      protocol: TCP
+
+# Route definitions
+routes:
+  # API v1 routes
+  - name: api-v1-users
+    hostnames:
+      - api.example.com
+      - api.internal.example.com
+    pathMatch:
+      type: PathPrefix
+      value: /api/v1/users
+    methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+    backendRefs:
+      - name: users-service
+        weight: 100
+    filters:
+      - type: RequestHeaderModifier
+        requestHeaderModifier:
+          set:
+            - name: X-API-Version
+              value: v1
+          add:
+            - name: X-Request-Source
+              value: gateway
+          remove:
+            - X-Internal-Header
+    rateLimitRef: api-rate-limit
+    authPolicyRef: jwt-auth
+    timeout: 30s
+    retries:
+      numRetries: 3
+      retryOn:
+        - 5xx
+        - reset
+        - connect-failure
+      perTryTimeout: 10s
+      backoffBaseInterval: 100ms
+      backoffMaxInterval: 1s
+
+  # API v1 products with URL rewrite
+  - name: api-v1-products
+    hostnames:
+      - api.example.com
+    pathMatch:
+      type: PathPrefix
+      value: /api/v1/products
+    backendRefs:
+      - name: products-service
+        weight: 80
+      - name: products-service-canary
+        weight: 20
+    filters:
+      - type: URLRewrite
+        urlRewrite:
+          hostname: products.internal.svc
+          path:
+            type: ReplacePrefixMatch
+            replacePrefixMatch: /v1/products
+
+  # Health check endpoint (no auth required)
+  - name: health-check
+    hostnames:
+      - api.example.com
+    pathMatch:
+      type: Exact
+      value: /health
+    backendRefs:
+      - name: health-service
+
+  # Redirect HTTP to HTTPS
+  - name: http-to-https-redirect
+    hostnames:
+      - api.example.com
+    pathMatch:
+      type: PathPrefix
+      value: /
+    backendRefs:
+      - name: redirect-backend
+    filters:
+      - type: RequestRedirect
+        requestRedirect:
+          scheme: https
+          statusCode: 301
+
+  # Regex-based routing
+  - name: api-versioned
+    hostnames:
+      - api.example.com
+    pathMatch:
+      type: RegularExpression
+      value: "^/api/v[0-9]+/.*"
+    backendRefs:
+      - name: api-service
+
+# Backend service definitions
+backends:
+  # Users service with multiple endpoints
+  - name: users-service
+    protocol: HTTP
+    endpoints:
+      - address: users-1.internal.svc
+        port: 8080
+        weight: 50
+      - address: users-2.internal.svc
+        port: 8080
+        weight: 50
+    loadBalancer:
+      algorithm: RoundRobin
+    healthCheck:
+      interval: 10s
+      timeout: 5s
+      unhealthyThreshold: 3
+      healthyThreshold: 2
+      http:
+        path: /health
+        method: GET
+        expectedStatuses:
+          - 200
+    circuitBreaker:
+      maxConnections: 100
+      maxPendingRequests: 50
+      maxRequests: 1000
+      consecutiveErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+    connectionPool:
+      http:
+        maxRequestsPerConnection: 100
+        maxRetries: 3
+        idleTimeout: 60s
+        h2UpgradePolicy: UPGRADE
+      tcp:
+        maxConnections: 100
+        connectTimeout: 5s
+
+  # Products service with consistent hashing
+  - name: products-service
+    protocol: HTTP
+    endpoints:
+      - address: products.internal.svc
+        port: 8080
+    loadBalancer:
+      algorithm: ConsistentHash
+      consistentHash:
+        header: X-User-ID
+    healthCheck:
+      interval: 15s
+      timeout: 5s
+      unhealthyThreshold: 3
+      healthyThreshold: 2
+      http:
+        path: /healthz
+        method: GET
+        expectedStatuses:
+          - 200
+          - 204
+
+  # Products canary service
+  - name: products-service-canary
+    protocol: HTTP
+    endpoints:
+      - address: products-canary.internal.svc
+        port: 8080
+    healthCheck:
+      interval: 10s
+      timeout: 5s
+      unhealthyThreshold: 2
+      healthyThreshold: 1
+      http:
+        path: /healthz
+        method: GET
+
+  # gRPC backend service
+  - name: grpc-service
+    protocol: GRPC
+    endpoints:
+      - address: grpc-backend.internal.svc
+        port: 9090
+    healthCheck:
+      interval: 10s
+      timeout: 5s
+      unhealthyThreshold: 3
+      healthyThreshold: 2
+      grpc:
+        service: grpc.health.v1.Health
+    tls:
+      mode: simple
+      insecureSkipVerify: false
+      sni: grpc-backend.internal.svc
+
+  # Health service (simple backend)
+  - name: health-service
+    protocol: HTTP
+    endpoints:
+      - address: localhost
+        port: 8081
+    healthCheck:
+      interval: 30s
+      timeout: 5s
+      unhealthyThreshold: 3
+      healthyThreshold: 1
+      tcp: {}
+
+  # API service
+  - name: api-service
+    protocol: HTTP
+    endpoints:
+      - address: api.internal.svc
+        port: 8080
+    healthCheck:
+      interval: 10s
+      timeout: 5s
+      unhealthyThreshold: 3
+      healthyThreshold: 2
+      http:
+        path: /health
+        method: GET
+
+  # Redirect backend (placeholder)
+  - name: redirect-backend
+    protocol: HTTP
+    endpoints:
+      - address: localhost
+        port: 8080
+    healthCheck:
+      interval: 60s
+      timeout: 5s
+      unhealthyThreshold: 3
+      healthyThreshold: 1
+      tcp: {}
+
+# Rate limiting policies
+rateLimits:
+  # API rate limit - 100 requests per minute per IP
+  - name: api-rate-limit
+    algorithm: sliding_window
+    requests: 100
+    window: 1m
+    burst: 20
+    key:
+      type: IP
+    responseHeaders:
+      rateLimitLimit: X-RateLimit-Limit
+      rateLimitRemaining: X-RateLimit-Remaining
+      rateLimitReset: X-RateLimit-Reset
+
+  # User-based rate limit - 1000 requests per hour per user
+  - name: user-rate-limit
+    algorithm: token_bucket
+    requests: 1000
+    window: 1h
+    burst: 100
+    key:
+      type: User
+      claim: sub
+
+  # API key rate limit - based on X-API-Key header
+  - name: apikey-rate-limit
+    algorithm: fixed_window
+    requests: 500
+    window: 1m
+    key:
+      type: Header
+      header: X-API-Key
+
+# Authentication and authorization policies
+authPolicies:
+  # JWT authentication
+  - name: jwt-auth
+    jwt:
+      issuer: https://auth.example.com
+      audiences:
+        - api.example.com
+        - https://api.example.com
+      jwksUrl: https://auth.example.com/.well-known/jwks.json
+      algorithms:
+        - RS256
+        - RS384
+      tokenSource:
+        header: Authorization
+        prefix: "Bearer "
+      claimsToHeaders:
+        - claim: sub
+          header: X-User-ID
+        - claim: email
+          header: X-User-Email
+        - claim: roles
+          header: X-User-Roles
+    rules:
+      # Admin endpoints require admin role
+      - paths:
+          - /api/v1/admin/*
+        methods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        roles:
+          - admin
+        allow: true
+      # Users can access their own data
+      - paths:
+          - /api/v1/users/*
+        methods:
+          - GET
+          - PUT
+        roles:
+          - user
+          - admin
+        allow: true
+      # Default deny
+      - paths:
+          - /api/*
+        allow: false
+
+  # API key authentication
+  - name: apikey-auth
+    apiKey:
+      header: X-API-Key
+      keys:
+        - name: service-a
+          roles:
+            - service
+            - read
+        - name: service-b
+          roles:
+            - service
+            - read
+            - write
+      vaultPath: secret/data/api-keys
+    rules:
+      - paths:
+          - /api/v1/*
+        roles:
+          - service
+        allow: true
+
+  # Basic authentication
+  - name: basic-auth
+    basicAuth:
+      realm: API Gateway
+      vaultPath: secret/data/basic-auth-users
+    rules:
+      - paths:
+          - /internal/*
+        allow: true
+
+  # OAuth2 authentication
+  - name: oauth2-auth
+    oauth2:
+      tokenEndpoint: https://auth.example.com/oauth/token
+      introspectionEndpoint: https://auth.example.com/oauth/introspect
+      clientId: api-gateway
+      vaultPath: secret/data/oauth2-credentials
+      scopes:
+        - read
+        - write
+    rules:
+      - paths:
+          - /api/v1/*
+        allow: true

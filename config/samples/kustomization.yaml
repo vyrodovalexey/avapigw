@@ -1,0 +1,12 @@
+# Sample resources for the API Gateway operator
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - gateway_sample.yaml
+  - httproute_sample.yaml
+  - grpcroute_sample.yaml
+  - backend_sample.yaml
+  - ratelimitpolicy_sample.yaml
+  - authpolicy_sample.yaml
+  - vaultsecret_sample.yaml
