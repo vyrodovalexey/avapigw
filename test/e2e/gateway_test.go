@@ -125,7 +125,7 @@ func TestE2E_CRUD_ThroughGateway(t *testing.T) {
 	err = helpers.WaitForReady(gi.BaseURL+"/health", 10*time.Second)
 	require.NoError(t, err)
 
-	var createdItemID int
+	var createdItemID string
 
 	t.Run("create item through gateway", func(t *testing.T) {
 		item := helpers.CreateItemRequest{
@@ -153,7 +153,7 @@ func TestE2E_CRUD_ThroughGateway(t *testing.T) {
 	})
 
 	t.Run("read item through gateway", func(t *testing.T) {
-		if createdItemID == 0 {
+		if createdItemID == "" {
 			t.Skip("No item created")
 		}
 
@@ -170,7 +170,7 @@ func TestE2E_CRUD_ThroughGateway(t *testing.T) {
 	})
 
 	t.Run("update item through gateway", func(t *testing.T) {
-		if createdItemID == 0 {
+		if createdItemID == "" {
 			t.Skip("No item created")
 		}
 
@@ -180,7 +180,7 @@ func TestE2E_CRUD_ThroughGateway(t *testing.T) {
 			Price:       39.99,
 		}
 
-		resp, err := helpers.MakeRequest(http.MethodPut, gi.BaseURL+"/api/v1/items/"+string(rune(createdItemID)), item)
+		resp, err := helpers.MakeRequest(http.MethodPut, gi.BaseURL+"/api/v1/items/"+createdItemID, item)
 		if err != nil {
 			t.Logf("Update request failed: %v", err)
 			return
@@ -192,7 +192,7 @@ func TestE2E_CRUD_ThroughGateway(t *testing.T) {
 	})
 
 	t.Run("delete item through gateway", func(t *testing.T) {
-		if createdItemID == 0 {
+		if createdItemID == "" {
 			t.Skip("No item created")
 		}
 
