@@ -14,6 +14,27 @@ spec:
         - "*"
       bind: 0.0.0.0
 
+    # gRPC listener configuration (uncomment to enable)
+    # - name: grpc
+    #   port: ${GATEWAY_GRPC_PORT:-9000}
+    #   protocol: GRPC
+    #   hosts:
+    #     - "*"
+    #   bind: 0.0.0.0
+    #   grpc:
+    #     maxConcurrentStreams: 100
+    #     maxRecvMsgSize: 4194304  # 4MB
+    #     maxSendMsgSize: 4194304  # 4MB
+    #     reflection: true
+    #     healthCheck: true
+    #     keepalive:
+    #       time: 30s
+    #       timeout: 10s
+    #       maxConnectionIdle: 5m
+    #       maxConnectionAge: 30m
+    #       maxConnectionAgeGrace: 10s
+    #       permitWithoutStream: true
+
   routes:
     - name: health-check
       match:
@@ -101,6 +122,68 @@ spec:
         unhealthyThreshold: 3
       loadBalancer:
         algorithm: roundRobin
+
+  # gRPC routes configuration (uncomment to enable)
+  # grpcRoutes:
+  #   - name: test-service-route
+  #     match:
+  #       service:
+  #         exact: api.v1.TestService
+  #     route:
+  #       - destination:
+  #           host: 127.0.0.1
+  #           port: 8803
+  #         weight: 50
+  #       - destination:
+  #           host: 127.0.0.1
+  #           port: 8804
+  #         weight: 50
+  #     timeout: 30s
+  #     retries:
+  #       attempts: 3
+  #       perTryTimeout: 10s
+  #       retryOn:
+  #         - UNAVAILABLE
+  #         - RESOURCE_EXHAUSTED
+  #
+  #   - name: catch-all-grpc
+  #     match:
+  #       service:
+  #         prefix: ""
+  #     route:
+  #       - destination:
+  #           host: 127.0.0.1
+  #           port: 8803
+
+  # gRPC backends configuration (uncomment to enable)
+  # grpcBackends:
+  #   - name: grpc-backend-1
+  #     hosts:
+  #       - address: 127.0.0.1
+  #         port: 8803
+  #         weight: 1
+  #     healthCheck:
+  #       enabled: true
+  #       service: ""
+  #       interval: 10s
+  #       timeout: 5s
+  #     connectionPool:
+  #       maxConnections: 100
+  #       connectTimeout: 5s
+  #
+  #   - name: grpc-backend-2
+  #     hosts:
+  #       - address: 127.0.0.1
+  #         port: 8804
+  #         weight: 1
+  #     healthCheck:
+  #       enabled: true
+  #       service: ""
+  #       interval: 10s
+  #       timeout: 5s
+  #     connectionPool:
+  #       maxConnections: 100
+  #       connectTimeout: 5s
 
   rateLimit:
     enabled: true

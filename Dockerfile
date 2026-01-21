@@ -74,9 +74,10 @@ RUN mkdir -p /app/data /app/logs && \
 USER gateway
 
 # Expose ports
-# 8080 - HTTP traffic
+# 8080 - HTTP traffic (REST API)
+# 9000 - gRPC traffic
 # 9090 - Metrics and health endpoints
-EXPOSE 8080 9090
+EXPOSE 8080 9000 9090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -152,6 +152,20 @@ jobs:
     permissions:
       contents: read
     services:
+      # Redis for caching and rate limiting
+      redis:
+        image: bitnami/redis:latest
+        env:
+          REDIS_PASSWORD: password
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli -a password ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+      # HTTP REST API backends
       backend1:
         image: ghcr.io/vyrodovalexey/restapi-example:latest
         ports:
@@ -176,6 +190,31 @@ jobs:
           --health-timeout 5s
           --health-retries 5
           --health-start-period 10s
+      # gRPC backends
+      grpc-backend1:
+        image: ghcr.io/vyrodovalexey/grpc-example:latest
+        ports:
+          - 8803:50051
+        env:
+          GRPC_PORT: 50051
+        options: >-
+          --health-cmd "grpcurl -plaintext localhost:50051 list || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+      grpc-backend2:
+        image: ghcr.io/vyrodovalexey/grpc-example:latest
+        ports:
+          - 8804:50051
+        env:
+          GRPC_PORT: 50051
+        options: >-
+          --health-cmd "grpcurl -plaintext localhost:50051 list || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -186,35 +225,78 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Wait for backends to be ready
+      - name: Install grpcurl
         run: |
-          echo "Waiting for backend services to be ready..."
+          echo "Installing grpcurl for gRPC health checks..."
+          curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz | tar -xz -C /usr/local/bin grpcurl
+          chmod +x /usr/local/bin/grpcurl
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for all services to be ready..."
+          
+          # Wait for Redis
+          echo "Checking Redis..."
           for i in {1..30}; do
-            if curl -sf http://127.0.0.1:8801/health && curl -sf http://127.0.0.1:8802/health; then
-              echo "Both backends are ready!"
+            if redis-cli -h 127.0.0.1 -a password ping 2>/dev/null | grep -q PONG; then
+              echo "Redis is ready!"
               break
             fi
-            echo "Attempt $i: Waiting for backends..."
+            echo "Attempt $i: Waiting for Redis..."
             sleep 2
           done
-          # Final check
-          curl -sf http://127.0.0.1:8801/health || (echo "Backend 1 not ready" && exit 1)
-          curl -sf http://127.0.0.1:8802/health || (echo "Backend 2 not ready" && exit 1)
+          
+          # Wait for HTTP backends
+          echo "Checking HTTP backends..."
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:8801/health && curl -sf http://127.0.0.1:8802/health; then
+              echo "HTTP backends are ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for HTTP backends..."
+            sleep 2
+          done
+          
+          # Wait for gRPC backends
+          echo "Checking gRPC backends..."
+          for i in {1..30}; do
+            if grpcurl -plaintext 127.0.0.1:8803 list >/dev/null 2>&1 && grpcurl -plaintext 127.0.0.1:8804 list >/dev/null 2>&1; then
+              echo "gRPC backends are ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for gRPC backends..."
+            sleep 2
+          done
+          
+          # Final checks
+          echo "Running final health checks..."
+          redis-cli -h 127.0.0.1 -a password ping || (echo "Redis not ready" && exit 1)
+          curl -sf http://127.0.0.1:8801/health || (echo "HTTP Backend 1 not ready" && exit 1)
+          curl -sf http://127.0.0.1:8802/health || (echo "HTTP Backend 2 not ready" && exit 1)
+          grpcurl -plaintext 127.0.0.1:8803 list || (echo "gRPC Backend 1 not ready" && exit 1)
+          grpcurl -plaintext 127.0.0.1:8804 list || (echo "gRPC Backend 2 not ready" && exit 1)
+          echo "All services are ready!"
 
       - name: Run integration tests
         env:
+          TEST_REDIS_URL: redis://default:password@127.0.0.1:6379
           TEST_BACKEND1_URL: http://127.0.0.1:8801
           TEST_BACKEND2_URL: http://127.0.0.1:8802
+          TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803
+          TEST_GRPC_BACKEND2_URL: 127.0.0.1:8804
         run: |
           mkdir -p coverage
-          go test -race -coverprofile=coverage/integration.out -covermode=atomic -tags=integration -v ./test/integration/...
+          go test -race -coverprofile=coverage/integration.out -covermode=atomic -tags=integration -v -timeout 10m ./test/integration/...
 
       - name: Run e2e tests
         env:
+          TEST_REDIS_URL: redis://default:password@127.0.0.1:6379
           TEST_BACKEND1_URL: http://127.0.0.1:8801
           TEST_BACKEND2_URL: http://127.0.0.1:8802
+          TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803
+          TEST_GRPC_BACKEND2_URL: 127.0.0.1:8804
         run: |
-          go test -race -coverprofile=coverage/e2e.out -covermode=atomic -tags=e2e -v ./test/e2e/...
+          go test -race -coverprofile=coverage/e2e.out -covermode=atomic -tags=e2e -v -timeout 15m ./test/e2e/...
 
       - name: Upload integration coverage to Codecov
         uses: codecov/codecov-action@v4

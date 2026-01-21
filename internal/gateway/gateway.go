@@ -47,13 +47,14 @@ func (s State) String() string {
 
 // Gateway is the main API Gateway struct.
 type Gateway struct {
-	config    *config.GatewayConfig
-	logger    observability.Logger
-	engine    *gin.Engine
-	listeners []*Listener
-	state     atomic.Int32
-	startTime time.Time
-	mu        sync.RWMutex
+	config        *config.GatewayConfig
+	logger        observability.Logger
+	engine        *gin.Engine
+	listeners     []*Listener
+	grpcListeners []*GRPCListener
+	state         atomic.Int32
+	startTime     time.Time
+	mu            sync.RWMutex
 
 	// Handlers
 	routeHandler http.Handler
@@ -130,7 +131,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to create listeners: %w", err)
 	}
 
-	// Start listeners
+	// Start HTTP listeners
 	for _, listener := range g.listeners {
 		if err := listener.Start(ctx); err != nil {
 			// Stop already started listeners
@@ -140,12 +141,23 @@ func (g *Gateway) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start gRPC listeners
+	for _, listener := range g.grpcListeners {
+		if err := listener.Start(ctx); err != nil {
+			// Stop already started listeners
+			g.stopListeners(ctx)
+			g.state.Store(int32(StateStopped))
+			return fmt.Errorf("failed to start gRPC listener %s: %w", listener.Name(), err)
+		}
+	}
+
 	g.startTime = time.Now()
 	g.state.Store(int32(StateRunning))
 
 	g.logger.Info("gateway started",
 		observability.String("name", g.config.Metadata.Name),
-		observability.Int("listeners", len(g.listeners)),
+		observability.Int("http_listeners", len(g.listeners)),
+		observability.Int("grpc_listeners", len(g.grpcListeners)),
 	)
 
 	return nil
@@ -250,13 +262,32 @@ func (g *Gateway) setupRoutes() {
 // createListeners creates listeners from configuration.
 func (g *Gateway) createListeners() error {
 	g.listeners = make([]*Listener, 0, len(g.config.Spec.Listeners))
+	g.grpcListeners = make([]*GRPCListener, 0)
 
 	for _, listenerCfg := range g.config.Spec.Listeners {
-		listener, err := NewListener(listenerCfg, g.engine, WithListenerLogger(g.logger))
-		if err != nil {
-			return fmt.Errorf("failed to create listener %s: %w", listenerCfg.Name, err)
+		// Check if this is a gRPC listener
+		if listenerCfg.Protocol == config.ProtocolGRPC {
+			grpcListener, err := NewGRPCListener(listenerCfg,
+				WithGRPCListenerLogger(g.logger),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create gRPC listener %s: %w", listenerCfg.Name, err)
+			}
+
+			// Load gRPC routes
+			if err := grpcListener.LoadRoutes(g.config.Spec.GRPCRoutes); err != nil {
+				return fmt.Errorf("failed to load gRPC routes for listener %s: %w", listenerCfg.Name, err)
+			}
+
+			g.grpcListeners = append(g.grpcListeners, grpcListener)
+		} else {
+			// HTTP listener
+			listener, err := NewListener(listenerCfg, g.engine, WithListenerLogger(g.logger))
+			if err != nil {
+				return fmt.Errorf("failed to create listener %s: %w", listenerCfg.Name, err)
+			}
+			g.listeners = append(g.listeners, listener)
 		}
-		g.listeners = append(g.listeners, listener)
 	}
 
 	return nil
@@ -266,6 +297,7 @@ func (g *Gateway) createListeners() error {
 func (g *Gateway) stopListeners(ctx context.Context) {
 	var wg sync.WaitGroup
 
+	// Stop HTTP listeners
 	for _, listener := range g.listeners {
 		wg.Add(1)
 		go func(l *Listener) {
@@ -279,10 +311,29 @@ func (g *Gateway) stopListeners(ctx context.Context) {
 		}(listener)
 	}
 
+	// Stop gRPC listeners
+	for _, listener := range g.grpcListeners {
+		wg.Add(1)
+		go func(l *GRPCListener) {
+			defer wg.Done()
+			if err := l.Stop(ctx); err != nil {
+				g.logger.Error("failed to stop gRPC listener",
+					observability.String("name", l.Name()),
+					observability.Error(err),
+				)
+			}
+		}(listener)
+	}
+
 	wg.Wait()
 }
 
-// GetListeners returns all listeners.
+// GetListeners returns all HTTP listeners.
 func (g *Gateway) GetListeners() []*Listener {
 	return g.listeners
+}
+
+// GetGRPCListeners returns all gRPC listeners.
+func (g *Gateway) GetGRPCListeners() []*GRPCListener {
+	return g.grpcListeners
 }

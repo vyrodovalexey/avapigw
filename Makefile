@@ -26,9 +26,13 @@ DOCKER_TAG ?= $(VERSION)
 GOLANGCI_LINT := golangci-lint
 GOVULNCHECK := govulncheck
 
-# Test backend URLs
+# Test backend URLs (HTTP REST API)
 TEST_BACKEND1_URL ?= http://127.0.0.1:8801
 TEST_BACKEND2_URL ?= http://127.0.0.1:8802
+
+# Test backend URLs (gRPC)
+TEST_GRPC_BACKEND1_URL ?= 127.0.0.1:8803
+TEST_GRPC_BACKEND2_URL ?= 127.0.0.1:8804
 
 # Coverage settings
 COVERAGE_DIR := coverage
@@ -40,9 +44,10 @@ COVERAGE_MERGED := $(COVERAGE_DIR)/merged.out
 
 .PHONY: all build build-linux build-darwin build-windows build-all \
         test test-unit test-coverage test-functional test-integration test-e2e test-all \
+        test-grpc-unit test-grpc-integration test-grpc-e2e \
         lint lint-fix fmt vet vuln \
         docker-build docker-run docker-push docker-clean \
-        run dev clean deps tools generate \
+        run dev clean deps tools generate proto-generate \
         ci help version
 
 # ==============================================================================
@@ -116,27 +121,60 @@ test-functional:
 	$(GO) test -race -coverprofile=$(COVERAGE_FUNCTIONAL) -covermode=atomic -tags=functional ./test/functional/...
 	@echo "==> Functional tests completed"
 
-## test-integration: Run integration tests (requires backends on ports 8801, 8802)
+## test-integration: Run integration tests (requires HTTP backends on 8801, 8802 and gRPC backends on 8803, 8804)
 test-integration:
 	@echo "==> Running integration tests..."
-	@echo "==> Backends expected at $(TEST_BACKEND1_URL) and $(TEST_BACKEND2_URL)"
+	@echo "==> HTTP backends expected at $(TEST_BACKEND1_URL) and $(TEST_BACKEND2_URL)"
+	@echo "==> gRPC backends expected at $(TEST_GRPC_BACKEND1_URL) and $(TEST_GRPC_BACKEND2_URL)"
 	@mkdir -p $(COVERAGE_DIR)
 	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
+	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
 		$(GO) test -race -coverprofile=$(COVERAGE_INTEGRATION) -covermode=atomic -tags=integration ./test/integration/...
 	@echo "==> Integration tests completed"
 
-## test-e2e: Run end-to-end tests (requires backends on ports 8801, 8802)
+## test-e2e: Run end-to-end tests (requires HTTP backends on 8801, 8802 and gRPC backends on 8803, 8804)
 test-e2e:
 	@echo "==> Running e2e tests..."
-	@echo "==> Backends expected at $(TEST_BACKEND1_URL) and $(TEST_BACKEND2_URL)"
+	@echo "==> HTTP backends expected at $(TEST_BACKEND1_URL) and $(TEST_BACKEND2_URL)"
+	@echo "==> gRPC backends expected at $(TEST_GRPC_BACKEND1_URL) and $(TEST_GRPC_BACKEND2_URL)"
 	@mkdir -p $(COVERAGE_DIR)
 	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
+	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
 		$(GO) test -race -coverprofile=$(COVERAGE_E2E) -covermode=atomic -tags=e2e ./test/e2e/...
 	@echo "==> E2E tests completed"
 
 ## test-all: Run all tests (unit, functional, integration, e2e)
 test-all: test-unit test-functional test-integration test-e2e
 	@echo "==> All tests completed"
+
+# ==============================================================================
+# gRPC-specific test targets
+# ==============================================================================
+
+## test-grpc-unit: Run gRPC-specific unit tests
+test-grpc-unit:
+	@echo "==> Running gRPC unit tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -race -coverprofile=$(COVERAGE_DIR)/grpc-unit.out -covermode=atomic ./internal/grpc/...
+	@echo "==> gRPC unit tests completed"
+
+## test-grpc-integration: Run gRPC integration tests (requires gRPC backends on 8803, 8804)
+test-grpc-integration:
+	@echo "==> Running gRPC integration tests..."
+	@echo "==> gRPC backends expected at $(TEST_GRPC_BACKEND1_URL) and $(TEST_GRPC_BACKEND2_URL)"
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
+		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/grpc-integration.out -covermode=atomic -tags=integration -run ".*[Gg]rpc.*|.*[Gg]RPC.*" ./test/integration/...
+	@echo "==> gRPC integration tests completed"
+
+## test-grpc-e2e: Run gRPC e2e tests (requires gRPC backends on 8803, 8804)
+test-grpc-e2e:
+	@echo "==> Running gRPC e2e tests..."
+	@echo "==> gRPC backends expected at $(TEST_GRPC_BACKEND1_URL) and $(TEST_GRPC_BACKEND2_URL)"
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
+		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/grpc-e2e.out -covermode=atomic -tags=e2e -run ".*[Gg]rpc.*|.*[Gg]RPC.*" ./test/e2e/...
+	@echo "==> gRPC e2e tests completed"
 
 ## test-merge-coverage: Merge all coverage reports
 test-merge-coverage:
@@ -202,6 +240,7 @@ docker-run:
 	@echo "==> Running Docker container..."
 	docker run --rm -it \
 		-p 8080:8080 \
+		-p 9000:9000 \
 		-p 9090:9090 \
 		-v $(PWD)/configs:/app/configs:ro \
 		$(DOCKER_IMAGE):$(DOCKER_TAG)
@@ -273,6 +312,23 @@ generate:
 	$(GO) generate ./...
 	@echo "==> Code generation completed"
 
+## proto-generate: Generate gRPC code from proto files (requires protoc and plugins)
+proto-generate:
+	@echo "==> Generating gRPC code from proto files..."
+	@if command -v protoc > /dev/null 2>&1; then \
+		find . -name "*.proto" -exec dirname {} \; | sort -u | while read dir; do \
+			protoc --go_out=. --go_opt=paths=source_relative \
+				--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+				$$dir/*.proto; \
+		done; \
+		echo "==> Proto generation completed"; \
+	else \
+		echo "==> protoc not installed, skipping proto generation"; \
+		echo "==> Install with: brew install protobuf (macOS) or apt install protobuf-compiler (Linux)"; \
+		echo "==> Also install Go plugins: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest"; \
+		echo "==>                          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest"; \
+	fi
+
 # ==============================================================================
 # CI targets
 # ==============================================================================
@@ -311,9 +367,14 @@ help:
 	@echo "  test-unit       Run unit tests with race detection"
 	@echo "  test-coverage   Run tests with HTML coverage report"
 	@echo "  test-functional Run functional tests"
-	@echo "  test-integration Run integration tests (requires backends)"
-	@echo "  test-e2e        Run end-to-end tests (requires backends)"
+	@echo "  test-integration Run integration tests (requires HTTP and gRPC backends)"
+	@echo "  test-e2e        Run end-to-end tests (requires HTTP and gRPC backends)"
 	@echo "  test-all        Run all tests"
+	@echo ""
+	@echo "gRPC test targets:"
+	@echo "  test-grpc-unit        Run gRPC unit tests"
+	@echo "  test-grpc-integration Run gRPC integration tests (requires gRPC backends)"
+	@echo "  test-grpc-e2e         Run gRPC e2e tests (requires gRPC backends)"
 	@echo ""
 	@echo "Quality targets:"
 	@echo "  lint            Run golangci-lint"
@@ -336,6 +397,7 @@ help:
 	@echo "  deps            Download dependencies"
 	@echo "  tools           Install development tools"
 	@echo "  generate        Generate code"
+	@echo "  proto-generate  Generate gRPC code from proto files"
 	@echo ""
 	@echo "CI targets:"
 	@echo "  ci              Run all CI checks (lint, test, build)"
@@ -346,8 +408,10 @@ help:
 	@echo "  help            Show this help"
 	@echo ""
 	@echo "Environment variables:"
-	@echo "  TEST_BACKEND1_URL  Backend 1 URL (default: http://127.0.0.1:8801)"
-	@echo "  TEST_BACKEND2_URL  Backend 2 URL (default: http://127.0.0.1:8802)"
-	@echo "  DOCKER_REGISTRY    Docker registry (default: ghcr.io)"
-	@echo "  DOCKER_IMAGE       Docker image name"
-	@echo "  DOCKER_TAG         Docker image tag (default: VERSION)"
+	@echo "  TEST_BACKEND1_URL       HTTP Backend 1 URL (default: http://127.0.0.1:8801)"
+	@echo "  TEST_BACKEND2_URL       HTTP Backend 2 URL (default: http://127.0.0.1:8802)"
+	@echo "  TEST_GRPC_BACKEND1_URL  gRPC Backend 1 URL (default: 127.0.0.1:8803)"
+	@echo "  TEST_GRPC_BACKEND2_URL  gRPC Backend 2 URL (default: 127.0.0.1:8804)"
+	@echo "  DOCKER_REGISTRY         Docker registry (default: ghcr.io)"
+	@echo "  DOCKER_IMAGE            Docker image name"
+	@echo "  DOCKER_TAG              Docker image tag (default: VERSION)"

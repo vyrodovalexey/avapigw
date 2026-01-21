@@ -110,11 +110,25 @@ func loadAndValidateConfig(configPath string, logger observability.Logger) *conf
 		logger.Fatal("invalid configuration", observability.Error(err))
 	}
 
+	// Count gRPC and HTTP listeners
+	grpcListenerCount := 0
+	httpListenerCount := 0
+	for _, l := range cfg.Spec.Listeners {
+		if l.Protocol == config.ProtocolGRPC {
+			grpcListenerCount++
+		} else {
+			httpListenerCount++
+		}
+	}
+
 	logger.Info("configuration loaded",
 		observability.String("name", cfg.Metadata.Name),
-		observability.Int("listeners", len(cfg.Spec.Listeners)),
+		observability.Int("http_listeners", httpListenerCount),
+		observability.Int("grpc_listeners", grpcListenerCount),
 		observability.Int("routes", len(cfg.Spec.Routes)),
+		observability.Int("grpc_routes", len(cfg.Spec.GRPCRoutes)),
 		observability.Int("backends", len(cfg.Spec.Backends)),
+		observability.Int("grpc_backends", len(cfg.Spec.GRPCBackends)),
 	)
 
 	return cfg

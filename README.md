@@ -16,6 +16,11 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Method & Header Matching** - Advanced request matching capabilities
 - **Query Parameter Matching** - Route based on query parameters
 - **Path Parameters** - Extract and use path parameters in routing
+- **Native gRPC Support** - Full gRPC over HTTP/2 with dedicated port
+- **gRPC Streaming** - Support for unary, server streaming, client streaming, and bidirectional streaming
+- **gRPC Routing** - Service and method-based routing with metadata matching
+- **gRPC Health Service** - Built-in grpc.health.v1.Health implementation
+- **gRPC Reflection** - Optional gRPC reflection service for service discovery
 
 ### Traffic Management
 - **Load Balancing** - Round-robin and weighted load balancing algorithms
@@ -33,6 +38,33 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Direct Responses** - Return static responses without backend calls
 - **Header Manipulation** - Add, modify, or remove request/response headers
 - **CORS Support** - Comprehensive Cross-Origin Resource Sharing configuration
+
+### Data Transformation
+- **Field Filtering** - Filter response fields using allow/deny lists
+- **Field Mapping** - Rename and remap response fields
+- **Field Grouping** - Group fields into nested objects
+- **Field Flattening** - Extract and flatten nested objects
+- **Array Operations** - Append, prepend, filter, sort, limit, deduplicate arrays
+- **Response Templating** - Use Go templates for custom response formatting
+- **Response Merging** - Merge responses from multiple backends (deep, shallow, replace strategies)
+- **Request Manipulation** - Transform request body using templates and field operations
+- **gRPC FieldMask** - Filter gRPC responses using Protocol Buffer FieldMask
+- **Metadata Transformation** - Transform gRPC metadata (static and dynamic)
+- **Streaming Transformation** - Transform streaming messages with rate limiting
+
+### Caching
+- **In-Memory Cache** - Fast local caching with TTL and max entries
+- **Redis Cache** - Distributed caching with Redis
+- **Cache Key Generation** - Configurable cache key components
+- **Cache Control** - Honor Cache-Control headers
+- **Stale-While-Revalidate** - Serve stale data while revalidating
+- **Negative Caching** - Cache error responses
+
+### Encoding Support
+- **JSON** - Full JSON encoding/decoding with configurable options
+- **XML** - XML encoding/decoding
+- **YAML** - YAML encoding/decoding
+- **Content Negotiation** - Automatic content type negotiation based on Accept header
 
 ### Observability
 - **Prometheus Metrics** - Comprehensive metrics collection
@@ -52,8 +84,10 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Quick Start](#-quick-start)
 - [Installation](#-installation)
 - [Configuration](#-configuration)
+- [Data Transformation](#-data-transformation)
 - [API Endpoints](#-api-endpoints)
 - [Routing](#-routing)
+- [gRPC Gateway](#-grpc-gateway)
 - [Traffic Management](#-traffic-management)
 - [Observability](#-observability)
 - [Development](#-development)
@@ -75,10 +109,10 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 docker pull ghcr.io/avapigw/avapigw:latest
 
 # Run with default configuration
-docker run -p 8080:8080 -p 9090:9090 ghcr.io/avapigw/avapigw:latest
+docker run -p 8080:8080 -p 9000:9000 -p 9090:9090 ghcr.io/avapigw/avapigw:latest
 
 # Run with custom configuration
-docker run -p 8080:8080 -p 9090:9090 \
+docker run -p 8080:8080 -p 9000:9000 -p 9090:9090 \
   -v $(pwd)/configs:/app/configs:ro \
   ghcr.io/avapigw/avapigw:latest
 ```
@@ -100,7 +134,7 @@ make run
 make run-debug
 ```
 
-The gateway will start on port 8080 (HTTP traffic) and 9090 (metrics/health).
+The gateway will start on port 8080 (HTTP traffic), 9000 (gRPC traffic), and 9090 (metrics/health).
 
 ### Test the Gateway
 
@@ -111,8 +145,14 @@ curl http://localhost:9090/health
 # Metrics
 curl http://localhost:9090/metrics
 
-# Test routing (requires backend services)
+# Test HTTP routing (requires backend services)
 curl http://localhost:8080/api/v1/items
+
+# Test gRPC endpoint (requires grpcurl)
+grpcurl -plaintext localhost:9000 list
+
+# Check gRPC health
+grpcurl -plaintext localhost:9000 grpc.health.v1.Health/Check
 ```
 
 ## 📦 Installation
@@ -169,6 +209,13 @@ spec:
       protocol: HTTP
       hosts: ["*"]
       bind: 0.0.0.0
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      grpc:
+        maxConcurrentStreams: 100
+        reflection: true
+        healthCheck: true
   
   routes:
     - name: api-route
@@ -205,6 +252,20 @@ spec:
       protocol: HTTP
       hosts: ["*"]           # Host matching
       bind: 0.0.0.0         # Bind address
+    
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      grpc:
+        maxConcurrentStreams: 100
+        maxRecvMsgSize: 4194304    # 4MB
+        maxSendMsgSize: 4194304    # 4MB
+        keepalive:
+          time: 30s
+          timeout: 10s
+          permitWithoutStream: false
+        reflection: true
+        healthCheck: true
     
     - name: admin
       port: 9090
@@ -399,23 +460,189 @@ spec:
 
 See [configs/gateway.yaml](configs/gateway.yaml) for a complete example configuration demonstrating all features.
 
+## 🔄 Data Transformation
+
+The Ava API Gateway provides comprehensive data transformation capabilities for both HTTP and gRPC protocols.
+
+### Response Manipulation
+
+- **Field Filtering**: Filter response fields using allow/deny lists
+- **Field Mapping**: Rename and remap response fields
+- **Field Grouping**: Group fields into nested objects
+- **Field Flattening**: Extract and flatten nested objects
+- **Array Operations**: Append, prepend, filter, sort, limit, deduplicate arrays
+- **Response Templating**: Use Go templates for custom response formatting
+- **Response Merging**: Merge responses from multiple backends (deep, shallow, replace strategies)
+
+### Request Manipulation
+
+- **Body Passthrough**: Forward request body to backends
+- **Body Templating**: Transform request body using templates
+- **Header Injection**: Inject static and dynamic headers
+- **Field Injection**: Add fields to request body
+- **Field Removal**: Remove fields from request body
+- **Default Values**: Set default values for missing fields
+
+### gRPC-Specific Features
+
+- **FieldMask Filtering**: Filter responses using Protocol Buffer FieldMask
+- **Metadata Transformation**: Transform gRPC metadata (static and dynamic)
+- **Streaming Transformation**: Transform streaming messages with rate limiting
+- **Repeated Field Operations**: Filter, sort, limit, deduplicate repeated fields
+- **Map Field Operations**: Filter keys, merge map fields
+
+### Caching
+
+- **In-Memory Cache**: Fast local caching with TTL and max entries
+- **Redis Cache**: Distributed caching with Redis
+- **Cache Key Generation**: Configurable cache key components
+- **Cache Control**: Honor Cache-Control headers
+- **Stale-While-Revalidate**: Serve stale data while revalidating
+- **Negative Caching**: Cache error responses
+
+### Encoding Support
+
+- **JSON**: Full JSON encoding/decoding with configurable options
+- **XML**: XML encoding/decoding
+- **YAML**: YAML encoding/decoding
+- **Content Negotiation**: Automatic content type negotiation based on Accept header
+
+### Configuration Examples
+
+#### HTTP Route with Transformation
+
+```yaml
+routes:
+  - name: api-route
+    match:
+      - uri:
+          prefix: /api/v1/
+    route:
+      - destination:
+          host: backend.example.com
+          port: 8080
+    transform:
+      response:
+        allowFields:
+          - id
+          - name
+          - status
+        fieldMappings:
+          - source: created_at
+            target: createdAt
+        mergeStrategy: deep
+      request:
+        staticHeaders:
+          X-Gateway: avapigw
+        defaultValues:
+          version: "1.0"
+    cache:
+      enabled: true
+      type: redis
+      ttl: 5m
+      redis:
+        url: redis://localhost:6379
+        keyPrefix: "api:"
+```
+
+#### gRPC Route with Transformation
+
+```yaml
+grpcRoutes:
+  - name: grpc-service
+    match:
+      - service:
+          exact: "api.v1.UserService"
+    route:
+      - destination:
+          host: grpc-backend.example.com
+          port: 50051
+    transform:
+      response:
+        fieldMask:
+          - id
+          - name
+          - email
+      request:
+        staticMetadata:
+          x-gateway: avapigw
+        dynamicMetadata:
+          - key: x-request-id
+            source: context.request_id
+    cache:
+      enabled: true
+      type: redis
+      ttl: 10m
+```
+
+### API Reference
+
+#### Transformation Configuration
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `transform.response.allowFields` | `[]string` | Fields to include in response |
+| `transform.response.denyFields` | `[]string` | Fields to exclude from response |
+| `transform.response.fieldMappings` | `[]FieldMapping` | Field rename mappings |
+| `transform.response.groupFields` | `[]FieldGroup` | Fields to group into objects |
+| `transform.response.flattenFields` | `[]string` | Nested fields to flatten |
+| `transform.response.arrayOperations` | `[]ArrayOperation` | Array manipulation operations |
+| `transform.response.template` | `string` | Go template for response |
+| `transform.response.mergeStrategy` | `string` | Merge strategy: deep, shallow, replace |
+| `transform.request.passthroughBody` | `bool` | Pass request body unchanged |
+| `transform.request.bodyTemplate` | `string` | Go template for request body |
+| `transform.request.staticHeaders` | `map[string]string` | Static headers to inject |
+| `transform.request.dynamicHeaders` | `[]DynamicHeader` | Dynamic headers from context |
+| `transform.request.injectFields` | `[]FieldInjection` | Fields to inject |
+| `transform.request.removeFields` | `[]string` | Fields to remove |
+| `transform.request.defaultValues` | `map[string]interface{}` | Default values for missing fields |
+
+#### Cache Configuration
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cache.enabled` | `bool` | Enable caching |
+| `cache.type` | `string` | Cache type: memory, redis |
+| `cache.ttl` | `duration` | Cache TTL |
+| `cache.maxEntries` | `int` | Max entries (memory cache) |
+| `cache.redis.url` | `string` | Redis connection URL |
+| `cache.redis.keyPrefix` | `string` | Key prefix for Redis |
+| `cache.honorCacheControl` | `bool` | Honor Cache-Control headers |
+| `cache.staleWhileRevalidate` | `duration` | Stale-while-revalidate duration |
+| `cache.negativeCacheTTL` | `duration` | TTL for error responses |
+
+#### Encoding Configuration
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `encoding.requestEncoding` | `string` | Request encoding: json, xml, yaml |
+| `encoding.responseEncoding` | `string` | Response encoding |
+| `encoding.enableContentNegotiation` | `bool` | Enable content negotiation |
+| `encoding.json.emitDefaults` | `bool` | Emit default values in JSON |
+| `encoding.json.prettyPrint` | `bool` | Pretty print JSON |
+| `encoding.compression.enabled` | `bool` | Enable compression |
+| `encoding.compression.algorithms` | `[]string` | Compression algorithms |
+
 ## 🔌 API Endpoints
 
 The gateway exposes several built-in endpoints:
 
-### Health Endpoints
+### HTTP Endpoints
 
-| Endpoint | Description | Response |
-|----------|-------------|----------|
-| `GET /health` | Overall health status | `{"status":"healthy"}` |
-| `GET /ready` | Readiness probe | `{"status":"ready"}` |
-| `GET /live` | Liveness probe | `{"status":"alive"}` |
+| Endpoint | Port | Description | Response |
+|----------|------|-------------|----------|
+| `GET /health` | 9090 | Overall health status | `{"status":"healthy"}` |
+| `GET /ready` | 9090 | Readiness probe | `{"status":"ready"}` |
+| `GET /live` | 9090 | Liveness probe | `{"status":"alive"}` |
+| `GET /metrics` | 9090 | Prometheus metrics | Prometheus text format |
 
-### Metrics Endpoint
+### gRPC Endpoints
 
-| Endpoint | Description | Format |
-|----------|-------------|---------|
-| `GET /metrics` | Prometheus metrics | Prometheus text format |
+| Endpoint | Port | Description |
+|----------|------|-------------|
+| gRPC Services | 9000 | Native gRPC traffic |
+| grpc.health.v1.Health | 9000 | gRPC health checking |
+| gRPC Reflection | 9000 | Service discovery (optional) |
 
 ### Debug Endpoints
 
@@ -508,6 +735,356 @@ match:
       regex: "^/users/([0-9]+)$"
 rewrite:
   uri: "/user/{1}"  # Use captured group
+```
+
+## 🔌 gRPC Gateway
+
+The gateway provides comprehensive gRPC support with native HTTP/2 handling, streaming capabilities, and advanced routing features.
+
+### gRPC Listener Configuration
+
+Configure gRPC listeners with HTTP/2 settings:
+
+```yaml
+spec:
+  listeners:
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      grpc:
+        maxConcurrentStreams: 100
+        maxRecvMsgSize: 4194304    # 4MB
+        maxSendMsgSize: 4194304    # 4MB
+        keepalive:
+          time: 30s
+          timeout: 10s
+          permitWithoutStream: false
+        reflection: true
+        healthCheck: true
+```
+
+### gRPC Routes Configuration
+
+Define gRPC routing rules with service and method matching:
+
+```yaml
+spec:
+  grpcRoutes:
+    - name: user-service
+      match:
+        - service: "user.v1.UserService"
+          method: "GetUser"
+          metadata:
+            - name: "authorization"
+              present: true
+      route:
+        - destination:
+            host: user-backend.example.com
+            port: 50051
+          weight: 100
+      timeout: 30s
+      retries:
+        attempts: 3
+        retryOn: "unavailable,resource-exhausted"
+    
+    - name: order-service
+      match:
+        - service: "order.v1.OrderService"
+          method: "*"  # All methods
+          authority: "orders.example.com"
+      route:
+        - destination:
+            host: order-backend-1
+            port: 50051
+          weight: 70
+        - destination:
+            host: order-backend-2
+            port: 50051
+          weight: 30
+      timeout: 60s
+    
+    - name: streaming-service
+      match:
+        - service: "stream.v1.StreamService"
+          method: "StreamData"
+      route:
+        - destination:
+            host: stream-backend
+            port: 50051
+      timeout: 300s  # Longer timeout for streaming
+```
+
+### gRPC Backends Configuration
+
+Configure gRPC backend services with health checking:
+
+```yaml
+spec:
+  grpcBackends:
+    - name: user-backend
+      hosts:
+        - address: user-backend.example.com
+          port: 50051
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: "user.v1.UserService"  # Service-specific health check
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      connectionPool:
+        maxConnections: 100
+        connectTimeout: 5s
+        idleTimeout: 60s
+    
+    - name: order-backend
+      hosts:
+        - address: order-backend-1.example.com
+          port: 50051
+          weight: 2
+        - address: order-backend-2.example.com
+          port: 50051
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""  # Overall health check
+        interval: 15s
+        timeout: 5s
+      loadBalancer:
+        algorithm: roundRobin
+```
+
+### gRPC Routing Features
+
+#### Service Name Matching
+```yaml
+match:
+  - service: "user.v1.UserService"        # Exact match
+  - service: "user.v1.*"                  # Prefix match
+  - service: "^user\\.v[0-9]+\\..*"       # Regex match
+```
+
+#### Method Name Matching
+```yaml
+match:
+  - method: "GetUser"                     # Exact match
+  - method: "Get*"                        # Prefix match
+  - method: "^(Get|List).*"               # Regex match
+  - method: "*"                           # Wildcard (all methods)
+```
+
+#### Metadata Matching
+```yaml
+match:
+  - metadata:
+      - name: "authorization"
+        present: true                     # Header must be present
+      - name: "user-id"
+        exact: "12345"                    # Exact value match
+      - name: "user-agent"
+        regex: "grpc-go.*"                # Regex match
+      - name: "x-trace-id"
+        prefix: "trace-"                  # Prefix match
+```
+
+#### Authority/Host Matching
+```yaml
+match:
+  - authority: "api.example.com"          # Exact authority match
+  - authority: "*.example.com"            # Wildcard authority match
+```
+
+### gRPC Traffic Management
+
+#### Timeouts and Deadlines
+```yaml
+grpcRoutes:
+  - name: quick-service
+    timeout: 5s                           # Route-level timeout
+    route:
+      - destination:
+          host: backend
+          port: 50051
+        timeout: 3s                       # Per-destination timeout
+```
+
+#### Retry Policies
+```yaml
+retries:
+  attempts: 3
+  retryOn: "unavailable,resource-exhausted,deadline-exceeded"
+  backoffStrategy: exponential
+  baseInterval: 100ms
+  maxInterval: 5s
+  perTryTimeout: 10s
+```
+
+#### Rate Limiting
+```yaml
+rateLimit:
+  enabled: true
+  requestsPerSecond: 1000
+  burst: 2000
+  perClient: true
+  keyExtractor: "metadata:user-id"        # Extract from gRPC metadata
+```
+
+#### Circuit Breaker
+```yaml
+circuitBreaker:
+  enabled: true
+  threshold: 10
+  timeout: 30s
+  halfOpenRequests: 5
+  successThreshold: 3
+```
+
+### gRPC Streaming Support
+
+The gateway supports all gRPC streaming patterns:
+
+#### Unary RPC
+```protobuf
+rpc GetUser(GetUserRequest) returns (GetUserResponse);
+```
+
+#### Server Streaming
+```protobuf
+rpc ListUsers(ListUsersRequest) returns (stream User);
+```
+
+#### Client Streaming
+```protobuf
+rpc CreateUsers(stream CreateUserRequest) returns (CreateUsersResponse);
+```
+
+#### Bidirectional Streaming
+```protobuf
+rpc ChatStream(stream ChatMessage) returns (stream ChatMessage);
+```
+
+### gRPC Health Service
+
+Built-in gRPC health checking following the [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md):
+
+```bash
+# Check overall health
+grpcurl -plaintext localhost:9000 grpc.health.v1.Health/Check
+
+# Check specific service health
+grpcurl -plaintext -d '{"service":"user.v1.UserService"}' \
+  localhost:9000 grpc.health.v1.Health/Check
+
+# Watch health status
+grpcurl -plaintext -d '{"service":"user.v1.UserService"}' \
+  localhost:9000 grpc.health.v1.Health/Watch
+```
+
+### gRPC Reflection
+
+Optional gRPC reflection service for service discovery:
+
+```bash
+# List all services
+grpcurl -plaintext localhost:9000 list
+
+# List methods for a service
+grpcurl -plaintext localhost:9000 list user.v1.UserService
+
+# Describe a method
+grpcurl -plaintext localhost:9000 describe user.v1.UserService.GetUser
+```
+
+### gRPC Observability
+
+#### Prometheus Metrics
+- `gateway_grpc_requests_total` - Total gRPC requests by service/method
+- `gateway_grpc_request_duration_seconds` - Request duration histogram
+- `gateway_grpc_request_message_size_bytes` - Request message size
+- `gateway_grpc_response_message_size_bytes` - Response message size
+- `gateway_grpc_active_streams` - Active streaming connections
+
+#### OpenTelemetry Tracing
+Automatic trace propagation with gRPC metadata:
+- `grpc-trace-bin` - Binary trace context
+- `grpc-tags-bin` - Binary baggage context
+
+#### Structured Logging
+gRPC-specific log fields:
+- `grpc_service` - gRPC service name
+- `grpc_method` - gRPC method name
+- `grpc_status` - gRPC status code
+- `grpc_status_message` - gRPC status message
+- `stream_id` - HTTP/2 stream ID
+
+### gRPC Configuration Examples
+
+#### Complete gRPC Gateway Example
+```yaml
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: grpc-gateway
+spec:
+  listeners:
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      grpc:
+        maxConcurrentStreams: 1000
+        maxRecvMsgSize: 16777216  # 16MB
+        maxSendMsgSize: 16777216  # 16MB
+        keepalive:
+          time: 30s
+          timeout: 10s
+        reflection: true
+        healthCheck: true
+  
+  grpcRoutes:
+    - name: user-service
+      match:
+        - service: "user.v1.UserService"
+      route:
+        - destination:
+            host: user-service
+            port: 50051
+      timeout: 30s
+      retries:
+        attempts: 3
+        retryOn: "unavailable"
+    
+    - name: order-service
+      match:
+        - service: "order.v1.OrderService"
+          metadata:
+            - name: "tenant-id"
+              present: true
+      route:
+        - destination:
+            host: order-service
+            port: 50051
+      rateLimit:
+        requestsPerSecond: 100
+        keyExtractor: "metadata:tenant-id"
+  
+  grpcBackends:
+    - name: user-service
+      hosts:
+        - address: user-service.default.svc.cluster.local
+          port: 50051
+      healthCheck:
+        enabled: true
+        service: "user.v1.UserService"
+        interval: 10s
+    
+    - name: order-service
+      hosts:
+        - address: order-service.default.svc.cluster.local
+          port: 50051
+      healthCheck:
+        enabled: true
+        interval: 10s
 ```
 
 ## 🚦 Traffic Management
@@ -623,17 +1200,25 @@ fault:
 
 The gateway exposes comprehensive metrics:
 
-#### Request Metrics
+#### HTTP Request Metrics
 - `gateway_requests_total` - Total HTTP requests
 - `gateway_request_duration_seconds` - Request duration histogram
 - `gateway_request_size_bytes` - Request size histogram
 - `gateway_response_size_bytes` - Response size histogram
 - `gateway_active_requests` - Active requests gauge
 
+#### gRPC Request Metrics
+- `gateway_grpc_requests_total` - Total gRPC requests by service/method
+- `gateway_grpc_request_duration_seconds` - gRPC request duration histogram
+- `gateway_grpc_request_message_size_bytes` - gRPC request message size
+- `gateway_grpc_response_message_size_bytes` - gRPC response message size
+- `gateway_grpc_active_streams` - Active gRPC streaming connections
+
 #### Backend Metrics
 - `gateway_backend_health` - Backend health status
 - `gateway_backend_requests_total` - Backend request count
 - `gateway_backend_request_duration_seconds` - Backend request duration
+- `gateway_grpc_backend_health` - gRPC backend health status
 
 #### Circuit Breaker Metrics
 - `gateway_circuit_breaker_state` - Circuit breaker state
@@ -709,23 +1294,33 @@ make build
 
 ```bash
 # Unit tests
-make test
-
-# All tests with coverage
-make test-coverage
+make test-unit
 
 # Functional tests
 make test-functional
 
-# Integration tests (requires backends)
+# Integration tests (requires Redis)
 make test-integration
 
-# End-to-end tests (requires backends)
+# E2E tests (requires Redis and backends)
 make test-e2e
 
 # All tests
 make test-all
+
+# All tests with coverage
+make test-coverage
 ```
+
+### Test Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEST_REDIS_URL` | `redis://default:password@127.0.0.1:6379` | Redis connection URL |
+| `TEST_BACKEND1_URL` | `http://127.0.0.1:8801` | HTTP backend 1 URL |
+| `TEST_BACKEND2_URL` | `http://127.0.0.1:8802` | HTTP backend 2 URL |
+| `TEST_GRPC_BACKEND1_URL` | `127.0.0.1:8803` | gRPC backend 1 URL |
+| `TEST_GRPC_BACKEND2_URL` | `127.0.0.1:8804` | gRPC backend 2 URL |
 
 ### Code Quality
 
@@ -762,6 +1357,12 @@ avapigw/
 │   ├── backend/         # Backend management
 │   ├── config/          # Configuration handling
 │   ├── gateway/         # Core gateway logic
+│   ├── grpc/            # gRPC-specific packages
+│   │   ├── server/      # gRPC server implementation
+│   │   ├── proxy/       # gRPC reverse proxy
+│   │   ├── router/      # gRPC routing
+│   │   ├── middleware/  # gRPC interceptors
+│   │   └── health/      # gRPC health service
 │   ├── health/          # Health checking
 │   ├── middleware/      # HTTP middleware
 │   ├── observability/   # Metrics, tracing, logging
@@ -805,15 +1406,15 @@ docker build -t avapigw:latest .
 
 ```bash
 # Basic run
-docker run -p 8080:8080 -p 9090:9090 avapigw:latest
+docker run -p 8080:8080 -p 9000:9000 -p 9090:9090 avapigw:latest
 
 # With custom configuration
-docker run -p 8080:8080 -p 9090:9090 \
+docker run -p 8080:8080 -p 9000:9000 -p 9090:9090 \
   -v $(pwd)/configs:/app/configs:ro \
   avapigw:latest
 
 # With environment variables
-docker run -p 8080:8080 -p 9090:9090 \
+docker run -p 8080:8080 -p 9000:9000 -p 9090:9090 \
   -e GATEWAY_LOG_LEVEL=debug \
   -e GATEWAY_LOG_FORMAT=console \
   avapigw:latest
@@ -826,7 +1427,9 @@ docker run -p 8080:8080 -p 9090:9090 \
 | `GATEWAY_CONFIG_PATH` | Configuration file path | `/app/configs/gateway.yaml` |
 | `GATEWAY_LOG_LEVEL` | Log level | `info` |
 | `GATEWAY_LOG_FORMAT` | Log format | `json` |
-| `GATEWAY_PORT` | HTTP port | `8080` |
+| `GATEWAY_HTTP_PORT` | HTTP port | `8080` |
+| `GATEWAY_GRPC_PORT` | gRPC port | `9000` |
+| `GATEWAY_ADMIN_PORT` | Admin/metrics port | `9090` |
 | `GATEWAY_ENV` | Environment name | `development` |
 
 ### Docker Compose
@@ -838,6 +1441,7 @@ services:
     image: ghcr.io/avapigw/avapigw:latest
     ports:
       - "8080:8080"
+      - "9000:9000"
       - "9090:9090"
     volumes:
       - ./configs:/app/configs:ro

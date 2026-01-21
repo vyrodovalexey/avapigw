@@ -114,6 +114,8 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	v.validateListeners(spec.Listeners)
 	v.validateRoutes(spec.Routes, spec.Backends)
 	v.validateBackends(spec.Backends)
+	v.validateGRPCRoutes(spec.GRPCRoutes)
+	v.validateGRPCBackends(spec.GRPCBackends)
 
 	if spec.RateLimit != nil {
 		v.validateRateLimit(spec.RateLimit, "spec.rateLimit")
@@ -175,15 +177,21 @@ func (v *Validator) validateListenerPort(listener *Listener, path string, ports 
 // validateListenerProtocol validates listener protocol.
 func (v *Validator) validateListenerProtocol(listener *Listener, path string) {
 	validProtocols := map[string]bool{
-		"HTTP":  true,
-		"HTTPS": true,
-		"HTTP2": true,
+		ProtocolHTTP:  true,
+		ProtocolHTTPS: true,
+		ProtocolHTTP2: true,
+		ProtocolGRPC:  true,
 	}
 	switch {
 	case listener.Protocol == "":
 		v.addError(path+".protocol", "protocol is required")
 	case !validProtocols[listener.Protocol]:
-		v.addError(path+".protocol", "protocol must be HTTP, HTTPS, or HTTP2")
+		v.addError(path+".protocol", "protocol must be HTTP, HTTPS, HTTP2, or GRPC")
+	}
+
+	// Validate gRPC-specific configuration
+	if listener.Protocol == ProtocolGRPC {
+		v.validateGRPCListenerConfig(listener.GRPC, path+".grpc")
 	}
 }
 
@@ -614,4 +622,331 @@ func (v *Validator) validateObservability(obs *ObservabilityConfig, path string)
 // addError adds a validation error.
 func (v *Validator) addError(path, message string) {
 	v.errors = append(v.errors, ValidationError{Path: path, Message: message})
+}
+
+// validateGRPCListenerConfig validates gRPC listener configuration.
+func (v *Validator) validateGRPCListenerConfig(cfg *GRPCListenerConfig, path string) {
+	if cfg == nil {
+		return
+	}
+
+	if cfg.MaxRecvMsgSize < 0 {
+		v.addError(path+".maxRecvMsgSize", "maxRecvMsgSize cannot be negative")
+	}
+
+	if cfg.MaxSendMsgSize < 0 {
+		v.addError(path+".maxSendMsgSize", "maxSendMsgSize cannot be negative")
+	}
+
+	if cfg.Keepalive != nil {
+		v.validateGRPCKeepaliveConfig(cfg.Keepalive, path+".keepalive")
+	}
+
+	if cfg.TLS != nil {
+		v.validateTLSConfig(cfg.TLS, path+".tls")
+	}
+}
+
+// validateGRPCKeepaliveConfig validates gRPC keepalive configuration.
+func (v *Validator) validateGRPCKeepaliveConfig(cfg *GRPCKeepaliveConfig, path string) {
+	if cfg.Time.Duration() < 0 {
+		v.addError(path+".time", "time cannot be negative")
+	}
+
+	if cfg.Timeout.Duration() < 0 {
+		v.addError(path+".timeout", "timeout cannot be negative")
+	}
+
+	if cfg.MaxConnectionIdle.Duration() < 0 {
+		v.addError(path+".maxConnectionIdle", "maxConnectionIdle cannot be negative")
+	}
+
+	if cfg.MaxConnectionAge.Duration() < 0 {
+		v.addError(path+".maxConnectionAge", "maxConnectionAge cannot be negative")
+	}
+
+	if cfg.MaxConnectionAgeGrace.Duration() < 0 {
+		v.addError(path+".maxConnectionAgeGrace", "maxConnectionAgeGrace cannot be negative")
+	}
+}
+
+// validateTLSConfig validates TLS configuration.
+func (v *Validator) validateTLSConfig(cfg *TLSConfig, path string) {
+	if cfg.Enabled {
+		if cfg.CertFile == "" {
+			v.addError(path+".certFile", "certFile is required when TLS is enabled")
+		}
+		if cfg.KeyFile == "" {
+			v.addError(path+".keyFile", "keyFile is required when TLS is enabled")
+		}
+	}
+}
+
+// validateGRPCRoutes validates gRPC route configurations.
+func (v *Validator) validateGRPCRoutes(routes []GRPCRoute) {
+	names := make(map[string]bool)
+
+	for i, route := range routes {
+		path := fmt.Sprintf("spec.grpcRoutes[%d]", i)
+		v.validateSingleGRPCRoute(&route, path, names)
+	}
+}
+
+// validateSingleGRPCRoute validates a single gRPC route configuration.
+func (v *Validator) validateSingleGRPCRoute(route *GRPCRoute, path string, names map[string]bool) {
+	// Validate route name
+	switch {
+	case route.Name == "":
+		v.addError(path+".name", "route name is required")
+	case names[route.Name]:
+		v.addError(path+".name", fmt.Sprintf("duplicate gRPC route name: %s", route.Name))
+	default:
+		names[route.Name] = true
+	}
+
+	// Validate match conditions
+	if len(route.Match) == 0 {
+		v.addError(path+".match", "at least one match condition is required")
+	}
+
+	for j, match := range route.Match {
+		matchPath := fmt.Sprintf("%s.match[%d]", path, j)
+		v.validateGRPCRouteMatch(&match, matchPath)
+	}
+
+	// Validate destinations
+	if len(route.Route) == 0 {
+		v.addError(path+".route", "at least one destination is required")
+	}
+
+	totalWeight := 0
+	for j, dest := range route.Route {
+		destPath := fmt.Sprintf("%s.route[%d]", path, j)
+		totalWeight += v.validateRouteDestination(&dest, destPath)
+	}
+
+	if len(route.Route) > 1 && totalWeight > 0 && totalWeight != 100 {
+		v.addError(path+".route", fmt.Sprintf("route weights must sum to 100, got %d", totalWeight))
+	}
+
+	// Validate timeout
+	if route.Timeout.Duration() < 0 {
+		v.addError(path+".timeout", "timeout cannot be negative")
+	}
+
+	// Validate retry policy
+	if route.Retries != nil {
+		v.validateGRPCRetryPolicy(route.Retries, path+".retries")
+	}
+
+	// Validate rate limit
+	if route.RateLimit != nil {
+		v.validateRateLimit(route.RateLimit, path+".rateLimit")
+	}
+}
+
+// validateGRPCRouteMatch validates a gRPC route match configuration.
+func (v *Validator) validateGRPCRouteMatch(match *GRPCRouteMatch, path string) {
+	// At least one match condition should be specified
+	if match.IsEmpty() {
+		v.addError(path, "at least one match condition (service, method, metadata, or authority) is required")
+	}
+
+	// Validate service match
+	if match.Service != nil {
+		v.validateStringMatch(match.Service, path+".service")
+	}
+
+	// Validate method match
+	if match.Method != nil {
+		v.validateStringMatch(match.Method, path+".method")
+	}
+
+	// Validate authority match
+	if match.Authority != nil {
+		v.validateStringMatch(match.Authority, path+".authority")
+	}
+
+	// Validate metadata matches
+	for i, meta := range match.Metadata {
+		metaPath := fmt.Sprintf("%s.metadata[%d]", path, i)
+		v.validateMetadataMatch(&meta, metaPath)
+	}
+}
+
+// validateStringMatch validates a string match configuration.
+func (v *Validator) validateStringMatch(match *StringMatch, path string) {
+	if match == nil {
+		return
+	}
+
+	count := 0
+	if match.Exact != "" {
+		count++
+	}
+	if match.Prefix != "" {
+		count++
+	}
+	if match.Regex != "" {
+		count++
+		if err := util.ValidateRegex(match.Regex); err != nil {
+			v.addError(path+".regex", err.Error())
+		}
+	}
+
+	if count > 1 {
+		v.addError(path, "only one of exact, prefix, or regex can be specified")
+	}
+}
+
+// validateMetadataMatch validates a metadata match configuration.
+func (v *Validator) validateMetadataMatch(match *MetadataMatch, path string) {
+	if match.Name == "" {
+		v.addError(path+".name", "metadata name is required")
+	}
+
+	// Validate regex if specified
+	if match.Regex != "" {
+		if err := util.ValidateRegex(match.Regex); err != nil {
+			v.addError(path+".regex", err.Error())
+		}
+	}
+
+	// Check for conflicting conditions
+	if match.Present != nil && match.Absent != nil {
+		v.addError(path, "present and absent cannot both be specified")
+	}
+}
+
+// validateGRPCRetryPolicy validates gRPC retry policy configuration.
+func (v *Validator) validateGRPCRetryPolicy(retry *GRPCRetryPolicy, path string) {
+	if retry.Attempts < 0 {
+		v.addError(path+".attempts", "attempts cannot be negative")
+	}
+
+	if retry.PerTryTimeout.Duration() < 0 {
+		v.addError(path+".perTryTimeout", "perTryTimeout cannot be negative")
+	}
+
+	if retry.BackoffBaseInterval.Duration() < 0 {
+		v.addError(path+".backoffBaseInterval", "backoffBaseInterval cannot be negative")
+	}
+
+	if retry.BackoffMaxInterval.Duration() < 0 {
+		v.addError(path+".backoffMaxInterval", "backoffMaxInterval cannot be negative")
+	}
+
+	// Validate retry status codes
+	if retry.RetryOn != "" {
+		v.validateGRPCRetryStatusCodes(retry.RetryOn, path+".retryOn")
+	}
+}
+
+// validateGRPCRetryStatusCodes validates gRPC retry status codes.
+func (v *Validator) validateGRPCRetryStatusCodes(retryOn, path string) {
+	validCodes := map[string]bool{
+		"cancelled":          true,
+		"deadline-exceeded":  true,
+		"internal":           true,
+		"resource-exhausted": true,
+		"unavailable":        true,
+		"unknown":            true,
+		"aborted":            true,
+		"data-loss":          true,
+	}
+
+	codes := strings.Split(retryOn, ",")
+	for _, code := range codes {
+		code = strings.TrimSpace(strings.ToLower(code))
+		if code != "" && !validCodes[code] {
+			v.addError(path, fmt.Sprintf("invalid gRPC retry status code: %s", code))
+		}
+	}
+}
+
+// validateGRPCBackends validates gRPC backend configurations.
+func (v *Validator) validateGRPCBackends(backends []GRPCBackend) {
+	names := make(map[string]bool)
+
+	for i, backend := range backends {
+		path := fmt.Sprintf("spec.grpcBackends[%d]", i)
+		v.validateSingleGRPCBackend(&backend, path, names)
+	}
+}
+
+// validateSingleGRPCBackend validates a single gRPC backend configuration.
+func (v *Validator) validateSingleGRPCBackend(backend *GRPCBackend, path string, names map[string]bool) {
+	// Validate backend name
+	switch {
+	case backend.Name == "":
+		v.addError(path+".name", "backend name is required")
+	case names[backend.Name]:
+		v.addError(path+".name", fmt.Sprintf("duplicate gRPC backend name: %s", backend.Name))
+	default:
+		names[backend.Name] = true
+	}
+
+	// Validate hosts
+	if len(backend.Hosts) == 0 {
+		v.addError(path+".hosts", "at least one host is required")
+	}
+
+	for j, host := range backend.Hosts {
+		hostPath := fmt.Sprintf("%s.hosts[%d]", path, j)
+		v.validateBackendHost(&host, hostPath)
+	}
+
+	// Validate health check
+	if backend.HealthCheck != nil {
+		v.validateGRPCHealthCheckConfig(backend.HealthCheck, path+".healthCheck")
+	}
+
+	// Validate load balancer
+	if backend.LoadBalancer != nil {
+		v.validateLoadBalancer(backend.LoadBalancer, path+".loadBalancer")
+	}
+
+	// Validate TLS
+	if backend.TLS != nil {
+		v.validateTLSConfig(backend.TLS, path+".tls")
+	}
+
+	// Validate connection pool
+	if backend.ConnectionPool != nil {
+		v.validateGRPCConnectionPoolConfig(backend.ConnectionPool, path+".connectionPool")
+	}
+}
+
+// validateGRPCHealthCheckConfig validates gRPC health check configuration.
+func (v *Validator) validateGRPCHealthCheckConfig(cfg *GRPCHealthCheckConfig, path string) {
+	if cfg.Interval.Duration() < 0 {
+		v.addError(path+".interval", "interval cannot be negative")
+	}
+
+	if cfg.Timeout.Duration() < 0 {
+		v.addError(path+".timeout", "timeout cannot be negative")
+	}
+
+	if cfg.HealthyThreshold < 0 {
+		v.addError(path+".healthyThreshold", "healthyThreshold cannot be negative")
+	}
+
+	if cfg.UnhealthyThreshold < 0 {
+		v.addError(path+".unhealthyThreshold", "unhealthyThreshold cannot be negative")
+	}
+}
+
+// validateGRPCConnectionPoolConfig validates gRPC connection pool configuration.
+func (v *Validator) validateGRPCConnectionPoolConfig(cfg *GRPCConnectionPoolConfig, path string) {
+	if cfg.MaxIdleConns < 0 {
+		v.addError(path+".maxIdleConns", "maxIdleConns cannot be negative")
+	}
+
+	if cfg.MaxConnsPerHost < 0 {
+		v.addError(path+".maxConnsPerHost", "maxConnsPerHost cannot be negative")
+	}
+
+	if cfg.IdleConnTimeout.Duration() < 0 {
+		v.addError(path+".idleConnTimeout", "idleConnTimeout cannot be negative")
+	}
 }

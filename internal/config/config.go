@@ -25,6 +25,8 @@ type GatewaySpec struct {
 	Listeners      []Listener            `yaml:"listeners" json:"listeners"`
 	Routes         []Route               `yaml:"routes,omitempty" json:"routes,omitempty"`
 	Backends       []Backend             `yaml:"backends,omitempty" json:"backends,omitempty"`
+	GRPCRoutes     []GRPCRoute           `yaml:"grpcRoutes,omitempty" json:"grpcRoutes,omitempty"`
+	GRPCBackends   []GRPCBackend         `yaml:"grpcBackends,omitempty" json:"grpcBackends,omitempty"`
 	RateLimit      *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuitBreaker,omitempty" json:"circuitBreaker,omitempty"`
 	CORS           *CORSConfig           `yaml:"cors,omitempty" json:"cors,omitempty"`
@@ -33,11 +35,12 @@ type GatewaySpec struct {
 
 // Listener represents a network listener configuration.
 type Listener struct {
-	Name     string   `yaml:"name" json:"name"`
-	Port     int      `yaml:"port" json:"port"`
-	Protocol string   `yaml:"protocol" json:"protocol"`
-	Hosts    []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
-	Bind     string   `yaml:"bind,omitempty" json:"bind,omitempty"`
+	Name     string              `yaml:"name" json:"name"`
+	Port     int                 `yaml:"port" json:"port"`
+	Protocol string              `yaml:"protocol" json:"protocol"`
+	Hosts    []string            `yaml:"hosts,omitempty" json:"hosts,omitempty"`
+	Bind     string              `yaml:"bind,omitempty" json:"bind,omitempty"`
+	GRPC     *GRPCListenerConfig `yaml:"grpc,omitempty" json:"grpc,omitempty"`
 }
 
 // Route represents a routing rule configuration.
@@ -54,6 +57,9 @@ type Route struct {
 	Mirror         *MirrorConfig         `yaml:"mirror,omitempty" json:"mirror,omitempty"`
 	Fault          *FaultInjection       `yaml:"fault,omitempty" json:"fault,omitempty"`
 	RateLimit      *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
+	Transform      *TransformConfig      `yaml:"transform,omitempty" json:"transform,omitempty"`
+	Cache          *CacheConfig          `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Encoding       *EncodingConfig       `yaml:"encoding,omitempty" json:"encoding,omitempty"`
 }
 
 // RouteMatch represents matching conditions for a route.

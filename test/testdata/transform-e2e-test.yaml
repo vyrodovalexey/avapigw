@@ -1,0 +1,362 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: transform-e2e-test-gateway
+  labels:
+    app: avapigw
+    environment: e2e-test
+spec:
+  listeners:
+    - name: http
+      port: 18080
+      protocol: HTTP
+      bind: 0.0.0.0
+    - name: grpc
+      port: 19000
+      protocol: GRPC
+      bind: 0.0.0.0
+      grpc:
+        maxConcurrentStreams: 100
+        maxRecvMsgSize: 4194304
+        maxSendMsgSize: 4194304
+        reflection: true
+        healthCheck: true
+        keepalive:
+          time: 30s
+          timeout: 10s
+          permitWithoutStream: false
+          maxConnectionIdle: 5m
+          maxConnectionAge: 30m
+          maxConnectionAgeGrace: 5s
+
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"transform-e2e-test"}'
+        headers:
+          Content-Type: application/json
+
+    - name: transform-test
+      match:
+        - uri:
+            prefix: /api/v1/
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "5xx,reset,connect-failure"
+      transform:
+        request:
+          staticHeaders:
+            X-Gateway-Version: "1.0"
+            X-Transform-Test: "true"
+          dynamicHeaders:
+            - name: X-Request-ID
+              source: context.request_id
+          defaultValues:
+            api_version: "v1"
+        response:
+          allowFields:
+            - id
+            - name
+            - description
+            - price
+            - status
+            - success
+            - data
+          denyFields:
+            - password
+            - secret
+            - internal_id
+          fieldMappings:
+            - source: created_at
+              target: createdAt
+            - source: updated_at
+              target: updatedAt
+            - source: user_id
+              target: userId
+      cache:
+        enabled: true
+        type: redis
+        ttl: 5m
+        redis:
+          url: redis://default:password@127.0.0.1:6379
+          keyPrefix: "e2e:transform:"
+          poolSize: 5
+
+    - name: filtered-api
+      match:
+        - uri:
+            prefix: /api/v1/filtered/
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 100
+      transform:
+        response:
+          allowFields:
+            - id
+            - name
+            - status
+          denyFields:
+            - password
+            - secret
+
+    - name: mapped-api
+      match:
+        - uri:
+            prefix: /api/v1/mapped/
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 100
+      transform:
+        response:
+          fieldMappings:
+            - source: user_name
+              target: userName
+            - source: user_email
+              target: userEmail
+            - source: created_at
+              target: createdAt
+
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  grpcRoutes:
+    - name: grpc-transform-test
+      match:
+        - service:
+            exact: "api.v1.TestService"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8804
+          weight: 50
+      timeout: 30s
+      transform:
+        request:
+          staticMetadata:
+            x-gateway: "avapigw"
+            x-api-version: "v1"
+          dynamicMetadata:
+            - key: x-request-id
+              source: context.request_id
+        response:
+          fieldMask:
+            - message
+            - timestamp
+            - data
+          fieldMappings:
+            - source: old_field
+              target: new_field
+      cache:
+        enabled: true
+        type: redis
+        ttl: 5m
+        redis:
+          url: redis://default:password@127.0.0.1:6379
+          keyPrefix: "e2e:grpc:"
+
+    - name: grpc-stream-transform
+      match:
+        - service:
+            exact: "api.v1.TestService"
+          method:
+            exact: "ServerStream"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 100
+      timeout: 60s
+      transform:
+        response:
+          fieldMask:
+            - message
+            - sequence
+          streaming:
+            perMessageTransform: true
+            bufferSize: 100
+
+    - name: grpc-metadata-transform
+      match:
+        - service:
+            exact: "api.v1.TestService"
+          method:
+            exact: "Unary"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 100
+      timeout: 10s
+      transform:
+        request:
+          staticMetadata:
+            x-gateway: "avapigw"
+            x-transformed: "true"
+        response:
+          trailerMetadata:
+            x-processed-by: "avapigw"
+
+    - name: health-service
+      match:
+        - service:
+            exact: "grpc.health.v1.Health"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 100
+
+    - name: catch-all-grpc
+      match:
+        - service:
+            prefix: ""
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8804
+          weight: 50
+
+  backends:
+    - name: backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+    - name: backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8803
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+    - name: grpc-backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8804
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+    halfOpenRequests: 3
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - X-Trace-ID
+    exposeHeaders:
+      - X-Request-ID
+      - X-Trace-ID
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+    logging:
+      level: debug
+      format: json
