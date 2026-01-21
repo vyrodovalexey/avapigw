@@ -1,0 +1,576 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+  push:
+    tags:
+      - 'v*'
+
+# Concurrency control - cancel in-progress runs for the same branch/tag
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.25'
+  GOLANGCI_LINT_VERSION: 'v2.7.2'
+  DOCKER_REGISTRY: ghcr.io
+  DOCKER_IMAGE: ghcr.io/${{ github.repository }}
+  BINARY_NAME: gateway
+
+jobs:
+  # ===========================================================================
+  # Parallel Jobs: Lint, Vulnerability Check, Unit Tests, Functional Tests
+  # ===========================================================================
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m
+
+  govulncheck:
+    name: Vulnerability Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run unit tests with coverage
+        run: |
+          mkdir -p coverage
+          go test -race -coverprofile=coverage/unit.out -covermode=atomic ./internal/... ./cmd/...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/unit.out
+          flags: unit
+          name: unit-tests
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage/unit.out
+          retention-days: 7
+
+  functional-tests:
+    name: Functional Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run functional tests with coverage
+        run: |
+          mkdir -p coverage
+          go test -race -coverprofile=coverage/functional.out -covermode=atomic -tags=functional ./test/functional/...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/functional.out
+          flags: functional
+          name: functional-tests
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-functional
+          path: coverage/functional.out
+          retention-days: 7
+
+  # ===========================================================================
+  # Integration and E2E Tests (with backend services)
+  # ===========================================================================
+
+  integration-tests:
+    name: Integration & E2E Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      backend1:
+        image: ghcr.io/vyrodovalexey/restapi-example:latest
+        ports:
+          - 8801:8080
+        env:
+          APP_SERVER_PORT: 8080
+        options: >-
+          --health-cmd "curl -f http://localhost:8080/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+      backend2:
+        image: ghcr.io/vyrodovalexey/restapi-example:latest
+        ports:
+          - 8802:8080
+        env:
+          APP_SERVER_PORT: 8080
+        options: >-
+          --health-cmd "curl -f http://localhost:8080/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Wait for backends to be ready
+        run: |
+          echo "Waiting for backend services to be ready..."
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:8801/health && curl -sf http://127.0.0.1:8802/health; then
+              echo "Both backends are ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for backends..."
+            sleep 2
+          done
+          # Final check
+          curl -sf http://127.0.0.1:8801/health || (echo "Backend 1 not ready" && exit 1)
+          curl -sf http://127.0.0.1:8802/health || (echo "Backend 2 not ready" && exit 1)
+
+      - name: Run integration tests
+        env:
+          TEST_BACKEND1_URL: http://127.0.0.1:8801
+          TEST_BACKEND2_URL: http://127.0.0.1:8802
+        run: |
+          mkdir -p coverage
+          go test -race -coverprofile=coverage/integration.out -covermode=atomic -tags=integration -v ./test/integration/...
+
+      - name: Run e2e tests
+        env:
+          TEST_BACKEND1_URL: http://127.0.0.1:8801
+          TEST_BACKEND2_URL: http://127.0.0.1:8802
+        run: |
+          go test -race -coverprofile=coverage/e2e.out -covermode=atomic -tags=e2e -v ./test/e2e/...
+
+      - name: Upload integration coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/integration.out,./coverage/e2e.out
+          flags: integration,e2e
+          name: integration-e2e-tests
+          fail_ci_if_error: false
+          verbose: true
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration-e2e
+          path: |
+            coverage/integration.out
+            coverage/e2e.out
+          retention-days: 7
+
+  # ===========================================================================
+  # Sequential Jobs: SonarCloud, Build, Docker
+  # ===========================================================================
+
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: ubuntu-latest
+    needs: [lint, govulncheck, unit-tests, functional-tests, integration-tests]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required for SonarCloud
+
+      - name: Download unit coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-unit
+          path: coverage
+
+      - name: Download functional coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-functional
+          path: coverage
+
+      - name: Download integration/e2e coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-integration-e2e
+          path: coverage
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ github.repository_owner }}_${{ github.event.repository.name }}
+            -Dsonar.organization=${{ github.repository_owner }}
+            -Dsonar.go.coverage.reportPaths=coverage/unit.out,coverage/functional.out,coverage/integration.out,coverage/e2e.out
+            -Dsonar.sources=.
+            -Dsonar.exclusions=**/*_test.go,**/vendor/**,**/test/**
+            -Dsonar.tests=.
+            -Dsonar.test.inclusions=**/*_test.go,**/test/**
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [sonarcloud]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build binary
+        run: |
+          make build
+
+      - name: Verify binary
+        run: |
+          ./bin/${{ env.BINARY_NAME }} -version || true
+          ls -la ./bin/
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-binary
+          path: bin/${{ env.BINARY_NAME }}
+          retention-days: 7
+
+  docker-build-pr:
+    name: Docker Build (PR)
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=pr
+            type=sha,prefix=pr-
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ================================
+  # Tag-only Jobs: Build & Release
+  # ================================
+
+  build-release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    needs: [sonarcloud]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building version: ${VERSION}"
+
+      - name: Build binaries for multiple platforms
+        run: |
+          mkdir -p bin
+          # Linux amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S') -X main.gitCommit=${{ github.sha }}" \
+            -trimpath \
+            -o bin/${{ env.BINARY_NAME }}-linux-amd64 \
+            ./cmd/gateway
+          # Linux arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S') -X main.gitCommit=${{ github.sha }}" \
+            -trimpath \
+            -o bin/${{ env.BINARY_NAME }}-linux-arm64 \
+            ./cmd/gateway
+          # Darwin arm64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S') -X main.gitCommit=${{ github.sha }}" \
+            -trimpath \
+            -o bin/${{ env.BINARY_NAME }}-darwin-arm64 \
+            ./cmd/gateway
+          # Darwin amd64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S') -X main.gitCommit=${{ github.sha }}" \
+            -trimpath \
+            -o bin/${{ env.BINARY_NAME }}-darwin-amd64 \
+            ./cmd/gateway
+
+      - name: Create checksums
+        run: |
+          cd bin
+          sha256sum ${{ env.BINARY_NAME }}-linux-amd64 > ${{ env.BINARY_NAME }}-linux-amd64.sha256
+          sha256sum ${{ env.BINARY_NAME }}-linux-arm64 > ${{ env.BINARY_NAME }}-linux-arm64.sha256
+          sha256sum ${{ env.BINARY_NAME }}-darwin-arm64 > ${{ env.BINARY_NAME }}-darwin-arm64.sha256
+          sha256sum ${{ env.BINARY_NAME }}-darwin-amd64 > ${{ env.BINARY_NAME }}-darwin-amd64.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+          files: |
+            bin/${{ env.BINARY_NAME }}-linux-amd64
+            bin/${{ env.BINARY_NAME }}-linux-amd64.sha256
+            bin/${{ env.BINARY_NAME }}-linux-arm64
+            bin/${{ env.BINARY_NAME }}-linux-arm64.sha256
+            bin/${{ env.BINARY_NAME }}-darwin-arm64
+            bin/${{ env.BINARY_NAME }}-darwin-arm64.sha256
+            bin/${{ env.BINARY_NAME }}-darwin-amd64
+            bin/${{ env.BINARY_NAME }}-darwin-amd64.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload binary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: bin/${{ env.BINARY_NAME }}-*
+          retention-days: 30
+
+  # ===========================================================================
+  # Tag-only Jobs: Docker Build & Push, Trivy Scan
+  # ===========================================================================
+
+  docker-build-push:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: [sonarcloud]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.version }}
+          artifact-name: sbom-${{ steps.meta.outputs.version }}.spdx.json
+          output-file: ./sbom.spdx.json
+          upload-release-assets: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ./sbom.spdx.json
+          retention-days: 90
+
+  trivy-scan:
+    name: Trivy Security Scan
+    runs-on: ubuntu-latest
+    needs: [docker-build-push]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.DOCKER_IMAGE }}:${{ needs.docker-build-push.outputs.image-tag }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          vuln-type: 'os,library'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Trivy vulnerability scanner (table output)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.DOCKER_IMAGE }}:${{ needs.docker-build-push.outputs.image-tag }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          vuln-type: 'os,library'
+          exit-code: '1'
+
+      - name: Upload Trivy results artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          retention-days: 30

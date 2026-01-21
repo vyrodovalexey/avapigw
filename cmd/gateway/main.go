@@ -1,684 +1,359 @@
-/*
-Copyright 2024.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
+// Package main is the entry point for the API Gateway.
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"golang.org/x/sync/errgroup"
-
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
-	"github.com/vyrodovalexey/avapigw/internal/gateway/backend"
-	"github.com/vyrodovalexey/avapigw/internal/gateway/listener"
-	grpcserver "github.com/vyrodovalexey/avapigw/internal/gateway/server/grpc"
-	"github.com/vyrodovalexey/avapigw/internal/gateway/server/grpc/interceptor"
-	httpserver "github.com/vyrodovalexey/avapigw/internal/gateway/server/http"
-	"github.com/vyrodovalexey/avapigw/internal/gateway/server/http/middleware"
-	tcpserver "github.com/vyrodovalexey/avapigw/internal/gateway/server/tcp"
-	tlsserver "github.com/vyrodovalexey/avapigw/internal/gateway/server/tls"
+	"github.com/vyrodovalexey/avapigw/internal/gateway"
 	"github.com/vyrodovalexey/avapigw/internal/health"
+	"github.com/vyrodovalexey/avapigw/internal/middleware"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/proxy"
+	"github.com/vyrodovalexey/avapigw/internal/router"
 )
 
-// configState holds the current configuration state for hot-reload support.
-type configState struct {
-	mu          sync.RWMutex
-	cfg         *config.Config
-	localConfig *config.LocalConfig
-}
+// Version information (set at build time).
+var (
+	version   = "dev"
+	buildTime = "unknown"
+	gitCommit = "unknown"
+)
 
-func (s *configState) GetConfig() *config.Config {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cfg
-}
-
-func (s *configState) GetLocalConfig() *config.LocalConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.localConfig
-}
-
-func (s *configState) Update(cfg *config.Config, localCfg *config.LocalConfig) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cfg = cfg
-	s.localConfig = localCfg
-}
-
-// serverComponents holds all server instances for the gateway.
-type serverComponents struct {
-	httpServer           *httpserver.Server
-	grpcServer           *grpcserver.Server
-	tcpServer            *tcpserver.Server
-	tlsPassthroughServer *tlsserver.Server
-	configWatcher        *config.ConfigWatcher
-	listenerMgr          *listener.Manager
-	backendMgr           *backend.Manager
-	healthHandler        *health.Handler
+// cliFlags holds command line flags.
+type cliFlags struct {
+	configPath  string
+	logLevel    string
+	logFormat   string
+	showVersion bool
 }
 
 func main() {
-	cfg, state, configFilePath, logger := initializeGateway()
-	defer func() {
-		_ = logger.Sync()
-	}()
+	flags := parseFlags()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := setupSignalHandler()
-
-	components := createServerComponents(ctx, cfg, logger, cancel)
-
-	g, gCtx := errgroup.WithContext(ctx)
-	startAllServers(g, gCtx, cfg, components, state, configFilePath, logger)
-
-	waitForShutdownSignal(sigCh, gCtx, logger)
-
-	performGracefulShutdown(cfg, components, logger)
-
-	cancel()
-	if err := g.Wait(); err != nil {
-		logger.Error("error during shutdown", zap.Error(err))
+	if flags.showVersion {
+		printVersion()
+		return
 	}
 
-	logger.Info("API Gateway shutdown complete")
+	logger := initLogger(flags)
+	defer func() { _ = logger.Sync() }()
+
+	cfg := loadAndValidateConfig(flags.configPath, logger)
+	app := initApplication(cfg, logger)
+
+	runGateway(app, flags.configPath, logger)
 }
 
-// initializeGateway loads configuration and initializes the logger.
-func initializeGateway() (*config.Config, *configState, string, *zap.Logger) {
-	loader := config.NewLoader()
-	cfg, err := loader.LoadConfig(os.Args[1:])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load configuration: %v\n", err)
-		os.Exit(1)
+// parseFlags parses command line flags.
+func parseFlags() cliFlags {
+	configPath := flag.String("config", getEnvOrDefault("GATEWAY_CONFIG_PATH", "configs/gateway.yaml"),
+		"Path to configuration file")
+	logLevel := flag.String("log-level", getEnvOrDefault("GATEWAY_LOG_LEVEL", "info"),
+		"Log level (debug, info, warn, error)")
+	logFormat := flag.String("log-format", getEnvOrDefault("GATEWAY_LOG_FORMAT", "json"),
+		"Log format (json, console)")
+	showVersion := flag.Bool("version", false, "Show version information")
+	flag.Parse()
+
+	return cliFlags{
+		configPath:  *configPath,
+		logLevel:    *logLevel,
+		logFormat:   *logFormat,
+		showVersion: *showVersion,
 	}
+}
 
-	localCfg := loader.GetLocalConfig()
-	configFilePath := loader.GetConfigFilePath()
+// printVersion prints version information and exits.
+func printVersion() {
+	fmt.Printf("avapigw version %s\n", version)
+	fmt.Printf("  Build time: %s\n", buildTime)
+	fmt.Printf("  Git commit: %s\n", gitCommit)
+}
 
-	state := &configState{
-		cfg:         cfg,
-		localConfig: localCfg,
-	}
-
-	logger, err := newLogger(cfg.LogLevel, cfg.LogFormat)
+// initLogger initializes the logger.
+func initLogger(flags cliFlags) observability.Logger {
+	logger, err := observability.NewLogger(observability.LogConfig{
+		Level:  flags.logLevel,
+		Format: flags.logFormat,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		os.Exit(1)
 	}
 
-	logger.Info("starting API Gateway",
-		zap.Int("httpPort", cfg.HTTPPort),
-		zap.Int("healthPort", cfg.HealthPort),
-		zap.Int("metricsPort", cfg.MetricsPort),
-		zap.String("logLevel", cfg.LogLevel),
-		zap.String("configFile", configFilePath),
+	observability.SetGlobalLogger(logger)
+	return logger
+}
+
+// loadAndValidateConfig loads and validates the configuration.
+func loadAndValidateConfig(configPath string, logger observability.Logger) *config.GatewayConfig {
+	logger.Info("starting avapigw",
+		observability.String("version", version),
+		observability.String("config", configPath),
 	)
 
-	return cfg, state, configFilePath, logger
-}
-
-// setupSignalHandler sets up OS signal handling for graceful shutdown.
-func setupSignalHandler() chan os.Signal {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	return sigCh
-}
-
-// createServerComponents creates all server components.
-func createServerComponents(
-	ctx context.Context,
-	cfg *config.Config,
-	logger *zap.Logger,
-	cancel context.CancelFunc,
-) *serverComponents {
-	listenerMgr := listener.NewManager(logger)
-
-	backendMgr := backend.NewManager(logger)
-	if err := backendMgr.Start(ctx); err != nil {
-		logger.Error("failed to start backend manager", zap.Error(err))
-		cancel()
-		os.Exit(1) //nolint:gocritic // exitAfterDefer: cancel() called explicitly above
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		logger.Fatal("failed to load configuration", observability.Error(err))
 	}
 
-	healthHandler := health.NewHandlerWithConfig(logger, &health.HandlerConfig{
-		ReadinessProbeTimeout: cfg.ReadinessProbeTimeout,
-		LivenessProbeTimeout:  cfg.LivenessProbeTimeout,
-	})
-
-	httpServer := createHTTPServer(cfg, healthHandler, logger)
-
-	return &serverComponents{
-		httpServer:    httpServer,
-		listenerMgr:   listenerMgr,
-		backendMgr:    backendMgr,
-		healthHandler: healthHandler,
-	}
-}
-
-// createHTTPServer creates and configures the HTTP server.
-func createHTTPServer(cfg *config.Config, healthHandler *health.Handler, logger *zap.Logger) *httpserver.Server {
-	httpServer := httpserver.NewServer(&httpserver.ServerConfig{
-		Port:         cfg.HTTPPort,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-		IdleTimeout:  cfg.IdleTimeout,
-	}, logger)
-
-	setupMiddleware(httpServer, cfg, logger)
-	healthHandler.RegisterRoutes(httpServer.GetEngine())
-
-	return httpServer
-}
-
-// startAllServers starts all server goroutines.
-func startAllServers(
-	g *errgroup.Group,
-	gCtx context.Context,
-	cfg *config.Config,
-	components *serverComponents,
-	state *configState,
-	configFilePath string,
-	logger *zap.Logger,
-) {
-	startCoreServers(g, gCtx, cfg, components, logger)
-	startOptionalServers(g, gCtx, cfg, components, state, configFilePath, logger)
-}
-
-// startCoreServers starts the core HTTP, health, and listener servers.
-func startCoreServers(
-	g *errgroup.Group,
-	gCtx context.Context,
-	cfg *config.Config,
-	components *serverComponents,
-	logger *zap.Logger,
-) {
-	g.Go(func() error {
-		logger.Info("starting HTTP server", zap.Int("port", cfg.HTTPPort))
-		if err := components.httpServer.Start(gCtx); err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("HTTP server error: %w", err)
-		}
-		return nil
-	})
-
-	g.Go(func() error {
-		return startHealthServer(gCtx, cfg, components.healthHandler, logger)
-	})
-
-	if cfg.MetricsEnabled {
-		g.Go(func() error {
-			return startMetricsServer(gCtx, cfg, logger)
-		})
+	if err := config.ValidateConfig(cfg); err != nil {
+		logger.Fatal("invalid configuration", observability.Error(err))
 	}
 
-	g.Go(func() error {
-		if err := components.listenerMgr.Start(gCtx); err != nil {
-			return fmt.Errorf("listener manager error: %w", err)
-		}
-		return nil
-	})
+	logger.Info("configuration loaded",
+		observability.String("name", cfg.Metadata.Name),
+		observability.Int("listeners", len(cfg.Spec.Listeners)),
+		observability.Int("routes", len(cfg.Spec.Routes)),
+		observability.Int("backends", len(cfg.Spec.Backends)),
+	)
+
+	return cfg
 }
 
-// startOptionalServers starts optional servers based on configuration.
-func startOptionalServers(
-	g *errgroup.Group,
-	gCtx context.Context,
-	cfg *config.Config,
-	components *serverComponents,
-	state *configState,
-	configFilePath string,
-	logger *zap.Logger,
-) {
-	startConfigWatcher(g, gCtx, cfg, components, state, configFilePath, logger)
-	startGRPCServer(g, gCtx, cfg, components, logger)
-	startTCPServer(g, gCtx, cfg, components, logger)
-	startTLSPassthroughServer(g, gCtx, cfg, components, logger)
+// application holds all application components.
+type application struct {
+	gateway         *gateway.Gateway
+	backendRegistry *backend.Registry
+	healthChecker   *health.Checker
+	metrics         *observability.Metrics
+	tracer          *observability.Tracer
+	config          *config.GatewayConfig
 }
 
-// startConfigWatcher starts the config watcher if a config file was specified.
-func startConfigWatcher(
-	g *errgroup.Group,
-	gCtx context.Context,
-	_ *config.Config,
-	components *serverComponents,
-	state *configState,
-	configFilePath string,
-	logger *zap.Logger,
-) {
-	if configFilePath == "" {
-		return
+// initApplication initializes all application components.
+func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *application {
+	metrics := observability.NewMetrics("gateway")
+	tracer := initTracer(cfg, logger)
+	healthChecker := health.NewChecker(version)
+
+	backendRegistry := backend.NewRegistry(logger)
+	if err := backendRegistry.LoadFromConfig(cfg.Spec.Backends); err != nil {
+		logger.Fatal("failed to load backends", observability.Error(err))
 	}
 
-	watcher, err := config.NewConfigWatcher(
-		configFilePath,
-		createConfigReloadCallback(state, configFilePath, logger),
-		config.WithDebounce(500*time.Millisecond),
-		config.WithLogger(logger),
+	r := router.New()
+	if err := r.LoadRoutes(cfg.Spec.Routes); err != nil {
+		logger.Fatal("failed to load routes", observability.Error(err))
+	}
+
+	reverseProxy := proxy.NewReverseProxy(r, backendRegistry, proxy.WithProxyLogger(logger))
+	handler := buildMiddlewareChain(reverseProxy, cfg, logger, metrics, tracer)
+
+	gw, err := gateway.New(cfg,
+		gateway.WithLogger(logger),
+		gateway.WithRouteHandler(handler),
+		gateway.WithShutdownTimeout(30*time.Second),
 	)
 	if err != nil {
-		logger.Error("failed to create config watcher", zap.Error(err))
+		logger.Fatal("failed to create gateway", observability.Error(err))
+	}
+
+	return &application{
+		gateway:         gw,
+		backendRegistry: backendRegistry,
+		healthChecker:   healthChecker,
+		metrics:         metrics,
+		tracer:          tracer,
+		config:          cfg,
+	}
+}
+
+// initTracer initializes the tracer.
+func initTracer(cfg *config.GatewayConfig, logger observability.Logger) *observability.Tracer {
+	tracerCfg := observability.TracerConfig{
+		ServiceName:  "avapigw",
+		Enabled:      false,
+		SamplingRate: 1.0,
+	}
+
+	if cfg.Spec.Observability != nil && cfg.Spec.Observability.Tracing != nil {
+		tracerCfg.Enabled = cfg.Spec.Observability.Tracing.Enabled
+		tracerCfg.SamplingRate = cfg.Spec.Observability.Tracing.SamplingRate
+		tracerCfg.OTLPEndpoint = cfg.Spec.Observability.Tracing.OTLPEndpoint
+		if cfg.Spec.Observability.Tracing.ServiceName != "" {
+			tracerCfg.ServiceName = cfg.Spec.Observability.Tracing.ServiceName
+		}
+	}
+
+	tracer, err := observability.NewTracer(tracerCfg)
+	if err != nil {
+		logger.Fatal("failed to initialize tracer", observability.Error(err))
+	}
+
+	return tracer
+}
+
+// runGateway runs the gateway and handles shutdown.
+func runGateway(app *application, configPath string, logger observability.Logger) {
+	ctx := context.Background()
+
+	if err := app.backendRegistry.StartAll(ctx); err != nil {
+		logger.Fatal("failed to start backends", observability.Error(err))
+	}
+
+	if err := app.gateway.Start(ctx); err != nil {
+		logger.Fatal("failed to start gateway", observability.Error(err))
+	}
+
+	startMetricsServerIfEnabled(app, logger)
+	watcher := startConfigWatcher(app, configPath, logger)
+
+	waitForShutdown(app, watcher, logger)
+}
+
+// startMetricsServerIfEnabled starts the metrics server if enabled.
+func startMetricsServerIfEnabled(app *application, logger observability.Logger) {
+	obs := app.config.Spec.Observability
+	if obs == nil || obs.Metrics == nil || !obs.Metrics.Enabled {
 		return
 	}
 
-	components.configWatcher = watcher
-	g.Go(func() error {
-		logger.Info("starting config watcher", zap.String("path", configFilePath))
-		return watcher.Start(gCtx)
-	})
+	metricsPath := obs.Metrics.Path
+	if metricsPath == "" {
+		metricsPath = "/metrics"
+	}
+
+	metricsPort := obs.Metrics.Port
+	if metricsPort == 0 {
+		metricsPort = 9090
+	}
+
+	go startMetricsServer(metricsPort, metricsPath, app.metrics, app.healthChecker, logger)
 }
 
-// createConfigReloadCallback creates the callback function for config reloads.
-func createConfigReloadCallback(state *configState, configFilePath string, logger *zap.Logger) config.ConfigCallback {
-	return func(newLocalCfg *config.LocalConfig) error {
-		logger.Info("configuration file changed, applying new configuration",
-			zap.String("path", configFilePath),
-		)
-
-		newCfg := config.MergeConfigs(config.DefaultConfig(), newLocalCfg)
-		if err := newCfg.Validate(); err != nil {
-			logger.Error("new configuration validation failed", zap.Error(err))
-			return err
+// startConfigWatcher starts the configuration watcher.
+func startConfigWatcher(
+	app *application,
+	configPath string,
+	logger observability.Logger,
+) *config.Watcher {
+	watcher, err := config.NewWatcher(configPath, func(newCfg *config.GatewayConfig) {
+		logger.Info("configuration changed, reloading")
+		if reloadErr := app.gateway.Reload(newCfg); reloadErr != nil {
+			logger.Error("failed to reload configuration", observability.Error(reloadErr))
 		}
+	}, config.WithLogger(logger))
 
-		state.Update(newCfg, newLocalCfg)
-		logger.Info("configuration reloaded successfully",
-			zap.Int("routes", len(newLocalCfg.Routes)),
-			zap.Int("backends", len(newLocalCfg.Backends)),
-			zap.Int("rateLimits", len(newLocalCfg.RateLimits)),
-			zap.Int("authPolicies", len(newLocalCfg.AuthPolicies)),
-		)
+	if err != nil {
+		logger.Warn("failed to create config watcher", observability.Error(err))
 		return nil
 	}
+
+	if err := watcher.Start(context.Background()); err != nil {
+		logger.Warn("failed to start config watcher", observability.Error(err))
+	}
+
+	return watcher
 }
 
-// startGRPCServer starts the gRPC server if enabled.
-func startGRPCServer(
-	g *errgroup.Group,
-	gCtx context.Context,
-	cfg *config.Config,
-	components *serverComponents,
-	logger *zap.Logger,
+// waitForShutdown waits for shutdown signal and performs graceful shutdown.
+func waitForShutdown(app *application, watcher *config.Watcher, logger observability.Logger) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	sig := <-sigCh
+	logger.Info("received shutdown signal", observability.String("signal", sig.String()))
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if watcher != nil {
+		_ = watcher.Stop()
+	}
+
+	if err := app.gateway.Stop(shutdownCtx); err != nil {
+		logger.Error("failed to stop gateway gracefully", observability.Error(err))
+	}
+
+	if err := app.backendRegistry.StopAll(shutdownCtx); err != nil {
+		logger.Error("failed to stop backends", observability.Error(err))
+	}
+
+	if err := app.tracer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("failed to shutdown tracer", observability.Error(err))
+	}
+
+	logger.Info("gateway stopped")
+}
+
+// buildMiddlewareChain builds the middleware chain.
+func buildMiddlewareChain(
+	handler http.Handler,
+	cfg *config.GatewayConfig,
+	logger observability.Logger,
+	metrics *observability.Metrics,
+	tracer *observability.Tracer,
+) http.Handler {
+	h := handler
+
+	if cfg.Spec.RateLimit != nil && cfg.Spec.RateLimit.Enabled {
+		h = middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)(h)
+	}
+
+	if cfg.Spec.CircuitBreaker != nil && cfg.Spec.CircuitBreaker.Enabled {
+		h = middleware.CircuitBreakerFromConfig(cfg.Spec.CircuitBreaker, logger)(h)
+	}
+
+	if cfg.Spec.CORS != nil {
+		h = middleware.CORSFromConfig(cfg.Spec.CORS)(h)
+	}
+
+	h = observability.MetricsMiddleware(metrics)(h)
+	h = observability.TracingMiddleware(tracer)(h)
+	h = middleware.Logging(logger)(h)
+	h = middleware.RequestID()(h)
+	h = middleware.Recovery(logger)(h)
+
+	return h
+}
+
+// startMetricsServer starts the metrics HTTP server.
+func startMetricsServer(
+	port int,
+	path string,
+	metrics *observability.Metrics,
+	healthChecker *health.Checker,
+	logger observability.Logger,
 ) {
-	if !cfg.GRPCEnabled {
-		return
-	}
-
-	components.grpcServer = grpcserver.NewServer(&grpcserver.ServerConfig{
-		Port:                 cfg.GRPCPort,
-		MaxRecvMsgSize:       cfg.GRPCMaxRecvMsgSize,
-		MaxSendMsgSize:       cfg.GRPCMaxSendMsgSize,
-		MaxConcurrentStreams: safeIntToUint32(cfg.GRPCMaxConcurrentStreams),
-		EnableReflection:     cfg.GRPCEnableReflection,
-		EnableHealthCheck:    cfg.GRPCEnableHealthCheck,
-	}, components.backendMgr, logger)
-
-	setupGRPCInterceptors(components.grpcServer, cfg, logger)
-
-	g.Go(func() error {
-		logger.Info("starting gRPC server", zap.Int("port", cfg.GRPCPort))
-		if err := components.grpcServer.Start(gCtx); err != nil {
-			return fmt.Errorf("gRPC server error: %w", err)
-		}
-		return nil
-	})
-}
-
-// startTCPServer starts the TCP server if enabled.
-func startTCPServer(
-	g *errgroup.Group,
-	gCtx context.Context,
-	cfg *config.Config,
-	components *serverComponents,
-	logger *zap.Logger,
-) {
-	if !cfg.TCPEnabled {
-		return
-	}
-
-	components.tcpServer = tcpserver.NewServerWithBackend(&tcpserver.ServerConfig{
-		Port:           cfg.TCPPort,
-		ReadTimeout:    cfg.TCPReadTimeout,
-		WriteTimeout:   cfg.TCPWriteTimeout,
-		IdleTimeout:    cfg.TCPIdleTimeout,
-		MaxConnections: cfg.TCPMaxConnections,
-	}, components.backendMgr, logger)
-
-	g.Go(func() error {
-		logger.Info("starting TCP server", zap.Int("port", cfg.TCPPort))
-		if err := components.tcpServer.Start(gCtx); err != nil {
-			return fmt.Errorf("TCP server error: %w", err)
-		}
-		return nil
-	})
-}
-
-// startTLSPassthroughServer starts the TLS passthrough server if enabled.
-func startTLSPassthroughServer(
-	g *errgroup.Group,
-	gCtx context.Context,
-	cfg *config.Config,
-	components *serverComponents,
-	logger *zap.Logger,
-) {
-	if !cfg.TLSPassthroughEnabled {
-		return
-	}
-
-	components.tlsPassthroughServer = tlsserver.NewServerWithBackend(&tlsserver.ServerConfig{
-		Port:           cfg.TLSPassthroughPort,
-		Mode:           tlsserver.TLSModePassthrough,
-		ReadTimeout:    cfg.ReadTimeout,
-		WriteTimeout:   cfg.WriteTimeout,
-		IdleTimeout:    cfg.IdleTimeout,
-		MaxConnections: cfg.TCPMaxConnections,
-	}, components.backendMgr, logger)
-
-	g.Go(func() error {
-		logger.Info("starting TLS passthrough server", zap.Int("port", cfg.TLSPassthroughPort))
-		if err := components.tlsPassthroughServer.Start(gCtx); err != nil {
-			return fmt.Errorf("TLS passthrough server error: %w", err)
-		}
-		return nil
-	})
-}
-
-// waitForShutdownSignal waits for a shutdown signal or context cancellation.
-func waitForShutdownSignal(sigCh chan os.Signal, gCtx context.Context, logger *zap.Logger) {
-	select {
-	case sig := <-sigCh:
-		logger.Info("received shutdown signal", zap.String("signal", sig.String()))
-	case <-gCtx.Done():
-		logger.Info("context cancelled")
-	}
-}
-
-// performGracefulShutdown performs graceful shutdown of all components.
-func performGracefulShutdown(cfg *config.Config, components *serverComponents, logger *zap.Logger) {
-	logger.Info("initiating graceful shutdown", zap.Duration("timeout", cfg.ShutdownTimeout))
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer shutdownCancel()
-
-	stopServers(shutdownCtx, components, logger)
-	stopManagers(shutdownCtx, components, logger)
-	logFinalStats(components, logger)
-}
-
-// stopServers stops all server instances.
-func stopServers(ctx context.Context, components *serverComponents, logger *zap.Logger) {
-	if err := components.httpServer.Stop(ctx); err != nil {
-		logger.Error("error stopping HTTP server", zap.Error(err))
-	}
-
-	if components.grpcServer != nil {
-		if err := components.grpcServer.Stop(ctx); err != nil {
-			logger.Error("error stopping gRPC server", zap.Error(err))
-		}
-	}
-
-	if components.tcpServer != nil {
-		if err := components.tcpServer.Stop(ctx); err != nil {
-			logger.Error("error stopping TCP server", zap.Error(err))
-		}
-	}
-
-	if components.tlsPassthroughServer != nil {
-		if err := components.tlsPassthroughServer.Stop(ctx); err != nil {
-			logger.Error("error stopping TLS passthrough server", zap.Error(err))
-		}
-	}
-
-	if components.configWatcher != nil {
-		if err := components.configWatcher.Stop(); err != nil {
-			logger.Error("error stopping config watcher", zap.Error(err))
-		}
-	}
-}
-
-// stopManagers stops the listener and backend managers.
-func stopManagers(ctx context.Context, components *serverComponents, logger *zap.Logger) {
-	if err := components.listenerMgr.Stop(ctx); err != nil {
-		logger.Error("error stopping listener manager", zap.Error(err))
-	}
-
-	if err := components.backendMgr.Stop(ctx); err != nil {
-		logger.Error("error stopping backend manager", zap.Error(err))
-	}
-}
-
-// logFinalStats logs the final backend manager statistics.
-func logFinalStats(components *serverComponents, logger *zap.Logger) {
-	stats := components.backendMgr.Stats()
-	logger.Info("backend manager final stats",
-		zap.Int("totalBackends", stats.TotalBackends),
-		zap.Int("healthyBackends", stats.HealthyBackends),
-		zap.Int("totalEndpoints", stats.TotalEndpoints),
-		zap.Int("healthyEndpoints", stats.HealthyEndpoints),
-		zap.Duration("uptime", stats.Uptime),
-	)
-}
-
-// newLogger creates a new zap logger with the specified level and format.
-func newLogger(level, format string) (*zap.Logger, error) {
-	var zapLevel zapcore.Level
-	switch level {
-	case "debug":
-		zapLevel = zapcore.DebugLevel
-	case "info":
-		zapLevel = zapcore.InfoLevel
-	case "warn":
-		zapLevel = zapcore.WarnLevel
-	case "error":
-		zapLevel = zapcore.ErrorLevel
-	default:
-		zapLevel = zapcore.InfoLevel
-	}
-
-	var cfg zap.Config
-	if format == "console" {
-		cfg = zap.NewDevelopmentConfig()
-	} else {
-		cfg = zap.NewProductionConfig()
-	}
-
-	cfg.Level = zap.NewAtomicLevelAt(zapLevel)
-	cfg.EncoderConfig.TimeKey = "timestamp"
-	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-
-	return cfg.Build()
-}
-
-// setupMiddleware configures middleware for the HTTP server.
-// All middleware must be registered before the server starts.
-// Panics if middleware registration fails (indicates programming error).
-func setupMiddleware(server *httpserver.Server, cfg *config.Config, logger *zap.Logger) {
-	// Recovery middleware (should be first)
-	if err := server.Use(middleware.Recovery(logger)); err != nil {
-		logger.Fatal("failed to register recovery middleware", zap.Error(err))
-	}
-
-	// Request ID middleware
-	if err := server.Use(middleware.RequestID()); err != nil {
-		logger.Fatal("failed to register request ID middleware", zap.Error(err))
-	}
-
-	// Logging middleware
-	if err := server.Use(middleware.LoggingWithConfig(middleware.LoggingConfig{
-		Logger:          logger,
-		SkipHealthCheck: true,
-	})); err != nil {
-		logger.Fatal("failed to register logging middleware", zap.Error(err))
-	}
-
-	// Tracing middleware (if enabled)
-	if cfg.TracingEnabled {
-		if err := server.Use(middleware.TracingWithConfig(middleware.TracingConfig{
-			ServiceName: cfg.ServiceName,
-			SkipPaths:   []string{"/health", "/healthz", "/readyz", "/livez", "/metrics"},
-		})); err != nil {
-			logger.Fatal("failed to register tracing middleware", zap.Error(err))
-		}
-	}
-
-	// CORS middleware
-	if err := server.Use(middleware.CORS()); err != nil {
-		logger.Fatal("failed to register CORS middleware", zap.Error(err))
-	}
-
-	// Security headers middleware
-	if err := server.Use(middleware.SecurityHeaders()); err != nil {
-		logger.Fatal("failed to register security headers middleware", zap.Error(err))
-	}
-
-	// Timeout middleware
-	if err := server.Use(middleware.Timeout(cfg.ReadTimeout)); err != nil {
-		logger.Fatal("failed to register timeout middleware", zap.Error(err))
-	}
-}
-
-// startHealthServer starts the health check server on a separate port.
-func startHealthServer(ctx context.Context, cfg *config.Config, handler *health.Handler, logger *zap.Logger) error {
-	gin.SetMode(gin.ReleaseMode)
-	engine := gin.New()
-	engine.Use(gin.Recovery())
-
-	handler.RegisterRoutes(engine)
-
-	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.HealthPort),
-		Handler:      engine,
-		ReadTimeout:  cfg.HealthServerReadTimeout,
-		WriteTimeout: cfg.HealthServerWriteTimeout,
-	}
-
-	logger.Info("starting health server",
-		zap.Int("port", cfg.HealthPort),
-		zap.Duration("readTimeout", cfg.HealthServerReadTimeout),
-		zap.Duration("writeTimeout", cfg.HealthServerWriteTimeout),
-	)
-
-	// Start server in goroutine
-	errCh := make(chan error, 1)
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("health server failed to start", zap.Error(err))
-			errCh <- err
-		}
-	}()
-
-	// Wait for context cancellation or error
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HealthServerShutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error("failed to shutdown health server gracefully", zap.Error(err))
-			return err
-		}
-		logger.Info("health server shutdown complete")
-		return nil
-	case err := <-errCh:
-		logger.Error("health server error", zap.Error(err))
-		return err
-	}
-}
-
-// setupGRPCInterceptors configures interceptors for the gRPC server.
-func setupGRPCInterceptors(server *grpcserver.Server, cfg *config.Config, logger *zap.Logger) {
-	// Recovery interceptor (should be first)
-	server.AddUnaryInterceptor(interceptor.UnaryRecoveryInterceptor(logger))
-	server.AddStreamInterceptor(interceptor.StreamRecoveryInterceptor(logger))
-
-	// Logging interceptor
-	server.AddUnaryInterceptor(interceptor.UnaryLoggingInterceptor(logger))
-	server.AddStreamInterceptor(interceptor.StreamLoggingInterceptor(logger))
-
-	// Tracing interceptor (if enabled)
-	if cfg.TracingEnabled {
-		server.AddUnaryInterceptor(interceptor.UnaryTracingInterceptor())
-		server.AddStreamInterceptor(interceptor.StreamTracingInterceptor())
-	}
-}
-
-// safeIntToUint32 safely converts an int to uint32, clamping to max uint32 if needed.
-func safeIntToUint32(v int) uint32 {
-	if v < 0 {
-		return 0
-	}
-	if v > int(^uint32(0)) {
-		return ^uint32(0)
-	}
-	return uint32(v)
-}
-
-// startMetricsServer starts the metrics server on a separate port.
-func startMetricsServer(ctx context.Context, cfg *config.Config, logger *zap.Logger) error {
 	mux := http.NewServeMux()
+	mux.Handle(path, metrics.Handler())
+	mux.HandleFunc("/health", healthChecker.HealthHandler())
+	mux.HandleFunc("/ready", healthChecker.ReadinessHandler())
+	mux.HandleFunc("/live", healthChecker.LivenessHandler())
 
-	// Use actual Prometheus metrics handler for exposing application metrics
-	mux.Handle("/metrics", promhttp.Handler())
-
-	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.MetricsPort),
-		Handler:      mux,
-		ReadTimeout:  cfg.MetricsServerReadTimeout,
-		WriteTimeout: cfg.MetricsServerWriteTimeout,
-	}
-
+	addr := fmt.Sprintf(":%d", port)
 	logger.Info("starting metrics server",
-		zap.Int("port", cfg.MetricsPort),
-		zap.Duration("readTimeout", cfg.MetricsServerReadTimeout),
-		zap.Duration("writeTimeout", cfg.MetricsServerWriteTimeout),
+		observability.String("address", addr),
+		observability.String("metrics_path", path),
 	)
 
-	// Start server in goroutine
-	errCh := make(chan error, 1)
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("metrics server failed to start", zap.Error(err))
-			errCh <- err
-		}
-	}()
-
-	// Wait for context cancellation or error
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.MetricsServerShutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error("failed to shutdown metrics server gracefully", zap.Error(err))
-			return err
-		}
-		logger.Info("metrics server shutdown complete")
-		return nil
-	case err := <-errCh:
-		logger.Error("metrics server error", zap.Error(err))
-		return err
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      10 * time.Second,
 	}
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Error("metrics server error", observability.Error(err))
+	}
+}
+
+// getEnvOrDefault returns the environment variable value or a default.
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

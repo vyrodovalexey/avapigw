@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avapigw.io/schemas/gateway.schema.json",
+  "title": "Gateway Configuration",
+  "description": "Configuration schema for avapigw API Gateway",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "pattern": "^gateway\\.avapigw\\.io/v[0-9]+$",
+      "description": "API version of the configuration"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["Gateway"],
+      "description": "Kind of the configuration"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of the gateway"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Labels for the gateway"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Annotations for the gateway"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["listeners"],
+      "properties": {
+        "listeners": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/listener"
+          },
+          "description": "Network listeners"
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/route"
+          },
+          "description": "Routing rules"
+        },
+        "backends": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/backend"
+          },
+          "description": "Backend services"
+        },
+        "rateLimit": {
+          "$ref": "#/$defs/rateLimit",
+          "description": "Global rate limiting configuration"
+        },
+        "circuitBreaker": {
+          "$ref": "#/$defs/circuitBreaker",
+          "description": "Global circuit breaker configuration"
+        },
+        "cors": {
+          "$ref": "#/$defs/cors",
+          "description": "CORS configuration"
+        },
+        "observability": {
+          "$ref": "#/$defs/observability",
+          "description": "Observability configuration"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "listener": {
+      "type": "object",
+      "required": ["name", "port", "protocol"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "protocol": {
+          "type": "string",
+          "enum": ["HTTP", "HTTPS", "HTTP2"]
+        },
+        "hosts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "bind": {
+          "type": "string"
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "match": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/routeMatch"
+          }
+        },
+        "route": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/routeDestination"
+          }
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "retries": {
+          "$ref": "#/$defs/retryPolicy"
+        },
+        "redirect": {
+          "$ref": "#/$defs/redirect"
+        },
+        "rewrite": {
+          "$ref": "#/$defs/rewrite"
+        },
+        "directResponse": {
+          "$ref": "#/$defs/directResponse"
+        }
+      }
+    },
+    "routeMatch": {
+      "type": "object",
+      "properties": {
+        "uri": {
+          "$ref": "#/$defs/uriMatch"
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT", "*"]
+          }
+        },
+        "headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/headerMatch"
+          }
+        },
+        "queryParams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/queryParamMatch"
+          }
+        }
+      }
+    },
+    "uriMatch": {
+      "type": "object",
+      "properties": {
+        "exact": { "type": "string" },
+        "prefix": { "type": "string" },
+        "regex": { "type": "string" }
+      }
+    },
+    "headerMatch": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "exact": { "type": "string" },
+        "prefix": { "type": "string" },
+        "regex": { "type": "string" },
+        "present": { "type": "boolean" },
+        "absent": { "type": "boolean" }
+      }
+    },
+    "queryParamMatch": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "exact": { "type": "string" },
+        "regex": { "type": "string" },
+        "present": { "type": "boolean" }
+      }
+    },
+    "routeDestination": {
+      "type": "object",
+      "required": ["destination"],
+      "properties": {
+        "destination": {
+          "$ref": "#/$defs/destination"
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "required": ["host"],
+      "properties": {
+        "host": { "type": "string" },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "retryPolicy": {
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "perTryTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "retryOn": { "type": "string" }
+      }
+    },
+    "redirect": {
+      "type": "object",
+      "properties": {
+        "uri": { "type": "string" },
+        "code": {
+          "type": "integer",
+          "enum": [301, 302, 303, 307, 308]
+        },
+        "scheme": {
+          "type": "string",
+          "enum": ["http", "https"]
+        },
+        "host": { "type": "string" },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "stripQuery": { "type": "boolean" }
+      }
+    },
+    "rewrite": {
+      "type": "object",
+      "properties": {
+        "uri": { "type": "string" },
+        "authority": { "type": "string" }
+      }
+    },
+    "directResponse": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "body": { "type": "string" },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "required": ["name", "hosts"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/backendHost"
+          }
+        },
+        "healthCheck": {
+          "$ref": "#/$defs/healthCheck"
+        },
+        "loadBalancer": {
+          "$ref": "#/$defs/loadBalancer"
+        }
+      }
+    },
+    "backendHost": {
+      "type": "object",
+      "required": ["address", "port"],
+      "properties": {
+        "address": { "type": "string" },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "healthCheck": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string" },
+        "interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "healthyThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "unhealthyThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "loadBalancer": {
+      "type": "object",
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["roundRobin", "weighted", "leastConn", "random"]
+        }
+      }
+    },
+    "rateLimit": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "requestsPerSecond": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "perClient": { "type": "boolean" }
+      }
+    },
+    "circuitBreaker": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "threshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+        },
+        "halfOpenRequests": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "cors": {
+      "type": "object",
+      "properties": {
+        "allowOrigins": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "allowMethods": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "allowHeaders": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "exposeHeaders": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "maxAge": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allowCredentials": { "type": "boolean" }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "metrics": {
+          "$ref": "#/$defs/metricsConfig"
+        },
+        "tracing": {
+          "$ref": "#/$defs/tracingConfig"
+        },
+        "logging": {
+          "$ref": "#/$defs/loggingConfig"
+        }
+      }
+    },
+    "metricsConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string" },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "tracingConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "samplingRate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "otlpEndpoint": { "type": "string" },
+        "serviceName": { "type": "string" }
+      }
+    },
+    "loggingConfig": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"]
+        },
+        "format": {
+          "type": "string",
+          "enum": ["json", "console"]
+        },
+        "output": { "type": "string" }
+      }
+    }
+  }
+}

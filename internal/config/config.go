@@ -1,965 +1,384 @@
-// Package config provides configuration management for the API Gateway.
-// It supports loading configuration from environment variables and command-line flags,
-// with environment variables taking precedence over flags.
+// Package config provides configuration types and loading for the API Gateway.
 package config
 
 import (
-	"fmt"
 	"time"
 )
 
-// Vault authentication methods.
+// GatewayConfig represents the root configuration for the API Gateway.
+type GatewayConfig struct {
+	APIVersion string      `yaml:"apiVersion" json:"apiVersion"`
+	Kind       string      `yaml:"kind" json:"kind"`
+	Metadata   Metadata    `yaml:"metadata" json:"metadata"`
+	Spec       GatewaySpec `yaml:"spec" json:"spec"`
+}
+
+// Metadata contains metadata about the gateway configuration.
+type Metadata struct {
+	Name        string            `yaml:"name" json:"name"`
+	Labels      map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Annotations map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
+}
+
+// GatewaySpec contains the main gateway specification.
+type GatewaySpec struct {
+	Listeners      []Listener            `yaml:"listeners" json:"listeners"`
+	Routes         []Route               `yaml:"routes,omitempty" json:"routes,omitempty"`
+	Backends       []Backend             `yaml:"backends,omitempty" json:"backends,omitempty"`
+	RateLimit      *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuitBreaker,omitempty" json:"circuitBreaker,omitempty"`
+	CORS           *CORSConfig           `yaml:"cors,omitempty" json:"cors,omitempty"`
+	Observability  *ObservabilityConfig  `yaml:"observability,omitempty" json:"observability,omitempty"`
+}
+
+// Listener represents a network listener configuration.
+type Listener struct {
+	Name     string   `yaml:"name" json:"name"`
+	Port     int      `yaml:"port" json:"port"`
+	Protocol string   `yaml:"protocol" json:"protocol"`
+	Hosts    []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
+	Bind     string   `yaml:"bind,omitempty" json:"bind,omitempty"`
+}
+
+// Route represents a routing rule configuration.
+type Route struct {
+	Name           string                `yaml:"name" json:"name"`
+	Match          []RouteMatch          `yaml:"match,omitempty" json:"match,omitempty"`
+	Route          []RouteDestination    `yaml:"route,omitempty" json:"route,omitempty"`
+	Timeout        Duration              `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Retries        *RetryPolicy          `yaml:"retries,omitempty" json:"retries,omitempty"`
+	Redirect       *RedirectConfig       `yaml:"redirect,omitempty" json:"redirect,omitempty"`
+	Rewrite        *RewriteConfig        `yaml:"rewrite,omitempty" json:"rewrite,omitempty"`
+	DirectResponse *DirectResponseConfig `yaml:"directResponse,omitempty" json:"directResponse,omitempty"`
+	Headers        *HeaderManipulation   `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Mirror         *MirrorConfig         `yaml:"mirror,omitempty" json:"mirror,omitempty"`
+	Fault          *FaultInjection       `yaml:"fault,omitempty" json:"fault,omitempty"`
+	RateLimit      *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
+}
+
+// RouteMatch represents matching conditions for a route.
+type RouteMatch struct {
+	URI         *URIMatch         `yaml:"uri,omitempty" json:"uri,omitempty"`
+	Methods     []string          `yaml:"methods,omitempty" json:"methods,omitempty"`
+	Headers     []HeaderMatch     `yaml:"headers,omitempty" json:"headers,omitempty"`
+	QueryParams []QueryParamMatch `yaml:"queryParams,omitempty" json:"queryParams,omitempty"`
+}
+
+// URIMatch represents URI matching configuration.
+type URIMatch struct {
+	Exact  string `yaml:"exact,omitempty" json:"exact,omitempty"`
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	Regex  string `yaml:"regex,omitempty" json:"regex,omitempty"`
+}
+
+// MatchType returns the type of URI match configured.
+func (u *URIMatch) MatchType() string {
+	if u.Exact != "" {
+		return "exact"
+	}
+	if u.Prefix != "" {
+		return "prefix"
+	}
+	if u.Regex != "" {
+		return "regex"
+	}
+	return ""
+}
+
+// IsEmpty returns true if no match is configured.
+func (u *URIMatch) IsEmpty() bool {
+	return u.Exact == "" && u.Prefix == "" && u.Regex == ""
+}
+
+// HeaderMatch represents header matching configuration.
+type HeaderMatch struct {
+	Name    string `yaml:"name" json:"name"`
+	Exact   string `yaml:"exact,omitempty" json:"exact,omitempty"`
+	Prefix  string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+	Regex   string `yaml:"regex,omitempty" json:"regex,omitempty"`
+	Present *bool  `yaml:"present,omitempty" json:"present,omitempty"`
+	Absent  *bool  `yaml:"absent,omitempty" json:"absent,omitempty"`
+}
+
+// QueryParamMatch represents query parameter matching configuration.
+type QueryParamMatch struct {
+	Name    string `yaml:"name" json:"name"`
+	Exact   string `yaml:"exact,omitempty" json:"exact,omitempty"`
+	Regex   string `yaml:"regex,omitempty" json:"regex,omitempty"`
+	Present *bool  `yaml:"present,omitempty" json:"present,omitempty"`
+}
+
+// RouteDestination represents a destination for routing.
+type RouteDestination struct {
+	Destination Destination `yaml:"destination" json:"destination"`
+	Weight      int         `yaml:"weight,omitempty" json:"weight,omitempty"`
+}
+
+// Destination represents a backend destination.
+type Destination struct {
+	Host string `yaml:"host" json:"host"`
+	Port int    `yaml:"port" json:"port"`
+}
+
+// Backend represents a backend service configuration.
+type Backend struct {
+	Name         string        `yaml:"name" json:"name"`
+	Hosts        []BackendHost `yaml:"hosts" json:"hosts"`
+	HealthCheck  *HealthCheck  `yaml:"healthCheck,omitempty" json:"healthCheck,omitempty"`
+	LoadBalancer *LoadBalancer `yaml:"loadBalancer,omitempty" json:"loadBalancer,omitempty"`
+}
+
+// BackendHost represents a single backend host.
+type BackendHost struct {
+	Address string `yaml:"address" json:"address"`
+	Port    int    `yaml:"port" json:"port"`
+	Weight  int    `yaml:"weight,omitempty" json:"weight,omitempty"`
+}
+
+// HealthCheck represents health check configuration.
+type HealthCheck struct {
+	Path               string   `yaml:"path" json:"path"`
+	Interval           Duration `yaml:"interval,omitempty" json:"interval,omitempty"`
+	Timeout            Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	HealthyThreshold   int      `yaml:"healthyThreshold,omitempty" json:"healthyThreshold,omitempty"`
+	UnhealthyThreshold int      `yaml:"unhealthyThreshold,omitempty" json:"unhealthyThreshold,omitempty"`
+}
+
+// LoadBalancer represents load balancer configuration.
+type LoadBalancer struct {
+	Algorithm string `yaml:"algorithm,omitempty" json:"algorithm,omitempty"`
+}
+
+// LoadBalancerAlgorithm constants.
 const (
-	// VaultAuthMethodKubernetes is the Kubernetes authentication method for Vault.
-	VaultAuthMethodKubernetes = "kubernetes"
-	// VaultAuthMethodToken is the token authentication method for Vault.
-	VaultAuthMethodToken = "token"
-	// VaultAuthMethodAppRole is the AppRole authentication method for Vault.
-	VaultAuthMethodAppRole = "approle"
+	LoadBalancerRoundRobin = "roundRobin"
+	LoadBalancerWeighted   = "weighted"
+	LoadBalancerLeastConn  = "leastConn"
+	LoadBalancerRandom     = "random"
 )
 
-// Secrets provider types.
-const (
-	// SecretsProviderKubernetes uses Kubernetes secrets as the secrets provider.
-	SecretsProviderKubernetes = "kubernetes"
-	// SecretsProviderVault uses HashiCorp Vault as the secrets provider.
-	SecretsProviderVault = "vault"
-	// SecretsProviderLocal uses local filesystem as the secrets provider.
-	SecretsProviderLocal = "local"
-	// SecretsProviderEnv uses environment variables as the secrets provider.
-	SecretsProviderEnv = "env"
-)
-
-// Configuration constants for default values.
-const (
-	// DefaultVaultRole is the default Vault role name.
-	DefaultVaultRole = "avapigw"
-	// DefaultVaultAuthMethod is the default Vault authentication method.
-	DefaultVaultAuthMethod = VaultAuthMethodKubernetes
-	// DefaultServiceName is the default service name for observability.
-	DefaultServiceName = "avapigw"
-)
-
-// Size constants for buffer and message sizes.
-const (
-	// BytesPerKilobyte is the number of bytes in a kilobyte.
-	BytesPerKilobyte = 1024
-	// BytesPerMegabyte is the number of bytes in a megabyte.
-	BytesPerMegabyte = BytesPerKilobyte * 1024
-	// DefaultGRPCMaxMsgSize is the default maximum message size for gRPC (4 MB).
-	DefaultGRPCMaxMsgSize = 4 * BytesPerMegabyte
-)
-
-// Time constants for durations.
-const (
-	// SecondsPerMinute is the number of seconds in a minute.
-	SecondsPerMinute = 60
-	// SecondsPerHour is the number of seconds in an hour.
-	SecondsPerHour = SecondsPerMinute * 60
-	// SecondsPerDay is the number of seconds in a day.
-	SecondsPerDay = SecondsPerHour * 24
-	// SecondsPerYear is the approximate number of seconds in a year (365 days).
-	SecondsPerYear = SecondsPerDay * 365
-	// DefaultHSTSMaxAge is the default HSTS max-age in seconds (1 year).
-	DefaultHSTSMaxAge = SecondsPerYear
-)
-
-// Config holds all configuration settings for the API Gateway.
-type Config struct {
-	// Server settings
-	HTTPPort    int `json:"httpPort" yaml:"httpPort"`
-	GRPCPort    int `json:"grpcPort" yaml:"grpcPort"`
-	MetricsPort int `json:"metricsPort" yaml:"metricsPort"`
-	HealthPort  int `json:"healthPort" yaml:"healthPort"`
-
-	// Server timeouts
-	ReadTimeout     time.Duration `json:"readTimeout" yaml:"readTimeout"`
-	WriteTimeout    time.Duration `json:"writeTimeout" yaml:"writeTimeout"`
-	IdleTimeout     time.Duration `json:"idleTimeout" yaml:"idleTimeout"`
-	ShutdownTimeout time.Duration `json:"shutdownTimeout" yaml:"shutdownTimeout"`
-
-	// TLS settings
-	TLSEnabled  bool   `json:"tlsEnabled" yaml:"tlsEnabled"`
-	TLSCertFile string `json:"tlsCertFile" yaml:"tlsCertFile"`
-	TLSKeyFile  string `json:"tlsKeyFile" yaml:"tlsKeyFile"`
-	TLSCAFile   string `json:"tlsCAFile" yaml:"tlsCAFile"`
-
-	// Vault settings
-	VaultEnabled          bool          `json:"vaultEnabled" yaml:"vaultEnabled"`
-	VaultAddress          string        `json:"vaultAddress" yaml:"vaultAddress"`
-	VaultNamespace        string        `json:"vaultNamespace" yaml:"vaultNamespace"`
-	VaultAuthMethod       string        `json:"vaultAuthMethod" yaml:"vaultAuthMethod"` // kubernetes, token, approle
-	VaultRole             string        `json:"vaultRole" yaml:"vaultRole"`
-	VaultMountPath        string        `json:"vaultMountPath" yaml:"vaultMountPath"`
-	VaultSecretMountPoint string        `json:"vaultSecretMountPoint" yaml:"vaultSecretMountPoint"`
-	VaultTLSSkipVerify    bool          `json:"vaultTLSSkipVerify" yaml:"vaultTLSSkipVerify"`
-	VaultCACert           string        `json:"vaultCACert" yaml:"vaultCACert"`
-	VaultClientCert       string        `json:"vaultClientCert" yaml:"vaultClientCert"`
-	VaultClientKey        string        `json:"vaultClientKey" yaml:"vaultClientKey"`
-	VaultTimeout          time.Duration `json:"vaultTimeout" yaml:"vaultTimeout"`
-	VaultMaxRetries       int           `json:"vaultMaxRetries" yaml:"vaultMaxRetries"`
-	VaultRetryWaitMin     time.Duration `json:"vaultRetryWaitMin" yaml:"vaultRetryWaitMin"`
-	VaultRetryWaitMax     time.Duration `json:"vaultRetryWaitMax" yaml:"vaultRetryWaitMax"`
-	VaultCacheEnabled     bool          `json:"vaultCacheEnabled" yaml:"vaultCacheEnabled"`
-	VaultCacheTTL         time.Duration `json:"vaultCacheTTL" yaml:"vaultCacheTTL"`
-	VaultTokenRenewal     bool          `json:"vaultTokenRenewal" yaml:"vaultTokenRenewal"`
-	VaultTokenRenewalTime time.Duration `json:"vaultTokenRenewalTime" yaml:"vaultTokenRenewalTime"`
-
-	// Secrets Provider settings
-	SecretsProvider  string `json:"secretsProvider" yaml:"secretsProvider"`   // kubernetes, vault, local, env
-	SecretsLocalPath string `json:"secretsLocalPath" yaml:"secretsLocalPath"` // base path for local provider
-	SecretsEnvPrefix string `json:"secretsEnvPrefix" yaml:"secretsEnvPrefix"` // prefix for env provider
-
-	// Observability - Logging
-	LogLevel         string `json:"logLevel" yaml:"logLevel"`
-	LogFormat        string `json:"logFormat" yaml:"logFormat"`
-	LogOutput        string `json:"logOutput" yaml:"logOutput"`
-	AccessLogEnabled bool   `json:"accessLogEnabled" yaml:"accessLogEnabled"`
-
-	// Observability - Tracing
-	TracingEnabled    bool    `json:"tracingEnabled" yaml:"tracingEnabled"`
-	TracingExporter   string  `json:"tracingExporter" yaml:"tracingExporter"` // otlp-grpc, otlp-http
-	OTLPEndpoint      string  `json:"otlpEndpoint" yaml:"otlpEndpoint"`
-	TracingSampleRate float64 `json:"tracingSampleRate" yaml:"tracingSampleRate"`
-	ServiceName       string  `json:"serviceName" yaml:"serviceName"`
-	ServiceVersion    string  `json:"serviceVersion" yaml:"serviceVersion"`
-	TracingInsecure   bool    `json:"tracingInsecure" yaml:"tracingInsecure"`
-
-	// Observability - Metrics
-	MetricsEnabled bool   `json:"metricsEnabled" yaml:"metricsEnabled"`
-	MetricsPath    string `json:"metricsPath" yaml:"metricsPath"`
-
-	// Rate limiting
-	RateLimitEnabled bool `json:"rateLimitEnabled" yaml:"rateLimitEnabled"`
-	// RateLimitAlgorithm: token_bucket, sliding_window, fixed_window
-	RateLimitAlgorithm string        `json:"rateLimitAlgorithm" yaml:"rateLimitAlgorithm"`
-	RateLimitRequests  int           `json:"rateLimitRequests" yaml:"rateLimitRequests"`
-	RateLimitWindow    time.Duration `json:"rateLimitWindow" yaml:"rateLimitWindow"`
-	RateLimitBurst     int           `json:"rateLimitBurst" yaml:"rateLimitBurst"`
-	RateLimitStoreType string        `json:"rateLimitStoreType" yaml:"rateLimitStoreType"` // memory, redis
-	RedisAddress       string        `json:"redisAddress" yaml:"redisAddress"`
-	RedisPassword      string        `json:"redisPassword" yaml:"redisPassword"`
-	RedisDB            int           `json:"redisDB" yaml:"redisDB"`
-
-	// Circuit Breaker
-	CircuitBreakerEnabled          bool          `json:"circuitBreakerEnabled" yaml:"circuitBreakerEnabled"`
-	CircuitBreakerMaxFailures      int           `json:"circuitBreakerMaxFailures" yaml:"circuitBreakerMaxFailures"`
-	CircuitBreakerTimeout          time.Duration `json:"circuitBreakerTimeout" yaml:"circuitBreakerTimeout"`
-	CircuitBreakerHalfOpenMax      int           `json:"circuitBreakerHalfOpenMax" yaml:"circuitBreakerHalfOpenMax"`
-	CircuitBreakerSuccessThreshold int           `json:"circuitBreakerSuccessThreshold" yaml:"circuitBreakerSuccessThreshold"` //nolint:lll // long struct tag for JSON/YAML serialization
-
-	// Retry
-	RetryEnabled        bool          `json:"retryEnabled" yaml:"retryEnabled"`
-	RetryMaxAttempts    int           `json:"retryMaxAttempts" yaml:"retryMaxAttempts"`
-	RetryInitialBackoff time.Duration `json:"retryInitialBackoff" yaml:"retryInitialBackoff"`
-	RetryMaxBackoff     time.Duration `json:"retryMaxBackoff" yaml:"retryMaxBackoff"`
-	RetryBackoffFactor  float64       `json:"retryBackoffFactor" yaml:"retryBackoffFactor"`
-
-	// Backend settings
-	MaxIdleConns        int           `json:"maxIdleConns" yaml:"maxIdleConns"`
-	MaxIdleConnsPerHost int           `json:"maxIdleConnsPerHost" yaml:"maxIdleConnsPerHost"`
-	MaxConnsPerHost     int           `json:"maxConnsPerHost" yaml:"maxConnsPerHost"`
-	IdleConnTimeout     time.Duration `json:"idleConnTimeout" yaml:"idleConnTimeout"`
-
-	// Health check settings
-	HealthCheckInterval time.Duration `json:"healthCheckInterval" yaml:"healthCheckInterval"`
-	HealthCheckTimeout  time.Duration `json:"healthCheckTimeout" yaml:"healthCheckTimeout"`
-
-	// Health server timeouts
-	HealthServerReadTimeout     time.Duration `json:"healthServerReadTimeout" yaml:"healthServerReadTimeout"`
-	HealthServerWriteTimeout    time.Duration `json:"healthServerWriteTimeout" yaml:"healthServerWriteTimeout"`
-	HealthServerShutdownTimeout time.Duration `json:"healthServerShutdownTimeout" yaml:"healthServerShutdownTimeout"`
-
-	// Metrics server timeouts
-	MetricsServerReadTimeout     time.Duration `json:"metricsServerReadTimeout" yaml:"metricsServerReadTimeout"`
-	MetricsServerWriteTimeout    time.Duration `json:"metricsServerWriteTimeout" yaml:"metricsServerWriteTimeout"`
-	MetricsServerShutdownTimeout time.Duration `json:"metricsServerShutdownTimeout" yaml:"metricsServerShutdownTimeout"`
-
-	// Readiness/Liveness probe timeouts
-	ReadinessProbeTimeout time.Duration `json:"readinessProbeTimeout" yaml:"readinessProbeTimeout"`
-	LivenessProbeTimeout  time.Duration `json:"livenessProbeTimeout" yaml:"livenessProbeTimeout"`
-
-	// gRPC settings
-	GRPCEnabled              bool `json:"grpcEnabled" yaml:"grpcEnabled"`
-	GRPCMaxRecvMsgSize       int  `json:"grpcMaxRecvMsgSize" yaml:"grpcMaxRecvMsgSize"`
-	GRPCMaxSendMsgSize       int  `json:"grpcMaxSendMsgSize" yaml:"grpcMaxSendMsgSize"`
-	GRPCMaxConcurrentStreams int  `json:"grpcMaxConcurrentStreams" yaml:"grpcMaxConcurrentStreams"`
-	GRPCEnableReflection     bool `json:"grpcEnableReflection" yaml:"grpcEnableReflection"`
-	GRPCEnableHealthCheck    bool `json:"grpcEnableHealthCheck" yaml:"grpcEnableHealthCheck"`
-
-	// TCP settings
-	TCPEnabled        bool          `json:"tcpEnabled" yaml:"tcpEnabled"`
-	TCPPort           int           `json:"tcpPort" yaml:"tcpPort"`
-	TCPReadTimeout    time.Duration `json:"tcpReadTimeout" yaml:"tcpReadTimeout"`
-	TCPWriteTimeout   time.Duration `json:"tcpWriteTimeout" yaml:"tcpWriteTimeout"`
-	TCPIdleTimeout    time.Duration `json:"tcpIdleTimeout" yaml:"tcpIdleTimeout"`
-	TCPMaxConnections int           `json:"tcpMaxConnections" yaml:"tcpMaxConnections"`
-
-	// TLS Passthrough settings
-	TLSPassthroughEnabled bool `json:"tlsPassthroughEnabled" yaml:"tlsPassthroughEnabled"`
-	TLSPassthroughPort    int  `json:"tlsPassthroughPort" yaml:"tlsPassthroughPort"`
-
-	// Authentication - JWT
-	JWTEnabled     bool          `json:"jwtEnabled" yaml:"jwtEnabled"`
-	JWTIssuer      string        `json:"jwtIssuer" yaml:"jwtIssuer"`
-	JWTAudiences   []string      `json:"jwtAudiences" yaml:"jwtAudiences"`
-	JWKSURL        string        `json:"jwksUrl" yaml:"jwksUrl"`
-	JWKSCacheTTL   time.Duration `json:"jwksCacheTtl" yaml:"jwksCacheTtl"`
-	JWTClockSkew   time.Duration `json:"jwtClockSkew" yaml:"jwtClockSkew"`
-	JWTAlgorithms  []string      `json:"jwtAlgorithms" yaml:"jwtAlgorithms"`
-	JWTTokenHeader string        `json:"jwtTokenHeader" yaml:"jwtTokenHeader"`
-	JWTTokenPrefix string        `json:"jwtTokenPrefix" yaml:"jwtTokenPrefix"`
-	JWTTokenCookie string        `json:"jwtTokenCookie" yaml:"jwtTokenCookie"`
-	JWTTokenQuery  string        `json:"jwtTokenQuery" yaml:"jwtTokenQuery"`
-
-	// Authentication - API Key
-	APIKeyEnabled    bool   `json:"apiKeyEnabled" yaml:"apiKeyEnabled"`
-	APIKeyHeader     string `json:"apiKeyHeader" yaml:"apiKeyHeader"`
-	APIKeyQueryParam string `json:"apiKeyQueryParam" yaml:"apiKeyQueryParam"`
-
-	// Authentication - Basic Auth
-	BasicAuthEnabled bool   `json:"basicAuthEnabled" yaml:"basicAuthEnabled"`
-	BasicAuthRealm   string `json:"basicAuthRealm" yaml:"basicAuthRealm"`
-
-	// Authentication - OAuth2 Client Credentials
-	OAuth2Enabled       bool          `json:"oauth2Enabled" yaml:"oauth2Enabled"`
-	OAuth2TokenEndpoint string        `json:"oauth2TokenEndpoint" yaml:"oauth2TokenEndpoint"`
-	OAuth2ClientID      string        `json:"oauth2ClientId" yaml:"oauth2ClientId"`
-	OAuth2Scopes        []string      `json:"oauth2Scopes" yaml:"oauth2Scopes"`
-	OAuth2Timeout       time.Duration `json:"oauth2Timeout" yaml:"oauth2Timeout"`
-
-	// Authorization
-	AuthzEnabled      bool `json:"authzEnabled" yaml:"authzEnabled"`
-	AuthzDefaultAllow bool `json:"authzDefaultAllow" yaml:"authzDefaultAllow"`
-
-	// Security Headers
-	SecurityHeadersEnabled bool   `json:"securityHeadersEnabled" yaml:"securityHeadersEnabled"`
-	HSTSEnabled            bool   `json:"hstsEnabled" yaml:"hstsEnabled"`
-	HSTSMaxAge             int    `json:"hstsMaxAge" yaml:"hstsMaxAge"`
-	HSTSIncludeSubDomains  bool   `json:"hstsIncludeSubDomains" yaml:"hstsIncludeSubDomains"`
-	HSTSPreload            bool   `json:"hstsPreload" yaml:"hstsPreload"`
-	CSPPolicy              string `json:"cspPolicy" yaml:"cspPolicy"`
-	XFrameOptions          string `json:"xFrameOptions" yaml:"xFrameOptions"`
-	XContentTypeOptions    string `json:"xContentTypeOptions" yaml:"xContentTypeOptions"`
-	ReferrerPolicy         string `json:"referrerPolicy" yaml:"referrerPolicy"`
-
-	// Webhook Certificate Settings
-	WebhookSelfSignedCert       bool          `json:"webhookSelfSignedCert" yaml:"webhookSelfSignedCert"`
-	WebhookCertDir              string        `json:"webhookCertDir" yaml:"webhookCertDir"`
-	WebhookCertValidity         time.Duration `json:"webhookCertValidity" yaml:"webhookCertValidity"`
-	WebhookCertRotation         time.Duration `json:"webhookCertRotation" yaml:"webhookCertRotation"`
-	WebhookCertSecretName       string        `json:"webhookCertSecretName" yaml:"webhookCertSecretName"`
-	WebhookServiceName          string        `json:"webhookServiceName" yaml:"webhookServiceName"`
-	WebhookServiceNamespace     string        `json:"webhookServiceNamespace" yaml:"webhookServiceNamespace"`
-	WebhookValidatingConfigName string        `json:"webhookValidatingConfigName" yaml:"webhookValidatingConfigName"`
-	WebhookMutatingConfigName   string        `json:"webhookMutatingConfigName" yaml:"webhookMutatingConfigName"`
+// RetryPolicy represents retry configuration.
+type RetryPolicy struct {
+	Attempts      int      `yaml:"attempts" json:"attempts"`
+	PerTryTimeout Duration `yaml:"perTryTimeout,omitempty" json:"perTryTimeout,omitempty"`
+	RetryOn       string   `yaml:"retryOn,omitempty" json:"retryOn,omitempty"`
 }
 
-// DefaultConfig returns a Config with default values.
-// It assembles defaults from domain-specific helper functions.
-func DefaultConfig() *Config {
-	cfg := &Config{}
-	applyDefaultServerConfig(cfg)
-	applyDefaultTLSConfig(cfg)
-	applyDefaultVaultConfig(cfg)
-	applyDefaultSecretsProviderConfig(cfg)
-	applyDefaultObservabilityConfig(cfg)
-	applyDefaultRateLimitConfig(cfg)
-	applyDefaultResilienceConfig(cfg)
-	applyDefaultBackendConfig(cfg)
-	applyDefaultHealthConfig(cfg)
-	applyDefaultGRPCConfig(cfg)
-	applyDefaultTCPConfig(cfg)
-	applyDefaultAuthConfig(cfg)
-	applyDefaultSecurityConfig(cfg)
-	applyDefaultWebhookConfig(cfg)
-	return cfg
+// RateLimitConfig represents rate limiting configuration.
+type RateLimitConfig struct {
+	Enabled           bool `yaml:"enabled" json:"enabled"`
+	RequestsPerSecond int  `yaml:"requestsPerSecond" json:"requestsPerSecond"`
+	Burst             int  `yaml:"burst" json:"burst"`
+	PerClient         bool `yaml:"perClient,omitempty" json:"perClient,omitempty"`
 }
 
-// applyDefaultServerConfig sets default server settings.
-func applyDefaultServerConfig(cfg *Config) {
-	cfg.HTTPPort = 8080
-	cfg.GRPCPort = 9090
-	cfg.MetricsPort = 9091
-	cfg.HealthPort = 8081
-	cfg.ReadTimeout = 30 * time.Second
-	cfg.WriteTimeout = 30 * time.Second
-	cfg.IdleTimeout = 120 * time.Second
-	cfg.ShutdownTimeout = 30 * time.Second
+// CircuitBreakerConfig represents circuit breaker configuration.
+type CircuitBreakerConfig struct {
+	Enabled          bool     `yaml:"enabled" json:"enabled"`
+	Threshold        int      `yaml:"threshold" json:"threshold"`
+	Timeout          Duration `yaml:"timeout" json:"timeout"`
+	HalfOpenRequests int      `yaml:"halfOpenRequests,omitempty" json:"halfOpenRequests,omitempty"`
 }
 
-// applyDefaultTLSConfig sets default TLS settings.
-func applyDefaultTLSConfig(cfg *Config) {
-	cfg.TLSEnabled = false
-	cfg.TLSCertFile = ""
-	cfg.TLSKeyFile = ""
-	cfg.TLSCAFile = ""
-	cfg.TLSPassthroughEnabled = false
-	cfg.TLSPassthroughPort = 8444
+// CORSConfig represents CORS configuration.
+type CORSConfig struct {
+	AllowOrigins     []string `yaml:"allowOrigins,omitempty" json:"allowOrigins,omitempty"`
+	AllowMethods     []string `yaml:"allowMethods,omitempty" json:"allowMethods,omitempty"`
+	AllowHeaders     []string `yaml:"allowHeaders,omitempty" json:"allowHeaders,omitempty"`
+	ExposeHeaders    []string `yaml:"exposeHeaders,omitempty" json:"exposeHeaders,omitempty"`
+	MaxAge           int      `yaml:"maxAge,omitempty" json:"maxAge,omitempty"`
+	AllowCredentials bool     `yaml:"allowCredentials,omitempty" json:"allowCredentials,omitempty"`
 }
 
-// applyDefaultVaultConfig sets default Vault settings.
-func applyDefaultVaultConfig(cfg *Config) {
-	cfg.VaultEnabled = false
-	cfg.VaultAddress = "http://localhost:8200"
-	cfg.VaultNamespace = ""
-	cfg.VaultAuthMethod = DefaultVaultAuthMethod
-	cfg.VaultRole = DefaultVaultRole
-	cfg.VaultMountPath = DefaultVaultAuthMethod
-	cfg.VaultSecretMountPoint = "secret"
-	cfg.VaultTLSSkipVerify = false
-	cfg.VaultCACert = ""
-	cfg.VaultClientCert = ""
-	cfg.VaultClientKey = ""
-	cfg.VaultTimeout = 30 * time.Second
-	cfg.VaultMaxRetries = 3
-	cfg.VaultRetryWaitMin = 500 * time.Millisecond
-	cfg.VaultRetryWaitMax = 5 * time.Second
-	cfg.VaultCacheEnabled = true
-	cfg.VaultCacheTTL = 5 * time.Minute
-	cfg.VaultTokenRenewal = true
-	cfg.VaultTokenRenewalTime = 5 * time.Minute
+// ObservabilityConfig represents observability configuration.
+type ObservabilityConfig struct {
+	Metrics *MetricsConfig `yaml:"metrics,omitempty" json:"metrics,omitempty"`
+	Tracing *TracingConfig `yaml:"tracing,omitempty" json:"tracing,omitempty"`
+	Logging *LoggingConfig `yaml:"logging,omitempty" json:"logging,omitempty"`
 }
 
-// applyDefaultSecretsProviderConfig sets default secrets provider settings.
-func applyDefaultSecretsProviderConfig(cfg *Config) {
-	cfg.SecretsProvider = ""                      // empty means auto-detect (vault if enabled, otherwise kubernetes)
-	cfg.SecretsLocalPath = "/etc/avapigw/secrets" // default path for local secrets
-	cfg.SecretsEnvPrefix = "AVAPIGW_SECRET_"      // default prefix for env secrets
+// MetricsConfig represents metrics configuration.
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Path    string `yaml:"path,omitempty" json:"path,omitempty"`
+	Port    int    `yaml:"port,omitempty" json:"port,omitempty"`
 }
 
-// applyDefaultObservabilityConfig sets default observability settings (logging, tracing, metrics).
-func applyDefaultObservabilityConfig(cfg *Config) {
-	// Logging
-	cfg.LogLevel = "info"
-	cfg.LogFormat = "json"
-	cfg.LogOutput = "stdout"
-	cfg.AccessLogEnabled = true
-
-	// Tracing
-	cfg.TracingEnabled = false
-	cfg.TracingExporter = "otlp-grpc"
-	cfg.OTLPEndpoint = "localhost:4317"
-	cfg.TracingSampleRate = 1.0
-	cfg.ServiceName = DefaultServiceName
-	cfg.ServiceVersion = "1.0.0"
-	cfg.TracingInsecure = true
-
-	// Metrics
-	cfg.MetricsEnabled = true
-	cfg.MetricsPath = "/metrics"
+// TracingConfig represents tracing configuration.
+type TracingConfig struct {
+	Enabled      bool    `yaml:"enabled" json:"enabled"`
+	SamplingRate float64 `yaml:"samplingRate,omitempty" json:"samplingRate,omitempty"`
+	OTLPEndpoint string  `yaml:"otlpEndpoint,omitempty" json:"otlpEndpoint,omitempty"`
+	ServiceName  string  `yaml:"serviceName,omitempty" json:"serviceName,omitempty"`
 }
 
-// applyDefaultRateLimitConfig sets default rate limiting settings.
-func applyDefaultRateLimitConfig(cfg *Config) {
-	cfg.RateLimitEnabled = false
-	cfg.RateLimitAlgorithm = "token_bucket"
-	cfg.RateLimitRequests = 100
-	cfg.RateLimitWindow = time.Minute
-	cfg.RateLimitBurst = 10
-	cfg.RateLimitStoreType = "memory"
-	cfg.RedisAddress = "localhost:6379"
-	cfg.RedisPassword = ""
-	cfg.RedisDB = 0
+// LoggingConfig represents logging configuration.
+type LoggingConfig struct {
+	Level  string `yaml:"level,omitempty" json:"level,omitempty"`
+	Format string `yaml:"format,omitempty" json:"format,omitempty"`
+	Output string `yaml:"output,omitempty" json:"output,omitempty"`
 }
 
-// applyDefaultResilienceConfig sets default circuit breaker and retry settings.
-func applyDefaultResilienceConfig(cfg *Config) {
-	// Circuit Breaker
-	cfg.CircuitBreakerEnabled = false
-	cfg.CircuitBreakerMaxFailures = 5
-	cfg.CircuitBreakerTimeout = 30 * time.Second
-	cfg.CircuitBreakerHalfOpenMax = 3
-	cfg.CircuitBreakerSuccessThreshold = 2
-
-	// Retry
-	cfg.RetryEnabled = false
-	cfg.RetryMaxAttempts = 3
-	cfg.RetryInitialBackoff = 100 * time.Millisecond
-	cfg.RetryMaxBackoff = 10 * time.Second
-	cfg.RetryBackoffFactor = 2.0
+// RedirectConfig represents HTTP redirect configuration.
+type RedirectConfig struct {
+	URI        string `yaml:"uri,omitempty" json:"uri,omitempty"`
+	Code       int    `yaml:"code,omitempty" json:"code,omitempty"`
+	Scheme     string `yaml:"scheme,omitempty" json:"scheme,omitempty"`
+	Host       string `yaml:"host,omitempty" json:"host,omitempty"`
+	Port       int    `yaml:"port,omitempty" json:"port,omitempty"`
+	StripQuery bool   `yaml:"stripQuery,omitempty" json:"stripQuery,omitempty"`
 }
 
-// applyDefaultBackendConfig sets default backend connection pool settings.
-func applyDefaultBackendConfig(cfg *Config) {
-	cfg.MaxIdleConns = 100
-	cfg.MaxIdleConnsPerHost = 10
-	cfg.MaxConnsPerHost = 100
-	cfg.IdleConnTimeout = 90 * time.Second
+// RewriteConfig represents URL rewrite configuration.
+type RewriteConfig struct {
+	URI       string `yaml:"uri,omitempty" json:"uri,omitempty"`
+	Authority string `yaml:"authority,omitempty" json:"authority,omitempty"`
 }
 
-// applyDefaultHealthConfig sets default health check and server timeout settings.
-func applyDefaultHealthConfig(cfg *Config) {
-	// Health check settings
-	cfg.HealthCheckInterval = 10 * time.Second
-	cfg.HealthCheckTimeout = 5 * time.Second
-
-	// Health server timeouts - used for the dedicated health check server
-	cfg.HealthServerReadTimeout = 5 * time.Second
-	cfg.HealthServerWriteTimeout = 5 * time.Second
-	cfg.HealthServerShutdownTimeout = 5 * time.Second
-
-	// Metrics server timeouts - used for the Prometheus metrics server
-	cfg.MetricsServerReadTimeout = 5 * time.Second
-	cfg.MetricsServerWriteTimeout = 10 * time.Second
-	cfg.MetricsServerShutdownTimeout = 5 * time.Second
-
-	// Readiness/Liveness probe timeouts - context timeout for health check execution
-	cfg.ReadinessProbeTimeout = 5 * time.Second
-	cfg.LivenessProbeTimeout = 10 * time.Second
+// DirectResponseConfig represents direct response configuration.
+type DirectResponseConfig struct {
+	Status  int               `yaml:"status" json:"status"`
+	Body    string            `yaml:"body,omitempty" json:"body,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 }
 
-// applyDefaultGRPCConfig sets default gRPC server settings.
-func applyDefaultGRPCConfig(cfg *Config) {
-	cfg.GRPCEnabled = true
-	cfg.GRPCMaxRecvMsgSize = DefaultGRPCMaxMsgSize
-	cfg.GRPCMaxSendMsgSize = DefaultGRPCMaxMsgSize
-	cfg.GRPCMaxConcurrentStreams = 1000
-	cfg.GRPCEnableReflection = false
-	cfg.GRPCEnableHealthCheck = true
+// HeaderManipulation represents header manipulation configuration.
+type HeaderManipulation struct {
+	Request  *HeaderOperation `yaml:"request,omitempty" json:"request,omitempty"`
+	Response *HeaderOperation `yaml:"response,omitempty" json:"response,omitempty"`
 }
 
-// applyDefaultTCPConfig sets default TCP server settings.
-func applyDefaultTCPConfig(cfg *Config) {
-	cfg.TCPEnabled = false
-	cfg.TCPPort = 8443
-	cfg.TCPReadTimeout = 30 * time.Second
-	cfg.TCPWriteTimeout = 30 * time.Second
-	cfg.TCPIdleTimeout = 5 * time.Minute
-	cfg.TCPMaxConnections = 10000
+// HeaderOperation represents header operations.
+type HeaderOperation struct {
+	Set    map[string]string `yaml:"set,omitempty" json:"set,omitempty"`
+	Add    map[string]string `yaml:"add,omitempty" json:"add,omitempty"`
+	Remove []string          `yaml:"remove,omitempty" json:"remove,omitempty"`
 }
 
-// applyDefaultAuthConfig sets default authentication settings.
-func applyDefaultAuthConfig(cfg *Config) {
-	// JWT
-	cfg.JWTEnabled = false
-	cfg.JWTIssuer = ""
-	cfg.JWTAudiences = nil
-	cfg.JWKSURL = ""
-	cfg.JWKSCacheTTL = time.Hour
-	cfg.JWTClockSkew = time.Minute
-	cfg.JWTAlgorithms = []string{"RS256", "RS384", "RS512"}
-	cfg.JWTTokenHeader = "Authorization"
-	cfg.JWTTokenPrefix = "Bearer "
-	cfg.JWTTokenCookie = ""
-	cfg.JWTTokenQuery = ""
-
-	// API Key
-	cfg.APIKeyEnabled = false
-	cfg.APIKeyHeader = "X-API-Key"
-	cfg.APIKeyQueryParam = "api_key"
-
-	// Basic Auth
-	cfg.BasicAuthEnabled = false
-	cfg.BasicAuthRealm = "Restricted"
-
-	// OAuth2 Client Credentials
-	cfg.OAuth2Enabled = false
-	cfg.OAuth2TokenEndpoint = ""
-	cfg.OAuth2ClientID = ""
-	cfg.OAuth2Scopes = nil
-	cfg.OAuth2Timeout = 30 * time.Second
-
-	// Authorization
-	cfg.AuthzEnabled = false
-	cfg.AuthzDefaultAllow = false
+// FaultInjection represents fault injection configuration.
+type FaultInjection struct {
+	Delay *FaultDelay `yaml:"delay,omitempty" json:"delay,omitempty"`
+	Abort *FaultAbort `yaml:"abort,omitempty" json:"abort,omitempty"`
 }
 
-// applyDefaultSecurityConfig sets default security header settings.
-func applyDefaultSecurityConfig(cfg *Config) {
-	cfg.SecurityHeadersEnabled = true
-	cfg.HSTSEnabled = true
-	cfg.HSTSMaxAge = DefaultHSTSMaxAge
-	cfg.HSTSIncludeSubDomains = true
-	cfg.HSTSPreload = false
-	cfg.CSPPolicy = ""
-	cfg.XFrameOptions = "DENY"
-	cfg.XContentTypeOptions = "nosniff"
-	cfg.ReferrerPolicy = "strict-origin-when-cross-origin"
+// FaultDelay represents delay fault injection.
+type FaultDelay struct {
+	FixedDelay Duration `yaml:"fixedDelay" json:"fixedDelay"`
+	Percentage float64  `yaml:"percentage,omitempty" json:"percentage,omitempty"`
 }
 
-// applyDefaultWebhookConfig sets default webhook certificate settings.
-func applyDefaultWebhookConfig(cfg *Config) {
-	cfg.WebhookSelfSignedCert = false
-	cfg.WebhookCertDir = "/tmp/k8s-webhook-server/serving-certs"
-	cfg.WebhookCertValidity = 365 * 24 * time.Hour      // 1 year
-	cfg.WebhookCertRotation = 30 * 24 * time.Hour       // 30 days before expiry
-	cfg.WebhookCertSecretName = "avapigw-webhook-certs" // NOSONAR this is not real seacret
-	cfg.WebhookServiceName = "avapigw-webhook-service"
-	cfg.WebhookServiceNamespace = "avapigw-system"
-	cfg.WebhookValidatingConfigName = "avapigw-validating-webhook-configuration"
-	cfg.WebhookMutatingConfigName = "avapigw-mutating-webhook-configuration"
+// FaultAbort represents abort fault injection.
+type FaultAbort struct {
+	HTTPStatus int     `yaml:"httpStatus" json:"httpStatus"`
+	Percentage float64 `yaml:"percentage,omitempty" json:"percentage,omitempty"`
 }
 
-// Validate validates the configuration and returns an error if invalid.
-// It delegates to domain-specific validators for each configuration section.
-func (c *Config) Validate() error {
-	if err := c.validateServerConfig(); err != nil {
+// MirrorConfig represents traffic mirroring configuration.
+type MirrorConfig struct {
+	Destination Destination `yaml:"destination" json:"destination"`
+	Percentage  float64     `yaml:"percentage,omitempty" json:"percentage,omitempty"`
+}
+
+// Duration is a wrapper around time.Duration that supports YAML/JSON marshaling.
+type Duration time.Duration
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
 		return err
 	}
-	if err := c.validateTLSConfig(); err != nil {
-		return err
-	}
-	if err := c.validateVaultConfig(); err != nil {
-		return err
-	}
-	if err := c.validateSecretsProviderConfig(); err != nil {
-		return err
-	}
-	if err := c.validateObservabilityConfig(); err != nil {
-		return err
-	}
-	if err := c.validateRateLimitConfig(); err != nil {
-		return err
-	}
-	if err := c.validateResilienceConfig(); err != nil {
-		return err
-	}
-	if err := c.validateBackendConfig(); err != nil {
-		return err
-	}
-	if err := c.validateHealthConfig(); err != nil {
-		return err
-	}
-	if err := c.validateTCPConfig(); err != nil {
-		return err
-	}
-	if err := c.validateAuthConfig(); err != nil {
-		return err
-	}
-	if err := c.validateSecurityConfig(); err != nil {
-		return err
-	}
-	if err := c.validateWebhookConfig(); err != nil {
-		return err
-	}
-	return nil
-}
-
-// validateServerConfig validates server-related settings.
-func (c *Config) validateServerConfig() error {
-	if err := validatePort(c.HTTPPort, "HTTPPort"); err != nil {
-		return err
-	}
-	if err := validatePort(c.GRPCPort, "GRPCPort"); err != nil {
-		return err
-	}
-	if err := validatePort(c.MetricsPort, "MetricsPort"); err != nil {
-		return err
-	}
-	if err := validatePort(c.HealthPort, "HealthPort"); err != nil {
-		return err
-	}
-	if c.ReadTimeout <= 0 {
-		return fmt.Errorf("ReadTimeout must be positive")
-	}
-	if c.WriteTimeout <= 0 {
-		return fmt.Errorf("WriteTimeout must be positive")
-	}
-	if c.IdleTimeout <= 0 {
-		return fmt.Errorf("IdleTimeout must be positive")
-	}
-	if c.ShutdownTimeout <= 0 {
-		return fmt.Errorf("ShutdownTimeout must be positive")
-	}
-	return nil
-}
-
-// validateTLSConfig validates TLS-related settings.
-func (c *Config) validateTLSConfig() error {
-	if c.TLSEnabled {
-		if c.TLSCertFile == "" {
-			return fmt.Errorf("TLSCertFile is required when TLS is enabled")
-		}
-		if c.TLSKeyFile == "" {
-			return fmt.Errorf("TLSKeyFile is required when TLS is enabled")
-		}
-	}
-	if c.TLSPassthroughEnabled {
-		if err := validatePort(c.TLSPassthroughPort, "TLSPassthroughPort"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// validateVaultConfig validates Vault-related settings.
-func (c *Config) validateVaultConfig() error {
-	if !c.VaultEnabled {
+	if s == "" {
+		*d = 0
 		return nil
 	}
-	if c.VaultAddress == "" {
-		return fmt.Errorf("VaultAddress is required when Vault is enabled")
-	}
-	validAuthMethods := map[string]bool{
-		VaultAuthMethodKubernetes: true,
-		VaultAuthMethodToken:      true,
-		VaultAuthMethodAppRole:    true,
-	}
-	if !validAuthMethods[c.VaultAuthMethod] {
-		return fmt.Errorf("invalid VaultAuthMethod: %s, must be one of: kubernetes, token, approle", c.VaultAuthMethod)
-	}
-	if c.VaultAuthMethod == DefaultVaultAuthMethod && c.VaultRole == "" {
-		return fmt.Errorf("VaultRole is required when using Kubernetes auth")
-	}
-	if c.VaultTimeout <= 0 {
-		return fmt.Errorf("VaultTimeout must be positive")
-	}
-	if c.VaultMaxRetries < 0 {
-		return fmt.Errorf("VaultMaxRetries must be non-negative")
-	}
-	return nil
-}
-
-// validateSecretsProviderConfig validates secrets provider settings.
-func (c *Config) validateSecretsProviderConfig() error {
-	if c.SecretsProvider == "" {
-		return nil
-	}
-	validProviders := map[string]bool{
-		SecretsProviderKubernetes: true,
-		SecretsProviderVault:      true,
-		SecretsProviderLocal:      true,
-		SecretsProviderEnv:        true,
-	}
-	if !validProviders[c.SecretsProvider] {
-		return fmt.Errorf(
-			"invalid SecretsProvider: %s, must be one of: kubernetes, vault, local, env", c.SecretsProvider)
-	}
-	if c.SecretsProvider == SecretsProviderVault && !c.VaultEnabled {
-		return fmt.Errorf("VaultEnabled must be true when SecretsProvider is vault")
-	}
-	return nil
-}
-
-// validateObservabilityConfig validates observability settings (logging, tracing, metrics).
-func (c *Config) validateObservabilityConfig() error {
-	if err := c.validateLoggingConfig(); err != nil {
+	duration, err := time.ParseDuration(s)
+	if err != nil {
 		return err
 	}
-	if err := c.validateTracingConfig(); err != nil {
+	*d = Duration(duration)
+	return nil
+}
+
+// MarshalYAML implements yaml.Marshaler.
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return time.Duration(d).String(), nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	s := string(b)
+	// Remove quotes if present
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	if s == "" || s == "null" {
+		*d = 0
+		return nil
+	}
+	duration, err := time.ParseDuration(s)
+	if err != nil {
 		return err
 	}
+	*d = Duration(duration)
 	return nil
 }
 
-// validateLoggingConfig validates logging settings.
-func (c *Config) validateLoggingConfig() error {
-	validLogLevels := map[string]bool{
-		"debug": true,
-		"info":  true,
-		"warn":  true,
-		"error": true,
-	}
-	if !validLogLevels[c.LogLevel] {
-		return fmt.Errorf("invalid LogLevel: %s, must be one of: debug, info, warn, error", c.LogLevel)
-	}
-	validLogFormats := map[string]bool{
-		"json":    true,
-		"console": true,
-	}
-	if !validLogFormats[c.LogFormat] {
-		return fmt.Errorf("invalid LogFormat: %s, must be one of: json, console", c.LogFormat)
-	}
-	validLogOutputs := map[string]bool{
-		"stdout": true,
-		"stderr": true,
-	}
-	if c.LogOutput != "" && !validLogOutputs[c.LogOutput] {
-		// Allow file paths as well
-		if c.LogOutput[0] != '/' && c.LogOutput[0] != '.' {
-			return fmt.Errorf("invalid LogOutput: %s, must be stdout, stderr, or a file path", c.LogOutput)
-		}
-	}
-	return nil
+// MarshalJSON implements json.Marshaler.
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + time.Duration(d).String() + `"`), nil
 }
 
-// validateTracingConfig validates tracing settings.
-func (c *Config) validateTracingConfig() error {
-	if !c.TracingEnabled {
-		return nil
-	}
-	if c.OTLPEndpoint == "" {
-		return fmt.Errorf("OTLPEndpoint is required when tracing is enabled")
-	}
-	validExporters := map[string]bool{
-		"otlp-grpc": true,
-		"otlp-http": true,
-	}
-	if !validExporters[c.TracingExporter] {
-		return fmt.Errorf("invalid TracingExporter: %s, must be one of: otlp-grpc, otlp-http", c.TracingExporter)
-	}
-	if c.TracingSampleRate < 0 || c.TracingSampleRate > 1 {
-		return fmt.Errorf("TracingSampleRate must be between 0.0 and 1.0")
-	}
-	return nil
+// Duration returns the time.Duration value.
+func (d Duration) Duration() time.Duration {
+	return time.Duration(d)
 }
 
-// validateRateLimitConfig validates rate limiting settings.
-func (c *Config) validateRateLimitConfig() error {
-	if !c.RateLimitEnabled {
-		return nil
+// DefaultConfig returns a configuration with sensible defaults.
+func DefaultConfig() *GatewayConfig {
+	return &GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata: Metadata{
+			Name: "default-gateway",
+		},
+		Spec: GatewaySpec{
+			Listeners: []Listener{
+				{
+					Name:     "http",
+					Port:     8080,
+					Protocol: "HTTP",
+					Hosts:    []string{"*"},
+					Bind:     "0.0.0.0",
+				},
+			},
+			Observability: &ObservabilityConfig{
+				Metrics: &MetricsConfig{
+					Enabled: true,
+					Path:    "/metrics",
+				},
+				Logging: &LoggingConfig{
+					Level:  "info",
+					Format: "json",
+				},
+			},
+		},
 	}
-	validAlgorithms := map[string]bool{
-		"token_bucket":   true,
-		"sliding_window": true,
-		"fixed_window":   true,
-	}
-	if !validAlgorithms[c.RateLimitAlgorithm] {
-		return fmt.Errorf("invalid RateLimitAlgorithm: %s, must be one of: "+
-			"token_bucket, sliding_window, fixed_window", c.RateLimitAlgorithm)
-	}
-	validStoreTypes := map[string]bool{
-		"memory": true,
-		"redis":  true,
-	}
-	if !validStoreTypes[c.RateLimitStoreType] {
-		return fmt.Errorf("invalid RateLimitStoreType: %s, must be one of: memory, redis", c.RateLimitStoreType)
-	}
-	if c.RateLimitStoreType == "redis" && c.RedisAddress == "" {
-		return fmt.Errorf("RedisAddress is required when rate limit store type is redis")
-	}
-	if c.RateLimitRequests <= 0 {
-		return fmt.Errorf("RateLimitRequests must be positive")
-	}
-	if c.RateLimitWindow <= 0 {
-		return fmt.Errorf("RateLimitWindow must be positive")
-	}
-	if c.RateLimitBurst <= 0 {
-		return fmt.Errorf("RateLimitBurst must be positive")
-	}
-	return nil
 }
 
-// validateResilienceConfig validates circuit breaker and retry settings.
-func (c *Config) validateResilienceConfig() error {
-	if err := c.validateCircuitBreakerConfig(); err != nil {
-		return err
+// IsEmpty returns true if the RouteMatch has no conditions.
+func (rm *RouteMatch) IsEmpty() bool {
+	if rm.URI != nil && !rm.URI.IsEmpty() {
+		return false
 	}
-	if err := c.validateRetryConfig(); err != nil {
-		return err
+	if len(rm.Methods) > 0 {
+		return false
 	}
-	return nil
-}
-
-// validateCircuitBreakerConfig validates circuit breaker settings.
-func (c *Config) validateCircuitBreakerConfig() error {
-	if !c.CircuitBreakerEnabled {
-		return nil
+	if len(rm.Headers) > 0 {
+		return false
 	}
-	if c.CircuitBreakerMaxFailures <= 0 {
-		return fmt.Errorf("CircuitBreakerMaxFailures must be positive")
+	if len(rm.QueryParams) > 0 {
+		return false
 	}
-	if c.CircuitBreakerTimeout <= 0 {
-		return fmt.Errorf("CircuitBreakerTimeout must be positive")
-	}
-	if c.CircuitBreakerHalfOpenMax <= 0 {
-		return fmt.Errorf("CircuitBreakerHalfOpenMax must be positive")
-	}
-	if c.CircuitBreakerSuccessThreshold <= 0 {
-		return fmt.Errorf("CircuitBreakerSuccessThreshold must be positive")
-	}
-	return nil
-}
-
-// validateRetryConfig validates retry settings.
-func (c *Config) validateRetryConfig() error {
-	if !c.RetryEnabled {
-		return nil
-	}
-	if c.RetryMaxAttempts < 0 {
-		return fmt.Errorf("RetryMaxAttempts must be non-negative")
-	}
-	if c.RetryInitialBackoff <= 0 {
-		return fmt.Errorf("RetryInitialBackoff must be positive")
-	}
-	if c.RetryMaxBackoff <= 0 {
-		return fmt.Errorf("RetryMaxBackoff must be positive")
-	}
-	if c.RetryBackoffFactor <= 0 {
-		return fmt.Errorf("RetryBackoffFactor must be positive")
-	}
-	return nil
-}
-
-// validateBackendConfig validates backend connection pool settings.
-func (c *Config) validateBackendConfig() error {
-	if c.MaxIdleConns <= 0 {
-		return fmt.Errorf("MaxIdleConns must be positive")
-	}
-	if c.MaxIdleConnsPerHost <= 0 {
-		return fmt.Errorf("MaxIdleConnsPerHost must be positive")
-	}
-	if c.MaxConnsPerHost <= 0 {
-		return fmt.Errorf("MaxConnsPerHost must be positive")
-	}
-	return nil
-}
-
-// validateHealthConfig validates health check and server timeout settings.
-func (c *Config) validateHealthConfig() error {
-	// Health server timeouts
-	if c.HealthServerReadTimeout <= 0 {
-		return fmt.Errorf("HealthServerReadTimeout must be positive")
-	}
-	if c.HealthServerWriteTimeout <= 0 {
-		return fmt.Errorf("HealthServerWriteTimeout must be positive")
-	}
-	if c.HealthServerShutdownTimeout <= 0 {
-		return fmt.Errorf("HealthServerShutdownTimeout must be positive")
-	}
-	// Metrics server timeouts
-	if c.MetricsServerReadTimeout <= 0 {
-		return fmt.Errorf("MetricsServerReadTimeout must be positive")
-	}
-	if c.MetricsServerWriteTimeout <= 0 {
-		return fmt.Errorf("MetricsServerWriteTimeout must be positive")
-	}
-	if c.MetricsServerShutdownTimeout <= 0 {
-		return fmt.Errorf("MetricsServerShutdownTimeout must be positive")
-	}
-	// Probe timeouts
-	if c.ReadinessProbeTimeout <= 0 {
-		return fmt.Errorf("ReadinessProbeTimeout must be positive")
-	}
-	if c.LivenessProbeTimeout <= 0 {
-		return fmt.Errorf("LivenessProbeTimeout must be positive")
-	}
-	return nil
-}
-
-// validateTCPConfig validates TCP server settings.
-func (c *Config) validateTCPConfig() error {
-	if !c.TCPEnabled {
-		return nil
-	}
-	if err := validatePort(c.TCPPort, "TCPPort"); err != nil {
-		return err
-	}
-	if c.TCPReadTimeout <= 0 {
-		return fmt.Errorf("TCPReadTimeout must be positive")
-	}
-	if c.TCPWriteTimeout <= 0 {
-		return fmt.Errorf("TCPWriteTimeout must be positive")
-	}
-	if c.TCPIdleTimeout <= 0 {
-		return fmt.Errorf("TCPIdleTimeout must be positive")
-	}
-	if c.TCPMaxConnections <= 0 {
-		return fmt.Errorf("TCPMaxConnections must be positive")
-	}
-	return nil
-}
-
-// validateAuthConfig validates authentication settings (JWT, OAuth2).
-func (c *Config) validateAuthConfig() error {
-	if err := c.validateJWTConfig(); err != nil {
-		return err
-	}
-	if err := c.validateOAuth2Config(); err != nil {
-		return err
-	}
-	return nil
-}
-
-// validateJWTConfig validates JWT authentication settings.
-func (c *Config) validateJWTConfig() error {
-	if !c.JWTEnabled {
-		return nil
-	}
-	if c.JWKSURL == "" && c.JWTIssuer == "" {
-		return fmt.Errorf("either JWKSURL or JWTIssuer is required when JWT is enabled")
-	}
-	if c.JWKSCacheTTL <= 0 {
-		return fmt.Errorf("JWKSCacheTTL must be positive")
-	}
-	if c.JWTClockSkew < 0 {
-		return fmt.Errorf("JWTClockSkew must be non-negative")
-	}
-	return nil
-}
-
-// validateOAuth2Config validates OAuth2 authentication settings.
-func (c *Config) validateOAuth2Config() error {
-	if !c.OAuth2Enabled {
-		return nil
-	}
-	if c.OAuth2TokenEndpoint == "" {
-		return fmt.Errorf("OAuth2TokenEndpoint is required when OAuth2 is enabled")
-	}
-	if c.OAuth2ClientID == "" {
-		return fmt.Errorf("OAuth2ClientID is required when OAuth2 is enabled")
-	}
-	if c.OAuth2Timeout <= 0 {
-		return fmt.Errorf("OAuth2Timeout must be positive")
-	}
-	return nil
-}
-
-// validateSecurityConfig validates security header settings.
-func (c *Config) validateSecurityConfig() error {
-	if !c.SecurityHeadersEnabled {
-		return nil
-	}
-	if c.HSTSEnabled && c.HSTSMaxAge < 0 {
-		return fmt.Errorf("HSTSMaxAge must be non-negative")
-	}
-	validXFrameOptions := map[string]bool{
-		"":           true,
-		"DENY":       true,
-		"SAMEORIGIN": true,
-	}
-	if !validXFrameOptions[c.XFrameOptions] {
-		return fmt.Errorf("invalid XFrameOptions: %s, must be one of: DENY, SAMEORIGIN", c.XFrameOptions)
-	}
-	return nil
-}
-
-// validateWebhookConfig validates webhook certificate settings.
-func (c *Config) validateWebhookConfig() error {
-	if !c.WebhookSelfSignedCert {
-		return nil
-	}
-	if c.WebhookCertDir == "" {
-		return fmt.Errorf("WebhookCertDir is required when self-signed certificates are enabled")
-	}
-	if c.WebhookCertValidity <= 0 {
-		return fmt.Errorf("WebhookCertValidity must be positive")
-	}
-	if c.WebhookCertRotation <= 0 {
-		return fmt.Errorf("WebhookCertRotation must be positive")
-	}
-	if c.WebhookCertRotation >= c.WebhookCertValidity {
-		return fmt.Errorf("WebhookCertRotation must be less than WebhookCertValidity")
-	}
-	if c.WebhookCertSecretName == "" {
-		return fmt.Errorf("WebhookCertSecretName is required when self-signed certificates are enabled")
-	}
-	if c.WebhookServiceName == "" {
-		return fmt.Errorf("WebhookServiceName is required when self-signed certificates are enabled")
-	}
-	if c.WebhookServiceNamespace == "" {
-		return fmt.Errorf("WebhookServiceNamespace is required when self-signed certificates are enabled")
-	}
-	return nil
-}
-
-// validatePort validates that a port number is within valid range.
-func validatePort(port int, name string) error {
-	if port < 1 || port > 65535 {
-		return fmt.Errorf("%s must be between 1 and 65535, got %d", name, port)
-	}
-	return nil
-}
-
-// String returns a string representation of the config (without sensitive data).
-func (c *Config) String() string {
-	return fmt.Sprintf(
-		"Config{HTTPPort: %d, GRPCPort: %d, MetricsPort: %d, HealthPort: %d, "+
-			"TLSEnabled: %t, VaultEnabled: %t, LogLevel: %s, TracingEnabled: %t, "+
-			"TCPEnabled: %t, TCPPort: %d, TLSPassthroughEnabled: %t, TLSPassthroughPort: %d}",
-		c.HTTPPort, c.GRPCPort, c.MetricsPort, c.HealthPort,
-		c.TLSEnabled, c.VaultEnabled, c.LogLevel, c.TracingEnabled,
-		c.TCPEnabled, c.TCPPort, c.TLSPassthroughEnabled, c.TLSPassthroughPort,
-	)
+	return true
 }
