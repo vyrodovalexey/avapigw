@@ -80,7 +80,7 @@ func TestIntegration_Proxy_ForwardToBackend(t *testing.T) {
 		assert.Equal(t, "Test Item", response.Data.Name)
 
 		// Cleanup
-		if response.Data.ID > 0 {
+		if response.Data.ID != "" {
 			_ = helpers.DeleteTestItem(testCfg.Backend1URL, response.Data.ID)
 		}
 	})

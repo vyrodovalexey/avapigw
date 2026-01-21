@@ -250,7 +250,7 @@ type BackendResponse struct {
 
 // ItemResponse represents an item from the backend.
 type ItemResponse struct {
-	ID          int     `json:"id"`
+	ID          string  `json:"id"`
 	Name        string  `json:"name"`
 	Description string  `json:"description"`
 	Price       float64 `json:"price"`
@@ -317,8 +317,8 @@ func CreateTestItem(backendURL string, item CreateItemRequest) (*ItemResponse, e
 }
 
 // DeleteTestItem deletes a test item from the backend.
-func DeleteTestItem(backendURL string, id int) error {
-	resp, err := MakeRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/items/%d", backendURL, id), nil)
+func DeleteTestItem(backendURL string, id string) error {
+	resp, err := MakeRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/items/%s", backendURL, id), nil)
 	if err != nil {
 		return err
 	}
