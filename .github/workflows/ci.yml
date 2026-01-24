@@ -172,7 +172,7 @@ jobs:
           --health-start-period 10s
       # Vault for secrets management and PKI
       vault:
-        image: vault:latest
+        image: vault:1.13.3
         ports:
           - 8200:8200
         env:
