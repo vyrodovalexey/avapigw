@@ -54,6 +54,48 @@ type RedisCacheConfig struct {
 
 	// TLS contains TLS configuration for Redis connections.
 	TLS *TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+
+	// Retry contains retry configuration for initial connection.
+	Retry *RedisRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+}
+
+// RedisRetryConfig contains retry configuration for Redis connections.
+type RedisRetryConfig struct {
+	// MaxRetries is the maximum number of retry attempts for initial connection.
+	// Default is 3.
+	MaxRetries int `yaml:"maxRetries,omitempty" json:"maxRetries,omitempty"`
+
+	// InitialBackoff is the initial backoff duration between retries.
+	// Default is 100ms.
+	InitialBackoff Duration `yaml:"initialBackoff,omitempty" json:"initialBackoff,omitempty"`
+
+	// MaxBackoff is the maximum backoff duration between retries.
+	// Default is 30s.
+	MaxBackoff Duration `yaml:"maxBackoff,omitempty" json:"maxBackoff,omitempty"`
+}
+
+// GetMaxRetries returns the effective max retries.
+func (c *RedisRetryConfig) GetMaxRetries() int {
+	if c == nil || c.MaxRetries <= 0 {
+		return DefaultRetryMaxRetries
+	}
+	return c.MaxRetries
+}
+
+// GetInitialBackoff returns the effective initial backoff.
+func (c *RedisRetryConfig) GetInitialBackoff() Duration {
+	if c == nil || c.InitialBackoff <= 0 {
+		return Duration(DefaultRetryInitialBackoff)
+	}
+	return c.InitialBackoff
+}
+
+// GetMaxBackoff returns the effective max backoff.
+func (c *RedisRetryConfig) GetMaxBackoff() Duration {
+	if c == nil || c.MaxBackoff <= 0 {
+		return Duration(DefaultRetryMaxBackoff)
+	}
+	return c.MaxBackoff
 }
 
 // CacheKeyConfig contains configuration for cache key generation.
@@ -92,8 +134,8 @@ func DefaultCacheConfig() *CacheConfig {
 	return &CacheConfig{
 		Enabled:    false,
 		Type:       CacheTypeMemory,
-		TTL:        Duration(300000000000), // 5 minutes
-		MaxEntries: 10000,
+		TTL:        Duration(DefaultCacheTTL),
+		MaxEntries: DefaultCacheMaxEntries,
 		KeyConfig: &CacheKeyConfig{
 			IncludeMethod: true,
 			IncludePath:   true,
@@ -104,11 +146,11 @@ func DefaultCacheConfig() *CacheConfig {
 // DefaultRedisCacheConfig returns default Redis cache configuration.
 func DefaultRedisCacheConfig() *RedisCacheConfig {
 	return &RedisCacheConfig{
-		PoolSize:       10,
-		ConnectTimeout: Duration(5000000000), // 5 seconds
-		ReadTimeout:    Duration(3000000000), // 3 seconds
-		WriteTimeout:   Duration(3000000000), // 3 seconds
-		KeyPrefix:      "avapigw:",
+		PoolSize:       DefaultRedisPoolSize,
+		ConnectTimeout: Duration(DefaultRedisConnectTimeout),
+		ReadTimeout:    Duration(DefaultRedisReadTimeout),
+		WriteTimeout:   Duration(DefaultRedisWriteTimeout),
+		KeyPrefix:      DefaultRedisKeyPrefix,
 	}
 }
 

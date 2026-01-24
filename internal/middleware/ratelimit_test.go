@@ -226,7 +226,10 @@ func TestRateLimitFromConfig(t *testing.T) {
 			t.Parallel()
 
 			logger := observability.NopLogger()
-			middleware := RateLimitFromConfig(tt.config, logger)
+			middleware, rl := RateLimitFromConfig(tt.config, logger)
+			if rl != nil {
+				defer rl.Stop()
+			}
 
 			handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
@@ -248,19 +251,55 @@ func TestRateLimiter_CleanupOldClients(t *testing.T) {
 
 	rl := NewRateLimiter(100, 10, true)
 
-	// Add many clients
-	for i := 0; i < 15000; i++ {
-		rl.Allow("192.168." + string(rune(i/256)) + "." + string(rune(i%256)))
+	// Add some clients
+	for i := 0; i < 10; i++ {
+		rl.Allow("192.168.1." + string(rune(i)))
 	}
 
-	// Cleanup should clear clients when over 10000
-	rl.CleanupOldClients(time.Hour)
+	// Verify clients were added
+	rl.mu.RLock()
+	initialCount := len(rl.clients)
+	rl.mu.RUnlock()
+	assert.Equal(t, 10, initialCount)
+
+	// Cleanup with a very short TTL should remove all clients
+	// since they haven't been accessed recently relative to a 0 TTL
+	rl.CleanupOldClients(0)
 
 	rl.mu.RLock()
 	clientCount := len(rl.clients)
 	rl.mu.RUnlock()
 
 	assert.Equal(t, 0, clientCount)
+}
+
+func TestRateLimiter_CleanupOldClients_TTLBased(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(100, 10, true)
+
+	// Add some clients
+	for i := 0; i < 5; i++ {
+		rl.Allow("192.168.1." + string(rune(i)))
+	}
+
+	// Wait a bit
+	time.Sleep(50 * time.Millisecond)
+
+	// Add more clients
+	for i := 5; i < 10; i++ {
+		rl.Allow("192.168.1." + string(rune(i)))
+	}
+
+	// Cleanup with TTL that should only remove the older clients
+	rl.CleanupOldClients(25 * time.Millisecond)
+
+	rl.mu.RLock()
+	clientCount := len(rl.clients)
+	rl.mu.RUnlock()
+
+	// Only the newer clients should remain
+	assert.Equal(t, 5, clientCount)
 }
 
 func TestRateLimiter_StartCleanup(t *testing.T) {

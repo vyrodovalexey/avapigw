@@ -14,17 +14,20 @@ import (
 	grpcrouter "github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	grpcserver "github.com/vyrodovalexey/avapigw/internal/grpc/server"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 )
 
 // GRPCListener represents a gRPC listener.
 type GRPCListener struct {
-	config  config.Listener
-	server  *grpcserver.Server
-	router  *grpcrouter.Router
-	proxy   *grpcproxy.Proxy
-	metrics *grpcmiddleware.GRPCMetrics
-	logger  observability.Logger
-	running atomic.Bool
+	config     config.Listener
+	server     *grpcserver.Server
+	router     *grpcrouter.Router
+	proxy      *grpcproxy.Proxy
+	metrics    *grpcmiddleware.GRPCMetrics
+	logger     observability.Logger
+	running    atomic.Bool
+	tlsManager *tlspkg.Manager
+	tlsMetrics tlspkg.MetricsRecorder
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -48,6 +51,20 @@ func WithGRPCRouter(router *grpcrouter.Router) GRPCListenerOption {
 func WithGRPCMetrics(metrics *grpcmiddleware.GRPCMetrics) GRPCListenerOption {
 	return func(l *GRPCListener) {
 		l.metrics = metrics
+	}
+}
+
+// WithGRPCTLSManager sets the TLS manager for the gRPC listener.
+func WithGRPCTLSManager(manager *tlspkg.Manager) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.tlsManager = manager
+	}
+}
+
+// WithGRPCTLSMetrics sets the TLS metrics for the gRPC listener.
+func WithGRPCTLSMetrics(metrics tlspkg.MetricsRecorder) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.tlsMetrics = metrics
 	}
 }
 
@@ -84,15 +101,24 @@ func NewGRPCListener(
 		grpcCfg = config.DefaultGRPCListenerConfig()
 	}
 
-	// Create server
-	address := l.Address()
-	server, err := grpcserver.New(grpcCfg,
+	// Build server options
+	serverOpts := []grpcserver.Option{
 		grpcserver.WithLogger(l.logger),
-		grpcserver.WithAddress(address),
+		grpcserver.WithAddress(l.Address()),
 		grpcserver.WithUnaryInterceptors(unaryInterceptors...),
 		grpcserver.WithStreamInterceptors(streamInterceptors...),
 		grpcserver.WithUnknownServiceHandler(l.proxy.StreamHandler()),
-	)
+	}
+
+	// Configure TLS
+	tlsOpts, err := l.buildTLSOptions(grpcCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure TLS: %w", err)
+	}
+	serverOpts = append(serverOpts, tlsOpts...)
+
+	// Create server
+	server, err := grpcserver.New(grpcCfg, serverOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC server: %w", err)
 	}
@@ -100,6 +126,157 @@ func NewGRPCListener(
 	l.server = server
 
 	return l, nil
+}
+
+// buildTLSOptions builds TLS-related server options.
+func (l *GRPCListener) buildTLSOptions(grpcCfg *config.GRPCListenerConfig) ([]grpcserver.Option, error) {
+	// Check if TLS manager is provided externally
+	if l.tlsManager != nil {
+		return l.buildTLSOptionsFromManager(), nil
+	}
+
+	// Check TLS configuration from gRPC config
+	if grpcCfg == nil || grpcCfg.TLS == nil {
+		return nil, nil
+	}
+
+	return l.buildTLSOptionsFromConfig(grpcCfg.TLS)
+}
+
+// buildTLSOptionsFromManager builds TLS options using the externally provided TLS manager.
+func (l *GRPCListener) buildTLSOptionsFromManager() []grpcserver.Option {
+	opts := []grpcserver.Option{grpcserver.WithTLSManager(l.tlsManager)}
+	if l.tlsMetrics != nil {
+		opts = append(opts, grpcserver.WithTLSMetrics(l.tlsMetrics))
+	}
+
+	l.logger.Info("gRPC listener using TLS manager",
+		observability.String("name", l.config.Name),
+		observability.String("mode", string(l.tlsManager.GetMode())),
+	)
+	return opts
+}
+
+// buildTLSOptionsFromConfig builds TLS options from TLS configuration.
+func (l *GRPCListener) buildTLSOptionsFromConfig(tlsCfg *config.TLSConfig) ([]grpcserver.Option, error) {
+	// Validate TLS configuration
+	if err := tlsCfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
+	}
+
+	// Check if insecure mode
+	if tlsCfg.IsInsecure() {
+		l.logger.Warn("gRPC listener running in INSECURE mode",
+			observability.String("name", l.config.Name),
+		)
+		return []grpcserver.Option{grpcserver.WithInsecure()}, nil
+	}
+
+	// Configure TLS from config
+	if !tlsCfg.Enabled {
+		return nil, nil
+	}
+
+	return l.configureTLSFromConfig(tlsCfg)
+}
+
+// configureTLSFromConfig configures TLS options from TLS configuration.
+func (l *GRPCListener) configureTLSFromConfig(tlsCfg *config.TLSConfig) ([]grpcserver.Option, error) {
+	var opts []grpcserver.Option
+
+	// Create TLS manager from config
+	manager, err := l.createTLSManagerFromConfig(tlsCfg)
+	if err != nil {
+		opts = l.handleTLSManagerCreationError(tlsCfg, err)
+	} else {
+		l.tlsManager = manager
+		opts = append(opts, grpcserver.WithTLSManager(manager))
+		if l.tlsMetrics != nil {
+			opts = append(opts, grpcserver.WithTLSMetrics(l.tlsMetrics))
+		}
+	}
+
+	// Configure ALPN enforcement
+	if tlsCfg.RequireALPN {
+		opts = append(opts, grpcserver.WithALPNEnforcement(true))
+	}
+
+	// Configure client cert metadata extraction for mTLS
+	if tlsCfg.IsMutual() || tlsCfg.IsOptionalMutual() {
+		opts = append(opts, grpcserver.WithClientCertMetadata(true))
+	}
+
+	l.logger.Info("gRPC listener TLS configured",
+		observability.String("name", l.config.Name),
+		observability.String("mode", tlsCfg.GetEffectiveMode()),
+		observability.Bool("mtls", tlsCfg.IsMutual()),
+	)
+
+	return opts, nil
+}
+
+// handleTLSManagerCreationError handles TLS manager creation failure by falling back to file-based TLS.
+func (l *GRPCListener) handleTLSManagerCreationError(
+	tlsCfg *config.TLSConfig,
+	err error,
+) []grpcserver.Option {
+	l.logger.Warn("failed to create TLS manager, falling back to file-based TLS",
+		observability.String("name", l.config.Name),
+		observability.Error(err),
+	)
+
+	var opts []grpcserver.Option
+	if tlsCfg.CertFile != "" && tlsCfg.KeyFile != "" {
+		opts = append(opts, grpcserver.WithTLSCredentials(tlsCfg.CertFile, tlsCfg.KeyFile))
+	}
+	return opts
+}
+
+// createTLSManagerFromConfig creates a TLS manager from TLSConfig.
+func (l *GRPCListener) createTLSManagerFromConfig(cfg *config.TLSConfig) (*tlspkg.Manager, error) {
+	// Convert config.TLSConfig to tlspkg.Config
+	tlsConfig := &tlspkg.Config{
+		Mode:               tlspkg.TLSMode(cfg.GetEffectiveMode()),
+		MinVersion:         tlspkg.TLSVersion(cfg.GetEffectiveMinVersion()),
+		CipherSuites:       cfg.CipherSuites,
+		ALPN:               cfg.GetEffectiveALPN(),
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+	}
+
+	// Set max version if specified
+	if cfg.MaxVersion != "" {
+		tlsConfig.MaxVersion = tlspkg.TLSVersion(cfg.MaxVersion)
+	}
+
+	// Configure server certificate
+	if cfg.CertFile != "" && cfg.KeyFile != "" {
+		tlsConfig.ServerCertificate = &tlspkg.CertificateConfig{
+			Source:   tlspkg.CertificateSourceFile,
+			CertFile: cfg.CertFile,
+			KeyFile:  cfg.KeyFile,
+		}
+	}
+
+	// Configure client validation for mTLS
+	if cfg.IsMutual() || cfg.IsOptionalMutual() {
+		tlsConfig.ClientValidation = &tlspkg.ClientValidationConfig{
+			Enabled:           true,
+			CAFile:            cfg.CAFile,
+			RequireClientCert: cfg.IsMutual(),
+			AllowedCNs:        cfg.AllowedCNs,
+			AllowedSANs:       cfg.AllowedSANs,
+		}
+	}
+
+	// Create manager options
+	managerOpts := []tlspkg.ManagerOption{
+		tlspkg.WithManagerLogger(l.logger),
+	}
+	if l.tlsMetrics != nil {
+		managerOpts = append(managerOpts, tlspkg.WithManagerMetrics(l.tlsMetrics))
+	}
+
+	return tlspkg.NewManager(tlsConfig, managerOpts...)
 }
 
 // buildInterceptors builds the interceptor chains.
@@ -163,7 +340,22 @@ func (l *GRPCListener) Start(ctx context.Context) error {
 		observability.String("address", l.Address()),
 	)
 
+	// Start TLS manager if available
+	if l.tlsManager != nil {
+		if err := l.tlsManager.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start TLS manager: %w", err)
+		}
+		l.logger.Info("TLS manager started",
+			observability.String("name", l.config.Name),
+			observability.String("mode", string(l.tlsManager.GetMode())),
+		)
+	}
+
 	if err := l.server.Start(ctx); err != nil {
+		// Clean up TLS manager if server fails to start
+		if l.tlsManager != nil {
+			_ = l.tlsManager.Close()
+		}
 		return fmt.Errorf("failed to start gRPC server: %w", err)
 	}
 
@@ -210,6 +402,16 @@ func (l *GRPCListener) Stop(ctx context.Context) error {
 		)
 	}
 
+	// Close TLS manager if we created it
+	if l.tlsManager != nil {
+		if err := l.tlsManager.Close(); err != nil {
+			l.logger.Error("failed to close TLS manager",
+				observability.String("name", l.config.Name),
+				observability.Error(err),
+			)
+		}
+	}
+
 	l.running.Store(false)
 
 	l.logger.Info("gRPC listener stopped",
@@ -242,4 +444,45 @@ func (l *GRPCListener) Proxy() *grpcproxy.Proxy {
 // LoadRoutes loads gRPC routes from configuration.
 func (l *GRPCListener) LoadRoutes(routes []config.GRPCRoute) error {
 	return l.router.LoadRoutes(routes)
+}
+
+// TLSManager returns the TLS manager if configured.
+func (l *GRPCListener) TLSManager() *tlspkg.Manager {
+	return l.tlsManager
+}
+
+// IsTLSEnabled returns true if TLS is enabled for this listener.
+func (l *GRPCListener) IsTLSEnabled() bool {
+	if l.tlsManager != nil {
+		return l.tlsManager.IsEnabled()
+	}
+	// Check config
+	if l.config.GRPC != nil && l.config.GRPC.TLS != nil {
+		return l.config.GRPC.TLS.Enabled && !l.config.GRPC.TLS.IsInsecure()
+	}
+	return false
+}
+
+// IsMTLSEnabled returns true if mutual TLS is enabled for this listener.
+func (l *GRPCListener) IsMTLSEnabled() bool {
+	if l.tlsManager != nil {
+		return l.tlsManager.IsMTLSEnabled()
+	}
+	// Check config
+	if l.config.GRPC != nil && l.config.GRPC.TLS != nil {
+		return l.config.GRPC.TLS.IsMutual() || l.config.GRPC.TLS.IsOptionalMutual()
+	}
+	return false
+}
+
+// TLSMode returns the TLS mode for this listener.
+func (l *GRPCListener) TLSMode() string {
+	if l.tlsManager != nil {
+		return string(l.tlsManager.GetMode())
+	}
+	// Check config
+	if l.config.GRPC != nil && l.config.GRPC.TLS != nil {
+		return l.config.GRPC.TLS.GetEffectiveMode()
+	}
+	return config.TLSModeInsecure
 }

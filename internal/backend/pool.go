@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"time"
@@ -16,6 +17,7 @@ type PoolConfig struct {
 	ExpectContinueTimeout time.Duration
 	DisableKeepAlives     bool
 	DisableCompression    bool
+	TLSConfig             *tls.Config
 }
 
 // DefaultPoolConfig returns default pool configuration.
@@ -56,6 +58,7 @@ func NewConnectionPool(config PoolConfig) *ConnectionPool {
 		ExpectContinueTimeout: config.ExpectContinueTimeout,
 		DisableKeepAlives:     config.DisableKeepAlives,
 		DisableCompression:    config.DisableCompression,
+		TLSClientConfig:       config.TLSConfig,
 	}
 
 	client := &http.Client{
@@ -68,6 +71,19 @@ func NewConnectionPool(config PoolConfig) *ConnectionPool {
 		transport: transport,
 		client:    client,
 	}
+}
+
+// NewConnectionPoolWithTLS creates a new connection pool with TLS configuration.
+func NewConnectionPoolWithTLS(config PoolConfig, tlsConfig *tls.Config) *ConnectionPool {
+	config.TLSConfig = tlsConfig
+	return NewConnectionPool(config)
+}
+
+// SetTLSConfig updates the TLS configuration for the connection pool.
+// Note: This closes existing idle connections.
+func (p *ConnectionPool) SetTLSConfig(tlsConfig *tls.Config) {
+	p.transport.TLSClientConfig = tlsConfig
+	p.transport.CloseIdleConnections()
 }
 
 // Client returns the HTTP client.

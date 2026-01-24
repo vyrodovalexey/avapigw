@@ -161,7 +161,11 @@ func TestFunctional_Middleware_RateLimit(t *testing.T) {
 			Enabled: false,
 		}
 
-		handler := middleware.RateLimitFromConfig(cfg, observability.NopLogger())(
+		rateLimitMiddleware, rateLimiter := middleware.RateLimitFromConfig(cfg, observability.NopLogger())
+		if rateLimiter != nil {
+			defer rateLimiter.Stop()
+		}
+		handler := rateLimitMiddleware(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}),

@@ -365,28 +365,46 @@ func TestCalculateBackoff(t *testing.T) {
 	assert.LessOrEqual(t, backoff10, maxBackoff)
 }
 
-func TestReadRequestBody(t *testing.T) {
+func TestReadRequestBodyWithLimit(t *testing.T) {
 	t.Parallel()
 
+	logger := observability.NopLogger()
+
 	tests := []struct {
-		name     string
-		body     io.Reader
-		expected []byte
+		name      string
+		body      io.Reader
+		maxSize   int64
+		expected  []byte
+		canRetry  bool
+		nilResult bool
 	}{
 		{
-			name:     "reads body",
+			name:     "reads body within limit",
 			body:     strings.NewReader("test body"),
+			maxSize:  1024,
 			expected: []byte("test body"),
+			canRetry: true,
 		},
 		{
-			name:     "nil body",
+			name:     "nil body (becomes http.NoBody)",
 			body:     nil,
-			expected: []byte{}, // io.ReadAll returns empty slice for nil body
+			maxSize:  1024,
+			expected: []byte{}, // httptest.NewRequest converts nil to http.NoBody
+			canRetry: true,
 		},
 		{
 			name:     "empty body",
 			body:     strings.NewReader(""),
+			maxSize:  1024,
 			expected: []byte{},
+			canRetry: true,
+		},
+		{
+			name:      "body exceeds limit",
+			body:      strings.NewReader("this is a long body that exceeds the limit"),
+			maxSize:   10,
+			nilResult: true,
+			canRetry:  false,
 		},
 	}
 
@@ -395,9 +413,10 @@ func TestReadRequestBody(t *testing.T) {
 			t.Parallel()
 
 			req := httptest.NewRequest(http.MethodPost, "/test", tt.body)
-			result := readRequestBody(req)
+			result, canRetry := readRequestBodyWithLimit(req, tt.maxSize, logger)
 
-			if tt.expected == nil {
+			assert.Equal(t, tt.canRetry, canRetry)
+			if tt.nilResult {
 				assert.Nil(t, result)
 			} else {
 				assert.Equal(t, tt.expected, result)

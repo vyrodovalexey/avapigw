@@ -29,20 +29,21 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
           args: --timeout=5m
@@ -50,14 +51,15 @@ jobs:
   govulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -71,14 +73,15 @@ jobs:
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -89,7 +92,7 @@ jobs:
           go test -race -coverprofile=coverage/unit.out -covermode=atomic ./internal/... ./cmd/...
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/unit.out
@@ -99,7 +102,7 @@ jobs:
           verbose: true
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-unit
           path: coverage/unit.out
@@ -108,14 +111,15 @@ jobs:
   functional-tests:
     name: Functional Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -126,7 +130,7 @@ jobs:
           go test -race -coverprofile=coverage/functional.out -covermode=atomic -tags=functional ./test/functional/...
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/functional.out
@@ -136,7 +140,7 @@ jobs:
           verbose: true
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-functional
           path: coverage/functional.out
@@ -149,6 +153,7 @@ jobs:
   integration-tests:
     name: Integration & E2E Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     services:
@@ -161,6 +166,21 @@ jobs:
           - 6379:6379
         options: >-
           --health-cmd "redis-cli -a password ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+      # Vault for secrets management and PKI
+      vault:
+        image: vault:latest
+        ports:
+          - 8200:8200
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: myroot
+          VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        options: >-
+          --cap-add=IPC_LOCK
+          --health-cmd "wget -q --spider http://127.0.0.1:8200/v1/sys/health || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -190,7 +210,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
           --health-start-period 10s
-      # gRPC backends
+      # gRPC backends (health check via TCP port since grpcurl not available in container)
       grpc-backend1:
         image: ghcr.io/vyrodovalexey/grpc-example:latest
         ports:
@@ -198,7 +218,7 @@ jobs:
         env:
           GRPC_PORT: 50051
         options: >-
-          --health-cmd "grpcurl -plaintext localhost:50051 list || exit 1"
+          --health-cmd "nc -z localhost 50051 || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -210,17 +230,35 @@ jobs:
         env:
           GRPC_PORT: 50051
         options: >-
-          --health-cmd "grpcurl -plaintext localhost:50051 list || exit 1"
+          --health-cmd "nc -z localhost 50051 || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
           --health-start-period 10s
+      # Keycloak for OIDC testing (using dev mode for simplicity)
+      # Keycloak for OIDC testing (using bitnami image for easier dev mode)
+      keycloak:
+        image: bitnami/keycloak:26
+        ports:
+          - 8090:8080
+        env:
+          KEYCLOAK_ADMIN_USER: admin
+          KEYCLOAK_ADMIN_PASSWORD: admin
+          KEYCLOAK_HTTP_PORT: 8080
+          KEYCLOAK_ENABLE_HEALTH_ENDPOINTS: "true"
+          KEYCLOAK_ENABLE_STATISTICS: "true"
+        options: >-
+          --health-cmd "curl -sf http://localhost:8080/health/ready || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 120s
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -246,6 +284,17 @@ jobs:
             sleep 2
           done
           
+          # Wait for Vault
+          echo "Checking Vault..."
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:8200/v1/sys/health | grep -q '"initialized":true'; then
+              echo "Vault is ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for Vault..."
+            sleep 2
+          done
+          
           # Wait for HTTP backends
           echo "Checking HTTP backends..."
           for i in {1..30}; do
@@ -268,18 +317,174 @@ jobs:
             sleep 2
           done
           
+          # Wait for Keycloak
+          echo "Checking Keycloak..."
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:8090/health/ready; then
+              echo "Keycloak is ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for Keycloak..."
+            sleep 5
+          done
+          
           # Final checks
           echo "Running final health checks..."
           redis-cli -h 127.0.0.1 -a password ping || (echo "Redis not ready" && exit 1)
+          curl -s http://127.0.0.1:8200/v1/sys/health | grep -q '"initialized":true' || (echo "Vault not ready" && exit 1)
           curl -sf http://127.0.0.1:8801/health || (echo "HTTP Backend 1 not ready" && exit 1)
           curl -sf http://127.0.0.1:8802/health || (echo "HTTP Backend 2 not ready" && exit 1)
           grpcurl -plaintext 127.0.0.1:8803 list || (echo "gRPC Backend 1 not ready" && exit 1)
           grpcurl -plaintext 127.0.0.1:8804 list || (echo "gRPC Backend 2 not ready" && exit 1)
+          curl -sf http://127.0.0.1:8090/health/ready || (echo "Keycloak not ready" && exit 1)
           echo "All services are ready!"
+
+      - name: Setup Vault for Testing
+        env:
+          VAULT_ADDR: http://127.0.0.1:8200
+          VAULT_TOKEN: myroot
+        run: |
+          # Enable PKI secrets engine
+          echo "Enabling PKI secrets engine..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/sys/mounts/pki \
+            -d '{"type":"pki"}'
+          
+          # Configure PKI max lease TTL
+          echo "Configuring PKI max lease TTL..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/sys/mounts/pki/tune \
+            -d '{"max_lease_ttl":"87600h"}'
+          
+          # Generate root CA
+          echo "Generating root CA..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/pki/root/generate/internal \
+            -d '{"common_name":"Test Root CA","ttl":"87600h"}'
+          
+          # Create PKI role
+          echo "Creating PKI role..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/pki/roles/test-role \
+            -d '{"allowed_domains":"localhost,*.local,*.test","allow_subdomains":true,"allow_localhost":true,"max_ttl":"72h"}'
+          
+          # Enable KV v2 secrets engine (note: in dev mode, 'secret/' is already enabled as KV v2)
+          # We'll create a test secret to verify it works
+          echo "Creating test secret in KV store..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/secret/data/test \
+            -d '{"data":{"key":"value"}}'
+          
+          # Verify PKI setup
+          echo "Verifying PKI setup..."
+          curl -s -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/pki/roles/test-role | grep -q "test-role" && echo "PKI role verified"
+          
+          # Enable Transit for JWT signing
+          echo "Enabling Transit secrets engine..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/sys/mounts/transit \
+            -d '{"type":"transit"}'
+          
+          # Create JWT signing key
+          echo "Creating JWT signing key..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/transit/keys/jwt-signing \
+            -d '{"type":"rsa-2048"}'
+          
+          # Store API keys for testing
+          echo "Storing test API keys..."
+          curl -s -X POST -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/secret/data/api-keys/test-key \
+            -d '{"data":{"key":"test-api-key-12345","scopes":"read,write","enabled":true}}'
+          
+          echo "Vault setup complete!"
+
+      - name: Setup Keycloak for Testing
+        env:
+          KEYCLOAK_ADDR: http://127.0.0.1:8090
+        run: |
+          echo "Waiting for Keycloak to be ready..."
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:8090/health/ready; then
+              echo "Keycloak is ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for Keycloak..."
+            sleep 5
+          done
+          
+          # Get admin token
+          echo "Getting admin token..."
+          ADMIN_TOKEN=$(curl -s -X POST "http://127.0.0.1:8090/realms/master/protocol/openid-connect/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "username=admin" \
+            -d "password=admin" \
+            -d "grant_type=password" \
+            -d "client_id=admin-cli" | jq -r '.access_token')
+          
+          if [ -z "$ADMIN_TOKEN" ] || [ "$ADMIN_TOKEN" = "null" ]; then
+            echo "Failed to get admin token"
+            exit 1
+          fi
+          
+          # Create test realm
+          echo "Creating test realm..."
+          curl -s -X POST "http://127.0.0.1:8090/admin/realms" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"realm": "gateway-test", "enabled": true}'
+          
+          # Create client
+          echo "Creating gateway client..."
+          curl -s -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/clients" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "clientId": "gateway",
+              "enabled": true,
+              "publicClient": false,
+              "secret": "gateway-secret",
+              "directAccessGrantsEnabled": true,
+              "standardFlowEnabled": true,
+              "serviceAccountsEnabled": true
+            }'
+          
+          # Create test user
+          echo "Creating test user..."
+          curl -s -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/users" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "username": "testuser",
+              "enabled": true,
+              "emailVerified": true,
+              "credentials": [{"type": "password", "value": "testpass", "temporary": false}]
+            }'
+          
+          # Create admin user
+          echo "Creating admin user..."
+          curl -s -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/users" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "username": "adminuser",
+              "enabled": true,
+              "emailVerified": true,
+              "credentials": [{"type": "password", "value": "adminpass", "temporary": false}]
+            }'
+          
+          echo "Keycloak setup complete!"
 
       - name: Run integration tests
         env:
           TEST_REDIS_URL: redis://default:password@127.0.0.1:6379
+          TEST_VAULT_ADDR: http://127.0.0.1:8200
+          TEST_VAULT_TOKEN: myroot
+          TEST_KEYCLOAK_ADDR: http://127.0.0.1:8090
+          TEST_KEYCLOAK_REALM: gateway-test
+          TEST_KEYCLOAK_CLIENT_ID: gateway
+          TEST_KEYCLOAK_CLIENT_SECRET: gateway-secret
           TEST_BACKEND1_URL: http://127.0.0.1:8801
           TEST_BACKEND2_URL: http://127.0.0.1:8802
           TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803
@@ -291,6 +496,12 @@ jobs:
       - name: Run e2e tests
         env:
           TEST_REDIS_URL: redis://default:password@127.0.0.1:6379
+          TEST_VAULT_ADDR: http://127.0.0.1:8200
+          TEST_VAULT_TOKEN: myroot
+          TEST_KEYCLOAK_ADDR: http://127.0.0.1:8090
+          TEST_KEYCLOAK_REALM: gateway-test
+          TEST_KEYCLOAK_CLIENT_ID: gateway
+          TEST_KEYCLOAK_CLIENT_SECRET: gateway-secret
           TEST_BACKEND1_URL: http://127.0.0.1:8801
           TEST_BACKEND2_URL: http://127.0.0.1:8802
           TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803
@@ -299,7 +510,7 @@ jobs:
           go test -race -coverprofile=coverage/e2e.out -covermode=atomic -tags=e2e -v -timeout 15m ./test/e2e/...
 
       - name: Upload integration coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/integration.out,./coverage/e2e.out
@@ -309,7 +520,7 @@ jobs:
           verbose: true
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-integration-e2e
           path: |
@@ -324,35 +535,36 @@ jobs:
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [lint, govulncheck, unit-tests, functional-tests, integration-tests]
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0  # Required for SonarCloud
 
       - name: Download unit coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-unit
           path: coverage
 
       - name: Download functional coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-functional
           path: coverage
 
       - name: Download integration/e2e coverage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: coverage-integration-e2e
           path: coverage
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
+        uses: SonarSource/sonarcloud-github-action@02ef91109b2d589e757aefcfb2854c2783fd7b19 # v4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -369,16 +581,17 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [sonarcloud]
     if: github.event_name == 'pull_request'
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -393,7 +606,7 @@ jobs:
           ls -la ./bin/
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gateway-binary
           path: bin/${{ env.BINARY_NAME }}
@@ -402,6 +615,7 @@ jobs:
   docker-build-pr:
     name: Docker Build (PR)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [build]
     if: github.event_name == 'pull_request'
     permissions:
@@ -409,14 +623,14 @@ jobs:
       packages: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.DOCKER_IMAGE }}
           tags: |
@@ -424,7 +638,7 @@ jobs:
             type=sha,prefix=pr-
 
       - name: Build Docker image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: .
           push: false
@@ -444,6 +658,7 @@ jobs:
   build-release:
     name: Build & Release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [sonarcloud]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -453,12 +668,12 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -507,7 +722,7 @@ jobs:
           sha256sum ${{ env.BINARY_NAME }}-darwin-amd64 > ${{ env.BINARY_NAME }}-darwin-amd64.sha256
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           name: Release ${{ steps.version.outputs.version }}
           draft: false
@@ -526,7 +741,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload binary artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-binaries
           path: bin/${{ env.BINARY_NAME }}-*
@@ -539,6 +754,7 @@ jobs:
   docker-build-push:
     name: Docker Build & Push
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [sonarcloud]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -549,16 +765,16 @@ jobs:
       image-tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ github.actor }}
@@ -566,7 +782,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.DOCKER_IMAGE }}
           tags: |
@@ -578,7 +794,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -593,7 +809,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@62ad5284b8ced813296287a0b63906cb364b73ee # v0
         with:
           image: ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.version }}
           artifact-name: sbom-${{ steps.meta.outputs.version }}.spdx.json
@@ -601,7 +817,7 @@ jobs:
           upload-release-assets: false
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sbom
           path: ./sbom.spdx.json
@@ -610,6 +826,7 @@ jobs:
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [docker-build-push]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -617,17 +834,17 @@ jobs:
       security-events: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # v0.31.0
         with:
           image-ref: '${{ env.DOCKER_IMAGE }}:${{ needs.docker-build-push.outputs.image-tag }}'
           format: 'sarif'
@@ -636,12 +853,12 @@ jobs:
           vuln-type: 'os,library'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@38e701f46e33fb233075bf4238cb1e5d68e429e4 # v3
         with:
           sarif_file: 'trivy-results.sarif'
 
       - name: Run Trivy vulnerability scanner (table output)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # v0.31.0
         with:
           image-ref: '${{ env.DOCKER_IMAGE }}:${{ needs.docker-build-push.outputs.image-tag }}'
           format: 'table'
@@ -650,7 +867,7 @@ jobs:
           exit-code: '1'
 
       - name: Upload Trivy results artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: trivy-results

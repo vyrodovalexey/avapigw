@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -11,6 +12,21 @@ const (
 	ProtocolHTTPS = "HTTPS"
 	ProtocolHTTP2 = "HTTP2"
 	ProtocolGRPC  = "GRPC"
+)
+
+// TLS mode constants for gRPC listener configuration.
+const (
+	// TLSModeSimple enables TLS with server certificate only.
+	TLSModeSimple = "SIMPLE"
+
+	// TLSModeMutual enables mutual TLS (mTLS) requiring client certificates.
+	TLSModeMutual = "MUTUAL"
+
+	// TLSModeOptionalMutual enables TLS with optional client certificate verification.
+	TLSModeOptionalMutual = "OPTIONAL_MUTUAL"
+
+	// TLSModeInsecure disables TLS (plaintext, development only).
+	TLSModeInsecure = "INSECURE"
 )
 
 // GRPCListenerConfig contains gRPC-specific listener configuration.
@@ -59,10 +75,13 @@ type GRPCKeepaliveConfig struct {
 	MaxConnectionAgeGrace Duration `yaml:"maxConnectionAgeGrace,omitempty" json:"maxConnectionAgeGrace,omitempty"`
 }
 
-// TLSConfig contains TLS configuration.
+// TLSConfig contains TLS configuration for gRPC.
 type TLSConfig struct {
 	// Enabled indicates whether TLS is enabled.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// Mode specifies the TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE).
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// CertFile is the path to the TLS certificate file.
 	CertFile string `yaml:"certFile,omitempty" json:"certFile,omitempty"`
@@ -73,8 +92,208 @@ type TLSConfig struct {
 	// CAFile is the path to the CA certificate file for client verification.
 	CAFile string `yaml:"caFile,omitempty" json:"caFile,omitempty"`
 
+	// MinVersion is the minimum TLS version (TLS12, TLS13).
+	MinVersion string `yaml:"minVersion,omitempty" json:"minVersion,omitempty"`
+
+	// MaxVersion is the maximum TLS version.
+	MaxVersion string `yaml:"maxVersion,omitempty" json:"maxVersion,omitempty"`
+
+	// CipherSuites is the list of allowed cipher suites.
+	CipherSuites []string `yaml:"cipherSuites,omitempty" json:"cipherSuites,omitempty"`
+
+	// RequireClientCert requires client certificate (for MUTUAL mode).
+	RequireClientCert bool `yaml:"requireClientCert,omitempty" json:"requireClientCert,omitempty"`
+
 	// InsecureSkipVerify skips TLS verification (not recommended for production).
 	InsecureSkipVerify bool `yaml:"insecureSkipVerify,omitempty" json:"insecureSkipVerify,omitempty"`
+
+	// ALPN protocols for negotiation (default: ["h2"]).
+	ALPN []string `yaml:"alpn,omitempty" json:"alpn,omitempty"`
+
+	// RequireALPN rejects connections without proper ALPN.
+	RequireALPN bool `yaml:"requireALPN,omitempty" json:"requireALPN,omitempty"`
+
+	// AllowedCNs is the list of allowed Common Names for client certs.
+	AllowedCNs []string `yaml:"allowedCNs,omitempty" json:"allowedCNs,omitempty"`
+
+	// AllowedSANs is the list of allowed Subject Alternative Names.
+	AllowedSANs []string `yaml:"allowedSANs,omitempty" json:"allowedSANs,omitempty"`
+
+	// Vault configures Vault-based certificate management.
+	Vault *VaultGRPCTLSConfig `yaml:"vault,omitempty" json:"vault,omitempty"`
+}
+
+// VaultGRPCTLSConfig configures Vault-based TLS for gRPC.
+type VaultGRPCTLSConfig struct {
+	// Enabled enables Vault integration.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// PKIMount is the Vault PKI mount path.
+	PKIMount string `yaml:"pkiMount,omitempty" json:"pkiMount,omitempty"`
+
+	// Role is the Vault PKI role name.
+	Role string `yaml:"role,omitempty" json:"role,omitempty"`
+
+	// CommonName for certificate requests.
+	CommonName string `yaml:"commonName,omitempty" json:"commonName,omitempty"`
+
+	// AltNames for certificate requests.
+	AltNames []string `yaml:"altNames,omitempty" json:"altNames,omitempty"`
+
+	// TTL for certificate requests.
+	TTL string `yaml:"ttl,omitempty" json:"ttl,omitempty"`
+}
+
+// Validate validates the TLS configuration.
+func (c *TLSConfig) Validate() error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+
+	if err := c.validateMode(); err != nil {
+		return err
+	}
+
+	if err := c.validateCertificates(); err != nil {
+		return err
+	}
+
+	if err := c.validateVersions(); err != nil {
+		return err
+	}
+
+	return c.validateVault()
+}
+
+// validateMode validates the TLS mode.
+func (c *TLSConfig) validateMode() error {
+	if c.Mode == "" {
+		return nil
+	}
+
+	validModes := map[string]bool{
+		TLSModeSimple:         true,
+		TLSModeMutual:         true,
+		TLSModeOptionalMutual: true,
+		TLSModeInsecure:       true,
+	}
+	if !validModes[c.Mode] {
+		return fmt.Errorf("invalid TLS mode: %s", c.Mode)
+	}
+	return nil
+}
+
+// validateCertificates validates certificate configuration.
+func (c *TLSConfig) validateCertificates() error {
+	// For non-insecure modes, require cert and key (unless Vault is enabled)
+	if c.Mode != TLSModeInsecure && c.Mode != "" {
+		vaultEnabled := c.Vault != nil && c.Vault.Enabled
+		if c.CertFile == "" && !vaultEnabled {
+			return fmt.Errorf("certFile is required for TLS mode %s", c.Mode)
+		}
+		if c.KeyFile == "" && !vaultEnabled {
+			return fmt.Errorf("keyFile is required for TLS mode %s", c.Mode)
+		}
+	}
+
+	// For MUTUAL mode, require CA file
+	if c.Mode == TLSModeMutual && c.CAFile == "" {
+		return fmt.Errorf("caFile is required for MUTUAL TLS mode")
+	}
+	return nil
+}
+
+// validateVersions validates TLS version configuration.
+func (c *TLSConfig) validateVersions() error {
+	validVersions := map[string]bool{
+		"TLS10": true, "TLS11": true, "TLS12": true, "TLS13": true,
+	}
+
+	if c.MinVersion != "" && !validVersions[c.MinVersion] {
+		return fmt.Errorf("invalid minVersion: %s", c.MinVersion)
+	}
+	if c.MaxVersion != "" && !validVersions[c.MaxVersion] {
+		return fmt.Errorf("invalid maxVersion: %s", c.MaxVersion)
+	}
+	return nil
+}
+
+// validateVault validates Vault configuration if enabled.
+func (c *TLSConfig) validateVault() error {
+	if c.Vault != nil && c.Vault.Enabled {
+		return c.Vault.Validate()
+	}
+	return nil
+}
+
+// Validate validates the Vault TLS configuration.
+func (c *VaultGRPCTLSConfig) Validate() error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+
+	if c.PKIMount == "" {
+		return fmt.Errorf("vault.pkiMount is required")
+	}
+	if c.Role == "" {
+		return fmt.Errorf("vault.role is required")
+	}
+	if c.CommonName == "" {
+		return fmt.Errorf("vault.commonName is required")
+	}
+
+	return nil
+}
+
+// IsInsecure returns true if insecure mode is enabled.
+func (c *TLSConfig) IsInsecure() bool {
+	if c == nil {
+		return true
+	}
+	return !c.Enabled || c.Mode == TLSModeInsecure
+}
+
+// IsMutual returns true if mutual TLS is required.
+func (c *TLSConfig) IsMutual() bool {
+	if c == nil {
+		return false
+	}
+	return c.Mode == TLSModeMutual || c.RequireClientCert
+}
+
+// IsOptionalMutual returns true if optional mutual TLS is enabled.
+func (c *TLSConfig) IsOptionalMutual() bool {
+	if c == nil {
+		return false
+	}
+	return c.Mode == TLSModeOptionalMutual
+}
+
+// GetEffectiveMode returns the effective TLS mode.
+func (c *TLSConfig) GetEffectiveMode() string {
+	if c == nil || !c.Enabled {
+		return TLSModeInsecure
+	}
+	if c.Mode == "" {
+		return TLSModeSimple
+	}
+	return c.Mode
+}
+
+// GetEffectiveMinVersion returns the effective minimum TLS version.
+func (c *TLSConfig) GetEffectiveMinVersion() string {
+	if c == nil || c.MinVersion == "" {
+		return "TLS12" // Default to TLS 1.2 for gRPC
+	}
+	return c.MinVersion
+}
+
+// GetEffectiveALPN returns the effective ALPN protocols.
+func (c *TLSConfig) GetEffectiveALPN() []string {
+	if c == nil || len(c.ALPN) == 0 {
+		return []string{"h2"} // Default to HTTP/2 for gRPC
+	}
+	return c.ALPN
 }
 
 // GRPCRoute represents a gRPC routing rule configuration.
@@ -206,7 +425,7 @@ type GRPCRetryPolicy struct {
 	PerTryTimeout Duration `yaml:"perTryTimeout,omitempty" json:"perTryTimeout,omitempty"`
 
 	// RetryOn is a comma-separated list of gRPC status codes to retry on.
-	// Valid values: cancelled, deadline-exceeded, internal, resource-exhausted, unavailable
+	// Valid values: canceled, deadline-exceeded, internal, resource-exhausted, unavailable
 	RetryOn string `yaml:"retryOn,omitempty" json:"retryOn,omitempty"`
 
 	// BackoffBaseInterval is the base interval for exponential backoff.

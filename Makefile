@@ -14,7 +14,7 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
 # Go variables
 GO := go
-GOFLAGS := -v
+GOFLAGS := -v -trimpath
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.gitCommit=$(GIT_COMMIT) -s -w"
 
 # Docker variables
@@ -34,6 +34,16 @@ TEST_BACKEND2_URL ?= http://127.0.0.1:8802
 TEST_GRPC_BACKEND1_URL ?= 127.0.0.1:8803
 TEST_GRPC_BACKEND2_URL ?= 127.0.0.1:8804
 
+# Vault settings
+TEST_VAULT_ADDR ?= http://127.0.0.1:8200
+TEST_VAULT_TOKEN ?= myroot
+
+# Keycloak settings
+TEST_KEYCLOAK_ADDR ?= http://127.0.0.1:8090
+TEST_KEYCLOAK_REALM ?= gateway-test
+TEST_KEYCLOAK_CLIENT_ID ?= gateway
+TEST_KEYCLOAK_CLIENT_SECRET ?= gateway-secret
+
 # Coverage settings
 COVERAGE_DIR := coverage
 COVERAGE_UNIT := $(COVERAGE_DIR)/unit.out
@@ -45,6 +55,7 @@ COVERAGE_MERGED := $(COVERAGE_DIR)/merged.out
 .PHONY: all build build-linux build-darwin build-windows build-all \
         test test-unit test-coverage test-functional test-integration test-e2e test-all \
         test-grpc-unit test-grpc-integration test-grpc-e2e \
+        test-auth-unit test-auth-integration test-auth-e2e \
         lint lint-fix fmt vet vuln \
         docker-build docker-run docker-push docker-clean \
         run dev clean deps tools generate proto-generate \
@@ -71,23 +82,23 @@ build:
 build-linux:
 	@echo "==> Building for Linux..."
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./$(CMD_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 ./$(CMD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./$(CMD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 ./$(CMD_DIR)
 	@echo "==> Linux binaries built"
 
 ## build-darwin: Cross-compile for macOS (amd64 and arm64)
 build-darwin:
 	@echo "==> Building for macOS..."
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./$(CMD_DIR)
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./$(CMD_DIR)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -trimpath $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./$(CMD_DIR)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -trimpath $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./$(CMD_DIR)
 	@echo "==> macOS binaries built"
 
 ## build-windows: Cross-compile for Windows (amd64)
 build-windows:
 	@echo "==> Building for Windows..."
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./$(CMD_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -trimpath $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./$(CMD_DIR)
 	@echo "==> Windows binary built"
 
 ## build-all: Build for all platforms
@@ -175,6 +186,41 @@ test-grpc-e2e:
 	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
 		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/grpc-e2e.out -covermode=atomic -tags=e2e -run ".*[Gg]rpc.*|.*[Gg]RPC.*" ./test/e2e/...
 	@echo "==> gRPC e2e tests completed"
+
+# ==============================================================================
+# Auth-specific test targets
+# ==============================================================================
+
+## test-auth-unit: Run authentication/authorization unit tests
+test-auth-unit:
+	@echo "==> Running auth unit tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -race -coverprofile=$(COVERAGE_DIR)/auth-unit.out -covermode=atomic ./internal/auth/... ./internal/authz/... ./internal/security/... ./internal/audit/...
+	@echo "==> Auth unit tests completed"
+
+## test-auth-integration: Run authentication/authorization integration tests (requires Vault and Keycloak)
+test-auth-integration:
+	@echo "==> Running auth integration tests..."
+	@echo "==> Vault expected at $(TEST_VAULT_ADDR)"
+	@echo "==> Keycloak expected at $(TEST_KEYCLOAK_ADDR)"
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_VAULT_ADDR=$(TEST_VAULT_ADDR) TEST_VAULT_TOKEN=$(TEST_VAULT_TOKEN) \
+	TEST_KEYCLOAK_ADDR=$(TEST_KEYCLOAK_ADDR) TEST_KEYCLOAK_REALM=$(TEST_KEYCLOAK_REALM) \
+	TEST_KEYCLOAK_CLIENT_ID=$(TEST_KEYCLOAK_CLIENT_ID) TEST_KEYCLOAK_CLIENT_SECRET=$(TEST_KEYCLOAK_CLIENT_SECRET) \
+		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/auth-integration.out -covermode=atomic -tags=integration -run ".*[Aa]uth.*|.*[Oo]idc.*|.*[Jj]wt.*|.*[Aa]pikey.*" ./test/integration/...
+	@echo "==> Auth integration tests completed"
+
+## test-auth-e2e: Run authentication/authorization e2e tests (requires Vault and Keycloak)
+test-auth-e2e:
+	@echo "==> Running auth e2e tests..."
+	@echo "==> Vault expected at $(TEST_VAULT_ADDR)"
+	@echo "==> Keycloak expected at $(TEST_KEYCLOAK_ADDR)"
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_VAULT_ADDR=$(TEST_VAULT_ADDR) TEST_VAULT_TOKEN=$(TEST_VAULT_TOKEN) \
+	TEST_KEYCLOAK_ADDR=$(TEST_KEYCLOAK_ADDR) TEST_KEYCLOAK_REALM=$(TEST_KEYCLOAK_REALM) \
+	TEST_KEYCLOAK_CLIENT_ID=$(TEST_KEYCLOAK_CLIENT_ID) TEST_KEYCLOAK_CLIENT_SECRET=$(TEST_KEYCLOAK_CLIENT_SECRET) \
+		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/auth-e2e.out -covermode=atomic -tags=e2e -run ".*[Aa]uth.*|.*[Rr]bac.*|.*[Jj]wt.*|.*[Aa]pikey.*" ./test/e2e/...
+	@echo "==> Auth e2e tests completed"
 
 ## test-merge-coverage: Merge all coverage reports
 test-merge-coverage:
@@ -376,6 +422,11 @@ help:
 	@echo "  test-grpc-integration Run gRPC integration tests (requires gRPC backends)"
 	@echo "  test-grpc-e2e         Run gRPC e2e tests (requires gRPC backends)"
 	@echo ""
+	@echo "Auth test targets:"
+	@echo "  test-auth-unit        Run auth unit tests"
+	@echo "  test-auth-integration Run auth integration tests (requires Vault and Keycloak)"
+	@echo "  test-auth-e2e         Run auth e2e tests (requires Vault and Keycloak)"
+	@echo ""
 	@echo "Quality targets:"
 	@echo "  lint            Run golangci-lint"
 	@echo "  lint-fix        Run golangci-lint with auto-fix"
@@ -408,10 +459,16 @@ help:
 	@echo "  help            Show this help"
 	@echo ""
 	@echo "Environment variables:"
-	@echo "  TEST_BACKEND1_URL       HTTP Backend 1 URL (default: http://127.0.0.1:8801)"
-	@echo "  TEST_BACKEND2_URL       HTTP Backend 2 URL (default: http://127.0.0.1:8802)"
-	@echo "  TEST_GRPC_BACKEND1_URL  gRPC Backend 1 URL (default: 127.0.0.1:8803)"
-	@echo "  TEST_GRPC_BACKEND2_URL  gRPC Backend 2 URL (default: 127.0.0.1:8804)"
-	@echo "  DOCKER_REGISTRY         Docker registry (default: ghcr.io)"
-	@echo "  DOCKER_IMAGE            Docker image name"
-	@echo "  DOCKER_TAG              Docker image tag (default: VERSION)"
+	@echo "  TEST_BACKEND1_URL          HTTP Backend 1 URL (default: http://127.0.0.1:8801)"
+	@echo "  TEST_BACKEND2_URL          HTTP Backend 2 URL (default: http://127.0.0.1:8802)"
+	@echo "  TEST_GRPC_BACKEND1_URL     gRPC Backend 1 URL (default: 127.0.0.1:8803)"
+	@echo "  TEST_GRPC_BACKEND2_URL     gRPC Backend 2 URL (default: 127.0.0.1:8804)"
+	@echo "  TEST_VAULT_ADDR            Vault address (default: http://127.0.0.1:8200)"
+	@echo "  TEST_VAULT_TOKEN           Vault token (default: myroot)"
+	@echo "  TEST_KEYCLOAK_ADDR         Keycloak address (default: http://127.0.0.1:8090)"
+	@echo "  TEST_KEYCLOAK_REALM        Keycloak realm (default: gateway-test)"
+	@echo "  TEST_KEYCLOAK_CLIENT_ID    Keycloak client ID (default: gateway)"
+	@echo "  TEST_KEYCLOAK_CLIENT_SECRET Keycloak client secret (default: gateway-secret)"
+	@echo "  DOCKER_REGISTRY            Docker registry (default: ghcr.io)"
+	@echo "  DOCKER_IMAGE               Docker image name"
+	@echo "  DOCKER_TAG                 Docker image tag (default: VERSION)"

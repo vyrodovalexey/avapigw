@@ -1,0 +1,22 @@
+# CODEOWNERS file for avapigw
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @vyrodovalexey
+
+# CI/CD and DevOps configuration requires review
+/.github/ @vyrodovalexey
+/Dockerfile @vyrodovalexey
+/Makefile @vyrodovalexey
+/.golangci.yml @vyrodovalexey
+/sonar-project.properties @vyrodovalexey
+
+# Helm charts
+/charts/ @vyrodovalexey
+
+# Security-sensitive files
+/internal/auth/ @vyrodovalexey
+/internal/authz/ @vyrodovalexey
+/internal/security/ @vyrodovalexey
+/internal/tls/ @vyrodovalexey
+/internal/vault/ @vyrodovalexey

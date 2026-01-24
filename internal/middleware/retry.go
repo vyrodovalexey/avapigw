@@ -15,6 +15,9 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// DefaultMaxBodySize is the default maximum body size for retry buffering (1MB).
+const DefaultMaxBodySize = 1 << 20 // 1MB
+
 // RetryConfig contains retry configuration.
 type RetryConfig struct {
 	Attempts      int
@@ -22,6 +25,10 @@ type RetryConfig struct {
 	RetryOn       []string
 	BackoffBase   time.Duration
 	BackoffMax    time.Duration
+	// MaxBodySize is the maximum request body size to buffer for retries.
+	// Requests with bodies larger than this will not be retried.
+	// Default is 1MB.
+	MaxBodySize int64
 }
 
 // DefaultRetryConfig returns default retry configuration.
@@ -32,27 +39,72 @@ func DefaultRetryConfig() RetryConfig {
 		RetryOn:       []string{"5xx", "reset", "connect-failure"},
 		BackoffBase:   100 * time.Millisecond,
 		BackoffMax:    10 * time.Second,
+		MaxBodySize:   DefaultMaxBodySize,
 	}
 }
 
 // Retry returns a middleware that retries failed requests.
 func Retry(cfg RetryConfig, logger observability.Logger) func(http.Handler) http.Handler {
+	// Ensure MaxBodySize has a sensible default
+	maxBodySize := cfg.MaxBodySize
+	if maxBodySize <= 0 {
+		maxBodySize = DefaultMaxBodySize
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			bodyBytes := readRequestBody(r)
+			bodyBytes, canRetry := readRequestBodyWithLimit(r, maxBodySize, logger)
+			if !canRetry {
+				// Body too large for retry buffering, execute without retry
+				next.ServeHTTP(w, r)
+				return
+			}
 			executeWithRetry(w, r, next, cfg, bodyBytes, logger)
 		})
 	}
 }
 
-// readRequestBody reads and buffers the request body.
-func readRequestBody(r *http.Request) []byte {
+// readRequestBodyWithLimit reads and buffers the request body up to maxSize.
+// Returns the body bytes and a boolean indicating if the request can be retried.
+// If the body exceeds maxSize, returns nil and false, and the original body is preserved.
+func readRequestBodyWithLimit(r *http.Request, maxSize int64, logger observability.Logger) ([]byte, bool) {
 	if r.Body == nil {
-		return nil
+		return nil, true
 	}
-	bodyBytes, _ := io.ReadAll(r.Body)
+
+	// Check Content-Length header first for early rejection
+	if r.ContentLength > maxSize {
+		logger.Debug("request body too large for retry buffering",
+			observability.Int64("content_length", r.ContentLength),
+			observability.Int64("max_size", maxSize),
+		)
+		return nil, false
+	}
+
+	// Read up to maxSize + 1 to detect if body exceeds limit
+	limitedReader := io.LimitReader(r.Body, maxSize+1)
+	bodyBytes, err := io.ReadAll(limitedReader)
 	_ = r.Body.Close()
-	return bodyBytes
+
+	if err != nil {
+		logger.Warn("failed to read request body for retry",
+			observability.Error(err),
+		)
+		return nil, false
+	}
+
+	// Check if body exceeded the limit
+	if int64(len(bodyBytes)) > maxSize {
+		logger.Debug("request body too large for retry buffering",
+			observability.Int64("body_size", int64(len(bodyBytes))),
+			observability.Int64("max_size", maxSize),
+		)
+		// Restore the body for the single attempt
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		return nil, false
+	}
+
+	return bodyBytes, true
 }
 
 // executeWithRetry executes the request with retry logic.
@@ -77,8 +129,9 @@ func executeWithRetry(
 			status:         http.StatusOK,
 		}
 
-		ctx := applyPerTryTimeout(r.Context(), cfg.PerTryTimeout)
-		next.ServeHTTP(rw, r.WithContext(ctx))
+		ctxWithCancel := applyPerTryTimeout(r.Context(), cfg.PerTryTimeout)
+		next.ServeHTTP(rw, r.WithContext(ctxWithCancel.ctx))
+		ctxWithCancel.cancel() // Release context resources after request completion
 
 		lastStatus = rw.status
 
@@ -98,12 +151,20 @@ func executeWithRetry(
 	writeRetryExhaustedResponse(w, r, cfg.Attempts, lastStatus, logger)
 }
 
+// contextWithCancel holds a context and its cancel function.
+type contextWithCancel struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
 // applyPerTryTimeout applies timeout to context if configured.
-func applyPerTryTimeout(ctx context.Context, timeout time.Duration) context.Context {
+// Returns the new context and a cancel function that must be called to release resources.
+func applyPerTryTimeout(ctx context.Context, timeout time.Duration) contextWithCancel {
 	if timeout > 0 {
-		ctx, _ = context.WithTimeout(ctx, timeout) //nolint:govet // cancel handled by request completion
+		newCtx, cancel := context.WithTimeout(ctx, timeout)
+		return contextWithCancel{ctx: newCtx, cancel: cancel}
 	}
-	return ctx
+	return contextWithCancel{ctx: ctx, cancel: func() {}}
 }
 
 // writeResponse writes the captured response to the client.
@@ -137,9 +198,9 @@ func writeRetryExhaustedResponse(
 		observability.Int("last_status", lastStatus),
 	)
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(HeaderContentType, ContentTypeJSON)
 	w.WriteHeader(http.StatusBadGateway)
-	_, _ = io.WriteString(w, `{"error":"bad gateway","message":"all retries exhausted"}`)
+	_, _ = io.WriteString(w, ErrBadGateway)
 }
 
 // retryResponseWriter captures the response for potential retries.

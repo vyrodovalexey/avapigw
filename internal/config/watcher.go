@@ -72,7 +72,7 @@ func NewWatcher(path string, callback ConfigCallback, opts ...WatcherOption) (*W
 		path:          absPath,
 		watcher:       fsWatcher,
 		callback:      callback,
-		debounceDelay: 100 * time.Millisecond,
+		debounceDelay: DefaultWatcherDebounceDelay,
 		logger:        observability.NopLogger(),
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),

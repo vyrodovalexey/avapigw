@@ -3,6 +3,7 @@ package backend
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"sync"
@@ -70,9 +71,22 @@ func NewHost(address string, port, weight int) *Host {
 	return h
 }
 
-// URL returns the host URL.
+// URL returns the host URL (HTTP).
 func (h *Host) URL() string {
 	return fmt.Sprintf("http://%s:%d", h.Address, h.Port)
+}
+
+// TLSURL returns the host URL with HTTPS scheme.
+func (h *Host) TLSURL() string {
+	return fmt.Sprintf("https://%s:%d", h.Address, h.Port)
+}
+
+// URLWithScheme returns the host URL with the specified scheme.
+func (h *Host) URLWithScheme(useTLS bool) string {
+	if useTLS {
+		return h.TLSURL()
+	}
+	return h.URL()
 }
 
 // Status returns the host status.
@@ -114,6 +128,8 @@ type ServiceBackend struct {
 	loadBalancer LoadBalancer
 	healthCheck  *HealthChecker
 	pool         *ConnectionPool
+	tlsBuilder   *TLSConfigBuilder
+	tlsConfig    *tls.Config
 	logger       observability.Logger
 	status       atomic.Int32
 	mu           sync.RWMutex
@@ -183,9 +199,27 @@ func NewBackend(cfg config.Backend, opts ...BackendOption) (*ServiceBackend, err
 		b.loadBalancer = NewLoadBalancer(algorithm, b.hosts)
 	}
 
+	// Build TLS configuration if enabled
+	if cfg.TLS != nil && cfg.TLS.Enabled {
+		b.tlsBuilder = NewTLSConfigBuilder(cfg.TLS, WithTLSLogger(b.logger))
+		tlsConfig, err := b.tlsBuilder.Build()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build TLS config for backend %s: %w", cfg.Name, err)
+		}
+		b.tlsConfig = tlsConfig
+
+		b.logger.Info("TLS enabled for backend",
+			observability.String("backend", cfg.Name),
+			observability.String("mode", cfg.TLS.GetEffectiveMode()),
+			observability.Bool("insecureSkipVerify", cfg.TLS.InsecureSkipVerify),
+		)
+	}
+
 	// Create connection pool if not provided
 	if b.pool == nil {
-		b.pool = NewConnectionPool(DefaultPoolConfig())
+		poolCfg := DefaultPoolConfig()
+		poolCfg.TLSConfig = b.tlsConfig
+		b.pool = NewConnectionPool(poolCfg)
 	}
 
 	b.status.Store(int32(StatusUnknown))
@@ -287,6 +321,58 @@ func (b *ServiceBackend) GetHealthyHosts() []*Host {
 // HTTPClient returns an HTTP client for this backend.
 func (b *ServiceBackend) HTTPClient() *http.Client {
 	return b.pool.Client()
+}
+
+// TLSConfig returns the TLS configuration for this backend.
+func (b *ServiceBackend) TLSConfig() *tls.Config {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.tlsConfig
+}
+
+// IsTLSEnabled returns true if TLS is enabled for this backend.
+func (b *ServiceBackend) IsTLSEnabled() bool {
+	return b.config.TLS != nil && b.config.TLS.Enabled
+}
+
+// GetTLSMode returns the TLS mode for this backend.
+func (b *ServiceBackend) GetTLSMode() string {
+	if b.config.TLS == nil {
+		return config.TLSModeInsecure
+	}
+	return b.config.TLS.GetEffectiveMode()
+}
+
+// RefreshTLSConfig refreshes the TLS configuration (e.g., after certificate rotation).
+func (b *ServiceBackend) RefreshTLSConfig() error {
+	if b.tlsBuilder == nil {
+		return nil
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Invalidate cached config
+	b.tlsBuilder.Invalidate()
+
+	// Rebuild TLS config
+	tlsConfig, err := b.tlsBuilder.Build()
+	if err != nil {
+		return fmt.Errorf("failed to refresh TLS config: %w", err)
+	}
+
+	b.tlsConfig = tlsConfig
+
+	// Update connection pool
+	if b.pool != nil {
+		b.pool.SetTLSConfig(tlsConfig)
+	}
+
+	b.logger.Info("refreshed TLS configuration for backend",
+		observability.String("backend", b.name),
+	)
+
+	return nil
 }
 
 // Registry manages multiple backends.

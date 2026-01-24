@@ -152,27 +152,65 @@ func (l *Loader) loadWithIncludes(path string) (*GatewayConfig, error) {
 		return nil, fmt.Errorf("failed to parse YAML for includes: %w", err)
 	}
 
+	// Start with nil base config - will be built from includes
+	var baseConfig *GatewayConfig
+
 	// Process includes if present
-	if includes, ok := rawConfig["includes"].([]interface{}); ok {
-		for _, inc := range includes {
-			if includePath, ok := inc.(string); ok {
-				// Resolve relative paths
-				if !filepath.IsAbs(includePath) {
-					includePath = filepath.Join(filepath.Dir(path), includePath)
-				}
+	baseConfig, err = l.processIncludes(rawConfig, path, baseConfig)
+	if err != nil {
+		return nil, err
+	}
 
-				includedConfig, err := l.loadWithIncludes(includePath)
-				if err != nil {
-					return nil, fmt.Errorf("failed to load include %s: %w", includePath, err)
-				}
+	// Parse the current config
+	currentConfig, err := l.parseConfig(data)
+	if err != nil {
+		return nil, err
+	}
 
-				// Merge included config (included config is base, current overrides)
-				_ = includedConfig // TODO: implement merging
-			}
+	// Merge current config on top of base (current config overrides includes)
+	if baseConfig != nil {
+		return mergeTwo(baseConfig, currentConfig), nil
+	}
+
+	return currentConfig, nil
+}
+
+// processIncludes processes include directives from raw config and merges them into baseConfig.
+func (l *Loader) processIncludes(
+	rawConfig map[string]interface{},
+	path string,
+	baseConfig *GatewayConfig,
+) (*GatewayConfig, error) {
+	includes, ok := rawConfig["includes"].([]interface{})
+	if !ok {
+		return baseConfig, nil
+	}
+
+	for _, inc := range includes {
+		includePath, ok := inc.(string)
+		if !ok {
+			continue
+		}
+
+		// Resolve relative paths
+		if !filepath.IsAbs(includePath) {
+			includePath = filepath.Join(filepath.Dir(path), includePath)
+		}
+
+		includedConfig, err := l.loadWithIncludes(includePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load include %s: %w", includePath, err)
+		}
+
+		// Merge included config into base (included configs are merged in order)
+		if baseConfig == nil {
+			baseConfig = includedConfig
+		} else {
+			baseConfig = mergeTwo(baseConfig, includedConfig)
 		}
 	}
 
-	return l.parseConfig(data)
+	return baseConfig, nil
 }
 
 // MergeConfigs merges multiple configurations, with later configs taking precedence.

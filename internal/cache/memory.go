@@ -66,10 +66,10 @@ func newMemoryCache(cfg *config.CacheConfig, logger observability.Logger) (*memo
 
 // Get retrieves a value from the cache.
 func (c *memoryCache) Get(ctx context.Context, key string) ([]byte, error) {
-	c.mu.RLock()
-	elem, exists := c.items[key]
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	elem, exists := c.items[key]
 	if !exists {
 		atomic.AddInt64(&c.misses, 1)
 		return nil, ErrCacheMiss
@@ -79,17 +79,13 @@ func (c *memoryCache) Get(ctx context.Context, key string) ([]byte, error) {
 
 	// Check if expired
 	if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
-		c.mu.Lock()
 		c.removeElement(elem)
-		c.mu.Unlock()
 		atomic.AddInt64(&c.misses, 1)
 		return nil, ErrCacheMiss
 	}
 
 	// Move to front (most recently used)
-	c.mu.Lock()
 	c.eviction.MoveToFront(elem)
-	c.mu.Unlock()
 
 	atomic.AddInt64(&c.hits, 1)
 
@@ -162,10 +158,10 @@ func (c *memoryCache) Delete(ctx context.Context, key string) error {
 
 // Exists checks if a key exists in the cache.
 func (c *memoryCache) Exists(ctx context.Context, key string) (bool, error) {
-	c.mu.RLock()
-	elem, exists := c.items[key]
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	elem, exists := c.items[key]
 	if !exists {
 		return false, nil
 	}
@@ -174,9 +170,7 @@ func (c *memoryCache) Exists(ctx context.Context, key string) (bool, error) {
 
 	// Check if expired
 	if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
-		c.mu.Lock()
 		c.removeElement(elem)
-		c.mu.Unlock()
 		return false, nil
 	}
 

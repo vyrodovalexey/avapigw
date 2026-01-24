@@ -3,6 +3,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -143,14 +145,14 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // proxyRequest proxies the request to a backend.
 func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, route *router.CompiledRoute) {
 	if len(route.Config.Route) == 0 {
-		p.errorHandler(w, r, fmt.Errorf("no destinations configured for route %s", route.Name))
+		p.errorHandler(w, r, NewNoDestinationError(route.Name))
 		return
 	}
 
-	// Select destination (for now, use first destination or weighted selection)
+	// Select destination using weighted random selection
 	dest := p.selectDestination(route.Config.Route)
 	if dest == nil {
-		p.errorHandler(w, r, fmt.Errorf("no destination available for route %s", route.Name))
+		p.errorHandler(w, r, NewNoDestinationAvailableError(route.Name))
 		return
 	}
 
@@ -158,7 +160,7 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 	targetURL := fmt.Sprintf("http://%s:%d", dest.Destination.Host, dest.Destination.Port)
 	target, err := url.Parse(targetURL)
 	if err != nil {
-		p.errorHandler(w, r, fmt.Errorf("invalid target URL: %w", err))
+		p.errorHandler(w, r, NewInvalidTargetError(route.Name, targetURL, err))
 		return
 	}
 
@@ -228,7 +230,7 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	req.Host = target.Host
 }
 
-// selectDestination selects a destination based on weights.
+// selectDestination selects a destination based on weights using weighted random selection.
 func (p *ReverseProxy) selectDestination(destinations []config.RouteDestination) *config.RouteDestination {
 	if len(destinations) == 0 {
 		return nil
@@ -243,18 +245,46 @@ func (p *ReverseProxy) selectDestination(destinations []config.RouteDestination)
 	for _, dest := range destinations {
 		weight := dest.Weight
 		if weight == 0 {
-			weight = 1
+			weight = 1 // Default weight
 		}
 		totalWeight += weight
 	}
 
-	// Simple weighted selection (for production, use proper random)
-	// This is a simplified version - in production, use crypto/rand
+	// Generate a cryptographically secure random number
+	randomValue := secureRandomInt(totalWeight)
+
+	// Select destination based on weighted random selection
+	cumulativeWeight := 0
 	for i := range destinations {
-		return &destinations[i]
+		weight := destinations[i].Weight
+		if weight == 0 {
+			weight = 1
+		}
+		cumulativeWeight += weight
+		if randomValue < cumulativeWeight {
+			return &destinations[i]
+		}
 	}
 
+	// Fallback to first destination (should not reach here)
 	return &destinations[0]
+}
+
+// secureRandomInt returns a cryptographically secure random integer in [0, maxVal).
+func secureRandomInt(maxVal int) int {
+	if maxVal <= 0 {
+		return 0
+	}
+
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to 0 on error (will select first destination)
+		return 0
+	}
+
+	// Convert to uint64 and take modulo
+	n := binary.LittleEndian.Uint64(b[:])
+	return int(n % uint64(maxVal)) //nolint:gosec // maxVal is validated above
 }
 
 // applyRewrite applies URL rewriting to the request.

@@ -5,6 +5,7 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -138,7 +139,7 @@ func TestIntegration_GRPCHealthCheck_GatewayHealthService(t *testing.T) {
 
 		server, err := grpcserver.New(grpcCfg,
 			grpcserver.WithLogger(observability.NopLogger()),
-			grpcserver.WithAddress("127.0.0.1:"+string(rune(port))),
+			grpcserver.WithAddress(fmt.Sprintf("127.0.0.1:%d", port)),
 		)
 		require.NoError(t, err)
 

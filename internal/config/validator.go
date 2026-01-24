@@ -146,6 +146,7 @@ func (v *Validator) validateListeners(listeners []Listener) {
 		v.validateListenerProtocol(&listener, path)
 		v.validateListenerBind(&listener, path)
 		v.validateListenerHosts(&listener, path)
+		v.validateListenerTimeouts(listener.Timeouts, path+".timeouts")
 	}
 }
 
@@ -209,6 +210,36 @@ func (v *Validator) validateListenerHosts(listener *Listener, path string) {
 	for j, host := range listener.Hosts {
 		if err := util.ValidateHostname(host); err != nil {
 			v.addError(fmt.Sprintf("%s.hosts[%d]", path, j), err.Error())
+		}
+	}
+}
+
+// validateListenerTimeouts validates listener timeout configuration.
+func (v *Validator) validateListenerTimeouts(timeouts *ListenerTimeouts, path string) {
+	if timeouts == nil {
+		return
+	}
+
+	if timeouts.ReadTimeout.Duration() < 0 {
+		v.addError(path+".readTimeout", "readTimeout cannot be negative")
+	}
+
+	if timeouts.ReadHeaderTimeout.Duration() < 0 {
+		v.addError(path+".readHeaderTimeout", "readHeaderTimeout cannot be negative")
+	}
+
+	if timeouts.WriteTimeout.Duration() < 0 {
+		v.addError(path+".writeTimeout", "writeTimeout cannot be negative")
+	}
+
+	if timeouts.IdleTimeout.Duration() < 0 {
+		v.addError(path+".idleTimeout", "idleTimeout cannot be negative")
+	}
+
+	// Validate that readHeaderTimeout <= readTimeout if both are set
+	if timeouts.ReadHeaderTimeout.Duration() > 0 && timeouts.ReadTimeout.Duration() > 0 {
+		if timeouts.ReadHeaderTimeout.Duration() > timeouts.ReadTimeout.Duration() {
+			v.addError(path+".readHeaderTimeout", "readHeaderTimeout should not exceed readTimeout")
 		}
 	}
 }
@@ -407,6 +438,10 @@ func (v *Validator) validateSingleBackend(backend *Backend, path string, names m
 
 	if backend.LoadBalancer != nil {
 		v.validateLoadBalancer(backend.LoadBalancer, path+".loadBalancer")
+	}
+
+	if backend.TLS != nil {
+		v.validateBackendTLSConfig(backend.TLS, path+".tls")
 	}
 }
 
@@ -845,7 +880,7 @@ func (v *Validator) validateGRPCRetryPolicy(retry *GRPCRetryPolicy, path string)
 // validateGRPCRetryStatusCodes validates gRPC retry status codes.
 func (v *Validator) validateGRPCRetryStatusCodes(retryOn, path string) {
 	validCodes := map[string]bool{
-		"cancelled":          true,
+		"canceled":           true,
 		"deadline-exceeded":  true,
 		"internal":           true,
 		"resource-exhausted": true,
@@ -948,5 +983,83 @@ func (v *Validator) validateGRPCConnectionPoolConfig(cfg *GRPCConnectionPoolConf
 
 	if cfg.IdleConnTimeout.Duration() < 0 {
 		v.addError(path+".idleConnTimeout", "idleConnTimeout cannot be negative")
+	}
+}
+
+// validateBackendTLSConfig validates backend TLS configuration.
+func (v *Validator) validateBackendTLSConfig(cfg *BackendTLSConfig, path string) {
+	if cfg == nil {
+		return
+	}
+
+	v.validateBackendTLSMode(cfg, path)
+	v.validateBackendTLSMutual(cfg, path)
+	v.validateBackendTLSVersions(cfg, path)
+
+	// Validate Vault configuration
+	if cfg.Vault != nil && cfg.Vault.Enabled {
+		v.validateVaultBackendTLSConfig(cfg.Vault, path+".vault")
+	}
+}
+
+// validateBackendTLSMode validates the TLS mode.
+func (v *Validator) validateBackendTLSMode(cfg *BackendTLSConfig, path string) {
+	if cfg.Mode == "" {
+		return
+	}
+	validModes := map[string]bool{
+		TLSModeSimple:   true,
+		TLSModeMutual:   true,
+		TLSModeInsecure: true,
+	}
+	if !validModes[cfg.Mode] {
+		v.addError(path+".mode",
+			fmt.Sprintf("invalid TLS mode: %s (must be SIMPLE, MUTUAL, or INSECURE)", cfg.Mode))
+	}
+}
+
+// validateBackendTLSMutual validates mTLS configuration.
+func (v *Validator) validateBackendTLSMutual(cfg *BackendTLSConfig, path string) {
+	if cfg.Mode != TLSModeMutual {
+		return
+	}
+	vaultEnabled := cfg.Vault != nil && cfg.Vault.Enabled
+	if cfg.CertFile == "" && !vaultEnabled {
+		v.addError(path+".certFile", "certFile is required for MUTUAL TLS mode (or enable Vault)")
+	}
+	if cfg.KeyFile == "" && !vaultEnabled {
+		v.addError(path+".keyFile", "keyFile is required for MUTUAL TLS mode (or enable Vault)")
+	}
+}
+
+// validateBackendTLSVersions validates TLS version configuration.
+func (v *Validator) validateBackendTLSVersions(cfg *BackendTLSConfig, path string) {
+	validVersions := map[string]bool{
+		"TLS10": true, "TLS11": true, "TLS12": true, "TLS13": true,
+	}
+	if cfg.MinVersion != "" && !validVersions[cfg.MinVersion] {
+		v.addError(path+".minVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MinVersion))
+	}
+	if cfg.MaxVersion != "" && !validVersions[cfg.MaxVersion] {
+		v.addError(path+".maxVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MaxVersion))
+	}
+}
+
+// validateVaultBackendTLSConfig validates Vault backend TLS configuration.
+func (v *Validator) validateVaultBackendTLSConfig(cfg *VaultBackendTLSConfig, path string) {
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+
+	if cfg.PKIMount == "" {
+		v.addError(path+".pkiMount", "pkiMount is required when Vault is enabled")
+	}
+
+	if cfg.Role == "" {
+		v.addError(path+".role", "role is required when Vault is enabled")
+	}
+
+	if cfg.CommonName == "" {
+		v.addError(path+".commonName", "commonName is required when Vault is enabled")
 	}
 }

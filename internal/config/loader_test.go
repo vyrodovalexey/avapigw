@@ -273,6 +273,221 @@ spec:
 	assert.Contains(t, err.Error(), "circular include")
 }
 
+func TestLoader_LoadWithIncludes_MergesConfigs(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Base config with some defaults
+	baseConfigPath := filepath.Join(tmpDir, "base.yaml")
+	baseContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: base-gateway
+  labels:
+    env: production
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+  routes:
+    - name: base-route
+      match:
+        - uri:
+            prefix: /base
+`
+	err := os.WriteFile(baseConfigPath, []byte(baseContent), 0644)
+	require.NoError(t, err)
+
+	// Main config that includes base
+	mainConfigPath := filepath.Join(tmpDir, "main.yaml")
+	mainContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: main-gateway
+  labels:
+    version: v1
+includes:
+  - base.yaml
+spec:
+  listeners:
+    - name: https
+      port: 443
+      protocol: HTTPS
+  routes:
+    - name: main-route
+      match:
+        - uri:
+            prefix: /main
+`
+	err = os.WriteFile(mainConfigPath, []byte(mainContent), 0644)
+	require.NoError(t, err)
+
+	loader := NewLoader()
+	cfg, err := loader.LoadWithIncludes(mainConfigPath)
+
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Main config should override base config name
+	assert.Equal(t, "main-gateway", cfg.Metadata.Name)
+
+	// Labels should be merged (base + main)
+	assert.Equal(t, "production", cfg.Metadata.Labels["env"])
+	assert.Equal(t, "v1", cfg.Metadata.Labels["version"])
+
+	// Listeners from main should override base
+	assert.Len(t, cfg.Spec.Listeners, 1)
+	assert.Equal(t, "https", cfg.Spec.Listeners[0].Name)
+
+	// Routes should be appended (base + main)
+	assert.Len(t, cfg.Spec.Routes, 2)
+}
+
+func TestLoader_LoadWithIncludes_MultipleIncludes(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// First include
+	include1Path := filepath.Join(tmpDir, "include1.yaml")
+	include1Content := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: include1
+  labels:
+    source: include1
+spec:
+  routes:
+    - name: route-from-include1
+`
+	err := os.WriteFile(include1Path, []byte(include1Content), 0644)
+	require.NoError(t, err)
+
+	// Second include
+	include2Path := filepath.Join(tmpDir, "include2.yaml")
+	include2Content := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: include2
+  labels:
+    source: include2
+spec:
+  routes:
+    - name: route-from-include2
+`
+	err = os.WriteFile(include2Path, []byte(include2Content), 0644)
+	require.NoError(t, err)
+
+	// Main config that includes both
+	mainConfigPath := filepath.Join(tmpDir, "main.yaml")
+	mainContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: main-with-multiple-includes
+includes:
+  - include1.yaml
+  - include2.yaml
+spec:
+  routes:
+    - name: main-route
+`
+	err = os.WriteFile(mainConfigPath, []byte(mainContent), 0644)
+	require.NoError(t, err)
+
+	loader := NewLoader()
+	cfg, err := loader.LoadWithIncludes(mainConfigPath)
+
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Main config should override
+	assert.Equal(t, "main-with-multiple-includes", cfg.Metadata.Name)
+
+	// Label from include2 should override include1 (processed in order)
+	assert.Equal(t, "include2", cfg.Metadata.Labels["source"])
+
+	// Routes should be appended from all configs
+	assert.Len(t, cfg.Spec.Routes, 3)
+}
+
+func TestLoader_LoadWithIncludes_NestedIncludes(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Deepest include
+	deepPath := filepath.Join(tmpDir, "deep.yaml")
+	deepContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: deep
+  labels:
+    level: deep
+spec:
+  routes:
+    - name: deep-route
+`
+	err := os.WriteFile(deepPath, []byte(deepContent), 0644)
+	require.NoError(t, err)
+
+	// Middle include that includes deep
+	middlePath := filepath.Join(tmpDir, "middle.yaml")
+	middleContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: middle
+  labels:
+    level: middle
+includes:
+  - deep.yaml
+spec:
+  routes:
+    - name: middle-route
+`
+	err = os.WriteFile(middlePath, []byte(middleContent), 0644)
+	require.NoError(t, err)
+
+	// Top level config
+	topPath := filepath.Join(tmpDir, "top.yaml")
+	topContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: top
+  labels:
+    level: top
+includes:
+  - middle.yaml
+spec:
+  routes:
+    - name: top-route
+`
+	err = os.WriteFile(topPath, []byte(topContent), 0644)
+	require.NoError(t, err)
+
+	loader := NewLoader()
+	cfg, err := loader.LoadWithIncludes(topPath)
+
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Top config should override
+	assert.Equal(t, "top", cfg.Metadata.Name)
+	assert.Equal(t, "top", cfg.Metadata.Labels["level"])
+
+	// Routes should be appended from all levels
+	assert.Len(t, cfg.Spec.Routes, 3)
+}
+
 func TestMergeConfigs(t *testing.T) {
 	t.Parallel()
 

@@ -548,8 +548,9 @@ func TestIntegration_GRPCProxy_ConnectionPool(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, conn2)
 
-			// Should be different connections
-			assert.NotEqual(t, conn1, conn2)
+			// Should be different connections - compare targets instead of connection objects
+			// to avoid race conditions with gRPC internal state
+			assert.NotEqual(t, conn1.Target(), conn2.Target())
 		}
 	})
 }

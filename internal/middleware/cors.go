@@ -31,6 +31,8 @@ func DefaultCORSConfig() CORSConfig {
 // corsHeaders holds pre-computed CORS header values.
 type corsHeaders struct {
 	allowOrigins     map[string]bool
+	wildcardPatterns []string // Patterns like "*.example.com"
+	allowAllOrigins  bool
 	allowMethods     string
 	allowHeaders     string
 	exposeHeaders    string
@@ -45,12 +47,25 @@ type corsHeaders struct {
 // newCORSHeaders creates pre-computed CORS headers from config.
 func newCORSHeaders(cfg CORSConfig) *corsHeaders {
 	allowOrigins := make(map[string]bool)
+	var wildcardPatterns []string
+	allowAllOrigins := false
+
 	for _, origin := range cfg.AllowOrigins {
-		allowOrigins[origin] = true
+		switch {
+		case origin == "*":
+			allowAllOrigins = true
+		case strings.HasPrefix(origin, "*."):
+			// Wildcard subdomain pattern like "*.example.com"
+			wildcardPatterns = append(wildcardPatterns, origin)
+		default:
+			allowOrigins[origin] = true
+		}
 	}
 
 	return &corsHeaders{
 		allowOrigins:     allowOrigins,
+		wildcardPatterns: wildcardPatterns,
+		allowAllOrigins:  allowAllOrigins,
 		allowMethods:     strings.Join(cfg.AllowMethods, ", "),
 		allowHeaders:     strings.Join(cfg.AllowHeaders, ", "),
 		exposeHeaders:    strings.Join(cfg.ExposeHeaders, ", "),
@@ -63,10 +78,68 @@ func newCORSHeaders(cfg CORSConfig) *corsHeaders {
 	}
 }
 
+// isOriginAllowed checks if the given origin is allowed.
+func (h *corsHeaders) isOriginAllowed(origin string) bool {
+	if origin == "" {
+		return false
+	}
+
+	// Check for allow all origins
+	if h.allowAllOrigins {
+		return true
+	}
+
+	// Check exact match
+	if h.allowOrigins[origin] {
+		return true
+	}
+
+	// Check wildcard patterns (e.g., "*.example.com")
+	for _, pattern := range h.wildcardPatterns {
+		if matchWildcardOrigin(origin, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchWildcardOrigin checks if an origin matches a wildcard pattern.
+// Pattern format: "*.example.com" matches "sub.example.com", "api.example.com", etc.
+func matchWildcardOrigin(origin, pattern string) bool {
+	if !strings.HasPrefix(pattern, "*.") {
+		return false
+	}
+
+	// Extract the domain suffix from the pattern (e.g., ".example.com" from "*.example.com")
+	suffix := pattern[1:] // Remove the "*" to get ".example.com"
+
+	// Parse the origin to extract the host
+	// Origin format: "https://sub.example.com" or "http://sub.example.com:8080"
+	host := origin
+
+	// Remove protocol prefix if present
+	if idx := strings.Index(host, "://"); idx != -1 {
+		host = host[idx+3:]
+	}
+
+	// Remove port if present
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+
+	// Check if the host ends with the suffix
+	// Also ensure there's at least one character before the suffix (the subdomain)
+	return len(host) > len(suffix) && strings.HasSuffix(host, suffix)
+}
+
 // setCORSHeaders sets CORS headers on the response.
 func (h *corsHeaders) setCORSHeaders(w http.ResponseWriter, origin string) {
-	if origin != "" && (h.allowOrigins["*"] || h.allowOrigins[origin]) {
+	if h.isOriginAllowed(origin) {
+		// Always echo the specific origin for better security and compatibility
+		// This also handles the case where credentials are allowed (which requires specific origin)
 		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
 	}
 
 	if h.hasAllowMethods {

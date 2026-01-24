@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -15,12 +16,49 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// OTLP exporter retry configuration defaults.
+const (
+	// DefaultOTLPRetryInitialInterval is the initial backoff interval for OTLP exporter retries.
+	DefaultOTLPRetryInitialInterval = 1 * time.Second
+
+	// DefaultOTLPRetryMaxInterval is the maximum backoff interval for OTLP exporter retries.
+	DefaultOTLPRetryMaxInterval = 30 * time.Second
+
+	// DefaultOTLPRetryMaxElapsedTime is the maximum total time for OTLP exporter retries.
+	DefaultOTLPRetryMaxElapsedTime = 1 * time.Minute
+
+	// DefaultOTLPTimeout is the default timeout for OTLP exporter operations.
+	DefaultOTLPTimeout = 10 * time.Second
+
+	// DefaultOTLPReconnectionPeriod is the default reconnection period for OTLP gRPC connection.
+	DefaultOTLPReconnectionPeriod = 10 * time.Second
+)
+
 // TracerConfig contains tracing configuration.
 type TracerConfig struct {
 	ServiceName  string
 	OTLPEndpoint string
 	SamplingRate float64
 	Enabled      bool
+
+	// Retry configuration for OTLP exporter.
+	// If nil, defaults will be used.
+	RetryConfig *OTLPRetryConfig
+}
+
+// OTLPRetryConfig contains retry configuration for OTLP exporter.
+type OTLPRetryConfig struct {
+	// Enabled indicates whether retry is enabled.
+	Enabled bool
+
+	// InitialInterval is the initial backoff interval.
+	InitialInterval time.Duration
+
+	// MaxInterval is the maximum backoff interval.
+	MaxInterval time.Duration
+
+	// MaxElapsedTime is the maximum total time for retries.
+	MaxElapsedTime time.Duration
 }
 
 // Tracer wraps OpenTelemetry tracing functionality.
@@ -45,10 +83,10 @@ func NewTracer(cfg TracerConfig) (*Tracer, error) {
 	var err error
 
 	if cfg.OTLPEndpoint != "" {
-		exporter, err = otlptracegrpc.New(ctx,
-			otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
-			otlptracegrpc.WithInsecure(),
-		)
+		// Build OTLP exporter options with retry configuration
+		opts := buildOTLPExporterOptions(cfg)
+
+		exporter, err = otlptracegrpc.New(ctx, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -101,6 +139,60 @@ func createSampler(rate float64) sdktrace.Sampler {
 	default:
 		return sdktrace.TraceIDRatioBased(rate)
 	}
+}
+
+// buildOTLPExporterOptions builds OTLP gRPC exporter options with retry configuration.
+func buildOTLPExporterOptions(cfg TracerConfig) []otlptracegrpc.Option {
+	opts := []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
+		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithTimeout(DefaultOTLPTimeout),
+		otlptracegrpc.WithReconnectionPeriod(DefaultOTLPReconnectionPeriod),
+	}
+
+	// Configure retry with exponential backoff
+	retryConfig := buildRetryConfig(cfg.RetryConfig)
+	opts = append(opts, otlptracegrpc.WithRetry(retryConfig))
+
+	return opts
+}
+
+// buildRetryConfig builds the retry configuration for OTLP exporter.
+func buildRetryConfig(cfg *OTLPRetryConfig) otlptracegrpc.RetryConfig {
+	// Use defaults if no custom config provided
+	if cfg == nil {
+		return otlptracegrpc.RetryConfig{
+			Enabled:         true,
+			InitialInterval: DefaultOTLPRetryInitialInterval,
+			MaxInterval:     DefaultOTLPRetryMaxInterval,
+			MaxElapsedTime:  DefaultOTLPRetryMaxElapsedTime,
+		}
+	}
+
+	// Build config from provided values, using defaults for zero values
+	retryConfig := otlptracegrpc.RetryConfig{
+		Enabled: cfg.Enabled,
+	}
+
+	if cfg.InitialInterval > 0 {
+		retryConfig.InitialInterval = cfg.InitialInterval
+	} else {
+		retryConfig.InitialInterval = DefaultOTLPRetryInitialInterval
+	}
+
+	if cfg.MaxInterval > 0 {
+		retryConfig.MaxInterval = cfg.MaxInterval
+	} else {
+		retryConfig.MaxInterval = DefaultOTLPRetryMaxInterval
+	}
+
+	if cfg.MaxElapsedTime > 0 {
+		retryConfig.MaxElapsedTime = cfg.MaxElapsedTime
+	} else {
+		retryConfig.MaxElapsedTime = DefaultOTLPRetryMaxElapsedTime
+	}
+
+	return retryConfig
 }
 
 // Shutdown shuts down the tracer.

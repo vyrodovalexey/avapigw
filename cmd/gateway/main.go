@@ -94,6 +94,13 @@ func initLogger(flags cliFlags) observability.Logger {
 	return logger
 }
 
+// fatalWithSync logs a fatal message and ensures logger is synced before exit.
+func fatalWithSync(logger observability.Logger, msg string, fields ...observability.Field) {
+	logger.Error(msg, fields...)
+	_ = logger.Sync()
+	os.Exit(1)
+}
+
 // loadAndValidateConfig loads and validates the configuration.
 func loadAndValidateConfig(configPath string, logger observability.Logger) *config.GatewayConfig {
 	logger.Info("starting avapigw",
@@ -103,11 +110,11 @@ func loadAndValidateConfig(configPath string, logger observability.Logger) *conf
 
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		logger.Fatal("failed to load configuration", observability.Error(err))
+		fatalWithSync(logger, "failed to load configuration", observability.Error(err))
 	}
 
 	if err := config.ValidateConfig(cfg); err != nil {
-		logger.Fatal("invalid configuration", observability.Error(err))
+		fatalWithSync(logger, "invalid configuration", observability.Error(err))
 	}
 
 	// Count gRPC and HTTP listeners
@@ -140,8 +147,10 @@ type application struct {
 	backendRegistry *backend.Registry
 	healthChecker   *health.Checker
 	metrics         *observability.Metrics
+	metricsServer   *http.Server
 	tracer          *observability.Tracer
 	config          *config.GatewayConfig
+	rateLimiter     *middleware.RateLimiter
 }
 
 // initApplication initializes all application components.
@@ -152,24 +161,24 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 
 	backendRegistry := backend.NewRegistry(logger)
 	if err := backendRegistry.LoadFromConfig(cfg.Spec.Backends); err != nil {
-		logger.Fatal("failed to load backends", observability.Error(err))
+		fatalWithSync(logger, "failed to load backends", observability.Error(err))
 	}
 
 	r := router.New()
 	if err := r.LoadRoutes(cfg.Spec.Routes); err != nil {
-		logger.Fatal("failed to load routes", observability.Error(err))
+		fatalWithSync(logger, "failed to load routes", observability.Error(err))
 	}
 
 	reverseProxy := proxy.NewReverseProxy(r, backendRegistry, proxy.WithProxyLogger(logger))
-	handler := buildMiddlewareChain(reverseProxy, cfg, logger, metrics, tracer)
+	middlewareResult := buildMiddlewareChain(reverseProxy, cfg, logger, metrics, tracer)
 
 	gw, err := gateway.New(cfg,
 		gateway.WithLogger(logger),
-		gateway.WithRouteHandler(handler),
+		gateway.WithRouteHandler(middlewareResult.handler),
 		gateway.WithShutdownTimeout(30*time.Second),
 	)
 	if err != nil {
-		logger.Fatal("failed to create gateway", observability.Error(err))
+		fatalWithSync(logger, "failed to create gateway", observability.Error(err))
 	}
 
 	return &application{
@@ -179,6 +188,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		metrics:         metrics,
 		tracer:          tracer,
 		config:          cfg,
+		rateLimiter:     middlewareResult.rateLimiter,
 	}
 }
 
@@ -201,7 +211,7 @@ func initTracer(cfg *config.GatewayConfig, logger observability.Logger) *observa
 
 	tracer, err := observability.NewTracer(tracerCfg)
 	if err != nil {
-		logger.Fatal("failed to initialize tracer", observability.Error(err))
+		fatalWithSync(logger, "failed to initialize tracer", observability.Error(err))
 	}
 
 	return tracer
@@ -212,11 +222,11 @@ func runGateway(app *application, configPath string, logger observability.Logger
 	ctx := context.Background()
 
 	if err := app.backendRegistry.StartAll(ctx); err != nil {
-		logger.Fatal("failed to start backends", observability.Error(err))
+		fatalWithSync(logger, "failed to start backends", observability.Error(err))
 	}
 
 	if err := app.gateway.Start(ctx); err != nil {
-		logger.Fatal("failed to start gateway", observability.Error(err))
+		fatalWithSync(logger, "failed to start gateway", observability.Error(err))
 	}
 
 	startMetricsServerIfEnabled(app, logger)
@@ -242,7 +252,8 @@ func startMetricsServerIfEnabled(app *application, logger observability.Logger) 
 		metricsPort = 9090
 	}
 
-	go startMetricsServer(metricsPort, metricsPath, app.metrics, app.healthChecker, logger)
+	app.metricsServer = createMetricsServer(metricsPort, metricsPath, app.metrics, app.healthChecker, logger)
+	go runMetricsServer(app.metricsServer, logger)
 }
 
 // startConfigWatcher starts the configuration watcher.
@@ -285,6 +296,14 @@ func waitForShutdown(app *application, watcher *config.Watcher, logger observabi
 		_ = watcher.Stop()
 	}
 
+	// Shutdown metrics server if running
+	if app.metricsServer != nil {
+		logger.Info("stopping metrics server")
+		if err := app.metricsServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("failed to stop metrics server gracefully", observability.Error(err))
+		}
+	}
+
 	if err := app.gateway.Stop(shutdownCtx); err != nil {
 		logger.Error("failed to stop gateway gracefully", observability.Error(err))
 	}
@@ -297,7 +316,18 @@ func waitForShutdown(app *application, watcher *config.Watcher, logger observabi
 		logger.Error("failed to shutdown tracer", observability.Error(err))
 	}
 
+	// Stop rate limiter cleanup goroutine
+	if app.rateLimiter != nil {
+		app.rateLimiter.Stop()
+	}
+
 	logger.Info("gateway stopped")
+}
+
+// middlewareChainResult holds the result of building the middleware chain.
+type middlewareChainResult struct {
+	handler     http.Handler
+	rateLimiter *middleware.RateLimiter
 }
 
 // buildMiddlewareChain builds the middleware chain.
@@ -307,11 +337,14 @@ func buildMiddlewareChain(
 	logger observability.Logger,
 	metrics *observability.Metrics,
 	tracer *observability.Tracer,
-) http.Handler {
+) middlewareChainResult {
 	h := handler
+	var rateLimiter *middleware.RateLimiter
 
 	if cfg.Spec.RateLimit != nil && cfg.Spec.RateLimit.Enabled {
-		h = middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)(h)
+		var rateLimitMiddleware func(http.Handler) http.Handler
+		rateLimitMiddleware, rateLimiter = middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
+		h = rateLimitMiddleware(h)
 	}
 
 	if cfg.Spec.CircuitBreaker != nil && cfg.Spec.CircuitBreaker.Enabled {
@@ -328,17 +361,20 @@ func buildMiddlewareChain(
 	h = middleware.RequestID()(h)
 	h = middleware.Recovery(logger)(h)
 
-	return h
+	return middlewareChainResult{
+		handler:     h,
+		rateLimiter: rateLimiter,
+	}
 }
 
-// startMetricsServer starts the metrics HTTP server.
-func startMetricsServer(
+// createMetricsServer creates the metrics HTTP server.
+func createMetricsServer(
 	port int,
 	path string,
 	metrics *observability.Metrics,
 	healthChecker *health.Checker,
 	logger observability.Logger,
-) {
+) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle(path, metrics.Handler())
 	mux.HandleFunc("/health", healthChecker.HealthHandler())
@@ -351,14 +387,17 @@ func startMetricsServer(
 		observability.String("metrics_path", path),
 	)
 
-	server := &http.Server{
+	return &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 	}
+}
 
+// runMetricsServer runs the metrics HTTP server.
+func runMetricsServer(server *http.Server, logger observability.Logger) {
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("metrics server error", observability.Error(err))
 	}

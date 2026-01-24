@@ -3,10 +3,14 @@
 # ==============================================================================
 FROM golang:1.25-alpine AS builder
 
-# Install build dependencies
+# Target architecture for cross-compilation (set by Docker buildx)
+ARG TARGETARCH
+ARG TARGETOS=linux
+
+# Install build dependencies (sorted alphanumerically)
 RUN apk add --no-cache \
-    git \
     ca-certificates \
+    git \
     tzdata
 
 # Set working directory
@@ -27,7 +31,7 @@ ARG BUILD_TIME
 ARG GIT_COMMIT=unknown
 
 # Build the binary with optimizations
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} go build \
     -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.gitCommit=${GIT_COMMIT}" \
     -trimpath \
     -o /build/bin/gateway \
@@ -38,19 +42,27 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build \
 # ==============================================================================
 FROM alpine:3.21
 
-# OCI Labels
+# Build arguments for dynamic OCI labels
+ARG VERSION=dev
+ARG BUILD_TIME
+ARG GIT_COMMIT=unknown
+
+# OCI Labels (static and dynamic)
 LABEL org.opencontainers.image.title="avapigw" \
       org.opencontainers.image.description="High-performance API Gateway built with Go and gin-gonic" \
       org.opencontainers.image.vendor="avapigw" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/vyrodovalexey/avapigw" \
-      org.opencontainers.image.documentation="https://github.com/vyrodovalexey/avapigw/blob/main/README.md"
+      org.opencontainers.image.documentation="https://github.com/vyrodovalexey/avapigw/blob/main/README.md" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIME}"
 
-# Install runtime dependencies
+# Install runtime dependencies (sorted alphanumerically)
 RUN apk add --no-cache \
     ca-certificates \
-    tzdata \
     curl \
+    tzdata \
     && rm -rf /var/cache/apk/*
 
 # Create non-root user and group

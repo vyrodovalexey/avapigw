@@ -64,7 +64,7 @@ func TestParseRetryOn(t *testing.T) {
 		},
 		{
 			name:     "all codes",
-			input:    "cancelled,deadline-exceeded,internal,resource-exhausted,unavailable,unknown,aborted,data-loss",
+			input:    "canceled,deadline-exceeded,internal,resource-exhausted,unavailable,unknown,aborted,data-loss",
 			expected: []codes.Code{codes.Canceled, codes.DeadlineExceeded, codes.Internal, codes.ResourceExhausted, codes.Unavailable, codes.Unknown, codes.Aborted, codes.DataLoss},
 		},
 		{

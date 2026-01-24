@@ -506,3 +506,497 @@ func TestProtocolConstants(t *testing.T) {
 	assert.Equal(t, "HTTP2", ProtocolHTTP2)
 	assert.Equal(t, "GRPC", ProtocolGRPC)
 }
+
+func TestTLSModeConstants(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "SIMPLE", TLSModeSimple)
+	assert.Equal(t, "MUTUAL", TLSModeMutual)
+	assert.Equal(t, "OPTIONAL_MUTUAL", TLSModeOptionalMutual)
+	assert.Equal(t, "INSECURE", TLSModeInsecure)
+}
+
+func TestTLSConfig_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		config  *TLSConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "nil config",
+			config:  nil,
+			wantErr: false,
+		},
+		{
+			name:    "disabled config",
+			config:  &TLSConfig{Enabled: false},
+			wantErr: false,
+		},
+		{
+			name: "valid simple mode",
+			config: &TLSConfig{
+				Enabled:  true,
+				Mode:     TLSModeSimple,
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid mutual mode",
+			config: &TLSConfig{
+				Enabled:  true,
+				Mode:     TLSModeMutual,
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				CAFile:   "/path/to/ca.pem",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid insecure mode",
+			config: &TLSConfig{
+				Enabled: true,
+				Mode:    TLSModeInsecure,
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid mode",
+			config: &TLSConfig{
+				Enabled: true,
+				Mode:    "INVALID",
+			},
+			wantErr: true,
+			errMsg:  "invalid TLS mode",
+		},
+		{
+			name: "missing cert file for simple mode",
+			config: &TLSConfig{
+				Enabled: true,
+				Mode:    TLSModeSimple,
+				KeyFile: "/path/to/key.pem",
+			},
+			wantErr: true,
+			errMsg:  "certFile is required",
+		},
+		{
+			name: "missing key file for simple mode",
+			config: &TLSConfig{
+				Enabled:  true,
+				Mode:     TLSModeSimple,
+				CertFile: "/path/to/cert.pem",
+			},
+			wantErr: true,
+			errMsg:  "keyFile is required",
+		},
+		{
+			name: "missing CA file for mutual mode",
+			config: &TLSConfig{
+				Enabled:  true,
+				Mode:     TLSModeMutual,
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+			},
+			wantErr: true,
+			errMsg:  "caFile is required",
+		},
+		{
+			name: "invalid min version",
+			config: &TLSConfig{
+				Enabled:    true,
+				Mode:       TLSModeSimple,
+				CertFile:   "/path/to/cert.pem",
+				KeyFile:    "/path/to/key.pem",
+				MinVersion: "INVALID",
+			},
+			wantErr: true,
+			errMsg:  "invalid minVersion",
+		},
+		{
+			name: "invalid max version",
+			config: &TLSConfig{
+				Enabled:    true,
+				Mode:       TLSModeSimple,
+				CertFile:   "/path/to/cert.pem",
+				KeyFile:    "/path/to/key.pem",
+				MaxVersion: "INVALID",
+			},
+			wantErr: true,
+			errMsg:  "invalid maxVersion",
+		},
+		{
+			name: "valid with vault",
+			config: &TLSConfig{
+				Enabled: true,
+				Mode:    TLSModeSimple,
+				Vault: &VaultGRPCTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					Role:       "server",
+					CommonName: "server.example.com",
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.config.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestVaultGRPCTLSConfig_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		config  *VaultGRPCTLSConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "nil config",
+			config:  nil,
+			wantErr: false,
+		},
+		{
+			name:    "disabled config",
+			config:  &VaultGRPCTLSConfig{Enabled: false},
+			wantErr: false,
+		},
+		{
+			name: "valid config",
+			config: &VaultGRPCTLSConfig{
+				Enabled:    true,
+				PKIMount:   "pki",
+				Role:       "server",
+				CommonName: "server.example.com",
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing pki mount",
+			config: &VaultGRPCTLSConfig{
+				Enabled:    true,
+				Role:       "server",
+				CommonName: "server.example.com",
+			},
+			wantErr: true,
+			errMsg:  "pkiMount is required",
+		},
+		{
+			name: "missing role",
+			config: &VaultGRPCTLSConfig{
+				Enabled:    true,
+				PKIMount:   "pki",
+				CommonName: "server.example.com",
+			},
+			wantErr: true,
+			errMsg:  "role is required",
+		},
+		{
+			name: "missing common name",
+			config: &VaultGRPCTLSConfig{
+				Enabled:  true,
+				PKIMount: "pki",
+				Role:     "server",
+			},
+			wantErr: true,
+			errMsg:  "commonName is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.config.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestTLSConfig_IsInsecure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *TLSConfig
+		expected bool
+	}{
+		{
+			name:     "nil config",
+			config:   nil,
+			expected: true,
+		},
+		{
+			name:     "disabled config",
+			config:   &TLSConfig{Enabled: false},
+			expected: true,
+		},
+		{
+			name:     "insecure mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeInsecure},
+			expected: true,
+		},
+		{
+			name:     "simple mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeSimple},
+			expected: false,
+		},
+		{
+			name:     "mutual mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeMutual},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.config.IsInsecure())
+		})
+	}
+}
+
+func TestTLSConfig_IsMutual(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *TLSConfig
+		expected bool
+	}{
+		{
+			name:     "nil config",
+			config:   nil,
+			expected: false,
+		},
+		{
+			name:     "simple mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeSimple},
+			expected: false,
+		},
+		{
+			name:     "mutual mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeMutual},
+			expected: true,
+		},
+		{
+			name:     "require client cert",
+			config:   &TLSConfig{Enabled: true, RequireClientCert: true},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.config.IsMutual())
+		})
+	}
+}
+
+func TestTLSConfig_IsOptionalMutual(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *TLSConfig
+		expected bool
+	}{
+		{
+			name:     "nil config",
+			config:   nil,
+			expected: false,
+		},
+		{
+			name:     "simple mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeSimple},
+			expected: false,
+		},
+		{
+			name:     "optional mutual mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeOptionalMutual},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.config.IsOptionalMutual())
+		})
+	}
+}
+
+func TestTLSConfig_GetEffectiveMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *TLSConfig
+		expected string
+	}{
+		{
+			name:     "nil config",
+			config:   nil,
+			expected: TLSModeInsecure,
+		},
+		{
+			name:     "disabled config",
+			config:   &TLSConfig{Enabled: false},
+			expected: TLSModeInsecure,
+		},
+		{
+			name:     "empty mode",
+			config:   &TLSConfig{Enabled: true},
+			expected: TLSModeSimple,
+		},
+		{
+			name:     "explicit mode",
+			config:   &TLSConfig{Enabled: true, Mode: TLSModeMutual},
+			expected: TLSModeMutual,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.config.GetEffectiveMode())
+		})
+	}
+}
+
+func TestTLSConfig_GetEffectiveMinVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *TLSConfig
+		expected string
+	}{
+		{
+			name:     "nil config",
+			config:   nil,
+			expected: "TLS12",
+		},
+		{
+			name:     "empty min version",
+			config:   &TLSConfig{},
+			expected: "TLS12",
+		},
+		{
+			name:     "explicit min version",
+			config:   &TLSConfig{MinVersion: "TLS13"},
+			expected: "TLS13",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.config.GetEffectiveMinVersion())
+		})
+	}
+}
+
+func TestTLSConfig_GetEffectiveALPN(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *TLSConfig
+		expected []string
+	}{
+		{
+			name:     "nil config",
+			config:   nil,
+			expected: []string{"h2"},
+		},
+		{
+			name:     "empty ALPN",
+			config:   &TLSConfig{},
+			expected: []string{"h2"},
+		},
+		{
+			name:     "explicit ALPN",
+			config:   &TLSConfig{ALPN: []string{"h2", "http/1.1"}},
+			expected: []string{"h2", "http/1.1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.config.GetEffectiveALPN())
+		})
+	}
+}
+
+func TestTLSConfig_YAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := &TLSConfig{
+		Enabled:            true,
+		Mode:               TLSModeMutual,
+		CertFile:           "/path/to/cert.pem",
+		KeyFile:            "/path/to/key.pem",
+		CAFile:             "/path/to/ca.pem",
+		MinVersion:         "TLS12",
+		MaxVersion:         "TLS13",
+		CipherSuites:       []string{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+		RequireClientCert:  true,
+		InsecureSkipVerify: false,
+		ALPN:               []string{"h2"},
+		RequireALPN:        true,
+		AllowedCNs:         []string{"client.example.com"},
+		AllowedSANs:        []string{"*.example.com"},
+	}
+
+	// Marshal to YAML
+	yamlData, err := yaml.Marshal(original)
+	require.NoError(t, err)
+
+	// Unmarshal back
+	var restored TLSConfig
+	err = yaml.Unmarshal(yamlData, &restored)
+	require.NoError(t, err)
+
+	// Verify
+	assert.Equal(t, original.Enabled, restored.Enabled)
+	assert.Equal(t, original.Mode, restored.Mode)
+	assert.Equal(t, original.CertFile, restored.CertFile)
+	assert.Equal(t, original.KeyFile, restored.KeyFile)
+	assert.Equal(t, original.CAFile, restored.CAFile)
+	assert.Equal(t, original.MinVersion, restored.MinVersion)
+	assert.Equal(t, original.MaxVersion, restored.MaxVersion)
+	assert.Equal(t, original.CipherSuites, restored.CipherSuites)
+	assert.Equal(t, original.RequireClientCert, restored.RequireClientCert)
+	assert.Equal(t, original.InsecureSkipVerify, restored.InsecureSkipVerify)
+	assert.Equal(t, original.ALPN, restored.ALPN)
+	assert.Equal(t, original.RequireALPN, restored.RequireALPN)
+	assert.Equal(t, original.AllowedCNs, restored.AllowedCNs)
+	assert.Equal(t, original.AllowedSANs, restored.AllowedSANs)
+}

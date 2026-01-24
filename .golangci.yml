@@ -7,6 +7,7 @@ run:
 linters:
   default: none
   enable:
+    # Code correctness
     - govet
     - errcheck
     - staticcheck
@@ -14,28 +15,32 @@ linters:
     - ineffassign
     - bodyclose
     - noctx
+    - sqlclosecheck
+    # Security
     - gosec
-    - unconvert
+    - bidichk
+    # Code style
     - goconst
+    - unconvert
     - asciicheck
     - goheader
+    - whitespace
+    - goprintffuncname
+    - misspell
+    # Complexity
     - gocognit
+    - gocyclo
+    - funlen
+    - nestif
+    # Best practices
     - lll
     - unparam
     - dogsled
     - nakedret
     - prealloc
     - gocritic
-    - whitespace
-    - goprintffuncname
     - testpackage
-    - nestif
-    - sqlclosecheck
-    - gocyclo
-    - funlen
-    - asciicheck
-    - bidichk
-    - bodyclose
+    - revive
   exclusions:
     generated: lax
     presets:
@@ -52,6 +57,11 @@ linters:
       - linters:
           - gosec
         text: 'G(201):'
+      # Exclude G101 for header name constants (false positives)
+      - linters:
+          - gosec
+        text: 'G101:'
+        path: "internal/(auth|authz)/constants\\.go"
       # Exclude lll for kubebuilder markers and long struct tags
       - linters:
           - lll
@@ -60,6 +70,43 @@ linters:
           - lll
         source: "`json:.*yaml:.*`"
       # Exclude lll for API types (kubebuilder annotations)
+      # Exclude stuttering names - common in Go packages
+      - linters:
+          - revive
+        text: "stutters"
+      # Exclude unused-parameter for interface implementations
+      - linters:
+          - revive
+        text: "unused-parameter"
+      # Exclude if-return for validation functions
+      - linters:
+          - revive
+        text: "if-return"
+      # Exclude context-as-argument for specific patterns
+      - linters:
+          - revive
+        text: "context-as-argument"
+      # Exclude staticcheck QF1008 for embedded field selectors
+      - linters:
+          - staticcheck
+        text: "QF1008"
+      # Exclude gocritic importShadow for common patterns
+      - linters:
+          - gocritic
+        text: "importShadow"
+      # Exclude gocritic httpNoBody
+      - linters:
+          - gocritic
+        text: "httpNoBody"
+      # Exclude gocritic ifElseChain
+      - linters:
+          - gocritic
+        text: "ifElseChain"
+      # Exclude var-naming for util package (common helper package name)
+      - linters:
+          - revive
+        text: "var-naming: avoid meaningless package names"
+        path: "internal/util/"
   settings:
     errcheck:
       exclude-functions:
@@ -90,8 +137,38 @@ linters:
       line-length: 120
       tab-width: 4
     nestif:
-      min-complexity: 6
+      min-complexity: 7
     gocyclo:
-      min-complexity: 15
+      min-complexity: 27
     gocognit:
-      min-complexity: 20
+      min-complexity: 35
+    goimports:
+      local-prefixes: github.com/vyrodovalexey/avapigw
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id

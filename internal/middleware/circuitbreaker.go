@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -88,50 +89,81 @@ func (cb *CircuitBreaker) State() gobreaker.State {
 }
 
 // CircuitBreakerMiddleware returns a middleware that applies circuit breaker.
+// It uses the circuit breaker's Execute method to ensure atomic state checks and execution.
 func CircuitBreakerMiddleware(cb *CircuitBreaker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if cb.State() == gobreaker.StateOpen {
-				cb.logger.Warn("circuit breaker open",
-					observability.String("path", r.URL.Path),
-				)
-
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = io.WriteString(w, `{"error":"service unavailable","message":"circuit breaker open"}`)
-				return
-			}
-
 			rw := &circuitBreakerWriter{
 				ResponseWriter: w,
 				status:         http.StatusOK,
 			}
 
-			next.ServeHTTP(rw, r)
+			// Execute the request through the circuit breaker for atomic state check
+			_, err := cb.Execute(func() (interface{}, error) {
+				next.ServeHTTP(rw, r)
 
-			if rw.status >= 500 {
-				_, _ = cb.Execute(func() (interface{}, error) {
-					return nil, http.ErrAbortHandler
-				})
-			} else {
-				_, _ = cb.Execute(func() (interface{}, error) {
-					return nil, nil
-				})
+				// Return error for 5xx responses to trigger circuit breaker
+				if rw.status >= 500 {
+					return nil, &serverError{status: rw.status}
+				}
+				return nil, nil
+			})
+
+			// Handle circuit breaker open state
+			if err != nil {
+				// Check if it's a circuit breaker open error
+				if err == gobreaker.ErrOpenState || err == gobreaker.ErrTooManyRequests {
+					cb.logger.Warn("circuit breaker rejected request",
+						observability.String("path", r.URL.Path),
+						observability.String("state", cb.State().String()),
+					)
+
+					// Only write error response if we haven't written anything yet
+					if !rw.headerWritten {
+						w.Header().Set(HeaderContentType, ContentTypeJSON)
+						w.WriteHeader(http.StatusServiceUnavailable)
+						_, _ = io.WriteString(w, ErrServiceUnavailable)
+					}
+					return
+				}
+				// For server errors, the response was already written by the handler
 			}
 		})
 	}
 }
 
+// serverError represents a server-side error for circuit breaker tracking.
+type serverError struct {
+	status int
+}
+
+func (e *serverError) Error() string {
+	return fmt.Sprintf("server error: status %d", e.status)
+}
+
 // circuitBreakerWriter wraps http.ResponseWriter to track status.
 type circuitBreakerWriter struct {
 	http.ResponseWriter
-	status int
+	status        int
+	headerWritten bool
 }
 
 // WriteHeader captures the status code.
 func (w *circuitBreakerWriter) WriteHeader(code int) {
+	if w.headerWritten {
+		return
+	}
 	w.status = code
+	w.headerWritten = true
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// Write writes data and marks header as written.
+func (w *circuitBreakerWriter) Write(b []byte) (int, error) {
+	if !w.headerWritten {
+		w.headerWritten = true
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // CircuitBreakerFromConfig creates circuit breaker middleware from gateway config.

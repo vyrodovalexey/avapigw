@@ -75,7 +75,7 @@ func TestE2E_RateLimiting(t *testing.T) {
 		p := proxy.NewReverseProxy(r, registry, proxy.WithProxyLogger(logger))
 
 		// Create rate limiter middleware
-		rateLimitMiddleware := middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
+		rateLimitMiddleware, rateLimiter := middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
 		handler := rateLimitMiddleware(p)
 
 		// Create gateway with the handler
@@ -90,6 +90,9 @@ func TestE2E_RateLimiting(t *testing.T) {
 
 		t.Cleanup(func() {
 			_ = gw.Stop(ctx)
+			if rateLimiter != nil {
+				rateLimiter.Stop()
+			}
 		})
 
 		// Wait for gateway to be ready
@@ -159,7 +162,7 @@ func TestE2E_RateLimiting(t *testing.T) {
 
 		registry := backend.NewRegistry(logger)
 		p := proxy.NewReverseProxy(r, registry, proxy.WithProxyLogger(logger))
-		rateLimitMiddleware := middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
+		rateLimitMiddleware, rateLimiter := middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
 		handler := rateLimitMiddleware(p)
 
 		gw, err := gateway.New(cfg,
@@ -173,6 +176,9 @@ func TestE2E_RateLimiting(t *testing.T) {
 
 		t.Cleanup(func() {
 			_ = gw.Stop(ctx)
+			if rateLimiter != nil {
+				rateLimiter.Stop()
+			}
 		})
 
 		time.Sleep(500 * time.Millisecond)
@@ -253,7 +259,7 @@ func TestE2E_RateLimiting_Recovery(t *testing.T) {
 
 		registry := backend.NewRegistry(logger)
 		p := proxy.NewReverseProxy(r, registry, proxy.WithProxyLogger(logger))
-		rateLimitMiddleware := middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
+		rateLimitMiddleware, rateLimiter := middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
 		handler := rateLimitMiddleware(p)
 
 		gw, err := gateway.New(cfg,
@@ -267,6 +273,9 @@ func TestE2E_RateLimiting_Recovery(t *testing.T) {
 
 		t.Cleanup(func() {
 			_ = gw.Stop(ctx)
+			if rateLimiter != nil {
+				rateLimiter.Stop()
+			}
 		})
 
 		time.Sleep(500 * time.Millisecond)

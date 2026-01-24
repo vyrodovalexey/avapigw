@@ -1,12 +1,14 @@
 package server
 
 import (
+	"crypto/tls"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 )
 
 // Option is a functional option for configuring the gRPC server.
@@ -116,5 +118,47 @@ func WithConnectionTimeout(timeout time.Duration) Option {
 func WithGracefulStopTimeout(timeout time.Duration) Option {
 	return func(s *Server) {
 		s.gracefulStopTimeout = timeout
+	}
+}
+
+// WithTLSManager sets the TLS manager for the server.
+func WithTLSManager(manager *tlspkg.Manager) Option {
+	return func(s *Server) {
+		s.tlsManager = manager
+	}
+}
+
+// WithTLSMetrics sets the TLS metrics for the server.
+func WithTLSMetrics(metrics tlspkg.MetricsRecorder) Option {
+	return func(s *Server) {
+		s.tlsMetrics = metrics
+	}
+}
+
+// WithTLSConfig sets the TLS configuration directly.
+func WithTLSConfig(tlsConfig *tls.Config) Option {
+	return func(s *Server) {
+		s.tlsConfig = tlsConfig
+	}
+}
+
+// WithInsecure enables insecure mode (no TLS) for development.
+func WithInsecure() Option {
+	return func(s *Server) {
+		s.insecure = true
+	}
+}
+
+// WithALPNEnforcement enables ALPN protocol enforcement.
+func WithALPNEnforcement(enabled bool) Option {
+	return func(s *Server) {
+		s.requireALPN = enabled
+	}
+}
+
+// WithClientCertMetadata enables extraction of client certificate identity to metadata.
+func WithClientCertMetadata(enabled bool) Option {
+	return func(s *Server) {
+		s.extractClientCertMetadata = enabled
 	}
 }

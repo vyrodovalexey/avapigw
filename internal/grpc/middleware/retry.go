@@ -40,7 +40,7 @@ func ParseRetryOn(retryOn string) []codes.Code {
 	}
 
 	codeMap := map[string]codes.Code{
-		"cancelled":          codes.Canceled,
+		"canceled":           codes.Canceled,
 		"deadline-exceeded":  codes.DeadlineExceeded,
 		"internal":           codes.Internal,
 		"resource-exhausted": codes.ResourceExhausted,

@@ -2,24 +2,28 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 // ConnectionPool manages gRPC client connections.
 type ConnectionPool struct {
-	conns    map[string]*grpc.ClientConn
-	mu       sync.RWMutex
-	dialOpts []grpc.DialOption
-	logger   observability.Logger
-	timeout  time.Duration
+	conns     map[string]*grpc.ClientConn
+	mu        sync.RWMutex
+	dialOpts  []grpc.DialOption
+	logger    observability.Logger
+	timeout   time.Duration
+	tlsConfig *tls.Config
 }
 
 // PoolOption is a functional option for configuring the connection pool.
@@ -46,6 +50,45 @@ func WithDialTimeout(timeout time.Duration) PoolOption {
 	}
 }
 
+// WithTLSConfig sets the TLS configuration for the connection pool.
+func WithTLSConfig(tlsConfig *tls.Config) PoolOption {
+	return func(p *ConnectionPool) {
+		p.tlsConfig = tlsConfig
+	}
+}
+
+// WithTLSFromConfig creates TLS configuration from config.TLSConfig.
+func WithTLSFromConfig(cfg *config.TLSConfig) PoolOption {
+	return func(p *ConnectionPool) {
+		if cfg == nil || !cfg.Enabled || cfg.IsInsecure() {
+			return
+		}
+
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // Intentional for dev/testing
+		}
+
+		// Set minimum TLS version
+		switch cfg.GetEffectiveMinVersion() {
+		case "TLS12":
+			tlsConfig.MinVersion = tls.VersionTLS12
+		case "TLS13":
+			tlsConfig.MinVersion = tls.VersionTLS13
+		default:
+			tlsConfig.MinVersion = tls.VersionTLS12
+		}
+
+		// Set ALPN protocols (default to h2 for gRPC)
+		if len(cfg.GetEffectiveALPN()) > 0 {
+			tlsConfig.NextProtos = cfg.GetEffectiveALPN()
+		} else {
+			tlsConfig.NextProtos = []string{"h2"}
+		}
+
+		p.tlsConfig = tlsConfig
+	}
+}
+
 // NewConnectionPool creates a new connection pool.
 func NewConnectionPool(opts ...PoolOption) *ConnectionPool {
 	p := &ConnectionPool{
@@ -60,16 +103,15 @@ func NewConnectionPool(opts ...PoolOption) *ConnectionPool {
 
 	// Add default dial options if none provided
 	if len(p.dialOpts) == 0 {
-		p.dialOpts = defaultDialOptions()
+		p.dialOpts = p.buildDialOptions()
 	}
 
 	return p
 }
 
-// defaultDialOptions returns default gRPC dial options.
-func defaultDialOptions() []grpc.DialOption {
-	return []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+// buildDialOptions builds dial options based on pool configuration.
+func (p *ConnectionPool) buildDialOptions() []grpc.DialOption {
+	opts := []grpc.DialOption{
 		grpc.WithDefaultCallOptions(
 			grpc.ForceCodec(&rawCodec{}),
 		),
@@ -79,6 +121,16 @@ func defaultDialOptions() []grpc.DialOption {
 			PermitWithoutStream: true,
 		}),
 	}
+
+	// Add TLS credentials if configured
+	if p.tlsConfig != nil {
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(p.tlsConfig)))
+		p.logger.Debug("using TLS credentials for gRPC connections")
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	return opts
 }
 
 // Get returns a connection to the target, creating one if necessary.
@@ -183,4 +235,28 @@ func (p *ConnectionPool) Targets() []string {
 		targets = append(targets, target)
 	}
 	return targets
+}
+
+// IsTLSEnabled returns true if TLS is enabled for this pool.
+func (p *ConnectionPool) IsTLSEnabled() bool {
+	return p.tlsConfig != nil
+}
+
+// TLSConfig returns the TLS configuration for this pool.
+func (p *ConnectionPool) TLSConfig() *tls.Config {
+	return p.tlsConfig
+}
+
+// SetTLSConfig updates the TLS configuration and rebuilds dial options.
+// Note: This does not affect existing connections.
+func (p *ConnectionPool) SetTLSConfig(tlsConfig *tls.Config) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.tlsConfig = tlsConfig
+	p.dialOpts = p.buildDialOptions()
+
+	p.logger.Info("updated TLS configuration for gRPC connection pool",
+		observability.Bool("tlsEnabled", tlsConfig != nil),
+	)
 }

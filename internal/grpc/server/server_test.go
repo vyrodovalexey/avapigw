@@ -415,3 +415,87 @@ func TestServer_Start_InvalidAddress(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, StateStopped, s.State())
 }
+
+func TestNew_WithInsecure(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultGRPCListenerConfig()
+	s, err := New(cfg, WithInsecure())
+
+	require.NoError(t, err)
+	assert.NotNil(t, s)
+	assert.True(t, s.insecure)
+}
+
+func TestNew_WithALPNEnforcement(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultGRPCListenerConfig()
+	s, err := New(cfg, WithALPNEnforcement(true))
+
+	require.NoError(t, err)
+	assert.NotNil(t, s)
+	assert.True(t, s.requireALPN)
+}
+
+func TestNew_WithClientCertMetadata(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultGRPCListenerConfig()
+	s, err := New(cfg, WithClientCertMetadata(true))
+
+	require.NoError(t, err)
+	assert.NotNil(t, s)
+	assert.True(t, s.extractClientCertMetadata)
+}
+
+func TestServer_Start_Insecure(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil, WithAddress("127.0.0.1:0"), WithInsecure())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = s.Stop(ctx) }()
+
+	assert.Equal(t, StateRunning, s.State())
+	assert.True(t, s.IsRunning())
+}
+
+func TestParseTLSVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		version  string
+		expected uint16
+	}{
+		{"TLS10", "TLS10", 0x0301},
+		{"TLS11", "TLS11", 0x0302},
+		{"TLS12", "TLS12", 0x0303},
+		{"TLS13", "TLS13", 0x0304},
+		{"empty", "", 0x0303},          // Default to TLS 1.2
+		{"invalid", "invalid", 0x0303}, // Default to TLS 1.2
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := parseTLSVersion(tt.version)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestWrappedServerStream_Context(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.WithValue(context.Background(), "key", "value")
+	wrapped := &wrappedServerStream{ctx: ctx}
+
+	assert.Equal(t, ctx, wrapped.Context())
+	assert.Equal(t, "value", wrapped.Context().Value("key"))
+}

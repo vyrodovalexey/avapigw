@@ -232,10 +232,11 @@ func TestConnectionPool_Concurrency(t *testing.T) {
 	assert.Equal(t, 1, pool.Size())
 }
 
-func TestDefaultDialOptions(t *testing.T) {
+func TestBuildDialOptions(t *testing.T) {
 	t.Parallel()
 
-	opts := defaultDialOptions()
+	pool := NewConnectionPool()
+	opts := pool.buildDialOptions()
 
 	assert.NotEmpty(t, opts)
 	// Should have at least transport credentials and keepalive

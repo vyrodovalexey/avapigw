@@ -4,6 +4,8 @@ package health
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -22,10 +24,17 @@ const (
 
 // HealthResponse represents the health check response.
 type HealthResponse struct {
-	Status    Status    `json:"status"`
-	Version   string    `json:"version,omitempty"`
-	Uptime    string    `json:"uptime,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	Status       Status            `json:"status"`
+	Version      string            `json:"version,omitempty"`
+	Uptime       string            `json:"uptime,omitempty"`
+	UptimeSecs   int64             `json:"uptime_seconds,omitempty"`
+	Timestamp    time.Time         `json:"timestamp"`
+	StartTime    time.Time         `json:"start_time,omitempty"`
+	Hostname     string            `json:"hostname,omitempty"`
+	GoVersion    string            `json:"go_version,omitempty"`
+	NumGoroutine int               `json:"num_goroutines,omitempty"`
+	MemoryMB     float64           `json:"memory_mb,omitempty"`
+	Details      map[string]string `json:"details,omitempty"`
 }
 
 // ReadinessResponse represents the readiness check response.
@@ -75,13 +84,27 @@ func (c *Checker) UnregisterCheck(name string) {
 	delete(c.checks, name)
 }
 
-// Health returns the health status.
+// Health returns the health status with detailed information.
 func (c *Checker) Health() HealthResponse {
+	uptime := time.Since(c.startTime)
+	hostname, _ := os.Hostname()
+
+	// Get memory stats
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	memoryMB := float64(memStats.Alloc) / 1024 / 1024
+
 	return HealthResponse{
-		Status:    StatusHealthy,
-		Version:   c.version,
-		Uptime:    time.Since(c.startTime).Round(time.Second).String(),
-		Timestamp: time.Now(),
+		Status:       StatusHealthy,
+		Version:      c.version,
+		Uptime:       uptime.Round(time.Second).String(),
+		UptimeSecs:   int64(uptime.Seconds()),
+		Timestamp:    time.Now(),
+		StartTime:    c.startTime,
+		Hostname:     hostname,
+		GoVersion:    runtime.Version(),
+		NumGoroutine: runtime.NumGoroutine(),
+		MemoryMB:     memoryMB,
 	}
 }
 
@@ -115,7 +138,7 @@ func (c *Checker) HealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		response := c.Health()
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(HeaderContentType, ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 
 		if err := json.NewEncoder(w).Encode(response); err != nil {
@@ -129,7 +152,7 @@ func (c *Checker) ReadinessHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		response := c.Readiness()
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(HeaderContentType, ContentTypeJSON)
 
 		statusCode := http.StatusOK
 		if response.Status == StatusUnhealthy {
