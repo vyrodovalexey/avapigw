@@ -244,30 +244,12 @@ jobs:
           POSTGRES_DB: keycloak
           POSTGRES_USER: keycloak
           POSTGRES_PASSWORD: password
-      # Keycloak for OIDC testing (using bitnami image for easier dev mode)
-      keycloak:
-        image: quay.io/keycloak/keycloak:26.5
-        ports:
-          - 8090:8090
-        env:
-          KC_DB: postgres
-          KC_DB_URL: jdbc:postgresql://127.0.0.1:5432/keycloak
-          KC_DB_USERNAME: keycloak
-          KC_DB_PASSWORD: password
-          KC_HOSTNAME: 127.0.0.1
-          KC_HTTP_PORT: 8090
-          KC_LOG_LEVEL: info
-          KC_METRICS_ENABLED: true
-          KC_HEALTH_ENABLED: true
-          KEYCLOAK_ADMIN: admin
         options: >-
-          --entrypoint sh
-          -c "/opt/keycloak/bin/kc.sh start-dev"
-          --health-cmd "curl -sf http://localhost:8090/health/ready || exit 1"
+          --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 15
-          --health-start-period 180s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -277,6 +259,32 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      # Keycloak for OIDC testing (using bitnami image for easier dev mode)
+      - name: Start Keycloak
+        run: |
+          docker run -d --name keycloak \
+            -e KC_DB=postgres \
+            -e KC_DB_URL=jdbc:postgresql://127.0.0.1:5432/keycloak \
+            -e KC_DB_USERNAME=keycloak \
+            -e KC_DB_PASSWORD=password \
+            -e KC_HOSTNAME=127.0.0.1 \
+            -e KC_HTTP_PORT=8090 \
+            -e KC_HOSTNAME_STRICT=false \
+            -e KC_HOSTNAME_STRICT_HTTPS=false \
+            -e KC_LOG_LEVEL=info \
+            -e KC_METRICS_ENABLED=true \
+            -e KC_HEALTH_ENABLED=true \
+            -e KEYCLOAK_ADMIN=admin \
+            -e KEYCLOAK_ADMIN_PASSWORD=admin \
+            -p 8090:8090 \
+            --network host \
+            quay.io/keycloak/keycloak:26.5 start-dev
+
+      - name: Wait for Keycloak
+        run: |
+          echo "Waiting for Keycloak to be ready..."
+          timeout 180 bash -c 'until curl -sf http://127.0.0.1:8090/health/ready; do sleep 5; done'
+          echo "Keycloak is ready"
 
       - name: Install grpcurl
         run: |
