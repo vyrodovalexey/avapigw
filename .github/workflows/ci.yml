@@ -245,20 +245,16 @@ jobs:
           POSTGRES_USER: keycloak
           POSTGRES_PASSWORD: password
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "nc -z localhost 5432 || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+          --health-start-period 30s
 
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Set up Go
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
       # Keycloak for OIDC testing (using bitnami image for easier dev mode)
       - name: Start Keycloak
         run: |
@@ -285,6 +281,13 @@ jobs:
           echo "Waiting for Keycloak to be ready..."
           timeout 180 bash -c 'until curl -sf http://127.0.0.1:8090/health/ready; do sleep 5; done'
           echo "Keycloak is ready"
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
 
       - name: Install grpcurl
         run: |
