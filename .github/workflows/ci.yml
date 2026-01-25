@@ -235,21 +235,6 @@ jobs:
           --health-timeout 5s
           --health-retries 5
           --health-start-period 10s
-      # Keycloak DB
-      keycloakdb:
-        image: postgres:16
-        ports:
-          - 5432:5432
-        env:
-          POSTGRES_DB: keycloak
-          POSTGRES_USER: keycloak
-          POSTGRES_PASSWORD: password
-        options: >-
-          --health-cmd "nc -z localhost 5432 || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-          --health-start-period 30s
 
     steps:
       - name: Checkout code
@@ -259,10 +244,6 @@ jobs:
       - name: Start Keycloak
         run: |
           docker run -d --name keycloak \
-            -e KC_DB=postgres \
-            -e KC_DB_URL=jdbc:postgresql://127.0.0.1:5432/keycloak \
-            -e KC_DB_USERNAME=keycloak \
-            -e KC_DB_PASSWORD=password \
             -e KC_HOSTNAME=127.0.0.1 \
             -e KC_HTTP_PORT=8090 \
             -e KC_HOSTNAME_STRICT=false \
@@ -274,7 +255,7 @@ jobs:
             -e KEYCLOAK_ADMIN_PASSWORD=admin \
             -p 8090:8090 \
             --network host \
-            quay.io/keycloak/keycloak:26.5 start-dev
+            quay.io/keycloak/keycloak:26.5 start-dev --storage=chm
 
       - name: Wait for Keycloak
         run: |
