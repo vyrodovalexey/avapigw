@@ -261,7 +261,8 @@ jobs:
           KC_HEALTH_ENABLED: true
           KEYCLOAK_ADMIN: admin
         options: >-
-          --entrypoint "/opt/keycloak/bin/kc.sh start-dev"
+          --entrypoint sh
+          -c "/opt/keycloak/bin/kc.sh start-dev"
           --health-cmd "curl -sf http://localhost:8090/health/ready || exit 1"
           --health-interval 10s
           --health-timeout 5s
