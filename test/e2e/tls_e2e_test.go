@@ -381,6 +381,9 @@ func TestE2E_TLS_ConnectionInfo(t *testing.T) {
 				if err := tlsConn.Handshake(); err != nil {
 					return
 				}
+				// Read the HTTP request first before sending response
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
 				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
 			}(conn)
 		}
@@ -495,6 +498,9 @@ func TestE2E_TLS_VersionNegotiation(t *testing.T) {
 					}
 					go func(c net.Conn) {
 						defer c.Close()
+						// Read the HTTP request first before sending response
+						buf := make([]byte, 1024)
+						_, _ = c.Read(buf)
 						_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
 					}(conn)
 				}
@@ -579,6 +585,9 @@ func TestE2E_TLS_CipherSuiteNegotiation(t *testing.T) {
 					}
 					go func(c net.Conn) {
 						defer c.Close()
+						// Read the HTTP request first before sending response
+						buf := make([]byte, 1024)
+						_, _ = c.Read(buf)
 						_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
 					}(conn)
 				}
@@ -632,6 +641,9 @@ func TestE2E_TLS_ExpiredCertificate(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				// Read the HTTP request first before sending response
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
 				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
 			}(conn)
 		}
@@ -678,6 +690,9 @@ func TestE2E_TLS_SelfSignedCertificate(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				// Read the HTTP request first before sending response
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
 				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
 			}(conn)
 		}

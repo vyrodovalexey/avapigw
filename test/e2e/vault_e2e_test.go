@@ -124,6 +124,9 @@ func TestE2E_Vault_PKI_GatewayTLS(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				// Read the HTTP request first before sending response
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
 				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\nVault TLS Gateway"))
 			}(conn)
 		}
@@ -222,6 +225,9 @@ func TestE2E_Vault_PKI_BackendTLS(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				// Read the HTTP request first before sending response
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
 				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\nVault TLS Backend"))
 			}(conn)
 		}
