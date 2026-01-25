@@ -142,8 +142,7 @@ linters:
       min-complexity: 27
     gocognit:
       min-complexity: 35
-    goimports:
-      local-prefixes: github.com/vyrodovalexey/avapigw
+
     misspell:
       locale: US
     revive:
