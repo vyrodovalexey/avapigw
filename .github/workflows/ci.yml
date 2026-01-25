@@ -236,32 +236,30 @@ jobs:
           --health-retries 5
           --health-start-period 10s
 
+      keycloak:
+        image: bitnami/keycloak:26
+        env:
+          KEYCLOAK_HTTP_PORT: 8090
+          KEYCLOAK_ADMIN_USER: admin
+          KEYCLOAK_ADMIN_PASSWORD: admin
+          KEYCLOAK_DATABASE_VENDOR: dev-mem
+          KEYCLOAK_ENABLE_HEALTH_ENDPOINTS: "true"
+          KEYCLOAK_ENABLE_STATISTICS: "true"
+          KEYCLOAK_LOG_LEVEL: INFO
+        ports:
+          - 8090:8090
+        options: >-
+          --health-cmd "curl -sf http://127.0.0.1:8090/health/ready || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 120s
+
+
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Keycloak for OIDC testing (using bitnami image for easier dev mode)
-      - name: Start Keycloak
-        run: |
-          docker run -d --name keycloak \
-            -e KC_HOSTNAME=127.0.0.1 \
-            -e KC_HTTP_PORT=8090 \
-            -e KC_HOSTNAME_STRICT=false \
-            -e KC_HOSTNAME_STRICT_HTTPS=false \
-            -e KC_LOG_LEVEL=info \
-            -e KC_METRICS_ENABLED=true \
-            -e KC_HEALTH_ENABLED=true \
-            -e KEYCLOAK_ADMIN=admin \
-            -e KEYCLOAK_ADMIN_PASSWORD=admin \
-            -p 8090:8090 \
-            --network host \
-            quay.io/keycloak/keycloak:26.5 start-dev --storage=chm
-
-      - name: Wait for Keycloak
-        run: |
-          echo "Waiting for Keycloak to be ready..."
-          timeout 180 bash -c 'until curl -sf http://127.0.0.1:8090/health/ready; do sleep 5; done'
-          echo "Keycloak is ready"
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
