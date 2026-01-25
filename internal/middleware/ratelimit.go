@@ -12,6 +12,18 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// Rate limiter default configuration constants.
+const (
+	// DefaultClientTTL is the default TTL for client rate limiter entries.
+	DefaultClientTTL = 10 * time.Minute
+
+	// MinCleanupInterval is the minimum interval for cleanup operations.
+	MinCleanupInterval = 10 * time.Second
+
+	// MaxCleanupInterval is the maximum interval for cleanup operations.
+	MaxCleanupInterval = time.Minute
+)
+
 // clientEntry holds a rate limiter and its last access time for TTL-based cleanup.
 type clientEntry struct {
 	limiter    *rate.Limiter
@@ -51,7 +63,7 @@ func NewRateLimiter(rps, burst int, perClient bool, opts ...RateLimiterOption) *
 		rps:       rps,
 		burst:     burst,
 		logger:    observability.NopLogger(),
-		clientTTL: 10 * time.Minute, // Default TTL for client entries
+		clientTTL: DefaultClientTTL,
 		stopCh:    make(chan struct{}),
 	}
 
@@ -71,33 +83,29 @@ func (rl *RateLimiter) Allow(clientIP string) bool {
 }
 
 // allowPerClient checks rate limit per client.
+// Uses a single critical section to avoid race conditions between
+// checking existence and updating lastAccess time.
 func (rl *RateLimiter) allowPerClient(clientIP string) bool {
 	now := time.Now()
 
-	rl.mu.RLock()
+	rl.mu.Lock()
 	entry, exists := rl.clients[clientIP]
-	rl.mu.RUnlock()
-
 	if !exists {
-		rl.mu.Lock()
-		// Double-check after acquiring write lock
-		entry, exists = rl.clients[clientIP]
-		if !exists {
-			entry = &clientEntry{
-				limiter:    rate.NewLimiter(rate.Limit(rl.rps), rl.burst),
-				lastAccess: now,
-			}
-			rl.clients[clientIP] = entry
+		entry = &clientEntry{
+			limiter:    rate.NewLimiter(rate.Limit(rl.rps), rl.burst),
+			lastAccess: now,
 		}
-		rl.mu.Unlock()
+		rl.clients[clientIP] = entry
 	} else {
-		// Update last access time
-		rl.mu.Lock()
+		// Update last access time within the same critical section
 		entry.lastAccess = now
-		rl.mu.Unlock()
 	}
+	// Get the limiter reference while holding the lock
+	limiter := entry.limiter
+	rl.mu.Unlock()
 
-	return entry.limiter.Allow()
+	// Allow() is thread-safe on the limiter itself
+	return limiter.Allow()
 }
 
 // RateLimit returns a middleware that applies rate limiting.
@@ -209,11 +217,11 @@ func (rl *RateLimiter) StartAutoCleanup() {
 	go func() {
 		// Run cleanup every minute or at half the TTL, whichever is smaller
 		cleanupInterval := rl.clientTTL / 2
-		if cleanupInterval > time.Minute {
-			cleanupInterval = time.Minute
+		if cleanupInterval > MaxCleanupInterval {
+			cleanupInterval = MaxCleanupInterval
 		}
-		if cleanupInterval < 10*time.Second {
-			cleanupInterval = 10 * time.Second
+		if cleanupInterval < MinCleanupInterval {
+			cleanupInterval = MinCleanupInterval
 		}
 
 		ticker := time.NewTicker(cleanupInterval)

@@ -40,7 +40,7 @@ func (c *jsonCodec) Encode(v interface{}) ([]byte, error) {
 	// would require custom marshaling logic or protojson for protobuf messages
 
 	if err := encoder.Encode(v); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEncodingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrEncodingFailed, err)
 	}
 
 	// Remove trailing newline added by encoder
@@ -64,7 +64,7 @@ func (c *jsonCodec) Decode(data []byte, v interface{}) error {
 	decoder.UseNumber()
 
 	if err := decoder.Decode(v); err != nil {
-		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
+		return fmt.Errorf("%w: %w", ErrDecodingFailed, err)
 	}
 
 	return nil

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -112,7 +113,7 @@ func CircuitBreakerMiddleware(cb *CircuitBreaker) func(http.Handler) http.Handle
 			// Handle circuit breaker open state
 			if err != nil {
 				// Check if it's a circuit breaker open error
-				if err == gobreaker.ErrOpenState || err == gobreaker.ErrTooManyRequests {
+				if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
 					cb.logger.Warn("circuit breaker rejected request",
 						observability.String("path", r.URL.Path),
 						observability.String("state", cb.State().String()),

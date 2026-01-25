@@ -7,6 +7,33 @@ import (
 	"time"
 )
 
+// Connection pool default configuration constants.
+const (
+	// DefaultMaxIdleConns is the default maximum number of idle connections.
+	DefaultMaxIdleConns = 100
+
+	// DefaultMaxIdleConnsPerHost is the default maximum idle connections per host.
+	DefaultMaxIdleConnsPerHost = 10
+
+	// DefaultMaxConnsPerHost is the default maximum connections per host.
+	DefaultMaxConnsPerHost = 100
+
+	// DefaultIdleConnTimeout is the default idle connection timeout.
+	DefaultIdleConnTimeout = 90 * time.Second
+
+	// DefaultResponseHeaderTimeout is the default response header timeout.
+	DefaultResponseHeaderTimeout = 30 * time.Second
+
+	// DefaultExpectContinueTimeout is the default expect continue timeout.
+	DefaultExpectContinueTimeout = 1 * time.Second
+
+	// DefaultDialTimeout is the default dial timeout.
+	DefaultDialTimeout = 30 * time.Second
+
+	// DefaultDialKeepAlive is the default dial keep-alive interval.
+	DefaultDialKeepAlive = 30 * time.Second
+)
+
 // PoolConfig contains connection pool configuration.
 type PoolConfig struct {
 	MaxIdleConns          int
@@ -23,12 +50,12 @@ type PoolConfig struct {
 // DefaultPoolConfig returns default pool configuration.
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		MaxConnsPerHost:       100,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConns:          DefaultMaxIdleConns,
+		MaxIdleConnsPerHost:   DefaultMaxIdleConnsPerHost,
+		MaxConnsPerHost:       DefaultMaxConnsPerHost,
+		IdleConnTimeout:       DefaultIdleConnTimeout,
+		ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
+		ExpectContinueTimeout: DefaultExpectContinueTimeout,
 		DisableKeepAlives:     false,
 		DisableCompression:    false,
 	}
@@ -46,8 +73,8 @@ func NewConnectionPool(config PoolConfig) *ConnectionPool {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
+			Timeout:   DefaultDialTimeout,
+			KeepAlive: DefaultDialKeepAlive,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          config.MaxIdleConns,

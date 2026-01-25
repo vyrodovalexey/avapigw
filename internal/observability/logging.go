@@ -63,8 +63,10 @@ type zapLogger struct {
 }
 
 var (
-	globalLogger Logger
-	globalMu     sync.RWMutex
+	globalLogger     Logger
+	globalMu         sync.RWMutex
+	defaultLoggerMu  sync.Mutex
+	defaultLoggerVal Logger
 )
 
 // NewLogger creates a new logger with the given configuration.
@@ -243,15 +245,35 @@ func SetGlobalLogger(logger Logger) {
 }
 
 // GetGlobalLogger returns the global logger instance.
+// If no global logger is set, it returns a lazily-initialized default logger.
 func GetGlobalLogger() Logger {
 	globalMu.RLock()
-	defer globalMu.RUnlock()
-	if globalLogger == nil {
-		// Return a default logger if none is set
-		logger, _ := NewLogger(DefaultLogConfig())
+	logger := globalLogger
+	globalMu.RUnlock()
+
+	if logger != nil {
 		return logger
 	}
-	return globalLogger
+
+	// Use double-checked locking to safely initialize the default logger
+	defaultLoggerMu.Lock()
+	defer defaultLoggerMu.Unlock()
+
+	// Check again after acquiring the lock
+	if defaultLoggerVal != nil {
+		return defaultLoggerVal
+	}
+
+	// Create and store the default logger
+	defaultLogger, err := NewLogger(DefaultLogConfig())
+	if err != nil {
+		// Fallback to NopLogger if default logger creation fails
+		defaultLoggerVal = NopLogger()
+	} else {
+		defaultLoggerVal = defaultLogger
+	}
+
+	return defaultLoggerVal
 }
 
 // L returns the global logger (shorthand).

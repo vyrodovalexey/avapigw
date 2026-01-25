@@ -197,6 +197,14 @@ func (c *vaultClient) Authenticate(ctx context.Context) error {
 	}
 	c.mu.RUnlock()
 
+	// Check if context is already canceled or has expired deadline before starting
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		// Context is still valid, proceed with authentication
+	}
+
 	start := time.Now()
 	var err error
 
@@ -226,7 +234,7 @@ func (c *vaultClient) Authenticate(ctx context.Context) error {
 	)
 
 	// Start token renewal goroutine (uses internal stop channel, not passed context)
-	go c.tokenRenewalLoop()
+	go c.tokenRenewalLoop() //nolint:contextcheck // Background goroutine manages its own context lifecycle
 
 	return nil
 }

@@ -10,6 +10,29 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
+// Route priority constants for calculating route matching order.
+// Higher priority routes are matched first.
+const (
+	// priorityExactMatch is the base priority for exact path matches.
+	priorityExactMatch = 1000
+
+	// priorityPrefixMatch is the base priority for prefix path matches.
+	// Longer prefixes receive additional priority based on their length.
+	priorityPrefixMatch = 500
+
+	// priorityRegexMatch is the base priority for regex path matches.
+	priorityRegexMatch = 100
+
+	// priorityMethodRestriction is the priority bonus for routes with method restrictions.
+	priorityMethodRestriction = 50
+
+	// priorityHeaderRestriction is the priority bonus per header restriction.
+	priorityHeaderRestriction = 10
+
+	// priorityQueryRestriction is the priority bonus per query parameter restriction.
+	priorityQueryRestriction = 5
+)
+
 // Router is the main routing engine.
 type Router struct {
 	routes   []*CompiledRoute
@@ -261,36 +284,41 @@ func (r *Router) createPathMatcher(uri *config.URIMatch) (PathMatcher, error) {
 
 // calculatePriority calculates the priority of a route.
 // Higher priority routes are matched first.
+// Priority is determined by match specificity:
+// - Exact path matches have the highest priority
+// - Prefix matches have medium priority (longer prefixes rank higher)
+// - Regex matches have lower priority
+// - Additional restrictions (methods, headers, query params) increase priority
 func calculatePriority(route config.Route) int {
 	priority := 0
 
 	for _, match := range route.Match {
 		// Exact matches have highest priority
 		if match.URI != nil && match.URI.Exact != "" {
-			priority += 1000
+			priority += priorityExactMatch
 		}
 
 		// Prefix matches have medium priority
 		if match.URI != nil && match.URI.Prefix != "" {
 			// Longer prefixes have higher priority
-			priority += 500 + len(match.URI.Prefix)
+			priority += priorityPrefixMatch + len(match.URI.Prefix)
 		}
 
 		// Regex matches have lower priority
 		if match.URI != nil && match.URI.Regex != "" {
-			priority += 100
+			priority += priorityRegexMatch
 		}
 
 		// Method restrictions increase priority
 		if len(match.Methods) > 0 {
-			priority += 50
+			priority += priorityMethodRestriction
 		}
 
 		// Header restrictions increase priority
-		priority += len(match.Headers) * 10
+		priority += len(match.Headers) * priorityHeaderRestriction
 
 		// Query restrictions increase priority
-		priority += len(match.QueryParams) * 5
+		priority += len(match.QueryParams) * priorityQueryRestriction
 	}
 
 	return priority

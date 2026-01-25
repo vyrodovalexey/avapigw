@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -157,7 +158,7 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 	}
 
 	// Get backend host
-	targetURL := fmt.Sprintf("http://%s:%d", dest.Destination.Host, dest.Destination.Port)
+	targetURL := "http://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		p.errorHandler(w, r, NewInvalidTargetError(route.Name, targetURL, err))

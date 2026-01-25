@@ -50,7 +50,8 @@ func Logging(logger observability.Logger) func(http.Handler) http.Handler {
 			// Calculate duration
 			duration := time.Since(start)
 
-			// Get request ID from context
+			// Get request ID from context (r.Context() is the correct context to use here)
+			//nolint:contextcheck // Using request context is correct here
 			requestID := observability.RequestIDFromContext(r.Context())
 
 			// Log request

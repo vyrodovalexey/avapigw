@@ -95,45 +95,80 @@ func NewAuthenticator(config *Config, opts ...AuthenticatorOption) (Authenticato
 		a.metrics = NewMetrics("gateway")
 	}
 
-	// Initialize JWT validator if enabled and not provided
-	if config.IsJWTEnabled() && a.jwtValidator == nil {
-		validator, err := jwt.NewValidator(config.JWT, jwt.WithValidatorLogger(a.logger))
-		if err != nil {
-			return nil, err
-		}
-		a.jwtValidator = validator
-	}
-
-	// Initialize API key validator if enabled and not provided
-	if config.IsAPIKeyEnabled() && a.apiKeyValidator == nil {
-		validator, err := apikey.NewValidator(config.APIKey, apikey.WithValidatorLogger(a.logger))
-		if err != nil {
-			return nil, err
-		}
-		a.apiKeyValidator = validator
-	}
-
-	// Initialize mTLS validator if enabled and not provided
-	if config.IsMTLSEnabled() && a.mtlsValidator == nil {
-		validator, err := mtls.NewValidator(config.MTLS, mtls.WithValidatorLogger(a.logger))
-		if err != nil {
-			return nil, err
-		}
-		a.mtlsValidator = validator
-	}
-
-	// Initialize OIDC providers if enabled
-	if config.IsOIDCEnabled() {
-		for _, providerConfig := range config.OIDC.Providers {
-			provider, err := oidc.NewProvider(&providerConfig, config.OIDC, oidc.WithProviderLogger(a.logger))
-			if err != nil {
-				return nil, err
-			}
-			a.oidcProviders[providerConfig.Name] = provider
-		}
+	// Initialize validators
+	if err := a.initializeValidators(config); err != nil {
+		return nil, err
 	}
 
 	return a, nil
+}
+
+// initializeValidators initializes all authentication validators.
+func (a *authenticator) initializeValidators(config *Config) error {
+	if err := a.initJWTValidator(config); err != nil {
+		return err
+	}
+	if err := a.initAPIKeyValidator(config); err != nil {
+		return err
+	}
+	if err := a.initMTLSValidator(config); err != nil {
+		return err
+	}
+	return a.initOIDCProviders(config)
+}
+
+// initJWTValidator initializes the JWT validator if enabled.
+func (a *authenticator) initJWTValidator(config *Config) error {
+	if !config.IsJWTEnabled() || a.jwtValidator != nil {
+		return nil
+	}
+	validator, err := jwt.NewValidator(config.JWT, jwt.WithValidatorLogger(a.logger))
+	if err != nil {
+		return err
+	}
+	a.jwtValidator = validator
+	return nil
+}
+
+// initAPIKeyValidator initializes the API key validator if enabled.
+func (a *authenticator) initAPIKeyValidator(config *Config) error {
+	if !config.IsAPIKeyEnabled() || a.apiKeyValidator != nil {
+		return nil
+	}
+	validator, err := apikey.NewValidator(config.APIKey, apikey.WithValidatorLogger(a.logger))
+	if err != nil {
+		return err
+	}
+	a.apiKeyValidator = validator
+	return nil
+}
+
+// initMTLSValidator initializes the mTLS validator if enabled.
+func (a *authenticator) initMTLSValidator(config *Config) error {
+	if !config.IsMTLSEnabled() || a.mtlsValidator != nil {
+		return nil
+	}
+	validator, err := mtls.NewValidator(config.MTLS, mtls.WithValidatorLogger(a.logger))
+	if err != nil {
+		return err
+	}
+	a.mtlsValidator = validator
+	return nil
+}
+
+// initOIDCProviders initializes OIDC providers if enabled.
+func (a *authenticator) initOIDCProviders(config *Config) error {
+	if !config.IsOIDCEnabled() {
+		return nil
+	}
+	for _, providerConfig := range config.OIDC.Providers {
+		provider, err := oidc.NewProvider(&providerConfig, config.OIDC, oidc.WithProviderLogger(a.logger))
+		if err != nil {
+			return err
+		}
+		a.oidcProviders[providerConfig.Name] = provider
+	}
+	return nil
 }
 
 // Authenticate authenticates an HTTP request.

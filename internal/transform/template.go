@@ -73,7 +73,7 @@ func (te *templateEngine) Execute(templateStr string, data interface{}) (interfa
 	// Get or create the template
 	tmpl, err := te.getOrCreateTemplate(templateStr)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTemplateExecution, err)
+		return nil, fmt.Errorf("%w: %w", ErrTemplateExecution, err)
 	}
 
 	// Execute the template
@@ -81,21 +81,20 @@ func (te *templateEngine) Execute(templateStr string, data interface{}) (interfa
 	if err := tmpl.Execute(&buf, data); err != nil {
 		te.logger.Error("template execution failed",
 			observability.Error(err))
-		return nil, fmt.Errorf("%w: %v", ErrTemplateExecution, err)
+		return nil, fmt.Errorf("%w: %w", ErrTemplateExecution, err)
 	}
 
 	// Try to parse the result as JSON
 	result := buf.String()
 	var parsed interface{}
-	if err := json.Unmarshal([]byte(result), &parsed); err != nil {
-		// Return as string if not valid JSON
-		return result, nil
+	if err := json.Unmarshal([]byte(result), &parsed); err == nil {
+		te.logger.Debug("template executed successfully",
+			observability.Int("outputLength", len(result)))
+		return parsed, nil
 	}
 
-	te.logger.Debug("template executed successfully",
-		observability.Int("outputLength", len(result)))
-
-	return parsed, nil
+	// Return as string if not valid JSON (this is expected behavior, not an error)
+	return result, nil
 }
 
 // getOrCreateTemplate gets a cached template or creates a new one.

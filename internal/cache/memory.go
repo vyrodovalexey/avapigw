@@ -240,26 +240,27 @@ func (c *memoryCache) cleanupLoop() {
 }
 
 // cleanup removes expired entries.
+// Uses a single write lock for the entire operation to prevent race conditions
+// where entries could be modified between identifying expired entries and removing them.
 func (c *memoryCache) cleanup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	now := time.Now()
 	var toRemove []*list.Element
 
-	c.mu.RLock()
 	for elem := c.eviction.Back(); elem != nil; elem = elem.Prev() {
 		entry := elem.Value.(*memoryCacheEntry)
 		if !entry.expiresAt.IsZero() && now.After(entry.expiresAt) {
 			toRemove = append(toRemove, elem)
 		}
 	}
-	c.mu.RUnlock()
+
+	for _, elem := range toRemove {
+		c.removeElement(elem)
+	}
 
 	if len(toRemove) > 0 {
-		c.mu.Lock()
-		for _, elem := range toRemove {
-			c.removeElement(elem)
-		}
-		c.mu.Unlock()
-
 		c.logger.Debug("cache cleanup completed",
 			observability.Int("removed", len(toRemove)))
 	}

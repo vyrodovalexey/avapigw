@@ -2,10 +2,12 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -726,4 +728,191 @@ func TestRedisCache_DefaultKeyPrefix(t *testing.T) {
 	val, err := mr.Get("avapigw:key")
 	assert.NoError(t, err)
 	assert.Equal(t, "value", val)
+}
+
+func TestIsRetryableError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "redis.Nil error",
+			err:      redis.Nil,
+			expected: false,
+		},
+		{
+			name:     "context.Canceled",
+			err:      context.Canceled,
+			expected: false,
+		},
+		{
+			name:     "context.DeadlineExceeded",
+			err:      context.DeadlineExceeded,
+			expected: false,
+		},
+		{
+			name:     "generic error is retryable",
+			err:      errors.New("connection refused"),
+			expected: true,
+		},
+		{
+			name:     "network error is retryable",
+			err:      errors.New("dial tcp: connection refused"),
+			expected: true,
+		},
+		{
+			name:     "timeout error is retryable",
+			err:      errors.New("i/o timeout"),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := isRetryableError(tt.err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestCalculateBackoff(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		attempt     int
+		minExpected time.Duration
+		maxExpected time.Duration
+	}{
+		{
+			name:        "attempt 0",
+			attempt:     0,
+			minExpected: 100 * time.Millisecond,
+			maxExpected: 100 * time.Millisecond,
+		},
+		{
+			name:        "attempt 1",
+			attempt:     1,
+			minExpected: 200 * time.Millisecond,
+			maxExpected: 200 * time.Millisecond,
+		},
+		{
+			name:        "attempt 2",
+			attempt:     2,
+			minExpected: 400 * time.Millisecond,
+			maxExpected: 400 * time.Millisecond,
+		},
+		{
+			name:        "attempt 3",
+			attempt:     3,
+			minExpected: 800 * time.Millisecond,
+			maxExpected: 800 * time.Millisecond,
+		},
+		{
+			name:        "attempt 4",
+			attempt:     4,
+			minExpected: 1600 * time.Millisecond,
+			maxExpected: 1600 * time.Millisecond,
+		},
+		{
+			name:        "attempt 5 - capped at max",
+			attempt:     5,
+			minExpected: 2 * time.Second,
+			maxExpected: 2 * time.Second,
+		},
+		{
+			name:        "attempt 10 - capped at max",
+			attempt:     10,
+			minExpected: 2 * time.Second,
+			maxExpected: 2 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := calculateBackoff(tt.attempt)
+			assert.GreaterOrEqual(t, result, tt.minExpected)
+			assert.LessOrEqual(t, result, tt.maxExpected)
+		})
+	}
+}
+
+func TestCalculateBackoff_ExponentialGrowth(t *testing.T) {
+	t.Parallel()
+
+	// Verify exponential growth pattern
+	prev := calculateBackoff(0)
+	for i := 1; i < 5; i++ {
+		current := calculateBackoff(i)
+		// Each step should be approximately double (within tolerance)
+		expected := prev * 2
+		if expected > redisMaxDelay {
+			expected = redisMaxDelay
+		}
+		assert.Equal(t, expected, current, "attempt %d should be double of attempt %d", i, i-1)
+		prev = current
+	}
+}
+
+func TestCalculateBackoff_MaxDelayCap(t *testing.T) {
+	t.Parallel()
+
+	// Test that backoff is capped at redisMaxDelay
+	for i := 5; i < 20; i++ {
+		result := calculateBackoff(i)
+		assert.Equal(t, redisMaxDelay, result, "attempt %d should be capped at max delay", i)
+	}
+}
+
+func TestRedisConstants(t *testing.T) {
+	t.Parallel()
+
+	// Verify constants are set correctly
+	assert.Equal(t, 3, redisMaxRetries)
+	assert.Equal(t, 100*time.Millisecond, redisBaseDelay)
+	assert.Equal(t, 2*time.Second, redisMaxDelay)
+}
+
+func TestIsRetryableError_WrappedErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "wrapped redis.Nil",
+			err:      errors.Join(errors.New("wrapper"), redis.Nil),
+			expected: false,
+		},
+		{
+			name:     "wrapped context.Canceled",
+			err:      errors.Join(errors.New("wrapper"), context.Canceled),
+			expected: false,
+		},
+		{
+			name:     "wrapped context.DeadlineExceeded",
+			err:      errors.Join(errors.New("wrapper"), context.DeadlineExceeded),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := isRetryableError(tt.err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }

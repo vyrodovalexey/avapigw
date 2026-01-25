@@ -233,7 +233,7 @@ func (v *validator) validateChain(cert *x509.Certificate, chain []*x509.Certific
 
 	_, err := cert.Verify(opts)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrCertificateUntrusted, err)
+		return fmt.Errorf("%w: %w", ErrCertificateUntrusted, err)
 	}
 
 	return nil
@@ -328,44 +328,61 @@ func (c *CertificateInfo) GetIdentity(config *IdentityExtractionConfig) string {
 		return c.SubjectDN
 	}
 
-	// SPIFFE ID takes precedence
-	if config.SPIFFE && c.SPIFFEID != "" {
-		return c.SPIFFEID
+	// Try each identity source in priority order
+	if identity := c.getIdentityFromSPIFFE(config); identity != "" {
+		return identity
 	}
-
-	// Subject field
-	if config.SubjectField != "" && c.Subject != nil {
-		switch config.SubjectField {
-		case "CN":
-			return c.Subject.CommonName
-		case "O":
-			if len(c.Subject.Organization) > 0 {
-				return c.Subject.Organization[0]
-			}
-		case "OU":
-			if len(c.Subject.OrganizationalUnit) > 0 {
-				return c.Subject.OrganizationalUnit[0]
-			}
-		}
+	if identity := c.getIdentityFromSubject(config); identity != "" {
+		return identity
 	}
-
-	// DNS SAN
-	if config.SANDNS && len(c.DNSNames) > 0 {
-		return c.DNSNames[0]
-	}
-
-	// URI SAN
-	if config.SANURI && len(c.URIs) > 0 {
-		return c.URIs[0]
-	}
-
-	// Email SAN
-	if config.SANEmail && len(c.EmailAddresses) > 0 {
-		return c.EmailAddresses[0]
+	if identity := c.getIdentityFromSANs(config); identity != "" {
+		return identity
 	}
 
 	// Default to subject DN
 	return c.SubjectDN
+}
+
+// getIdentityFromSPIFFE extracts identity from SPIFFE ID if configured.
+func (c *CertificateInfo) getIdentityFromSPIFFE(config *IdentityExtractionConfig) string {
+	if config.SPIFFE && c.SPIFFEID != "" {
+		return c.SPIFFEID
+	}
+	return ""
+}
+
+// getIdentityFromSubject extracts identity from subject field if configured.
+func (c *CertificateInfo) getIdentityFromSubject(config *IdentityExtractionConfig) string {
+	if config.SubjectField == "" || c.Subject == nil {
+		return ""
+	}
+	switch config.SubjectField {
+	case "CN":
+		return c.Subject.CommonName
+	case "O":
+		if len(c.Subject.Organization) > 0 {
+			return c.Subject.Organization[0]
+		}
+	case "OU":
+		if len(c.Subject.OrganizationalUnit) > 0 {
+			return c.Subject.OrganizationalUnit[0]
+		}
+	}
+	return ""
+}
+
+// getIdentityFromSANs extracts identity from Subject Alternative Names if configured.
+func (c *CertificateInfo) getIdentityFromSANs(config *IdentityExtractionConfig) string {
+	if config.SANDNS && len(c.DNSNames) > 0 {
+		return c.DNSNames[0]
+	}
+	if config.SANURI && len(c.URIs) > 0 {
+		return c.URIs[0]
+	}
+	if config.SANEmail && len(c.EmailAddresses) > 0 {
+		return c.EmailAddresses[0]
+	}
+	return ""
 }
 
 // ParseSPIFFEID parses a SPIFFE ID into its components.

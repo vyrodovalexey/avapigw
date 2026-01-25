@@ -369,3 +369,160 @@ func TestGateway_Uptime_AfterStart(t *testing.T) {
 	uptime := gw.Uptime()
 	assert.Greater(t, uptime, time.Duration(0))
 }
+
+func TestGateway_GetGRPCListeners(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 0, Protocol: "HTTP"},
+			},
+		},
+	}
+
+	gw, err := New(cfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = gw.Stop(ctx) }()
+
+	grpcListeners := gw.GetGRPCListeners()
+	assert.NotNil(t, grpcListeners)
+	assert.Len(t, grpcListeners, 0) // No gRPC listeners configured
+}
+
+func TestGateway_Stop_WithTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 0, Protocol: "HTTP"},
+			},
+		},
+	}
+
+	gw, err := New(cfg, WithShutdownTimeout(100*time.Millisecond))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+
+	// Stop with context that has no deadline
+	err = gw.Stop(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, StateStopped, gw.State())
+}
+
+func TestGateway_Stop_WithContextDeadline(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 0, Protocol: "HTTP"},
+			},
+		},
+	}
+
+	gw, err := New(cfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+
+	// Stop with context that has deadline
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = gw.Stop(stopCtx)
+	require.NoError(t, err)
+	assert.Equal(t, StateStopped, gw.State())
+}
+
+func TestGateway_Start_WithRouteHandler(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 0, Protocol: "HTTP"},
+			},
+		},
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+
+	gw, err := New(cfg, WithRouteHandler(handler))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = gw.Stop(ctx) }()
+
+	assert.Equal(t, StateRunning, gw.State())
+}
+
+func TestGateway_Start_FailedListener(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: -1, Protocol: "HTTP"}, // Invalid port
+			},
+		},
+	}
+
+	gw, err := New(cfg)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	assert.Error(t, err)
+	assert.Equal(t, StateStopped, gw.State())
+}
+
+func TestGateway_Engine_BeforeStart(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+	}
+
+	gw, err := New(cfg)
+	require.NoError(t, err)
+
+	// Engine should be nil before start
+	engine := gw.Engine()
+	assert.Nil(t, engine)
+}
+
+func TestGateway_GetListeners_BeforeStart(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+	}
+
+	gw, err := New(cfg)
+	require.NoError(t, err)
+
+	// Listeners should be nil before start
+	listeners := gw.GetListeners()
+	assert.Nil(t, listeners)
+}

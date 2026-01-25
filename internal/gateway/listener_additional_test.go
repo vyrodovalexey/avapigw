@@ -99,6 +99,7 @@ func TestListener_WrapHandler_HTTPSRedirect(t *testing.T) {
 		Name:     "http-listener",
 		Port:     0,
 		Protocol: config.ProtocolHTTP,
+		Hosts:    []string{"example.com"},
 		TLS: &config.ListenerTLSConfig{
 			HTTPSRedirect: true,
 		},
@@ -510,4 +511,329 @@ func TestListener_WithLoggerOption(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, listener)
 	assert.Equal(t, logger, listener.logger)
+}
+
+func TestExtractHostWithoutPort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "host without port",
+			input:    "example.com",
+			expected: "example.com",
+		},
+		{
+			name:     "host with port",
+			input:    "example.com:8080",
+			expected: "example.com",
+		},
+		{
+			name:     "IPv4 with port",
+			input:    "192.168.1.1:8080",
+			expected: "192.168.1.1",
+		},
+		{
+			name:     "IPv4 without port",
+			input:    "192.168.1.1",
+			expected: "192.168.1.1",
+		},
+		{
+			name:     "IPv6 with port",
+			input:    "[::1]:8080",
+			expected: "[::1]",
+		},
+		{
+			name:     "IPv6 without port",
+			input:    "[::1]",
+			expected: "[::1]",
+		},
+		{
+			name:     "IPv6 full address with port",
+			input:    "[2001:db8::1]:443",
+			expected: "[2001:db8::1]",
+		},
+		{
+			name:     "localhost with port",
+			input:    "localhost:3000",
+			expected: "localhost",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := extractHostWithoutPort(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestListener_IsAllowedHost(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     8080,
+		Protocol: config.ProtocolHTTP,
+		Hosts:    []string{"example.com", "api.example.com", "UPPERCASE.COM"},
+	}
+
+	listener, err := NewListener(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		host     string
+		expected bool
+	}{
+		{
+			name:     "exact match",
+			host:     "example.com",
+			expected: true,
+		},
+		{
+			name:     "case insensitive match",
+			host:     "EXAMPLE.COM",
+			expected: true,
+		},
+		{
+			name:     "subdomain match",
+			host:     "api.example.com",
+			expected: true,
+		},
+		{
+			name:     "uppercase config lowercase input",
+			host:     "uppercase.com",
+			expected: true,
+		},
+		{
+			name:     "not allowed",
+			host:     "other.com",
+			expected: false,
+		},
+		{
+			name:     "empty host",
+			host:     "",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := listener.isAllowedHost(tt.host)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestListener_GetSafeRedirectHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		hosts        []string
+		requestHost  string
+		expectedHost string
+		expectedOK   bool
+	}{
+		{
+			name:         "no hosts configured",
+			hosts:        []string{},
+			requestHost:  "example.com",
+			expectedHost: "",
+			expectedOK:   false,
+		},
+		{
+			name:         "allowed host",
+			hosts:        []string{"example.com", "api.example.com"},
+			requestHost:  "example.com",
+			expectedHost: "example.com",
+			expectedOK:   true,
+		},
+		{
+			name:         "allowed host with port",
+			hosts:        []string{"example.com"},
+			requestHost:  "example.com:8080",
+			expectedHost: "example.com:8080",
+			expectedOK:   true,
+		},
+		{
+			name:         "untrusted host - use first configured",
+			hosts:        []string{"trusted.com", "also-trusted.com"},
+			requestHost:  "untrusted.com",
+			expectedHost: "trusted.com",
+			expectedOK:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.Listener{
+				Name:     "test-listener",
+				Port:     8080,
+				Protocol: config.ProtocolHTTP,
+				Hosts:    tt.hosts,
+			}
+
+			listener, err := NewListener(cfg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			require.NoError(t, err)
+
+			host, ok := listener.getSafeRedirectHost(tt.requestHost)
+			assert.Equal(t, tt.expectedOK, ok)
+			assert.Equal(t, tt.expectedHost, host)
+		})
+	}
+}
+
+func TestListener_HTTPSRedirectMiddleware(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		hosts          []string
+		requestHost    string
+		hasTLS         bool
+		expectedStatus int
+		checkLocation  bool
+	}{
+		{
+			name:           "HTTPS request passes through",
+			hosts:          []string{"example.com"},
+			requestHost:    "example.com",
+			hasTLS:         true,
+			expectedStatus: http.StatusOK,
+			checkLocation:  false,
+		},
+		{
+			name:           "HTTP request redirects to HTTPS",
+			hosts:          []string{"example.com"},
+			requestHost:    "example.com",
+			hasTLS:         false,
+			expectedStatus: http.StatusMovedPermanently,
+			checkLocation:  true,
+		},
+		{
+			name:           "HTTP request with no hosts configured",
+			hosts:          []string{},
+			requestHost:    "example.com",
+			hasTLS:         false,
+			expectedStatus: http.StatusBadRequest,
+			checkLocation:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.Listener{
+				Name:     "test-listener",
+				Port:     8080,
+				Protocol: config.ProtocolHTTP,
+				Hosts:    tt.hosts,
+			}
+
+			baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+
+			listener, err := NewListener(cfg, baseHandler)
+			require.NoError(t, err)
+
+			middleware := listener.httpsRedirectMiddleware(baseHandler)
+
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.Host = tt.requestHost
+			if tt.hasTLS {
+				req.TLS = &tls.ConnectionState{}
+			}
+
+			w := httptest.NewRecorder()
+			middleware.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.checkLocation {
+				location := w.Header().Get("Location")
+				assert.Contains(t, location, "https://")
+			}
+		})
+	}
+}
+
+func TestListener_Serve_WithTLSManager(t *testing.T) {
+	t.Parallel()
+
+	// This test verifies the serve function handles TLS correctly
+	// We can't easily test the actual TLS serving without certificates,
+	// but we can test the non-TLS path
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     0,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	listener, err := NewListener(cfg, handler)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = listener.Start(ctx)
+	require.NoError(t, err)
+
+	// Give it time to start serving
+	time.Sleep(10 * time.Millisecond)
+
+	assert.True(t, listener.IsRunning())
+
+	err = listener.Stop(ctx)
+	require.NoError(t, err)
+}
+
+func TestListener_Stop_WithTLSManager(t *testing.T) {
+	t.Parallel()
+
+	// Create a listener and manually set a TLS manager to test the close path
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     0,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	listener, err := NewListener(cfg, handler)
+	require.NoError(t, err)
+
+	// Create a mock TLS manager
+	tlsConfig := &tlspkg.Config{
+		Mode: tlspkg.TLSModeInsecure,
+	}
+	manager, err := tlspkg.NewManager(tlsConfig)
+	require.NoError(t, err)
+	listener.tlsManager = manager
+
+	ctx := context.Background()
+	err = listener.Start(ctx)
+	require.NoError(t, err)
+
+	// Stop should close the TLS manager
+	err = listener.Stop(ctx)
+	require.NoError(t, err)
 }

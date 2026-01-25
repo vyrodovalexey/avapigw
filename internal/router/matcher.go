@@ -84,34 +84,93 @@ type RegexMatcher struct {
 	regex   *regexp.Regexp
 }
 
-// regexCache caches compiled regular expressions.
+// regexCacheMaxSize is the maximum number of entries in the regex cache.
+const regexCacheMaxSize = 1000
+
+// regexCacheEntry holds a compiled regex and its access order for LRU eviction.
+type regexCacheEntry struct {
+	regex       *regexp.Regexp
+	accessOrder int64
+}
+
+// regexCache is a bounded LRU cache for compiled regular expressions.
 var (
-	regexCache   = make(map[string]*regexp.Regexp)
-	regexCacheMu sync.RWMutex
+	regexCache         = make(map[string]*regexCacheEntry)
+	regexCacheMu       sync.RWMutex
+	regexAccessCounter int64
 )
 
 // NewRegexMatcher creates a new regex path matcher.
 func NewRegexMatcher(pattern string) (*RegexMatcher, error) {
 	regexCacheMu.RLock()
-	regex, ok := regexCache[pattern]
+	entry, ok := regexCache[pattern]
 	regexCacheMu.RUnlock()
 
-	if !ok {
-		var err error
-		regex, err = regexp.Compile(pattern)
-		if err != nil {
-			return nil, err
-		}
-
+	if ok {
+		// Update access order for LRU tracking
 		regexCacheMu.Lock()
-		regexCache[pattern] = regex
+		regexAccessCounter++
+		entry.accessOrder = regexAccessCounter
 		regexCacheMu.Unlock()
+
+		return &RegexMatcher{
+			pattern: pattern,
+			regex:   entry.regex,
+		}, nil
 	}
+
+	// Compile the regex
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	regexCacheMu.Lock()
+	// Double-check after acquiring write lock
+	if existingEntry, exists := regexCache[pattern]; exists {
+		regexAccessCounter++
+		existingEntry.accessOrder = regexAccessCounter
+		regexCacheMu.Unlock()
+		return &RegexMatcher{
+			pattern: pattern,
+			regex:   existingEntry.regex,
+		}, nil
+	}
+
+	// Evict LRU entry if cache is at capacity
+	if len(regexCache) >= regexCacheMaxSize {
+		evictLRURegexEntry()
+	}
+
+	regexAccessCounter++
+	regexCache[pattern] = &regexCacheEntry{
+		regex:       regex,
+		accessOrder: regexAccessCounter,
+	}
+	regexCacheMu.Unlock()
 
 	return &RegexMatcher{
 		pattern: pattern,
 		regex:   regex,
 	}, nil
+}
+
+// evictLRURegexEntry removes the least recently used entry from the cache.
+// Must be called with regexCacheMu held.
+func evictLRURegexEntry() {
+	var lruKey string
+	var lruOrder int64 = -1
+
+	for key, entry := range regexCache {
+		if lruOrder == -1 || entry.accessOrder < lruOrder {
+			lruOrder = entry.accessOrder
+			lruKey = key
+		}
+	}
+
+	if lruKey != "" {
+		delete(regexCache, lruKey)
+	}
 }
 
 // Match checks if the path matches the regex.

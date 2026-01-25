@@ -24,7 +24,7 @@ func (c *yamlCodec) Encode(v interface{}) ([]byte, error) {
 
 	data, err := yaml.Marshal(v)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEncodingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrEncodingFailed, err)
 	}
 
 	return data, nil
@@ -37,7 +37,7 @@ func (c *yamlCodec) Decode(data []byte, v interface{}) error {
 	}
 
 	if err := yaml.Unmarshal(data, v); err != nil {
-		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
+		return fmt.Errorf("%w: %w", ErrDecodingFailed, err)
 	}
 
 	return nil

@@ -126,7 +126,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	g.setupRoutes()
 
 	// Create listeners
-	if err := g.createListeners(); err != nil {
+	if err := g.createListeners(); err != nil { //nolint:contextcheck // Listener creation doesn't need context
 		g.state.Store(int32(StateStopped))
 		return fmt.Errorf("failed to create listeners: %w", err)
 	}

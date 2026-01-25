@@ -130,6 +130,7 @@ func executeWithRetry(
 		}
 
 		ctxWithCancel := applyPerTryTimeout(r.Context(), cfg.PerTryTimeout)
+		//nolint:contextcheck // Derived context with timeout is correct
 		next.ServeHTTP(rw, r.WithContext(ctxWithCancel.ctx))
 		ctxWithCancel.cancel() // Release context resources after request completion
 

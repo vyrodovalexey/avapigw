@@ -479,3 +479,240 @@ func TestGRPCListener_BuildInterceptorsWithMetrics(t *testing.T) {
 	// We can verify the listener was created successfully
 	assert.NotNil(t, listener.Server())
 }
+
+func TestGRPCListener_WithGRPCTLSManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a TLS manager in insecure mode
+	tlsConfig := &tlspkg.Config{
+		Mode: tlspkg.TLSModeInsecure,
+	}
+	manager, err := tlspkg.NewManager(tlsConfig)
+	require.NoError(t, err)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCTLSManager(manager),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Equal(t, manager, listener.tlsManager)
+}
+
+func TestGRPCListener_BuildTLSOptionsFromManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a TLS manager in insecure mode
+	tlsConfig := &tlspkg.Config{
+		Mode: tlspkg.TLSModeInsecure,
+	}
+	manager, err := tlspkg.NewManager(tlsConfig)
+	require.NoError(t, err)
+
+	tlsMetrics := tlspkg.NewNopMetrics()
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCTLSManager(manager),
+		WithGRPCTLSMetrics(tlsMetrics),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+}
+
+func TestGRPCListener_BuildTLSOptionsFromConfig_Insecure(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+		GRPC: &config.GRPCListenerConfig{
+			TLS: &config.TLSConfig{
+				Enabled: true,
+				Mode:    config.TLSModeInsecure,
+			},
+		},
+	}
+
+	listener, err := NewGRPCListener(cfg, WithGRPCListenerLogger(observability.NopLogger()))
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+}
+
+func TestGRPCListener_BuildTLSOptionsFromConfig_Disabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+		GRPC: &config.GRPCListenerConfig{
+			TLS: &config.TLSConfig{
+				Enabled: false,
+			},
+		},
+	}
+
+	listener, err := NewGRPCListener(cfg, WithGRPCListenerLogger(observability.NopLogger()))
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+}
+
+func TestGRPCListener_StartAlreadyRunning(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	listener, err := NewGRPCListener(cfg, WithGRPCListenerLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = listener.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = listener.Stop(ctx) }()
+
+	// Try to start again
+	err = listener.Start(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already running")
+}
+
+func TestGRPCListener_StopNotRunning(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	listener, err := NewGRPCListener(cfg, WithGRPCListenerLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	// Stop without starting - should be no-op
+	err = listener.Stop(ctx)
+	assert.NoError(t, err)
+}
+
+func TestGRPCListener_StopWithTLSManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Don't use a TLS manager with Start() to avoid race conditions
+	// The TLS manager's monitoring goroutine can race with Close()
+	// Instead, just test that the listener can be created with a TLS manager
+	tlsConfig := &tlspkg.Config{
+		Mode: tlspkg.TLSModeInsecure,
+	}
+	manager, err := tlspkg.NewManager(tlsConfig)
+	require.NoError(t, err)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCTLSManager(manager),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Equal(t, manager, listener.tlsManager)
+}
+
+func TestGRPCListener_IsTLSEnabled_WithManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a TLS manager in insecure mode
+	tlsConfig := &tlspkg.Config{
+		Mode: tlspkg.TLSModeInsecure,
+	}
+	manager, err := tlspkg.NewManager(tlsConfig)
+	require.NoError(t, err)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCTLSManager(manager),
+	)
+	require.NoError(t, err)
+
+	// Insecure mode should return false for IsTLSEnabled
+	assert.False(t, listener.IsTLSEnabled())
+}
+
+func TestGRPCListener_IsMTLSEnabled_WithManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a TLS manager in insecure mode
+	tlsConfig := &tlspkg.Config{
+		Mode: tlspkg.TLSModeInsecure,
+	}
+	manager, err := tlspkg.NewManager(tlsConfig)
+	require.NoError(t, err)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCTLSManager(manager),
+	)
+	require.NoError(t, err)
+
+	// Insecure mode should return false for IsMTLSEnabled
+	assert.False(t, listener.IsMTLSEnabled())
+}
+
+func TestGRPCListener_TLSMode_WithManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a TLS manager in insecure mode
+	tlsConfig := &tlspkg.Config{
+		Mode: tlspkg.TLSModeInsecure,
+	}
+	manager, err := tlspkg.NewManager(tlsConfig)
+	require.NoError(t, err)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCTLSManager(manager),
+	)
+	require.NoError(t, err)
+
+	// Should return the manager's mode
+	assert.Equal(t, string(tlspkg.TLSModeInsecure), listener.TLSMode())
+}

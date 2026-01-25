@@ -262,39 +262,53 @@ func ParseClaims(data map[string]interface{}) (*Claims, error) {
 	}
 
 	for key, value := range data {
-		switch key {
-		case "iss":
-			if s, ok := value.(string); ok {
-				claims.Issuer = s
-			}
-		case "sub":
-			if s, ok := value.(string); ok {
-				claims.Subject = s
-			}
-		case "aud":
-			claims.Audience = parseAudience(value)
-		case "exp":
-			if t := parseTime(value); t != nil {
-				claims.ExpiresAt = t
-			}
-		case "nbf":
-			if t := parseTime(value); t != nil {
-				claims.NotBefore = t
-			}
-		case "iat":
-			if t := parseTime(value); t != nil {
-				claims.IssuedAt = t
-			}
-		case "jti":
-			if s, ok := value.(string); ok {
-				claims.JWTID = s
-			}
-		default:
+		if !parseStandardClaim(claims, key, value) {
 			claims.Extra[key] = value
 		}
 	}
 
 	return claims, nil
+}
+
+// parseStandardClaim parses a standard JWT claim and returns true if it was a standard claim.
+func parseStandardClaim(claims *Claims, key string, value interface{}) bool {
+	switch key {
+	case "iss":
+		if s, ok := value.(string); ok {
+			claims.Issuer = s
+		}
+		return true
+	case "sub":
+		if s, ok := value.(string); ok {
+			claims.Subject = s
+		}
+		return true
+	case "aud":
+		claims.Audience = parseAudience(value)
+		return true
+	case "exp":
+		if t := parseTime(value); t != nil {
+			claims.ExpiresAt = t
+		}
+		return true
+	case "nbf":
+		if t := parseTime(value); t != nil {
+			claims.NotBefore = t
+		}
+		return true
+	case "iat":
+		if t := parseTime(value); t != nil {
+			claims.IssuedAt = t
+		}
+		return true
+	case "jti":
+		if s, ok := value.(string); ok {
+			claims.JWTID = s
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // parseAudience parses the audience claim.

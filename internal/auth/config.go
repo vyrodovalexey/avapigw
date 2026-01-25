@@ -93,11 +93,7 @@ type AuthCacheConfig struct {
 
 // Validate validates the authentication configuration.
 func (c *Config) Validate() error {
-	if c == nil {
-		return nil
-	}
-
-	if !c.Enabled {
+	if c == nil || !c.Enabled {
 		return nil
 	}
 
@@ -106,48 +102,64 @@ func (c *Config) Validate() error {
 		return errors.New("at least one authentication method must be configured when authentication is enabled")
 	}
 
-	// Validate JWT configuration
+	// Validate all auth methods
+	if err := c.validateAuthMethods(); err != nil {
+		return err
+	}
+
+	// Validate extraction configuration
+	if err := c.validateExtractionConfig(); err != nil {
+		return err
+	}
+
+	// Validate cache configuration
+	return c.validateCacheConfig()
+}
+
+// validateAuthMethods validates all authentication method configurations.
+func (c *Config) validateAuthMethods() error {
 	if c.JWT != nil && c.JWT.Enabled {
 		if err := c.JWT.Validate(); err != nil {
 			return fmt.Errorf("jwt config: %w", err)
 		}
 	}
-
-	// Validate API Key configuration
 	if c.APIKey != nil && c.APIKey.Enabled {
 		if err := c.APIKey.Validate(); err != nil {
 			return fmt.Errorf("apikey config: %w", err)
 		}
 	}
-
-	// Validate mTLS configuration
 	if c.MTLS != nil && c.MTLS.Enabled {
 		if err := c.MTLS.Validate(); err != nil {
 			return fmt.Errorf("mtls config: %w", err)
 		}
 	}
-
-	// Validate OIDC configuration
 	if c.OIDC != nil && c.OIDC.Enabled {
 		if err := c.OIDC.Validate(); err != nil {
 			return fmt.Errorf("oidc config: %w", err)
 		}
 	}
+	return nil
+}
 
-	// Validate extraction configuration
-	if c.Extraction != nil {
-		if err := c.validateExtraction(); err != nil {
-			return fmt.Errorf("extraction config: %w", err)
-		}
+// validateExtractionConfig validates the extraction configuration.
+func (c *Config) validateExtractionConfig() error {
+	if c.Extraction == nil {
+		return nil
 	}
-
-	// Validate cache configuration
-	if c.Cache != nil && c.Cache.Enabled {
-		if err := c.validateCache(); err != nil {
-			return fmt.Errorf("cache config: %w", err)
-		}
+	if err := c.validateExtraction(); err != nil {
+		return fmt.Errorf("extraction config: %w", err)
 	}
+	return nil
+}
 
+// validateCacheConfig validates the cache configuration.
+func (c *Config) validateCacheConfig() error {
+	if c.Cache == nil || !c.Cache.Enabled {
+		return nil
+	}
+	if err := c.validateCache(); err != nil {
+		return fmt.Errorf("cache config: %w", err)
+	}
 	return nil
 }
 

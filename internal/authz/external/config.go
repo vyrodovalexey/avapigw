@@ -3,6 +3,7 @@ package external
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -188,7 +189,7 @@ func (c *HTTPConfig) Validate() error {
 	if c.URL == "" {
 		return errors.New("url is required")
 	}
-	if c.Method != "" && c.Method != "GET" && c.Method != "POST" {
+	if c.Method != "" && c.Method != http.MethodGet && c.Method != http.MethodPost {
 		return fmt.Errorf("invalid method: %s (must be 'GET' or 'POST')", c.Method)
 	}
 	return nil

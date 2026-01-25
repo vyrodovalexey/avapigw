@@ -127,50 +127,81 @@ func (c *Config) Validate() error {
 		return nil
 	}
 
-	// Validate hash algorithm
-	if c.HashAlgorithm != "" {
-		validAlgorithms := map[string]bool{
-			"sha256":    true,
-			"sha512":    true,
-			"bcrypt":    true,
-			"plaintext": true,
-		}
-		if !validAlgorithms[c.HashAlgorithm] {
-			return fmt.Errorf("invalid hash algorithm: %s", c.HashAlgorithm)
-		}
+	if err := c.validateHashAlgorithm(); err != nil {
+		return err
 	}
-
-	// Validate store configuration
-	if c.Store != nil {
-		if err := c.Store.Validate(); err != nil {
-			return fmt.Errorf("store: %w", err)
-		}
+	if err := c.validateStore(); err != nil {
+		return err
 	}
+	if err := c.validateExtraction(); err != nil {
+		return err
+	}
+	if err := c.validateVault(); err != nil {
+		return err
+	}
+	return c.validateCache()
+}
 
-	// Validate extraction configuration
+// validateHashAlgorithm validates the hash algorithm configuration.
+func (c *Config) validateHashAlgorithm() error {
+	if c.HashAlgorithm == "" {
+		return nil
+	}
+	validAlgorithms := map[string]bool{
+		"sha256":    true,
+		"sha512":    true,
+		"bcrypt":    true,
+		"plaintext": true,
+	}
+	if !validAlgorithms[c.HashAlgorithm] {
+		return fmt.Errorf("invalid hash algorithm: %s", c.HashAlgorithm)
+	}
+	return nil
+}
+
+// validateStore validates the store configuration.
+func (c *Config) validateStore() error {
+	if c.Store == nil {
+		return nil
+	}
+	if err := c.Store.Validate(); err != nil {
+		return fmt.Errorf("store: %w", err)
+	}
+	return nil
+}
+
+// validateExtraction validates the extraction configuration.
+func (c *Config) validateExtraction() error {
 	for i, src := range c.Extraction {
 		if err := validateExtractionSource(src); err != nil {
 			return fmt.Errorf("extraction[%d]: %w", i, err)
 		}
 	}
+	return nil
+}
 
-	// Validate Vault configuration
-	if c.Vault != nil && c.Vault.Enabled {
-		if err := c.Vault.Validate(); err != nil {
-			return fmt.Errorf("vault: %w", err)
-		}
+// validateVault validates the Vault configuration.
+func (c *Config) validateVault() error {
+	if c.Vault == nil || !c.Vault.Enabled {
+		return nil
 	}
-
-	// Validate cache configuration
-	if c.Cache != nil && c.Cache.Enabled {
-		if c.Cache.TTL < 0 {
-			return errors.New("cache.ttl must be non-negative")
-		}
-		if c.Cache.MaxSize < 0 {
-			return errors.New("cache.maxSize must be non-negative")
-		}
+	if err := c.Vault.Validate(); err != nil {
+		return fmt.Errorf("vault: %w", err)
 	}
+	return nil
+}
 
+// validateCache validates the cache configuration.
+func (c *Config) validateCache() error {
+	if c.Cache == nil || !c.Cache.Enabled {
+		return nil
+	}
+	if c.Cache.TTL < 0 {
+		return errors.New("cache.ttl must be non-negative")
+	}
+	if c.Cache.MaxSize < 0 {
+		return errors.New("cache.maxSize must be non-negative")
+	}
 	return nil
 }
 

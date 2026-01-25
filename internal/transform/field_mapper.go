@@ -252,7 +252,7 @@ func setFinalValue(current map[string]interface{}, part pathPart, value interfac
 func setArrayValue(current map[string]interface{}, part pathPart, value interface{}) error {
 	arr, ok := current[part.Name].([]interface{})
 	if !ok {
-		arr = make([]interface{}, part.Index+1)
+		arr = make([]interface{}, 0, part.Index+1)
 	}
 	for len(arr) <= part.Index {
 		arr = append(arr, nil)

@@ -276,36 +276,60 @@ func (v *validator) verifySignature(ctx context.Context, header *tokenHeader, si
 		return NewValidationError("failed to get signing key", err)
 	}
 
-	// Verify based on algorithm
-	switch header.Algorithm {
-	case AlgRS256:
-		return v.verifyRSA(key, signingInput, sigBytes, crypto.SHA256)
-	case AlgRS384:
-		return v.verifyRSA(key, signingInput, sigBytes, crypto.SHA384)
-	case AlgRS512:
-		return v.verifyRSA(key, signingInput, sigBytes, crypto.SHA512)
-	case AlgPS256:
-		return v.verifyRSAPSS(key, signingInput, sigBytes, crypto.SHA256)
-	case AlgPS384:
-		return v.verifyRSAPSS(key, signingInput, sigBytes, crypto.SHA384)
-	case AlgPS512:
-		return v.verifyRSAPSS(key, signingInput, sigBytes, crypto.SHA512)
-	case AlgES256:
-		return v.verifyECDSA(key, signingInput, sigBytes, crypto.SHA256)
-	case AlgES384:
-		return v.verifyECDSA(key, signingInput, sigBytes, crypto.SHA384)
-	case AlgES512:
-		return v.verifyECDSA(key, signingInput, sigBytes, crypto.SHA512)
-	case AlgHS256:
-		return v.verifyHMAC(key, signingInput, sigBytes, sha256.New)
-	case AlgHS384:
-		return v.verifyHMAC(key, signingInput, sigBytes, sha512.New384)
-	case AlgHS512:
-		return v.verifyHMAC(key, signingInput, sigBytes, sha512.New)
+	return v.verifyWithAlgorithm(key, header.Algorithm, signingInput, sigBytes)
+}
+
+// verifyWithAlgorithm verifies the signature using the specified algorithm.
+func (v *validator) verifyWithAlgorithm(key crypto.PublicKey, alg, signingInput string, sigBytes []byte) error {
+	switch alg {
+	case AlgRS256, AlgRS384, AlgRS512:
+		return v.verifyRSA(key, signingInput, sigBytes, rsaHashAlgorithm(alg))
+	case AlgPS256, AlgPS384, AlgPS512:
+		return v.verifyRSAPSS(key, signingInput, sigBytes, rsaHashAlgorithm(alg))
+	case AlgES256, AlgES384, AlgES512:
+		return v.verifyECDSA(key, signingInput, sigBytes, ecdsaHashAlgorithm(alg))
+	case AlgHS256, AlgHS384, AlgHS512:
+		return v.verifyHMAC(key, signingInput, sigBytes, hmacHashFunc(alg))
 	case AlgEdDSA, AlgEd25519:
 		return v.verifyEdDSA(key, signingInput, sigBytes)
 	default:
-		return NewValidationError(fmt.Sprintf("unsupported algorithm: %s", header.Algorithm), ErrUnsupportedAlgorithm)
+		return NewValidationError(fmt.Sprintf("unsupported algorithm: %s", alg), ErrUnsupportedAlgorithm)
+	}
+}
+
+// rsaHashAlgorithm returns the hash algorithm for RSA/RSA-PSS algorithms.
+func rsaHashAlgorithm(alg string) crypto.Hash {
+	switch alg {
+	case AlgRS256, AlgPS256:
+		return crypto.SHA256
+	case AlgRS384, AlgPS384:
+		return crypto.SHA384
+	default:
+		return crypto.SHA512
+	}
+}
+
+// ecdsaHashAlgorithm returns the hash algorithm for ECDSA algorithms.
+func ecdsaHashAlgorithm(alg string) crypto.Hash {
+	switch alg {
+	case AlgES256:
+		return crypto.SHA256
+	case AlgES384:
+		return crypto.SHA384
+	default:
+		return crypto.SHA512
+	}
+}
+
+// hmacHashFunc returns the hash function for HMAC algorithms.
+func hmacHashFunc(alg string) func() hash.Hash {
+	switch alg {
+	case AlgHS256:
+		return sha256.New
+	case AlgHS384:
+		return sha512.New384
+	default:
+		return sha512.New
 	}
 }
 
@@ -378,11 +402,54 @@ func (v *validator) verifyECDSA(
 	return nil
 }
 
-// convertToASN1 converts a raw ECDSA signature to ASN.1 format.
-func convertToASN1(sig []byte, _ int) []byte {
-	// This is a simplified conversion - in production, use proper ASN.1 encoding
-	// For now, we'll use the raw signature directly with ecdsa.Verify
-	return sig
+// convertToASN1 converts a raw ECDSA signature (r || s format) to ASN.1 DER format.
+// The raw signature consists of two big-endian integers r and s, each of keySize bytes.
+// ASN.1 DER format: SEQUENCE { INTEGER r, INTEGER s }
+func convertToASN1(sig []byte, keySize int) []byte {
+	// Extract r and s from the raw signature
+	r := sig[:keySize]
+	s := sig[keySize:]
+
+	// Remove leading zeros but keep at least one byte
+	r = trimLeadingZeros(r)
+	s = trimLeadingZeros(s)
+
+	// If the high bit is set, prepend a zero byte to indicate positive integer
+	if len(r) > 0 && r[0]&0x80 != 0 {
+		r = append([]byte{0x00}, r...)
+	}
+	if len(s) > 0 && s[0]&0x80 != 0 {
+		s = append([]byte{0x00}, s...)
+	}
+
+	// Build ASN.1 DER encoding
+	// INTEGER tag = 0x02
+	rEncoded := make([]byte, 0, 2+len(r))
+	rEncoded = append(rEncoded, 0x02, byte(len(r)))
+	rEncoded = append(rEncoded, r...)
+
+	sEncoded := make([]byte, 0, 2+len(s))
+	sEncoded = append(sEncoded, 0x02, byte(len(s)))
+	sEncoded = append(sEncoded, s...)
+
+	// SEQUENCE tag = 0x30
+	content := make([]byte, 0, len(rEncoded)+len(sEncoded))
+	content = append(content, rEncoded...)
+	content = append(content, sEncoded...)
+
+	result := make([]byte, 0, 2+len(content))
+	result = append(result, 0x30, byte(len(content)))
+	result = append(result, content...)
+	return result
+}
+
+// trimLeadingZeros removes leading zero bytes from a byte slice,
+// but ensures at least one byte remains.
+func trimLeadingZeros(b []byte) []byte {
+	for len(b) > 1 && b[0] == 0 {
+		b = b[1:]
+	}
+	return b
 }
 
 // verifyHMAC verifies an HMAC signature.
@@ -425,52 +492,87 @@ func (v *validator) verifyEdDSA(key crypto.PublicKey, signingInput string, signa
 
 // validateClaims validates the token claims.
 func (v *validator) validateClaims(claims *Claims, opts ValidationOptions) error {
-	// Validate expiration
-	if !opts.SkipExpirationCheck {
-		if err := claims.ValidWithSkew(opts.ClockSkew); err != nil {
-			if claims.ExpiresAt != nil && time.Now().After(claims.ExpiresAt.Time.Add(opts.ClockSkew)) {
-				return NewValidationErrorWithClaims("token has expired", ErrTokenExpired, claims)
-			}
-			if claims.NotBefore != nil && time.Now().Before(claims.NotBefore.Time.Add(-opts.ClockSkew)) {
-				return NewValidationErrorWithClaims("token is not yet valid", ErrTokenNotYetValid, claims)
-			}
-			return NewValidationErrorWithClaims(err.Error(), err, claims)
+	if err := v.validateExpiration(claims, opts); err != nil {
+		return err
+	}
+	if err := v.validateIssuer(claims, opts); err != nil {
+		return err
+	}
+	if err := v.validateAudience(claims, opts); err != nil {
+		return err
+	}
+	return v.validateRequiredClaims(claims, opts)
+}
+
+// validateExpiration validates the token expiration.
+func (v *validator) validateExpiration(claims *Claims, opts ValidationOptions) error {
+	if opts.SkipExpirationCheck {
+		return nil
+	}
+	if err := claims.ValidWithSkew(opts.ClockSkew); err != nil {
+		return v.createExpirationError(claims, opts.ClockSkew, err)
+	}
+	return nil
+}
+
+// createExpirationError creates an appropriate expiration error.
+func (v *validator) createExpirationError(claims *Claims, clockSkew time.Duration, err error) error {
+	now := time.Now()
+	if claims.ExpiresAt != nil && now.After(claims.ExpiresAt.Time.Add(clockSkew)) {
+		return NewValidationErrorWithClaims("token has expired", ErrTokenExpired, claims)
+	}
+	if claims.NotBefore != nil && now.Before(claims.NotBefore.Time.Add(-clockSkew)) {
+		return NewValidationErrorWithClaims("token is not yet valid", ErrTokenNotYetValid, claims)
+	}
+	return NewValidationErrorWithClaims(err.Error(), err, claims)
+}
+
+// validateIssuer validates the token issuer.
+func (v *validator) validateIssuer(claims *Claims, opts ValidationOptions) error {
+	if opts.SkipIssuerCheck {
+		return nil
+	}
+	allowedIssuers := v.config.GetAllowedIssuers()
+	if len(allowedIssuers) == 0 {
+		return nil
+	}
+	if !v.isIssuerAllowed(claims.Issuer, allowedIssuers) {
+		return NewValidationErrorWithClaims(
+			fmt.Sprintf("issuer %s is not allowed", claims.Issuer),
+			ErrTokenInvalidIssuer,
+			claims,
+		)
+	}
+	return nil
+}
+
+// isIssuerAllowed checks if the issuer is in the allowed list.
+func (v *validator) isIssuerAllowed(issuer string, allowedIssuers []string) bool {
+	for _, iss := range allowedIssuers {
+		if issuer == iss {
+			return true
 		}
 	}
+	return false
+}
 
-	// Validate issuer
-	if !opts.SkipIssuerCheck {
-		allowedIssuers := v.config.GetAllowedIssuers()
-		if len(allowedIssuers) > 0 {
-			valid := false
-			for _, iss := range allowedIssuers {
-				if claims.Issuer == iss {
-					valid = true
-					break
-				}
-			}
-			if !valid {
-				return NewValidationErrorWithClaims(
-					fmt.Sprintf("issuer %s is not allowed", claims.Issuer),
-					ErrTokenInvalidIssuer,
-					claims,
-				)
-			}
-		}
+// validateAudience validates the token audience.
+func (v *validator) validateAudience(claims *Claims, opts ValidationOptions) error {
+	if opts.SkipAudienceCheck || len(v.config.Audience) == 0 {
+		return nil
 	}
-
-	// Validate audience
-	if !opts.SkipAudienceCheck && len(v.config.Audience) > 0 {
-		if !claims.Audience.ContainsAny(v.config.Audience...) {
-			return NewValidationErrorWithClaims(
-				"token audience does not match",
-				ErrTokenInvalidAudience,
-				claims,
-			)
-		}
+	if !claims.Audience.ContainsAny(v.config.Audience...) {
+		return NewValidationErrorWithClaims(
+			"token audience does not match",
+			ErrTokenInvalidAudience,
+			claims,
+		)
 	}
+	return nil
+}
 
-	// Validate required claims
+// validateRequiredClaims validates that all required claims are present.
+func (v *validator) validateRequiredClaims(claims *Claims, opts ValidationOptions) error {
 	requiredClaims := opts.RequiredClaims
 	if len(requiredClaims) == 0 {
 		requiredClaims = v.config.RequiredClaims
@@ -484,7 +586,6 @@ func (v *validator) validateClaims(claims *Claims, opts ValidationOptions) error
 			)
 		}
 	}
-
 	return nil
 }
 

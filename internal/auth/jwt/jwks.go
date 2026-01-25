@@ -149,7 +149,8 @@ func (ks *JWKSKeySet) Start(ctx context.Context) error {
 	}
 
 	// Start background refresh
-	go ks.refreshLoop()
+	// The refresh loop runs independently with its own context management
+	go ks.refreshLoop() //nolint:contextcheck // Background goroutine manages its own context lifecycle
 
 	return nil
 }
@@ -273,7 +274,7 @@ func (ks *JWKSKeySet) Refresh(ctx context.Context) error {
 	}
 
 	ks.errors.Add(1)
-	return fmt.Errorf("%w after %d attempts: %v", ErrJWKSFetchFailed, ks.retryConfig.MaxAttempts, lastErr)
+	return fmt.Errorf("%w after %d attempts: %w", ErrJWKSFetchFailed, ks.retryConfig.MaxAttempts, lastErr)
 }
 
 // fetchJWKS performs a single JWKS fetch attempt.
@@ -453,14 +454,14 @@ func (ks *StaticKeySet) Close() error {
 // parseStaticKey parses a static key configuration.
 func parseStaticKey(key StaticKey) (crypto.PublicKey, error) {
 	var keyData []byte
-	var err error
 
-	if key.Key != "" {
+	switch {
+	case key.Key != "":
 		keyData = []byte(key.Key)
-	} else if key.KeyFile != "" {
+	case key.KeyFile != "":
 		// Read from file - would need to implement file reading
 		return nil, fmt.Errorf("keyFile not yet implemented")
-	} else {
+	default:
 		return nil, fmt.Errorf("key or keyFile is required")
 	}
 
@@ -483,66 +484,78 @@ func parseStaticKey(key StaticKey) (crypto.PublicKey, error) {
 
 // parsePEMKey parses a PEM-encoded key.
 func parsePEMKey(data []byte) (crypto.PublicKey, error) {
-	// Try parsing as JWK JSON
-	var jwkData map[string]interface{}
-	if err := json.Unmarshal(data, &jwkData); err == nil {
-		key, err := jwk.ParseKey(data)
-		if err != nil {
-			return nil, err
-		}
-		var rawKey interface{}
-		if err := key.Raw(&rawKey); err != nil {
-			return nil, err
-		}
-		if pubKey, ok := rawKey.(crypto.PublicKey); ok {
-			return pubKey, nil
-		}
+	// Try parsing as JWK JSON first
+	if key, err := parseAsJWK(data); err == nil {
+		return key, nil
 	}
 
 	// Try parsing as PEM-encoded public key
 	block, _ := pem.Decode(data)
-	if block != nil {
-		switch block.Type {
-		case "PUBLIC KEY":
-			// PKIX format (most common for public keys)
-			pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse PKIX public key: %w", err)
-			}
-			if pk, ok := pubKey.(crypto.PublicKey); ok {
-				return pk, nil
-			}
-			return nil, fmt.Errorf("parsed key is not a public key")
-		case "RSA PUBLIC KEY":
-			// PKCS#1 format for RSA
-			pubKey, err := x509.ParsePKCS1PublicKey(block.Bytes)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse PKCS1 public key: %w", err)
-			}
-			return pubKey, nil
-		case "EC PUBLIC KEY":
-			// EC public key
-			pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse EC public key: %w", err)
-			}
-			if pk, ok := pubKey.(crypto.PublicKey); ok {
-				return pk, nil
-			}
-			return nil, fmt.Errorf("parsed key is not a public key")
-		case "CERTIFICATE":
-			// X.509 certificate - extract public key
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse certificate: %w", err)
-			}
-			return cert.PublicKey, nil
-		default:
-			return nil, fmt.Errorf("unsupported PEM block type: %s", block.Type)
-		}
+	if block == nil {
+		return nil, fmt.Errorf("unsupported key format")
 	}
 
-	return nil, fmt.Errorf("unsupported key format")
+	return parsePEMBlock(block)
+}
+
+// parseAsJWK attempts to parse data as a JWK.
+func parseAsJWK(data []byte) (crypto.PublicKey, error) {
+	var jwkData map[string]interface{}
+	if err := json.Unmarshal(data, &jwkData); err != nil {
+		return nil, err
+	}
+
+	key, err := jwk.ParseKey(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var rawKey interface{}
+	if err := key.Raw(&rawKey); err != nil {
+		return nil, err
+	}
+
+	if pubKey, ok := rawKey.(crypto.PublicKey); ok {
+		return pubKey, nil
+	}
+	return nil, fmt.Errorf("key is not a public key")
+}
+
+// parsePEMBlock parses a PEM block into a public key.
+func parsePEMBlock(block *pem.Block) (crypto.PublicKey, error) {
+	switch block.Type {
+	case "PUBLIC KEY":
+		return parsePKIXPublicKey(block.Bytes)
+	case "RSA PUBLIC KEY":
+		return x509.ParsePKCS1PublicKey(block.Bytes)
+	case "EC PUBLIC KEY":
+		return parsePKIXPublicKey(block.Bytes)
+	case "CERTIFICATE":
+		return parsePublicKeyFromCertificate(block.Bytes)
+	default:
+		return nil, fmt.Errorf("unsupported PEM block type: %s", block.Type)
+	}
+}
+
+// parsePKIXPublicKey parses a PKIX-encoded public key.
+func parsePKIXPublicKey(data []byte) (crypto.PublicKey, error) {
+	pubKey, err := x509.ParsePKIXPublicKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKIX public key: %w", err)
+	}
+	if pk, ok := pubKey.(crypto.PublicKey); ok {
+		return pk, nil
+	}
+	return nil, fmt.Errorf("parsed key is not a public key")
+}
+
+// parsePublicKeyFromCertificate extracts the public key from a certificate.
+func parsePublicKeyFromCertificate(data []byte) (crypto.PublicKey, error) {
+	cert, err := x509.ParseCertificate(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+	return cert.PublicKey, nil
 }
 
 // validateKeyAlgorithm validates that a key is suitable for an algorithm.

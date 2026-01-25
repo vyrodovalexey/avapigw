@@ -32,7 +32,7 @@ func (c *xmlCodec) Encode(v interface{}) ([]byte, error) {
 	encoder.Indent("", "  ")
 
 	if err := encoder.Encode(v); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEncodingFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrEncodingFailed, err)
 	}
 
 	return buf.Bytes(), nil
@@ -47,7 +47,7 @@ func (c *xmlCodec) Decode(data []byte, v interface{}) error {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 
 	if err := decoder.Decode(v); err != nil {
-		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
+		return fmt.Errorf("%w: %w", ErrDecodingFailed, err)
 	}
 
 	return nil

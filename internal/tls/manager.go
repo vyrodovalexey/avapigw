@@ -190,6 +190,12 @@ func (m *Manager) buildTLSConfig() error {
 	if err != nil {
 		return err
 	}
+	// Log when cipher suite configuration is empty and defaults are used
+	if len(m.config.CipherSuites) == 0 {
+		m.logger.Info("no cipher suites configured, using secure defaults",
+			observability.Int("defaultCipherSuiteCount", len(cipherSuites)),
+		)
+	}
 	tlsConfig.CipherSuites = cipherSuites
 
 	// Set curve preferences
@@ -380,6 +386,7 @@ func (m *Manager) watchCertificateEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
+			//nolint:contextcheck // Event handler creates its own context for operations
 			m.handleCertificateEvent(event)
 		}
 	}
@@ -424,7 +431,7 @@ func (m *Manager) monitorCertificateExpiry(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Check immediately on start
-	m.checkCertificateExpiry()
+	m.checkCertificateExpiry() //nolint:contextcheck // Background check creates its own context
 
 	for {
 		select {
@@ -433,7 +440,7 @@ func (m *Manager) monitorCertificateExpiry(ctx context.Context) {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			m.checkCertificateExpiry()
+			m.checkCertificateExpiry() //nolint:contextcheck // Background check creates its own context
 		}
 	}
 }
@@ -495,8 +502,26 @@ func (m *Manager) rebuildTLSConfig() error {
 	return nil
 }
 
-// createContextWithTimeout creates a context with the specified timeout.
-// This helper method ensures consistent context creation across the manager.
+// createContextWithTimeout creates a new context with the specified timeout duration.
+//
+// This helper method ensures consistent context creation across the TLS manager
+// for operations that require time-bounded execution, such as:
+//   - Loading certificates from file system or external providers
+//   - Loading client CA certificates for mTLS validation
+//   - Checking certificate expiry status
+//
+// The returned cancel function must be called to release resources associated
+// with the context, typically using defer immediately after calling this method:
+//
+//	ctx, cancel := m.createContextWithTimeout(DefaultCertificateLoadTimeout)
+//	defer cancel()
+//
+// Parameters:
+//   - timeout: The maximum duration for the context before it is automatically canceled.
+//
+// Returns:
+//   - context.Context: A new context that will be canceled after the timeout expires.
+//   - context.CancelFunc: A function to cancel the context early and release resources.
 func (m *Manager) createContextWithTimeout(timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), timeout)
 }

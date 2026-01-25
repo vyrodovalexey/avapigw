@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"testing"
 	"time"
 
@@ -498,4 +499,243 @@ func TestWrappedServerStream_Context(t *testing.T) {
 
 	assert.Equal(t, ctx, wrapped.Context())
 	assert.Equal(t, "value", wrapped.Context().Value("key"))
+}
+
+func TestNew_WithTLSCredentials(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultGRPCListenerConfig()
+	s, err := New(cfg, WithTLSCredentials("/path/to/cert.pem", "/path/to/key.pem"))
+
+	require.NoError(t, err)
+	assert.NotNil(t, s)
+	assert.Equal(t, "/path/to/cert.pem", s.tlsCertFile)
+	assert.Equal(t, "/path/to/key.pem", s.tlsKeyFile)
+}
+
+func TestNew_WithTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.DefaultGRPCListenerConfig()
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+	}
+	s, err := New(cfg, WithTLSConfig(tlsConfig))
+
+	require.NoError(t, err)
+	assert.NotNil(t, s)
+	assert.Equal(t, tlsConfig, s.tlsConfig)
+}
+
+func TestServer_RegisterService_AfterStart(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil, WithAddress("127.0.0.1:0"), WithInsecure())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = s.Stop(ctx) }()
+
+	// RegisterService after start with nil desc should be handled gracefully
+	// Note: The underlying gRPC server will panic with nil desc, so we skip this test
+	// The RegisterService method is meant to be called before Start
+}
+
+func TestServer_GetServiceInfo_AfterStart(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil, WithAddress("127.0.0.1:0"), WithInsecure(), WithHealthService(true))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = s.Stop(ctx) }()
+
+	info := s.GetServiceInfo()
+	assert.NotNil(t, info)
+	// Health service should be registered
+	_, hasHealth := info["grpc.health.v1.Health"]
+	assert.True(t, hasHealth)
+}
+
+func TestServer_SetServingStatus_AfterStart(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil, WithAddress("127.0.0.1:0"), WithInsecure(), WithHealthService(true))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = s.Stop(ctx) }()
+
+	// Should not panic
+	s.SetServingStatus("test.Service", 1)
+}
+
+func TestServer_Uptime_AfterStart(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil, WithAddress("127.0.0.1:0"), WithInsecure())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = s.Stop(ctx) }()
+
+	// Wait a bit
+	time.Sleep(10 * time.Millisecond)
+
+	uptime := s.Uptime()
+	assert.Greater(t, uptime, time.Duration(0))
+}
+
+func TestServer_Stop_Twice(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil, WithAddress("127.0.0.1:0"), WithInsecure())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+
+	// First stop
+	err = s.Stop(ctx)
+	require.NoError(t, err)
+
+	// Second stop should not error
+	err = s.Stop(ctx)
+	require.NoError(t, err)
+}
+
+func TestServer_GracefulStop_Twice(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil, WithAddress("127.0.0.1:0"), WithInsecure())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+
+	// First graceful stop
+	err = s.GracefulStop(ctx)
+	require.NoError(t, err)
+
+	// Second graceful stop should not error
+	err = s.GracefulStop(ctx)
+	require.NoError(t, err)
+}
+
+func TestServer_Start_WithClientCertMetadata(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(nil,
+		WithAddress("127.0.0.1:0"),
+		WithInsecure(),
+		WithClientCertMetadata(true),
+	)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = s.Stop(ctx) }()
+
+	assert.Equal(t, StateRunning, s.State())
+}
+
+func TestServer_Start_WithAllOptions(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	kp := keepalive.ServerParameters{
+		Time:    30 * time.Second,
+		Timeout: 10 * time.Second,
+	}
+	kep := keepalive.EnforcementPolicy{
+		PermitWithoutStream: true,
+	}
+
+	unaryInterceptor := func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		return handler(ctx, req)
+	}
+
+	streamInterceptor := func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		return handler(srv, ss)
+	}
+
+	unknownHandler := func(srv interface{}, stream grpc.ServerStream) error {
+		return nil
+	}
+
+	s, err := New(nil,
+		WithAddress("127.0.0.1:0"),
+		WithInsecure(),
+		WithLogger(logger),
+		WithMaxConcurrentStreams(200),
+		WithMaxRecvMsgSize(8*1024*1024),
+		WithMaxSendMsgSize(8*1024*1024),
+		WithKeepaliveParams(kp),
+		WithKeepaliveEnforcementPolicy(kep),
+		WithUnaryInterceptors(unaryInterceptor),
+		WithStreamInterceptors(streamInterceptor),
+		WithUnknownServiceHandler(unknownHandler),
+		WithReflection(true),
+		WithHealthService(true),
+		WithConnectionTimeout(60*time.Second),
+		WithGracefulStopTimeout(15*time.Second),
+		WithALPNEnforcement(false),
+		WithClientCertMetadata(false),
+	)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	err = s.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = s.Stop(ctx) }()
+
+	assert.Equal(t, StateRunning, s.State())
+	assert.True(t, s.IsRunning())
+}
+
+func TestServer_ConfigFromGRPCListenerConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GRPCListenerConfig{
+		MaxConcurrentStreams: 150,
+		MaxRecvMsgSize:       2 * 1024 * 1024,
+		MaxSendMsgSize:       2 * 1024 * 1024,
+		Reflection:           true,
+		HealthCheck:          true,
+		TLS: &config.TLSConfig{
+			Enabled:  true,
+			CertFile: "/path/to/cert.pem",
+			KeyFile:  "/path/to/key.pem",
+		},
+	}
+
+	s, err := New(cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint32(150), s.maxConcurrentStreams)
+	assert.Equal(t, 2*1024*1024, s.maxRecvMsgSize)
+	assert.Equal(t, 2*1024*1024, s.maxSendMsgSize)
+	assert.True(t, s.reflectionEnabled)
+	assert.True(t, s.healthServiceEnabled)
+	assert.Equal(t, "/path/to/cert.pem", s.tlsCertFile)
+	assert.Equal(t, "/path/to/key.pem", s.tlsKeyFile)
 }

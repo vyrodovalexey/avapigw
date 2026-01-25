@@ -10,6 +10,23 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// Health check default configuration constants.
+const (
+	// DefaultHealthCheckTimeout is the default timeout for health check requests.
+	DefaultHealthCheckTimeout = 5 * time.Second
+
+	// DefaultHealthCheckInterval is the default interval between health checks.
+	DefaultHealthCheckInterval = 10 * time.Second
+
+	// DefaultHealthyThreshold is the default number of consecutive successes
+	// required to mark a host as healthy.
+	DefaultHealthyThreshold = 2
+
+	// DefaultUnhealthyThreshold is the default number of consecutive failures
+	// required to mark a host as unhealthy.
+	DefaultUnhealthyThreshold = 3
+)
+
 // HealthChecker performs periodic health checks on backend hosts.
 type HealthChecker struct {
 	hosts              []*Host
@@ -47,7 +64,7 @@ func WithHealthCheckClient(client *http.Client) HealthCheckOption {
 func NewHealthChecker(hosts []*Host, cfg config.HealthCheck, opts ...HealthCheckOption) *HealthChecker {
 	timeout := cfg.Timeout.Duration()
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		timeout = DefaultHealthCheckTimeout
 	}
 
 	hc := &HealthChecker{
@@ -66,10 +83,10 @@ func NewHealthChecker(hosts []*Host, cfg config.HealthCheck, opts ...HealthCheck
 	}
 
 	if hc.healthyThreshold == 0 {
-		hc.healthyThreshold = 2
+		hc.healthyThreshold = DefaultHealthyThreshold
 	}
 	if hc.unhealthyThreshold == 0 {
-		hc.unhealthyThreshold = 3
+		hc.unhealthyThreshold = DefaultUnhealthyThreshold
 	}
 
 	for _, opt := range opts {
@@ -112,7 +129,7 @@ func (hc *HealthChecker) run(ctx context.Context) {
 
 	interval := hc.config.Interval.Duration()
 	if interval == 0 {
-		interval = 10 * time.Second
+		interval = DefaultHealthCheckInterval
 	}
 
 	ticker := time.NewTicker(interval)
@@ -150,6 +167,14 @@ func (hc *HealthChecker) checkAll(ctx context.Context) {
 
 // checkHost checks a single host.
 func (hc *HealthChecker) checkHost(ctx context.Context, host *Host) {
+	// Check if context is already canceled before making the request
+	select {
+	case <-ctx.Done():
+		return
+	default:
+		// Context is still valid, proceed with health check
+	}
+
 	url := host.URL() + hc.config.Path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)

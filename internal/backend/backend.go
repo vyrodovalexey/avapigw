@@ -5,13 +5,21 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+)
+
+// Default configuration constants for backend services.
+const (
+	// DefaultHostWeight is the default weight for a host when not specified.
+	DefaultHostWeight = 1
 )
 
 // Status represents the health status of a backend.
@@ -73,12 +81,12 @@ func NewHost(address string, port, weight int) *Host {
 
 // URL returns the host URL (HTTP).
 func (h *Host) URL() string {
-	return fmt.Sprintf("http://%s:%d", h.Address, h.Port)
+	return "http://" + net.JoinHostPort(h.Address, strconv.Itoa(h.Port))
 }
 
 // TLSURL returns the host URL with HTTPS scheme.
 func (h *Host) TLSURL() string {
-	return fmt.Sprintf("https://%s:%d", h.Address, h.Port)
+	return "https://" + net.JoinHostPort(h.Address, strconv.Itoa(h.Port))
 }
 
 // URLWithScheme returns the host URL with the specified scheme.
@@ -184,7 +192,7 @@ func NewBackend(cfg config.Backend, opts ...BackendOption) (*ServiceBackend, err
 	for _, hostCfg := range cfg.Hosts {
 		weight := hostCfg.Weight
 		if weight == 0 {
-			weight = 1
+			weight = DefaultHostWeight
 		}
 		host := NewHost(hostCfg.Address, hostCfg.Port, weight)
 		b.hosts = append(b.hosts, host)

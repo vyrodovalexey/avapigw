@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +13,40 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// Retry configuration constants for Redis operations.
+const (
+	// redisMaxRetries is the maximum number of retry attempts for Redis operations.
+	redisMaxRetries = 3
+
+	// redisBaseDelay is the base delay for exponential backoff.
+	redisBaseDelay = 100 * time.Millisecond
+
+	// redisMaxDelay is the maximum delay between retries.
+	redisMaxDelay = 2 * time.Second
+)
+
+// isRetryableError checks if the error is retryable (network/connection errors).
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Don't retry on cache miss or context errors
+	if errors.Is(err, redis.Nil) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// Retry on connection/network errors
+	return true
+}
+
+// calculateBackoff calculates the delay for exponential backoff with jitter.
+func calculateBackoff(attempt int) time.Duration {
+	delay := time.Duration(float64(redisBaseDelay) * math.Pow(2, float64(attempt)))
+	if delay > redisMaxDelay {
+		delay = redisMaxDelay
+	}
+	return delay
+}
 
 // redisCache implements a Redis-based cache.
 type redisCache struct {
@@ -90,7 +125,7 @@ func newRedisCache(cfg *config.CacheConfig, logger observability.Logger) (*redis
 	return c, nil
 }
 
-// Get retrieves a value from the cache.
+// Get retrieves a value from the cache with exponential backoff retry.
 func (c *redisCache) Get(ctx context.Context, key string) ([]byte, error) {
 	// Check for context cancellation before proceeding
 	select {
@@ -101,28 +136,49 @@ func (c *redisCache) Get(ctx context.Context, key string) ([]byte, error) {
 
 	fullKey := c.keyPrefix + key
 
-	result, err := c.client.Get(ctx, fullKey).Bytes()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
+	var result []byte
+	var lastErr error
+
+	for attempt := 0; attempt <= redisMaxRetries; attempt++ {
+		if attempt > 0 {
+			// Wait with exponential backoff before retry
+			delay := calculateBackoff(attempt - 1)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+			c.logger.Debug("retrying redis get",
+				observability.String("key", key),
+				observability.Int("attempt", attempt))
+		}
+
+		result, lastErr = c.client.Get(ctx, fullKey).Bytes()
+		if lastErr == nil {
+			atomic.AddInt64(&c.hits, 1)
+			c.logger.Debug("cache hit",
+				observability.String("key", key),
+				observability.Int("size", len(result)))
+			return result, nil
+		}
+
+		if errors.Is(lastErr, redis.Nil) {
 			atomic.AddInt64(&c.misses, 1)
 			return nil, ErrCacheMiss
 		}
-		c.logger.Error("redis get failed",
-			observability.String("key", key),
-			observability.Error(err))
-		return nil, err
+
+		if !isRetryableError(lastErr) {
+			break
+		}
 	}
 
-	atomic.AddInt64(&c.hits, 1)
-
-	c.logger.Debug("cache hit",
+	c.logger.Error("redis get failed",
 		observability.String("key", key),
-		observability.Int("size", len(result)))
-
-	return result, nil
+		observability.Error(lastErr))
+	return nil, lastErr
 }
 
-// Set stores a value in the cache.
+// Set stores a value in the cache with exponential backoff retry.
 func (c *redisCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
 	// Check for context cancellation before proceeding
 	select {
@@ -137,23 +193,43 @@ func (c *redisCache) Set(ctx context.Context, key string, value []byte, ttl time
 
 	fullKey := c.keyPrefix + key
 
-	err := c.client.Set(ctx, fullKey, value, ttl).Err()
-	if err != nil {
-		c.logger.Error("redis set failed",
-			observability.String("key", key),
-			observability.Error(err))
-		return err
+	var lastErr error
+
+	for attempt := 0; attempt <= redisMaxRetries; attempt++ {
+		if attempt > 0 {
+			// Wait with exponential backoff before retry
+			delay := calculateBackoff(attempt - 1)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+			c.logger.Debug("retrying redis set",
+				observability.String("key", key),
+				observability.Int("attempt", attempt))
+		}
+
+		lastErr = c.client.Set(ctx, fullKey, value, ttl).Err()
+		if lastErr == nil {
+			c.logger.Debug("cache set",
+				observability.String("key", key),
+				observability.Duration("ttl", ttl),
+				observability.Int("size", len(value)))
+			return nil
+		}
+
+		if !isRetryableError(lastErr) {
+			break
+		}
 	}
 
-	c.logger.Debug("cache set",
+	c.logger.Error("redis set failed",
 		observability.String("key", key),
-		observability.Duration("ttl", ttl),
-		observability.Int("size", len(value)))
-
-	return nil
+		observability.Error(lastErr))
+	return lastErr
 }
 
-// Delete removes a value from the cache.
+// Delete removes a value from the cache with exponential backoff retry.
 func (c *redisCache) Delete(ctx context.Context, key string) error {
 	// Check for context cancellation before proceeding
 	select {
@@ -164,21 +240,41 @@ func (c *redisCache) Delete(ctx context.Context, key string) error {
 
 	fullKey := c.keyPrefix + key
 
-	err := c.client.Del(ctx, fullKey).Err()
-	if err != nil {
-		c.logger.Error("redis delete failed",
-			observability.String("key", key),
-			observability.Error(err))
-		return err
+	var lastErr error
+
+	for attempt := 0; attempt <= redisMaxRetries; attempt++ {
+		if attempt > 0 {
+			// Wait with exponential backoff before retry
+			delay := calculateBackoff(attempt - 1)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+			c.logger.Debug("retrying redis delete",
+				observability.String("key", key),
+				observability.Int("attempt", attempt))
+		}
+
+		lastErr = c.client.Del(ctx, fullKey).Err()
+		if lastErr == nil {
+			c.logger.Debug("cache deleted",
+				observability.String("key", key))
+			return nil
+		}
+
+		if !isRetryableError(lastErr) {
+			break
+		}
 	}
 
-	c.logger.Debug("cache deleted",
-		observability.String("key", key))
-
-	return nil
+	c.logger.Error("redis delete failed",
+		observability.String("key", key),
+		observability.Error(lastErr))
+	return lastErr
 }
 
-// Exists checks if a key exists in the cache.
+// Exists checks if a key exists in the cache with exponential backoff retry.
 func (c *redisCache) Exists(ctx context.Context, key string) (bool, error) {
 	// Check for context cancellation before proceeding
 	select {
@@ -189,15 +285,37 @@ func (c *redisCache) Exists(ctx context.Context, key string) (bool, error) {
 
 	fullKey := c.keyPrefix + key
 
-	result, err := c.client.Exists(ctx, fullKey).Result()
-	if err != nil {
-		c.logger.Error("redis exists failed",
-			observability.String("key", key),
-			observability.Error(err))
-		return false, err
+	var result int64
+	var lastErr error
+
+	for attempt := 0; attempt <= redisMaxRetries; attempt++ {
+		if attempt > 0 {
+			// Wait with exponential backoff before retry
+			delay := calculateBackoff(attempt - 1)
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(delay):
+			}
+			c.logger.Debug("retrying redis exists",
+				observability.String("key", key),
+				observability.Int("attempt", attempt))
+		}
+
+		result, lastErr = c.client.Exists(ctx, fullKey).Result()
+		if lastErr == nil {
+			return result > 0, nil
+		}
+
+		if !isRetryableError(lastErr) {
+			break
+		}
 	}
 
-	return result > 0, nil
+	c.logger.Error("redis exists failed",
+		observability.String("key", key),
+		observability.Error(lastErr))
+	return false, lastErr
 }
 
 // Close closes the Redis connection.

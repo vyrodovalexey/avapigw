@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"google.golang.org/grpc"
@@ -103,7 +104,7 @@ func (h *StreamHandler) proxyStreams(serverStream grpc.ServerStream, clientStrea
 	for i := 0; i < 2; i++ {
 		select {
 		case err := <-serverToClientErr:
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				// Close send on client stream
 				_ = clientStream.CloseSend()
 				return err
@@ -125,7 +126,7 @@ func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, cl
 	for {
 		frame := &Frame{}
 		if err := serverStream.RecvMsg(frame); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				// Close send on client stream
 				return clientStream.CloseSend()
 			}
@@ -143,7 +144,7 @@ func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, se
 	for {
 		frame := &Frame{}
 		if err := clientStream.RecvMsg(frame); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err

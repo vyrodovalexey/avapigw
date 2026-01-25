@@ -154,6 +154,13 @@ func (w *Watcher) watch(ctx context.Context) {
 	var debounceTimer *time.Timer
 	var debounceCh <-chan time.Time
 
+	// Ensure debounce timer is cleaned up on exit to prevent goroutine leak
+	defer func() {
+		if debounceTimer != nil {
+			debounceTimer.Stop()
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -172,7 +179,7 @@ func (w *Watcher) watch(ctx context.Context) {
 
 		case <-debounceCh:
 			debounceCh = nil
-			w.reload()
+			w.reload(ctx)
 
 		case err, ok := <-w.watcher.Errors:
 			if !ok {
@@ -223,7 +230,19 @@ func (w *Watcher) handleWatchError(err error) {
 }
 
 // reload attempts to reload the configuration.
-func (w *Watcher) reload() {
+// It checks for context cancellation before and after expensive operations.
+func (w *Watcher) reload(ctx context.Context) {
+	// Check for context cancellation before starting reload
+	select {
+	case <-ctx.Done():
+		w.logger.Debug("reload canceled before starting",
+			observability.Error(ctx.Err()),
+		)
+		return
+	default:
+		// Continue with reload
+	}
+
 	w.logger.Info("reloading configuration",
 		observability.String("path", w.path),
 	)
@@ -239,6 +258,17 @@ func (w *Watcher) reload() {
 		return
 	}
 
+	// Check for context cancellation after loading config
+	select {
+	case <-ctx.Done():
+		w.logger.Debug("reload canceled after loading config",
+			observability.Error(ctx.Err()),
+		)
+		return
+	default:
+		// Continue with validation
+	}
+
 	if err := ValidateConfig(config); err != nil {
 		w.logger.Error("configuration validation failed",
 			observability.Error(err),
@@ -247,6 +277,17 @@ func (w *Watcher) reload() {
 			w.errorCallback(err)
 		}
 		return
+	}
+
+	// Check for context cancellation after validation
+	select {
+	case <-ctx.Done():
+		w.logger.Debug("reload canceled after validation",
+			observability.Error(ctx.Err()),
+		)
+		return
+	default:
+		// Continue with applying config
 	}
 
 	w.mu.Lock()

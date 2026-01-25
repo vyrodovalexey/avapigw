@@ -140,23 +140,51 @@ func (s *signer) Sign(ctx context.Context, claims *Claims) (string, error) {
 func (s *signer) SignWithOptions(ctx context.Context, claims *Claims, opts SigningOptions) (string, error) {
 	start := time.Now()
 
-	// Set default algorithm
-	algorithm := opts.Algorithm
-	if algorithm == "" {
-		algorithm = s.algorithm
-		if algorithm == "" {
-			algorithm = "RS256"
-		}
+	algorithm := s.resolveAlgorithm(opts.Algorithm)
+	keyID := s.resolveKeyID(opts.KeyID)
+
+	// Prepare claims with defaults
+	s.prepareClaims(claims, opts)
+
+	// Build and sign the token
+	token, err := s.buildAndSignToken(ctx, claims, algorithm, keyID)
+	if err != nil {
+		s.metrics.RecordSigning("error", algorithm, time.Since(start))
+		return "", err
 	}
 
-	// Set default key ID
-	keyID := opts.KeyID
-	if keyID == "" {
-		keyID = s.keyID
-	}
+	s.metrics.RecordSigning("success", algorithm, time.Since(start))
+	s.logger.Debug("JWT signed",
+		observability.String("subject", claims.Subject),
+		observability.String("algorithm", algorithm),
+	)
 
-	// Prepare claims
+	return token, nil
+}
+
+// resolveAlgorithm resolves the signing algorithm from options or defaults.
+func (s *signer) resolveAlgorithm(optAlgorithm string) string {
+	if optAlgorithm != "" {
+		return optAlgorithm
+	}
+	if s.algorithm != "" {
+		return s.algorithm
+	}
+	return "RS256"
+}
+
+// resolveKeyID resolves the key ID from options or defaults.
+func (s *signer) resolveKeyID(optKeyID string) string {
+	if optKeyID != "" {
+		return optKeyID
+	}
+	return s.keyID
+}
+
+// prepareClaims prepares claims with default values from options and config.
+func (s *signer) prepareClaims(claims *Claims, opts SigningOptions) {
 	now := time.Now()
+
 	if claims.IssuedAt == nil {
 		claims.IssuedAt = &Time{Time: now}
 	}
@@ -166,20 +194,43 @@ func (s *signer) SignWithOptions(ctx context.Context, claims *Claims, opts Signi
 	if !opts.NotBefore.IsZero() && claims.NotBefore == nil {
 		claims.NotBefore = &Time{Time: opts.NotBefore}
 	}
-	if opts.Issuer != "" && claims.Issuer == "" {
-		claims.Issuer = opts.Issuer
-	} else if s.config.Issuer != "" && claims.Issuer == "" {
-		claims.Issuer = s.config.Issuer
-	}
-	if len(opts.Audience) > 0 && len(claims.Audience) == 0 {
-		claims.Audience = opts.Audience
-	} else if len(s.config.Audience) > 0 && len(claims.Audience) == 0 {
-		claims.Audience = s.config.Audience
-	}
+
+	s.setIssuer(claims, opts.Issuer)
+	s.setAudience(claims, opts.Audience)
+
 	if opts.GenerateJTI && claims.JWTID == "" {
 		claims.JWTID = uuid.New().String()
 	}
+}
 
+// setIssuer sets the issuer claim from options or config.
+func (s *signer) setIssuer(claims *Claims, optIssuer string) {
+	if claims.Issuer != "" {
+		return
+	}
+	if optIssuer != "" {
+		claims.Issuer = optIssuer
+	} else if s.config.Issuer != "" {
+		claims.Issuer = s.config.Issuer
+	}
+}
+
+// setAudience sets the audience claim from options or config.
+func (s *signer) setAudience(claims *Claims, optAudience Audience) {
+	if len(claims.Audience) > 0 {
+		return
+	}
+	if len(optAudience) > 0 {
+		claims.Audience = optAudience
+	} else if len(s.config.Audience) > 0 {
+		claims.Audience = s.config.Audience
+	}
+}
+
+// buildAndSignToken builds the JWT header and payload, then signs it.
+func (s *signer) buildAndSignToken(
+	ctx context.Context, claims *Claims, algorithm, keyID string,
+) (string, error) {
 	// Create header
 	header := map[string]interface{}{
 		"alg": algorithm,
@@ -192,7 +243,6 @@ func (s *signer) SignWithOptions(ctx context.Context, claims *Claims, opts Signi
 	// Encode header
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
-		s.metrics.RecordSigning("error", algorithm, time.Since(start))
 		return "", NewSigningError("failed to encode header", err)
 	}
 	headerEncoded := base64.RawURLEncoding.EncodeToString(headerJSON)
@@ -200,7 +250,6 @@ func (s *signer) SignWithOptions(ctx context.Context, claims *Claims, opts Signi
 	// Encode payload
 	payloadJSON, err := json.Marshal(claims.ToMap())
 	if err != nil {
-		s.metrics.RecordSigning("error", algorithm, time.Since(start))
 		return "", NewSigningError("failed to encode payload", err)
 	}
 	payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadJSON)
@@ -209,29 +258,22 @@ func (s *signer) SignWithOptions(ctx context.Context, claims *Claims, opts Signi
 	signingInput := headerEncoded + "." + payloadEncoded
 
 	// Sign
-	var signature []byte
-	if s.vaultClient != nil && s.config.Vault != nil && s.config.Vault.Enabled {
-		signature, err = s.signWithVault(ctx, signingInput, algorithm)
-	} else {
-		signature, err = s.signWithKey(signingInput, algorithm)
-	}
+	signature, err := s.createSignature(ctx, signingInput, algorithm)
 	if err != nil {
-		s.metrics.RecordSigning("error", algorithm, time.Since(start))
 		return "", err
 	}
 
-	// Encode signature
+	// Encode signature and build token
 	signatureEncoded := base64.RawURLEncoding.EncodeToString(signature)
+	return signingInput + "." + signatureEncoded, nil
+}
 
-	token := signingInput + "." + signatureEncoded
-
-	s.metrics.RecordSigning("success", algorithm, time.Since(start))
-	s.logger.Debug("JWT signed",
-		observability.String("subject", claims.Subject),
-		observability.String("algorithm", algorithm),
-	)
-
-	return token, nil
+// createSignature creates the signature using Vault or local key.
+func (s *signer) createSignature(ctx context.Context, signingInput, algorithm string) ([]byte, error) {
+	if s.vaultClient != nil && s.config.Vault != nil && s.config.Vault.Enabled {
+		return s.signWithVault(ctx, signingInput, algorithm)
+	}
+	return s.signWithKey(signingInput, algorithm)
 }
 
 // signWithKey signs using a local private key.

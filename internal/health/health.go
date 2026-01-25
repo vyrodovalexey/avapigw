@@ -3,6 +3,7 @@ package health
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"runtime"
@@ -135,22 +136,39 @@ func (c *Checker) Readiness() ReadinessResponse {
 
 // HealthHandler returns an HTTP handler for the health endpoint.
 func (c *Checker) HealthHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		response := c.Health()
+
+		// Pre-encode the response to catch errors before writing headers
+		data, err := json.Marshal(response)
+		if err != nil {
+			log.Printf("health: failed to encode response: %v", err)
+			http.Error(w, "failed to encode response", http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set(HeaderContentType, ContentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			http.Error(w, "failed to encode response", http.StatusInternalServerError)
+		if _, err := w.Write(data); err != nil {
+			// Headers already sent, can only log the error
+			log.Printf("health: failed to write response: %v", err)
 		}
 	}
 }
 
 // ReadinessHandler returns an HTTP handler for the readiness endpoint.
 func (c *Checker) ReadinessHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		response := c.Readiness()
+
+		// Pre-encode the response to catch errors before writing headers
+		data, err := json.Marshal(response)
+		if err != nil {
+			log.Printf("readiness: failed to encode response: %v", err)
+			http.Error(w, "failed to encode response", http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set(HeaderContentType, ContentTypeJSON)
 
@@ -160,8 +178,9 @@ func (c *Checker) ReadinessHandler() http.HandlerFunc {
 		}
 		w.WriteHeader(statusCode)
 
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			http.Error(w, "failed to encode response", http.StatusInternalServerError)
+		if _, err := w.Write(data); err != nil {
+			// Headers already sent, can only log the error
+			log.Printf("readiness: failed to write response: %v", err)
 		}
 	}
 }

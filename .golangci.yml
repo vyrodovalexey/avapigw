@@ -16,9 +16,13 @@ linters:
     - bodyclose
     - noctx
     - sqlclosecheck
+    - nilerr
+    - errorlint
+    - makezero
     # Security
     - gosec
     - bidichk
+    - nosprintfhostport
     # Code style
     - goconst
     - unconvert
@@ -27,6 +31,8 @@ linters:
     - whitespace
     - goprintffuncname
     - misspell
+    - usestdlibvars
+    - predeclared
     # Complexity
     - gocognit
     - gocyclo
@@ -41,6 +47,8 @@ linters:
     - gocritic
     - testpackage
     - revive
+    - contextcheck
+    - reassign
   exclusions:
     generated: lax
     presets:
@@ -54,55 +62,37 @@ linters:
       - third_party
       - ".*generate\\.go$"
     rules:
+      # G201 SQL injection - only exclude where verified safe
       - linters:
           - gosec
-        text: 'G(201):'
-      # Exclude G101 for header name constants (false positives)
+        text: 'G201:'
+        path: "internal/repository/"
+      # G101 hardcoded credentials - false positives on header constants
       - linters:
           - gosec
         text: 'G101:'
         path: "internal/(auth|authz)/constants\\.go"
-      # Exclude lll for kubebuilder markers and long struct tags
+      # lll for kubebuilder markers
       - linters:
           - lll
         source: "^//\\s*\\+kubebuilder:"
+      # lll for long struct tags
       - linters:
           - lll
-        source: "`json:.*yaml:.*`"
-      # Exclude lll for API types (kubebuilder annotations)
-      # Exclude stuttering names - common in Go packages
+        source: '`json:.*yaml:.*`'
+      # revive exclusions
       - linters:
           - revive
-        text: "stutters"
-      # Exclude unused-parameter for interface implementations
-      - linters:
-          - revive
-        text: "unused-parameter"
-      # Exclude if-return for validation functions
-      - linters:
-          - revive
-        text: "if-return"
-      # Exclude context-as-argument for specific patterns
-      - linters:
-          - revive
-        text: "context-as-argument"
-      # Exclude staticcheck QF1008 for embedded field selectors
+        text: "stutters|unused-parameter|if-return|context-as-argument"
+      # staticcheck suggestions
       - linters:
           - staticcheck
         text: "QF1008"
-      # Exclude gocritic importShadow for common patterns
+      # gocritic common patterns
       - linters:
           - gocritic
-        text: "importShadow"
-      # Exclude gocritic httpNoBody
-      - linters:
-          - gocritic
-        text: "httpNoBody"
-      # Exclude gocritic ifElseChain
-      - linters:
-          - gocritic
-        text: "ifElseChain"
-      # Exclude var-naming for util package (common helper package name)
+        text: "importShadow|httpNoBody"
+      # var-naming for util package
       - linters:
           - revive
         text: "var-naming: avoid meaningless package names"
@@ -112,6 +102,8 @@ linters:
       exclude-functions:
         - fmt.Fprintf
         - fmt.Fprint
+        - fmt.Fprintln
+        - (io.Closer).Close
     goconst:
       min-len: 2
       min-occurrences: 3
@@ -131,18 +123,17 @@ linters:
         rangeValCopy:
           sizeThreshold: 512
     funlen:
-      lines: 300
-      statements: 90
+      lines: 200
+      statements: 60
     lll:
       line-length: 120
       tab-width: 4
     nestif:
       min-complexity: 7
     gocyclo:
-      min-complexity: 27
+      min-complexity: 15
     gocognit:
-      min-complexity: 35
-
+      min-complexity: 20
     misspell:
       locale: US
     revive:

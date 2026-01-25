@@ -104,29 +104,45 @@ func New(cfg *config.CacheConfig, logger observability.Logger) (Cache, error) {
 	}
 }
 
-// disabledCache is a cache that always returns ErrCacheDisabled.
+// disabledCache is a no-op cache implementation that always returns ErrCacheDisabled.
+// It is used when caching is explicitly disabled in the configuration.
+// All methods intentionally ignore their parameters since no actual caching occurs.
 type disabledCache struct{}
 
 func newDisabledCache() Cache {
 	return &disabledCache{}
 }
 
+// Get is a no-op implementation that always returns ErrCacheDisabled.
+// Parameters are intentionally unused as no actual cache lookup is performed
+// when caching is disabled.
 func (c *disabledCache) Get(_ context.Context, _ string) ([]byte, error) {
 	return nil, ErrCacheDisabled
 }
 
+// Set is a no-op implementation that always returns ErrCacheDisabled.
+// Parameters are intentionally unused as no actual cache storage is performed
+// when caching is disabled.
 func (c *disabledCache) Set(_ context.Context, _ string, _ []byte, _ time.Duration) error {
 	return ErrCacheDisabled
 }
 
+// Delete is a no-op implementation that always returns ErrCacheDisabled.
+// Parameters are intentionally unused as no actual cache deletion is performed
+// when caching is disabled.
 func (c *disabledCache) Delete(_ context.Context, _ string) error {
 	return ErrCacheDisabled
 }
 
+// Exists is a no-op implementation that always returns false and ErrCacheDisabled.
+// Parameters are intentionally unused as no actual cache existence check is performed
+// when caching is disabled.
 func (c *disabledCache) Exists(_ context.Context, _ string) (bool, error) {
 	return false, ErrCacheDisabled
 }
 
+// Close is a no-op implementation that returns nil.
+// No resources need to be released when caching is disabled.
 func (c *disabledCache) Close() error {
 	return nil
 }

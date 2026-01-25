@@ -301,3 +301,146 @@ func TestTracer_StartSpan_WithOptions(t *testing.T) {
 
 	span.End()
 }
+
+func TestBuildRetryConfig_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	retryConfig := buildRetryConfig(nil)
+
+	assert.True(t, retryConfig.Enabled)
+	assert.Equal(t, DefaultOTLPRetryInitialInterval, retryConfig.InitialInterval)
+	assert.Equal(t, DefaultOTLPRetryMaxInterval, retryConfig.MaxInterval)
+	assert.Equal(t, DefaultOTLPRetryMaxElapsedTime, retryConfig.MaxElapsedTime)
+}
+
+func TestBuildRetryConfig_CustomConfig(t *testing.T) {
+	t.Parallel()
+
+	customCfg := &OTLPRetryConfig{
+		Enabled:         true,
+		InitialInterval: 2 * DefaultOTLPRetryInitialInterval,
+		MaxInterval:     2 * DefaultOTLPRetryMaxInterval,
+		MaxElapsedTime:  2 * DefaultOTLPRetryMaxElapsedTime,
+	}
+
+	retryConfig := buildRetryConfig(customCfg)
+
+	assert.True(t, retryConfig.Enabled)
+	assert.Equal(t, 2*DefaultOTLPRetryInitialInterval, retryConfig.InitialInterval)
+	assert.Equal(t, 2*DefaultOTLPRetryMaxInterval, retryConfig.MaxInterval)
+	assert.Equal(t, 2*DefaultOTLPRetryMaxElapsedTime, retryConfig.MaxElapsedTime)
+}
+
+func TestBuildRetryConfig_ZeroValues(t *testing.T) {
+	t.Parallel()
+
+	customCfg := &OTLPRetryConfig{
+		Enabled:         false,
+		InitialInterval: 0,
+		MaxInterval:     0,
+		MaxElapsedTime:  0,
+	}
+
+	retryConfig := buildRetryConfig(customCfg)
+
+	assert.False(t, retryConfig.Enabled)
+	// Zero values should use defaults
+	assert.Equal(t, DefaultOTLPRetryInitialInterval, retryConfig.InitialInterval)
+	assert.Equal(t, DefaultOTLPRetryMaxInterval, retryConfig.MaxInterval)
+	assert.Equal(t, DefaultOTLPRetryMaxElapsedTime, retryConfig.MaxElapsedTime)
+}
+
+func TestOTLPRetryConfig_Struct(t *testing.T) {
+	t.Parallel()
+
+	cfg := OTLPRetryConfig{
+		Enabled:         true,
+		InitialInterval: 5 * DefaultOTLPRetryInitialInterval,
+		MaxInterval:     10 * DefaultOTLPRetryMaxInterval,
+		MaxElapsedTime:  3 * DefaultOTLPRetryMaxElapsedTime,
+	}
+
+	assert.True(t, cfg.Enabled)
+	assert.Equal(t, 5*DefaultOTLPRetryInitialInterval, cfg.InitialInterval)
+	assert.Equal(t, 10*DefaultOTLPRetryMaxInterval, cfg.MaxInterval)
+	assert.Equal(t, 3*DefaultOTLPRetryMaxElapsedTime, cfg.MaxElapsedTime)
+}
+
+func TestTracingMiddleware_WithTraceHeaders(t *testing.T) {
+	t.Parallel()
+
+	cfg := TracerConfig{
+		ServiceName: "test-service",
+		Enabled:     false,
+	}
+
+	tracer, err := NewTracer(cfg)
+	require.NoError(t, err)
+
+	middleware := TracingMiddleware(tracer)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	// Add trace context headers
+	req.Header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestTracingMiddleware_ClientError(t *testing.T) {
+	t.Parallel()
+
+	cfg := TracerConfig{
+		ServiceName: "test-service",
+		Enabled:     false,
+	}
+
+	tracer, err := NewTracer(cfg)
+	require.NoError(t, err)
+
+	middleware := TracingMiddleware(tracer)
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/error", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestTracingResponseWriter_Write(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	trw := &tracingResponseWriter{
+		ResponseWriter: rec,
+		status:         http.StatusOK,
+	}
+
+	n, err := trw.Write([]byte("test body"))
+
+	assert.NoError(t, err)
+	assert.Equal(t, 9, n)
+	assert.Equal(t, "test body", rec.Body.String())
+}
+
+func TestTracingConstants(t *testing.T) {
+	t.Parallel()
+
+	// Verify constants are set correctly
+	assert.NotZero(t, DefaultOTLPRetryInitialInterval)
+	assert.NotZero(t, DefaultOTLPRetryMaxInterval)
+	assert.NotZero(t, DefaultOTLPRetryMaxElapsedTime)
+	assert.NotZero(t, DefaultOTLPTimeout)
+	assert.NotZero(t, DefaultOTLPReconnectionPeriod)
+}
