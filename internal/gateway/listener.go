@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
@@ -238,15 +239,75 @@ func (l *Listener) hstsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// isAllowedHost checks if the given host is in the list of allowed hosts.
+func (l *Listener) isAllowedHost(host string) bool {
+	for _, allowedHost := range l.config.Hosts {
+		if strings.EqualFold(host, allowedHost) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractHostWithoutPort extracts the host part from a host:port string.
+// It handles IPv6 addresses correctly (e.g., [::1]:8080).
+func extractHostWithoutPort(hostWithPort string) string {
+	colonIdx := strings.LastIndex(hostWithPort, ":")
+	if colonIdx == -1 {
+		return hostWithPort
+	}
+	// Check if this is an IPv6 address (contains brackets)
+	bracketIdx := strings.LastIndex(hostWithPort, "]")
+	if bracketIdx != -1 && colonIdx < bracketIdx {
+		// Port separator is inside brackets, not a real port
+		return hostWithPort
+	}
+	return hostWithPort[:colonIdx]
+}
+
+// getSafeRedirectHost determines the safe host to use for HTTPS redirect.
+// Returns the redirect host and a boolean indicating if the redirect should proceed.
+func (l *Listener) getSafeRedirectHost(requestHost string) (string, bool) {
+	if len(l.config.Hosts) == 0 {
+		// No hosts configured, reject the request to prevent open redirect
+		l.logger.Warn("HTTPS redirect rejected: no allowed hosts configured",
+			observability.String("host", requestHost),
+		)
+		return "", false
+	}
+
+	host := extractHostWithoutPort(requestHost)
+	if l.isAllowedHost(host) {
+		// Host is allowed, use the original request host (with port if present)
+		return requestHost, true
+	}
+
+	// Host is not allowed, use the first configured host
+	redirectHost := l.config.Hosts[0]
+	l.logger.Warn("HTTPS redirect blocked untrusted host",
+		observability.String("untrusted_host", requestHost),
+		observability.String("redirect_host", redirectHost),
+	)
+	return redirectHost, true
+}
+
 // httpsRedirectMiddleware redirects HTTP to HTTPS.
+// It validates the Host header against configured allowed hosts to prevent open redirect attacks.
 func (l *Listener) httpsRedirectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS == nil {
-			target := "https://" + r.Host + r.URL.RequestURI()
-			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		if r.TLS != nil {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		redirectHost, ok := l.getSafeRedirectHost(r.Host)
+		if !ok {
+			http.Error(w, "Bad Request: untrusted host", http.StatusBadRequest)
+			return
+		}
+
+		target := "https://" + redirectHost + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	})
 }
 
