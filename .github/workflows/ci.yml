@@ -187,7 +187,7 @@ jobs:
           --health-start-period 10s
       # HTTP REST API backends
       backend1:
-        image: ghcr.io/vyrodovalexey/restapi-example:latest
+        image: ghcr.io/vyrodovalexey/restapi-example:e9416f5
         ports:
           - 8801:8080
         env:
@@ -199,7 +199,7 @@ jobs:
           --health-retries 5
           --health-start-period 10s
       backend2:
-        image: ghcr.io/vyrodovalexey/restapi-example:latest
+        image: ghcr.io/vyrodovalexey/restapi-example:e9416f5
         ports:
           - 8802:8080
         env:
@@ -212,7 +212,7 @@ jobs:
           --health-start-period 10s
       # gRPC backends (health check via TCP port since grpcurl not available in container)
       grpc-backend1:
-        image: ghcr.io/vyrodovalexey/grpc-example:latest
+        image: ghcr.io/vyrodovalexey/grpc-example:21f4570
         ports:
           - 8803:50051
         env:
@@ -224,7 +224,7 @@ jobs:
           --health-retries 5
           --health-start-period 10s
       grpc-backend2:
-        image: ghcr.io/vyrodovalexey/grpc-example:latest
+        image: ghcr.io/vyrodovalexey/grpc-example:21f4570
         ports:
           - 8804:50051
         env:
