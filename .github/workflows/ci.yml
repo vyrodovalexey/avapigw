@@ -257,6 +257,7 @@ jobs:
           KEYCLOAK_ADMIN_PASSWORD: admin
         ports:
           - 8090:8090
+          - 8091:9000
 
 
 
@@ -329,7 +330,7 @@ jobs:
           # Wait for Keycloak
           echo "Checking Keycloak..."
           for i in {1..60}; do
-            if curl -sf http://127.0.0.1:8090/health/ready; then
+            if curl -sf http://127.0.0.1:8091/health/ready; then
               echo "Keycloak is ready!"
               break
             fi
