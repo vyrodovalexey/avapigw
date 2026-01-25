@@ -256,21 +256,17 @@ jobs:
           KC_DB_PASSWORD: password
           KC_HOSTNAME: 127.0.0.1
           KC_HTTP_PORT: 8090
-          KC_HOSTNAME_STRICT: false
-          KC_HOSTNAME_STRICT_HTTPS: false
           KC_LOG_LEVEL: info
           KC_METRICS_ENABLED: true
           KC_HEALTH_ENABLED: true
           KEYCLOAK_ADMIN: admin
-          KEYCLOAK_ADMIN_PASSWORD: admin
-          KEYCLOAK_ENABLE_HEALTH_ENDPOINTS: "true"
-          KEYCLOAK_ENABLE_STATISTICS: "true"
         options: >-
+          --entrypoint "/opt/keycloak/bin/kc.sh start-dev"
           --health-cmd "curl -sf http://localhost:8090/health/ready || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 15
-          --health-start-period 120s
+          --health-start-period 180s
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
