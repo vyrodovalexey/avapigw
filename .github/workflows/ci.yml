@@ -346,7 +346,7 @@ jobs:
           curl -sf http://127.0.0.1:8802/health || (echo "HTTP Backend 2 not ready" && exit 1)
           grpcurl -plaintext 127.0.0.1:8803 list || (echo "gRPC Backend 1 not ready" && exit 1)
           grpcurl -plaintext 127.0.0.1:8804 list || (echo "gRPC Backend 2 not ready" && exit 1)
-          curl -sf http://127.0.0.1:8090/health/ready || (echo "Keycloak not ready" && exit 1)
+          curl -sf http://127.0.0.1:8091/health/ready || (echo "Keycloak not ready" && exit 1)
           echo "All services are ready!"
 
       - name: Setup Vault for Testing
