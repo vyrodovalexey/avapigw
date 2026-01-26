@@ -921,6 +921,11 @@ jobs:
           helm install --dry-run --debug avapigw-redis helm/avapigw \
             --set redis.enabled=true
 
+      - name: Install Prometheus Operator CRDs
+        run: |
+          echo "==> Installing Prometheus Operator CRDs for ServiceMonitor support..."
+          kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.71.0/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+
       - name: Helm dry-run with all features
         run: |
           echo "==> Running Helm dry-run with all features..."
