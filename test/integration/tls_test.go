@@ -51,10 +51,14 @@ func TestIntegration_TLS_SimpleMode(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				tlsConn := c.(*tls.Conn)
+				if err := tlsConn.Handshake(); err != nil {
+					return
+				}
 				// Read the request first before responding
 				buf := make([]byte, 1024)
 				_, _ = c.Read(buf)
-				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 			}(conn)
 		}
 	}()
@@ -280,10 +284,14 @@ func TestIntegration_TLS_InsecureMode(t *testing.T) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				tlsConn := c.(*tls.Conn)
+				if err := tlsConn.Handshake(); err != nil {
+					return
+				}
 				// Read the request first before responding
 				buf := make([]byte, 1024)
 				_, _ = c.Read(buf)
-				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 			}(conn)
 		}
 	}()
@@ -449,10 +457,14 @@ func TestIntegration_TLS_CipherSuiteNegotiation(t *testing.T) {
 					}
 					go func(c net.Conn) {
 						defer c.Close()
+						tlsConn := c.(*tls.Conn)
+						if err := tlsConn.Handshake(); err != nil {
+							return
+						}
 						// Read the request first before responding
 						buf := make([]byte, 1024)
 						_, _ = c.Read(buf)
-						_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+						_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 					}(conn)
 				}
 			}()
@@ -559,10 +571,14 @@ func TestIntegration_TLS_VersionNegotiation(t *testing.T) {
 					}
 					go func(c net.Conn) {
 						defer c.Close()
+						tlsConn := c.(*tls.Conn)
+						if err := tlsConn.Handshake(); err != nil {
+							return
+						}
 						// Read the request first before responding
 						buf := make([]byte, 1024)
 						_, _ = c.Read(buf)
-						_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+						_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 					}(conn)
 				}
 			}()
