@@ -1,0 +1,35 @@
+apiVersion: v2
+name: avapigw
+description: High-performance API Gateway built with Go and gin-gonic
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.23.0-0"
+home: https://github.com/vyrodovalexey/avapigw
+sources:
+  - https://github.com/vyrodovalexey/avapigw
+maintainers:
+  - name: Alexey Vyrodov
+    url: https://github.com/vyrodovalexey
+keywords:
+  - api-gateway
+  - gateway
+  - proxy
+  - grpc
+  - http
+  - go
+  - gin
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/vyrodovalexey/avapigw/blob/main/README.md
+    - name: Source
+      url: https://github.com/vyrodovalexey/avapigw
+
+dependencies:
+  - name: redis
+    version: "~19.0"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+    alias: redis

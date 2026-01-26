@@ -1,0 +1,57 @@
+# Yandex Tank Configuration: Load Balancing Verification Test
+# Purpose: Verify load is distributed correctly across backends
+# Target: Items API with 50/50 load balancing
+# Duration: 7 minutes total (1m warmup + 5m sustain + 1m cooldown)
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 1 to 200 RPS
+    # Sustain: 5 min at 200 RPS (longer duration for statistical significance)
+    # Cooldown: 1 min ramp down
+    schedule: line(1, 200, 1m) const(200, 5m) line(200, 1, 1m)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings
+  instances: 300
+  threads: 2
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: load-balancing]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP errors exceed 3%
+    - http(5xx,3%,10)
+    # Stop if response time exceeds 500ms for 30% of requests
+    - time(500,30%,30)
+    # Stop if network errors exceed 1%
+    - net(1%,10)

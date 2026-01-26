@@ -59,6 +59,10 @@ COVERAGE_MERGED := $(COVERAGE_DIR)/merged.out
         lint lint-fix fmt vet vuln \
         docker-build docker-run docker-push docker-clean \
         run dev clean deps tools generate proto-generate \
+        perf-test perf-test-http perf-test-post perf-test-mixed perf-test-all \
+        perf-test-grpc-unary perf-test-grpc-streaming perf-test-websocket \
+        perf-generate-ammo perf-generate-charts perf-analyze \
+        perf-start-gateway perf-stop-gateway perf-setup-infra \
         ci help version
 
 # ==============================================================================
@@ -376,6 +380,165 @@ proto-generate:
 	fi
 
 # ==============================================================================
+# Performance test targets (Yandex Tank)
+# ==============================================================================
+
+# Performance test directory
+PERF_DIR := test/performance
+PERF_SCRIPTS := $(PERF_DIR)/scripts
+
+## perf-test: Run HTTP throughput performance test (default)
+perf-test: perf-test-http
+
+## perf-test-http: Run HTTP GET throughput test
+perf-test-http: build
+	@echo "==> Running HTTP throughput performance test..."
+	@$(PERF_SCRIPTS)/run-test.sh http-throughput
+
+## perf-test-post: Run HTTP POST performance test
+perf-test-post: build
+	@echo "==> Running HTTP POST performance test..."
+	@$(PERF_SCRIPTS)/run-test.sh http-post
+
+## perf-test-mixed: Run mixed workload performance test
+perf-test-mixed: build
+	@echo "==> Running mixed workload performance test..."
+	@$(PERF_SCRIPTS)/run-test.sh mixed-workload
+
+## perf-test-load-balancing: Run load balancing verification test
+perf-test-load-balancing: build
+	@echo "==> Running load balancing performance test..."
+	@$(PERF_SCRIPTS)/run-test.sh load-balancing
+
+## perf-test-rate-limiting: Run rate limiting stress test
+perf-test-rate-limiting: build
+	@echo "==> Running rate limiting performance test..."
+	@$(PERF_SCRIPTS)/run-test.sh rate-limiting
+
+## perf-test-circuit-breaker: Run circuit breaker test
+perf-test-circuit-breaker: build
+	@echo "==> Running circuit breaker performance test..."
+	@$(PERF_SCRIPTS)/run-test.sh circuit-breaker
+
+## perf-test-all: Run all performance tests sequentially
+perf-test-all: build
+	@echo "==> Running all performance tests..."
+	@$(PERF_SCRIPTS)/run-test.sh all
+
+## perf-generate-ammo: Generate ammo files for performance tests
+perf-generate-ammo:
+	@echo "==> Generating ammo files..."
+	@$(PERF_SCRIPTS)/generate-ammo.sh get --count=1000
+	@$(PERF_SCRIPTS)/generate-ammo.sh post --count=500
+	@$(PERF_SCRIPTS)/generate-ammo.sh mixed --count=2000
+	@echo "==> Ammo files generated"
+
+## perf-analyze: Analyze latest performance test results
+perf-analyze:
+	@echo "==> Analyzing performance test results..."
+	@$(PERF_SCRIPTS)/analyze-results.sh --detailed
+
+## perf-start-gateway: Start gateway for performance testing
+perf-start-gateway: build
+	@echo "==> Starting gateway for performance testing..."
+	@$(PERF_SCRIPTS)/start-gateway.sh
+
+## perf-stop-gateway: Stop performance test gateway
+perf-stop-gateway:
+	@echo "==> Stopping performance test gateway..."
+	@$(PERF_SCRIPTS)/start-gateway.sh --stop
+
+## perf-clean: Clean performance test results
+perf-clean:
+	@echo "==> Cleaning performance test results..."
+	@rm -rf $(PERF_DIR)/results/*
+	@echo "==> Performance test results cleaned"
+
+# ==============================================================================
+# gRPC Performance test targets (ghz)
+# ==============================================================================
+
+## perf-test-grpc-unary: Run gRPC unary RPC throughput test
+perf-test-grpc-unary: build
+	@echo "==> Running gRPC unary performance test..."
+	@$(PERF_SCRIPTS)/run-grpc-test.sh unary
+
+## perf-test-grpc-streaming: Run all gRPC streaming tests
+perf-test-grpc-streaming: build
+	@echo "==> Running gRPC streaming performance tests..."
+	@$(PERF_SCRIPTS)/run-grpc-test.sh server-stream
+	@$(PERF_SCRIPTS)/run-grpc-test.sh client-stream
+	@$(PERF_SCRIPTS)/run-grpc-test.sh bidi-stream
+
+## perf-test-grpc-all: Run all gRPC performance tests
+perf-test-grpc-all: build
+	@echo "==> Running all gRPC performance tests..."
+	@$(PERF_SCRIPTS)/run-grpc-test.sh all
+
+# ==============================================================================
+# WebSocket Performance test targets (k6)
+# ==============================================================================
+
+## perf-test-websocket: Run all WebSocket performance tests
+perf-test-websocket: build
+	@echo "==> Running WebSocket performance tests..."
+	@$(PERF_SCRIPTS)/run-websocket-test.sh all
+
+## perf-test-websocket-connection: Run WebSocket connection throughput test
+perf-test-websocket-connection: build
+	@echo "==> Running WebSocket connection test..."
+	@$(PERF_SCRIPTS)/run-websocket-test.sh connection
+
+## perf-test-websocket-message: Run WebSocket message throughput test
+perf-test-websocket-message: build
+	@echo "==> Running WebSocket message test..."
+	@$(PERF_SCRIPTS)/run-websocket-test.sh message
+
+## perf-test-websocket-concurrent: Run WebSocket concurrent connections test
+perf-test-websocket-concurrent: build
+	@echo "==> Running WebSocket concurrent connections test..."
+	@$(PERF_SCRIPTS)/run-websocket-test.sh concurrent
+
+# ==============================================================================
+# Performance test utilities
+# ==============================================================================
+
+## perf-generate-charts: Generate charts from performance test results
+perf-generate-charts:
+	@echo "==> Generating performance charts..."
+	@if command -v python3 > /dev/null 2>&1; then \
+		python3 $(PERF_SCRIPTS)/generate-charts.py $(PERF_DIR)/results --all --format=png; \
+	else \
+		echo "==> Python3 not found, using Docker..."; \
+		docker run --rm -v $(PWD)/$(PERF_DIR):/perf python:3.11-slim bash -c \
+			"pip install matplotlib numpy --quiet && python /perf/scripts/generate-charts.py /perf/results --all"; \
+	fi
+	@echo "==> Charts generated"
+
+## perf-setup-infra: Setup Vault and Keycloak for performance testing
+perf-setup-infra:
+	@echo "==> Setting up infrastructure for performance testing..."
+	@$(PERF_SCRIPTS)/setup-vault.sh
+	@$(PERF_SCRIPTS)/setup-keycloak.sh
+	@echo "==> Infrastructure setup completed"
+
+## perf-setup-vault: Setup Vault for performance testing
+perf-setup-vault:
+	@echo "==> Setting up Vault..."
+	@$(PERF_SCRIPTS)/setup-vault.sh
+
+## perf-setup-keycloak: Setup Keycloak for performance testing
+perf-setup-keycloak:
+	@echo "==> Setting up Keycloak..."
+	@$(PERF_SCRIPTS)/setup-keycloak.sh
+
+## perf-verify-infra: Verify infrastructure setup
+perf-verify-infra:
+	@echo "==> Verifying infrastructure..."
+	@$(PERF_SCRIPTS)/setup-vault.sh --verify
+	@$(PERF_SCRIPTS)/setup-keycloak.sh --verify
+
+# ==============================================================================
 # CI targets
 # ==============================================================================
 
@@ -453,6 +616,37 @@ help:
 	@echo "CI targets:"
 	@echo "  ci              Run all CI checks (lint, test, build)"
 	@echo "  ci-full         Run full CI including integration tests"
+	@echo ""
+	@echo "Performance test targets (HTTP - Yandex Tank):"
+	@echo "  perf-test              Run HTTP throughput test (default)"
+	@echo "  perf-test-http         Run HTTP GET throughput test"
+	@echo "  perf-test-post         Run HTTP POST performance test"
+	@echo "  perf-test-mixed        Run mixed workload test"
+	@echo "  perf-test-load-balancing  Run load balancing verification"
+	@echo "  perf-test-rate-limiting   Run rate limiting stress test"
+	@echo "  perf-test-circuit-breaker Run circuit breaker test"
+	@echo "  perf-test-all          Run all HTTP performance tests"
+	@echo ""
+	@echo "Performance test targets (gRPC - ghz):"
+	@echo "  perf-test-grpc-unary      Run gRPC unary RPC test"
+	@echo "  perf-test-grpc-streaming  Run gRPC streaming tests"
+	@echo "  perf-test-grpc-all        Run all gRPC tests"
+	@echo ""
+	@echo "Performance test targets (WebSocket - k6):"
+	@echo "  perf-test-websocket           Run all WebSocket tests"
+	@echo "  perf-test-websocket-connection Run connection throughput test"
+	@echo "  perf-test-websocket-message    Run message throughput test"
+	@echo "  perf-test-websocket-concurrent Run concurrent connections test"
+	@echo ""
+	@echo "Performance test utilities:"
+	@echo "  perf-generate-ammo     Generate ammo files"
+	@echo "  perf-generate-charts   Generate charts from results"
+	@echo "  perf-analyze           Analyze test results"
+	@echo "  perf-start-gateway     Start gateway for perf testing"
+	@echo "  perf-stop-gateway      Stop perf test gateway"
+	@echo "  perf-setup-infra       Setup Vault and Keycloak"
+	@echo "  perf-verify-infra      Verify infrastructure setup"
+	@echo "  perf-clean             Clean test results"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  version         Show version information"

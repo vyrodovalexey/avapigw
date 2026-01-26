@@ -1,0 +1,51 @@
+[Host: localhost]
+[User-Agent: YandexTank/Perftest]
+[Accept: application/json]
+[Connection: keep-alive]
+/health
+/health
+/api/v1/simple
+/api/v1/simple
+/api/v1/simple
+/api/v1/items
+/api/v1/items
+/api/v1/items/1
+/api/v1/items/2
+/api/v1/items/3
+/api/v1/users
+/api/v1/users/1
+/api/v1/users/2
+/api/v1/orders
+/backend/health
+156 /api/v1/items
+Host: localhost
+User-Agent: YandexTank/Perftest
+Accept: application/json
+Content-Type: application/json
+Connection: keep-alive
+
+{"name":"Test Item 1","description":"Performance test item","price":99.99,"quantity":10,"category":"test"}
+162 /api/v1/echo
+Host: localhost
+User-Agent: YandexTank/Perftest
+Accept: application/json
+Content-Type: application/json
+Connection: keep-alive
+
+{"message":"Hello from performance test","timestamp":"2024-01-01T00:00:00Z","data":{"key":"value"}}
+195 /api/v1/users
+Host: localhost
+User-Agent: YandexTank/Perftest
+Accept: application/json
+Content-Type: application/json
+Connection: keep-alive
+
+{"username":"perftest_user_1","email":"perftest1@example.com","firstName":"Perf","lastName":"Test","role":"user","active":true}
+145 /api/v1/orders
+Host: localhost
+User-Agent: YandexTank/Perftest
+Accept: application/json
+Content-Type: application/json
+Connection: keep-alive
+
+{"userId":1,"items":[{"itemId":1,"quantity":2},{"itemId":2,"quantity":1}],"total":349.97}

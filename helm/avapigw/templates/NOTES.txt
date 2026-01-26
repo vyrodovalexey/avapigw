@@ -1,0 +1,89 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named: {{ .Release.Name }}
+
+To get the application URL:
+
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "avapigw.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "HTTP:    http://$NODE_IP:$NODE_PORT"
+  echo "Metrics: http://$NODE_IP:$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[2].nodePort}" services {{ include "avapigw.fullname" . }})"
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+        You can watch the status by running:
+        kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "avapigw.fullname" . }}
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "avapigw.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo "HTTP:    http://$SERVICE_IP:{{ .Values.service.httpPort }}"
+  echo "Metrics: http://$SERVICE_IP:{{ .Values.service.metricsPort }}"
+{{- else if contains "ClusterIP" .Values.service.type }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "avapigw.fullname" . }} {{ .Values.service.httpPort }}:{{ .Values.service.httpPort }} &
+  echo "HTTP:    http://127.0.0.1:{{ .Values.service.httpPort }}"
+  
+  # For metrics endpoint:
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "avapigw.fullname" . }} {{ .Values.service.metricsPort }}:{{ .Values.service.metricsPort }} &
+  echo "Metrics: http://127.0.0.1:{{ .Values.service.metricsPort }}/metrics"
+  echo "Health:  http://127.0.0.1:{{ .Values.service.metricsPort }}/health"
+{{- end }}
+
+{{- if .Values.gateway.listeners.grpc.enabled }}
+
+gRPC endpoint is available on port {{ .Values.service.grpcPort }}
+{{- end }}
+
+Configuration:
+  - HTTP Port:    {{ .Values.service.httpPort }}
+{{- if .Values.gateway.listeners.grpc.enabled }}
+  - gRPC Port:    {{ .Values.service.grpcPort }}
+{{- end }}
+  - Metrics Port: {{ .Values.service.metricsPort }}
+  - Log Level:    {{ .Values.gateway.logLevel }}
+  - Environment:  {{ .Values.gateway.environment }}
+
+Features enabled:
+  - Rate Limiting:    {{ .Values.gateway.rateLimit.enabled }}
+  - Circuit Breaker:  {{ .Values.gateway.circuitBreaker.enabled }}
+  - Metrics:          {{ .Values.gateway.observability.metrics.enabled }}
+  - Tracing:          {{ .Values.gateway.observability.tracing.enabled }}
+{{- if .Values.redis.enabled }}
+  - Redis:            enabled ({{ include "avapigw.redisHost" . }}:{{ include "avapigw.redisPort" . }})
+{{- else }}
+  - Redis:            disabled
+{{- end }}
+{{- if .Values.vault.enabled }}
+  - Vault:            enabled ({{ .Values.vault.address }})
+{{- else }}
+  - Vault:            disabled
+{{- end }}
+{{- if .Values.keycloak.enabled }}
+  - Keycloak:         enabled ({{ .Values.keycloak.url }})
+{{- else }}
+  - Keycloak:         disabled
+{{- end }}
+
+{{- if .Values.autoscaling.enabled }}
+
+Autoscaling is enabled:
+  - Min replicas: {{ .Values.autoscaling.minReplicas }}
+  - Max replicas: {{ .Values.autoscaling.maxReplicas }}
+{{- end }}
+
+{{- if .Values.podDisruptionBudget.enabled }}
+
+Pod Disruption Budget is enabled:
+{{- if .Values.podDisruptionBudget.minAvailable }}
+  - Min available: {{ .Values.podDisruptionBudget.minAvailable }}
+{{- end }}
+{{- if .Values.podDisruptionBudget.maxUnavailable }}
+  - Max unavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+{{- end }}
+{{- end }}
+
+For more information, visit: https://github.com/vyrodovalexey/avapigw

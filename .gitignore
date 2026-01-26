@@ -29,3 +29,8 @@ go.work
 *.swp
 *.swo
 *~
+
+# Performance test results
+test/performance/results/*
+!test/performance/results/.gitignore
+.yandextank/

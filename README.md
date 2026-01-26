@@ -119,8 +119,10 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Traffic Management](#-traffic-management)
 - [Observability](#-observability)
 - [Development](#-development)
+- [Kubernetes & Helm](#️-kubernetes--helm)
 - [Docker](#-docker)
 - [CI/CD](#-cicd)
+- [Performance Testing](#-performance-testing)
 - [Contributing](#-contributing)
 - [License](#-license)
 
@@ -490,7 +492,7 @@ See [configs/gateway.yaml](configs/gateway.yaml) for a complete example configur
 
 ## 🔐 TLS & Transport Security
 
-The Ava API Gateway provides comprehensive TLS support for secure communication between clients and the gateway, as well as between the gateway and backend services. The gateway supports multiple TLS modes, modern TLS versions, and flexible certificate management.
+The AV API Gateway provides comprehensive TLS support for secure communication between clients and the gateway, as well as between the gateway and backend services. The gateway supports multiple TLS modes, modern TLS versions, and flexible certificate management.
 
 ### TLS Modes
 
@@ -683,7 +685,7 @@ spec:
 
 ## 🔐 Vault Integration
 
-The Ava API Gateway integrates with HashiCorp Vault for secure secret management, including dynamic certificate provisioning, secret storage, and authentication token management.
+The AV API Gateway integrates with HashiCorp Vault for secure secret management, including dynamic certificate provisioning, secret storage, and authentication token management.
 
 ### Vault Configuration
 
@@ -1135,7 +1137,7 @@ vault:
 
 ## 🔐 Authentication
 
-The Ava API Gateway provides comprehensive authentication capabilities supporting multiple authentication methods for both HTTP and gRPC protocols. Authentication can be configured globally or per-route, with support for multiple authentication providers and token extraction methods.
+The AV API Gateway provides comprehensive authentication capabilities supporting multiple authentication methods for both HTTP and gRPC protocols. Authentication can be configured globally or per-route, with support for multiple authentication providers and token extraction methods.
 
 ### Authentication Overview
 
@@ -1573,7 +1575,7 @@ grpcurl -H "x-api-key: your-api-key" \
 
 ## 🛡️ Authorization
 
-The Ava API Gateway provides flexible authorization capabilities including Role-Based Access Control (RBAC), Attribute-Based Access Control (ABAC), and integration with external authorization services like Open Policy Agent (OPA).
+The AV API Gateway provides flexible authorization capabilities including Role-Based Access Control (RBAC), Attribute-Based Access Control (ABAC), and integration with external authorization services like Open Policy Agent (OPA).
 
 ### Authorization Overview
 
@@ -2090,7 +2092,7 @@ grpcurl -H "authorization: Bearer $TOKEN" \
 
 ## 🔄 Data Transformation
 
-The Ava API Gateway provides comprehensive data transformation capabilities for both HTTP and gRPC protocols.
+The AV API Gateway provides comprehensive data transformation capabilities for both HTTP and gRPC protocols.
 
 ### Response Manipulation
 
@@ -3147,6 +3149,175 @@ make setup-vault-test
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
+## ☸️ Kubernetes & Helm
+
+### Helm Chart Installation
+
+The AV API Gateway includes a production-ready Helm chart for Kubernetes deployment.
+
+#### Prerequisites
+
+- Kubernetes 1.19+
+- Helm 3.8+
+
+#### Quick Install
+
+```bash
+# Add the Helm repository (if published)
+# helm repo add avapigw https://charts.avapigw.io
+# helm repo update
+
+# Install from local chart
+helm install my-gateway ./helm/avapigw
+
+# Install with custom values
+helm install my-gateway ./helm/avapigw -f my-values.yaml
+
+# Install in a specific namespace
+helm install my-gateway ./helm/avapigw --namespace gateway --create-namespace
+```
+
+#### Configuration Options
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `replicaCount` | Number of replicas | `1` |
+| `image.repository` | Image repository | `ghcr.io/vyrodovalexey/avapigw` |
+| `image.tag` | Image tag | `""` (uses appVersion) |
+| `image.pullPolicy` | Image pull policy | `IfNotPresent` |
+| `service.type` | Service type | `ClusterIP` |
+| `service.httpPort` | HTTP port | `8080` |
+| `service.grpcPort` | gRPC port | `9000` |
+| `service.metricsPort` | Metrics port | `9090` |
+| `redis.enabled` | Enable Redis subchart | `false` |
+| `vault.enabled` | Enable Vault integration | `false` |
+| `keycloak.enabled` | Enable Keycloak integration | `false` |
+| `autoscaling.enabled` | Enable HPA | `false` |
+| `ingress.enabled` | Enable Ingress | `false` |
+| `podDisruptionBudget.enabled` | Enable PDB | `false` |
+
+#### Enable Redis Caching
+
+```bash
+helm install my-gateway ./helm/avapigw \
+  --set redis.enabled=true \
+  --set redis.auth.password=mypassword
+```
+
+#### Enable Autoscaling
+
+```bash
+helm install my-gateway ./helm/avapigw \
+  --set autoscaling.enabled=true \
+  --set autoscaling.minReplicas=2 \
+  --set autoscaling.maxReplicas=10 \
+  --set autoscaling.targetCPUUtilizationPercentage=80
+```
+
+#### Enable Ingress
+
+```bash
+helm install my-gateway ./helm/avapigw \
+  --set ingress.enabled=true \
+  --set ingress.className=nginx \
+  --set ingress.hosts[0].host=api.example.com \
+  --set ingress.hosts[0].paths[0].path=/ \
+  --set ingress.hosts[0].paths[0].pathType=Prefix
+```
+
+#### Production Configuration Example
+
+```yaml
+# production-values.yaml
+replicaCount: 3
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+redis:
+  enabled: true
+  auth:
+    password: "secure-password"
+  replica:
+    replicaCount: 3
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: api.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: api-tls
+      hosts:
+        - api.example.com
+
+gateway:
+  logLevel: info
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 1000
+    burst: 2000
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+```
+
+```bash
+helm install my-gateway ./helm/avapigw -f production-values.yaml
+```
+
+#### Upgrading
+
+```bash
+# Upgrade with new values
+helm upgrade my-gateway ./helm/avapigw -f my-values.yaml
+
+# Rollback if needed
+helm rollback my-gateway 1
+```
+
+#### Uninstalling
+
+```bash
+helm uninstall my-gateway
+```
+
+### Helm Chart Testing
+
+```bash
+# Lint the chart
+helm lint ./helm/avapigw
+
+# Template validation
+helm template my-gateway ./helm/avapigw
+
+# Dry-run install
+helm install --dry-run --debug my-gateway ./helm/avapigw
+
+# Run chart tests (after installation)
+helm test my-gateway
+```
+
 ## 🐳 Docker
 
 ### Building Docker Image
@@ -3349,6 +3520,202 @@ docker stop backend1 backend2
 docker rm backend1 backend2
 ```
 
+## 🚀 Performance Testing
+
+The AV API Gateway includes comprehensive performance testing infrastructure using [Yandex Tank](https://yandextank.readthedocs.io/), a powerful load testing tool that provides high-performance load generation and detailed metrics.
+
+### Overview
+
+The performance testing infrastructure provides:
+- **High-performance load generation** using Phantom engine
+- **Detailed metrics and statistics** with real-time monitoring
+- **Configurable load profiles** (constant, linear, step)
+- **Autostop conditions** for safety during testing
+- **Multiple test scenarios** covering different use cases
+
+### Prerequisites
+
+- **Docker** - Required to run Yandex Tank
+- **Docker Compose** - For orchestrating test containers
+
+```bash
+# Install Docker Desktop (includes Docker Compose)
+brew install --cask docker
+
+# Pull Yandex Tank image
+docker pull direvius/yandex-tank:latest
+```
+
+### Quick Start
+
+#### 1. Start the Gateway for Testing
+
+```bash
+# Start gateway with performance-optimized configuration
+make perf-start-gateway
+
+# Or manually
+./bin/gateway -config test/performance/configs/gateway-perftest.yaml
+```
+
+#### 2. Run a Basic Performance Test
+
+```bash
+# Run HTTP throughput test (default)
+make perf-test
+
+# Or run specific test
+make perf-test-http
+```
+
+#### 3. Analyze Results
+
+```bash
+# Analyze latest test results
+make perf-analyze
+
+# Or manually
+./test/performance/scripts/analyze-results.sh test/performance/results/http-throughput_*/
+```
+
+### Available Test Scenarios
+
+#### HTTP Throughput Test
+Tests maximum throughput for GET requests with simple payloads.
+
+```bash
+make perf-test-http
+```
+
+- **Load Profile**: Ramp 1→1000 RPS (2min), sustain 1000 RPS (3min)
+- **Target**: Health and API endpoints
+- **Purpose**: Measure baseline throughput capacity
+
+#### HTTP POST Test
+Tests throughput and latency for POST requests with JSON payloads.
+
+```bash
+make perf-test-post
+```
+
+- **Load Profile**: Ramp 1→500 RPS (2min), sustain 500 RPS (3min)
+- **Target**: Items, Users, Orders endpoints
+- **Purpose**: Measure performance with request bodies
+
+#### Load Balancing Test
+Verifies load distribution across multiple backends.
+
+```bash
+make perf-test-load-balancing
+```
+
+- **Load Profile**: Ramp 1→200 RPS (1min), sustain 200 RPS (5min)
+- **Purpose**: Verify load balancer behavior and distribution
+
+#### Rate Limiting Test
+Stress tests the rate limiting functionality.
+
+```bash
+make perf-test-rate-limiting
+```
+
+- **Load Profile**: Below limit → exceed limit → recover
+- **Purpose**: Verify rate limiter behavior under stress
+
+#### Circuit Breaker Test
+Tests circuit breaker behavior during backend failures.
+
+```bash
+make perf-test-circuit-breaker
+```
+
+- **Load Profile**: Constant 100 RPS for 8 minutes
+- **Purpose**: Verify circuit breaker opens and recovers properly
+
+#### Mixed Workload Test
+Simulates realistic mixed traffic patterns.
+
+```bash
+make perf-test-mixed
+```
+
+- **Load Profile**: Complex multi-phase load with GET and POST requests
+- **Purpose**: Realistic production-like load testing
+
+### Make Targets
+
+| Target | Description |
+|--------|-------------|
+| `make perf-test` | Run HTTP throughput test (default) |
+| `make perf-test-http` | Run HTTP GET throughput test |
+| `make perf-test-post` | Run HTTP POST performance test |
+| `make perf-test-mixed` | Run mixed workload test |
+| `make perf-test-load-balancing` | Run load balancing verification |
+| `make perf-test-rate-limiting` | Run rate limiting stress test |
+| `make perf-test-circuit-breaker` | Run circuit breaker test |
+| `make perf-test-all` | Run all performance tests sequentially |
+| `make perf-generate-ammo` | Generate ammo files for tests |
+| `make perf-analyze` | Analyze latest test results |
+| `make perf-start-gateway` | Start gateway for performance testing |
+| `make perf-stop-gateway` | Stop performance test gateway |
+| `make perf-clean` | Clean performance test results |
+
+### Results and Analysis
+
+#### Key Metrics
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| Total Requests | Number of requests sent | - |
+| Error Rate | Percentage of failed requests | < 1% |
+| Avg Latency | Average response time | < 100ms |
+| P50 Latency | Median response time | < 50ms |
+| P95 Latency | 95th percentile response time | < 200ms |
+| P99 Latency | 99th percentile response time | < 500ms |
+
+#### Analyzing Results
+
+```bash
+# Quick summary
+./test/performance/scripts/analyze-results.sh results/http-throughput_*/ --summary
+
+# Detailed analysis
+./test/performance/scripts/analyze-results.sh results/http-throughput_*/ --detailed
+
+# Export as JSON/CSV
+./test/performance/scripts/analyze-results.sh results/http-throughput_*/ --export=json
+
+# Compare test runs
+./test/performance/scripts/analyze-results.sh results/run1/ --compare=results/run2/
+```
+
+#### Result Files
+
+Test results are stored in `test/performance/results/` with the following structure:
+
+```
+results/
+├── http-throughput_20240126_113619/
+│   ├── load.yaml              # Test configuration
+│   ├── tank_errors.log        # Error log
+│   └── logs/
+│       ├── phout.log          # Raw request/response data
+│       ├── monitoring.log     # System monitoring data
+│       └── validated_conf.yaml # Validated configuration
+└── gateway.log                # Gateway logs during test
+```
+
+### Detailed Documentation
+
+For comprehensive documentation including:
+- Configuration reference
+- Custom ammo generation
+- Advanced load profiles
+- Troubleshooting guide
+- Integration with CI/CD
+
+See: [test/performance/README.md](test/performance/README.md)
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
@@ -3389,8 +3756,8 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - 📖 [Documentation](https://github.com/vyrodovalexey/avapigw/wiki)
 - 🐛 [Issue Tracker](https://github.com/vyrodovalexey/avapigw/issues)
 - 💬 [Discussions](https://github.com/vyrodovalexey/avapigw/discussions)
-- 📧 [Email Support](mailto:support@avapigw.io)
+- 📧 [Email Support](mailto:vyrodov.alexey@gmail.com)
 
 ---
 
-**Ava API Gateway** - Built with ❤️ for cloud-native applications
+**AV API Gateway** - Built with ❤️ for cloud-native applications

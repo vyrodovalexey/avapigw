@@ -1,0 +1,454 @@
+# Default values for avapigw.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# -- Number of replicas for the deployment
+replicaCount: 1
+
+image:
+  # -- Container image repository
+  repository: ghcr.io/vyrodovalexey/avapigw
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag whose default is the chart appVersion
+  tag: ""
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# -- Override the name of the chart
+nameOverride: ""
+
+# -- Override the full name of the chart
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: true
+  # -- Automatically mount a ServiceAccount's API credentials
+  automount: true
+  # -- Annotations to add to the service account
+  annotations: {}
+  # -- The name of the service account to use
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# -- Annotations to add to the pod
+podAnnotations: {}
+
+# -- Labels to add to the pod
+podLabels: {}
+
+podSecurityContext:
+  # -- Run as non-root user
+  runAsNonRoot: true
+  # -- Run as user ID
+  runAsUser: 1000
+  # -- Run as group ID
+  runAsGroup: 1000
+  # -- Filesystem group ID
+  fsGroup: 1000
+  # -- Seccomp profile
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  # -- Allow privilege escalation
+  allowPrivilegeEscalation: false
+  # -- Read-only root filesystem
+  readOnlyRootFilesystem: true
+  # -- Run as non-root user
+  runAsNonRoot: true
+  # -- Run as user ID
+  runAsUser: 1000
+  # -- Run as group ID
+  runAsGroup: 1000
+  # -- Drop all capabilities
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  # -- Service type
+  type: ClusterIP
+  # -- HTTP port for REST API traffic
+  httpPort: 8080
+  # -- gRPC port for gRPC traffic
+  grpcPort: 9000
+  # -- Metrics and health endpoints port
+  metricsPort: 9090
+  # -- Annotations to add to the service
+  annotations: {}
+
+ingress:
+  # -- Enable ingress
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Annotations to add to the ingress
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: avapigw.local
+      paths:
+        - path: /
+          pathType: Prefix
+          port: http
+  # -- TLS configuration for ingress
+  tls: []
+  #  - secretName: avapigw-tls
+  #    hosts:
+  #      - avapigw.local
+
+resources:
+  limits:
+    # -- CPU limit
+    cpu: 500m
+    # -- Memory limit
+    memory: 256Mi
+  requests:
+    # -- CPU request
+    cpu: 100m
+    # -- Memory request
+    memory: 128Mi
+
+livenessProbe:
+  httpGet:
+    # -- Liveness probe path
+    path: /health
+    # -- Liveness probe port
+    port: metrics
+  # -- Initial delay before liveness probe starts
+  initialDelaySeconds: 10
+  # -- Period between liveness probes
+  periodSeconds: 15
+  # -- Timeout for liveness probe
+  timeoutSeconds: 5
+  # -- Number of failures before pod is restarted
+  failureThreshold: 3
+  # -- Number of successes before pod is considered healthy
+  successThreshold: 1
+
+readinessProbe:
+  httpGet:
+    # -- Readiness probe path
+    path: /ready
+    # -- Readiness probe port
+    port: metrics
+  # -- Initial delay before readiness probe starts
+  initialDelaySeconds: 5
+  # -- Period between readiness probes
+  periodSeconds: 10
+  # -- Timeout for readiness probe
+  timeoutSeconds: 5
+  # -- Number of failures before pod is marked unready
+  failureThreshold: 3
+  # -- Number of successes before pod is considered ready
+  successThreshold: 1
+
+autoscaling:
+  # -- Enable horizontal pod autoscaler
+  enabled: false
+  # -- Minimum number of replicas
+  minReplicas: 1
+  # -- Maximum number of replicas
+  maxReplicas: 10
+  # -- Target CPU utilization percentage
+  targetCPUUtilizationPercentage: 80
+  # -- Target memory utilization percentage
+  targetMemoryUtilizationPercentage: 80
+  # -- Custom metrics for autoscaling
+  customMetrics: []
+
+podDisruptionBudget:
+  # -- Enable pod disruption budget
+  enabled: false
+  # -- Minimum available pods (can be number or percentage)
+  minAvailable: 1
+  # -- Maximum unavailable pods (can be number or percentage)
+  # maxUnavailable: 1
+
+# -- Additional volumes for the pod
+volumes: []
+
+# -- Additional volume mounts for the container
+volumeMounts: []
+
+# -- Node selector for pod scheduling
+nodeSelector: {}
+
+# -- Tolerations for pod scheduling
+tolerations: []
+
+# -- Affinity rules for pod scheduling
+affinity: {}
+
+# -- Topology spread constraints for pod scheduling
+topologySpreadConstraints: []
+
+# -- Extra environment variables
+extraEnv: []
+  # - name: EXAMPLE_VAR
+  #   value: "example-value"
+
+# -- Extra environment variables from secrets or configmaps
+extraEnvFrom: []
+  # - secretRef:
+  #     name: my-secret
+  # - configMapRef:
+  #     name: my-configmap
+
+# Gateway configuration
+gateway:
+  # -- Log level (debug, info, warn, error)
+  logLevel: info
+  # -- Log format (json, console)
+  logFormat: json
+  # -- Environment name
+  environment: production
+
+  # Listener configuration
+  listeners:
+    http:
+      # -- Enable HTTP listener
+      enabled: true
+      # -- HTTP listener port
+      port: 8080
+      # -- HTTP listener bind address
+      bind: "0.0.0.0"
+      # -- Allowed hosts
+      hosts:
+        - "*"
+
+    grpc:
+      # -- Enable gRPC listener
+      enabled: false
+      # -- gRPC listener port
+      port: 9000
+      # -- gRPC listener bind address
+      bind: "0.0.0.0"
+      # -- Allowed hosts
+      hosts:
+        - "*"
+      # -- Max concurrent streams
+      maxConcurrentStreams: 100
+      # -- Max receive message size in bytes
+      maxRecvMsgSize: 4194304
+      # -- Max send message size in bytes
+      maxSendMsgSize: 4194304
+      # -- Enable gRPC reflection
+      reflection: true
+      # -- Enable gRPC health check
+      healthCheck: true
+
+  # Rate limiting configuration
+  rateLimit:
+    # -- Enable rate limiting
+    enabled: true
+    # -- Requests per second
+    requestsPerSecond: 100
+    # -- Burst size
+    burst: 200
+    # -- Enable per-client rate limiting
+    perClient: true
+
+  # Circuit breaker configuration
+  circuitBreaker:
+    # -- Enable circuit breaker
+    enabled: true
+    # -- Failure threshold before opening circuit
+    threshold: 5
+    # -- Timeout before attempting to close circuit
+    timeout: 30s
+    # -- Number of requests to allow in half-open state
+    halfOpenRequests: 3
+
+  # CORS configuration
+  cors:
+    # -- Allowed origins
+    allowOrigins:
+      - "*"
+    # -- Allowed methods
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    # -- Allowed headers
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    # -- Exposed headers
+    exposeHeaders:
+      - X-Request-ID
+    # -- Max age in seconds
+    maxAge: 86400
+    # -- Allow credentials
+    allowCredentials: false
+
+  # Observability configuration
+  observability:
+    metrics:
+      # -- Enable metrics
+      enabled: true
+      # -- Metrics endpoint path
+      path: /metrics
+      # -- Metrics port
+      port: 9090
+
+    tracing:
+      # -- Enable tracing
+      enabled: false
+      # -- Sampling rate (0.0 to 1.0)
+      samplingRate: 1.0
+      # -- OTLP endpoint for trace export
+      otlpEndpoint: ""
+      # -- Service name for tracing
+      serviceName: avapigw
+
+    logging:
+      # -- Log level
+      level: info
+      # -- Log format
+      format: json
+
+  # Routes configuration
+  # Define your routes here or use a separate ConfigMap
+  routes: []
+    # - name: example-route
+    #   match:
+    #     - uri:
+    #         prefix: /api/v1
+    #       methods:
+    #         - GET
+    #         - POST
+    #   route:
+    #     - destination:
+    #         host: backend-service
+    #         port: 8080
+    #   timeout: 30s
+
+  # Backends configuration
+  backends: []
+    # - name: backend-service
+    #   hosts:
+    #     - address: backend-service.default.svc.cluster.local
+    #       port: 8080
+    #       weight: 1
+    #   healthCheck:
+    #     path: /health
+    #     interval: 10s
+    #     timeout: 5s
+    #     healthyThreshold: 2
+    #     unhealthyThreshold: 3
+    #   loadBalancer:
+    #     algorithm: roundRobin
+
+  # gRPC routes configuration
+  grpcRoutes: []
+
+  # gRPC backends configuration
+  grpcBackends: []
+
+  # Custom gateway configuration
+  # This will be merged with the generated configuration
+  customConfig: {}
+
+# Redis configuration (Bitnami subchart)
+redis:
+  # -- Enable Redis dependency
+  enabled: false
+  # -- Redis architecture (standalone or replication)
+  architecture: standalone
+  auth:
+    # -- Enable Redis authentication
+    enabled: true
+    # -- Redis password (use existingSecret in production)
+    password: ""
+    # -- Use existing secret for Redis password
+    existingSecret: ""
+    # -- Key in existing secret containing password
+    existingSecretPasswordKey: "redis-password"
+  master:
+    persistence:
+      # -- Enable Redis persistence
+      enabled: false
+      # -- Redis persistence size
+      size: 1Gi
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+# Vault configuration
+vault:
+  # -- Enable Vault integration
+  enabled: false
+  # -- Vault server address
+  address: ""
+  # -- Vault authentication method (token, kubernetes, approle)
+  authMethod: kubernetes
+  # -- Vault role for Kubernetes auth
+  role: ""
+  # -- Vault token (use only for development)
+  token: ""
+  # -- Secret path in Vault
+  secretPath: ""
+  # -- TLS configuration
+  tls:
+    # -- Enable TLS for Vault connection
+    enabled: false
+    # -- CA certificate secret name
+    caSecretName: ""
+    # -- Skip TLS verification (not recommended for production)
+    skipVerify: false
+
+# Keycloak configuration
+keycloak:
+  # -- Enable Keycloak integration
+  enabled: false
+  # -- Keycloak server URL
+  url: ""
+  # -- Keycloak realm
+  realm: ""
+  # -- Keycloak client ID
+  clientId: ""
+  # -- Keycloak client secret (use existingSecret in production)
+  clientSecret: ""
+  # -- Use existing secret for Keycloak credentials
+  existingSecret: ""
+  # -- Key in existing secret containing client secret
+  existingSecretKey: "client-secret"
+
+# ServiceMonitor for Prometheus Operator
+serviceMonitor:
+  # -- Enable ServiceMonitor for Prometheus Operator
+  enabled: false
+  # -- Namespace for ServiceMonitor (defaults to release namespace)
+  namespace: ""
+  # -- Labels for ServiceMonitor
+  labels: {}
+  # -- Scrape interval
+  interval: 30s
+  # -- Scrape timeout
+  scrapeTimeout: 10s
+  # -- Metric relabeling configs
+  metricRelabelings: []
+  # -- Relabeling configs
+  relabelings: []
+
+# Network policies
+networkPolicy:
+  # -- Enable network policies
+  enabled: false
+  # -- Ingress rules
+  ingress: []
+  # -- Egress rules
+  egress: []

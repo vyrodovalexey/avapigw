@@ -1,0 +1,73 @@
+# gRPC Performance Test Configuration: Client Streaming
+# Purpose: Measure throughput for client streaming RPCs
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000+ calls/second
+# Tool: ghz (https://ghz.sh)
+
+# Test metadata
+name: grpc-client-streaming
+description: Client streaming RPC throughput test through API Gateway
+
+# Target configuration
+target:
+  host: "127.0.0.1"
+  port: 9000
+
+# Call configuration
+call:
+  service: "api.v1.TestService"
+  method: "ClientStream"
+  reflection: true
+
+# Request data - array of messages to stream
+data:
+  - message: "Client stream message 1 for performance testing"
+    sequence: 1
+  - message: "Client stream message 2 for performance testing"
+    sequence: 2
+  - message: "Client stream message 3 for performance testing"
+    sequence: 3
+  - message: "Client stream message 4 for performance testing"
+    sequence: 4
+  - message: "Client stream message 5 for performance testing"
+    sequence: 5
+
+# Load configuration
+load:
+  # Total number of streaming calls
+  total: 600000
+  
+  # Concurrency
+  concurrency: 50
+  
+  # Calls per second - target 2000+ RPS
+  rps: 2000
+  
+  # Duration: 5 minutes
+  duration: "5m"
+
+# Connection configuration
+connection:
+  timeout: "30s"
+  keepalive:
+    time: "30s"
+    timeout: "10s"
+  insecure: true
+  connections: 10
+
+# Metadata
+metadata:
+  "x-perf-test": "grpc-client-streaming"
+  "x-request-id": "{{.RequestNumber}}"
+
+# Output configuration
+output:
+  format: "json"
+
+# Streaming-specific options
+streaming:
+  # Delay between sending messages (ms)
+  sendDelay: 0
+  
+  # Timeout for the entire stream
+  streamTimeout: "60s"

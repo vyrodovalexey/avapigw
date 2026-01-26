@@ -1,0 +1,515 @@
+# Gateway configuration for secure performance testing
+# Includes TLS, JWT/OIDC authentication, and WebSocket support
+# Optimized for high-throughput performance measurements
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-gateway-secure
+  labels:
+    app: avapigw
+    environment: perftest
+    security: enabled
+spec:
+  listeners:
+    # HTTP listener (non-TLS) for baseline tests
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+    # HTTPS listener with TLS
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        certFile: /etc/gateway/certs/server.crt
+        keyFile: /etc/gateway/certs/server.key
+        minVersion: TLS12
+        maxVersion: TLS13
+        cipherSuites:
+          - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+          - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+          - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+          - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+
+    # gRPC listener (non-TLS)
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      grpc:
+        maxConcurrentStreams: 1000
+        maxRecvMsgSize: 4194304  # 4MB
+        maxSendMsgSize: 4194304  # 4MB
+        reflection: true
+        healthCheck: true
+        keepalive:
+          time: 30s
+          timeout: 10s
+          maxConnectionIdle: 5m
+          maxConnectionAge: 30m
+          maxConnectionAgeGrace: 10s
+          permitWithoutStream: true
+
+    # gRPC-TLS listener
+    - name: grpc-tls
+      port: 9443
+      protocol: GRPC
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        certFile: /etc/gateway/certs/server.crt
+        keyFile: /etc/gateway/certs/server.key
+        minVersion: TLS12
+        maxVersion: TLS13
+      grpc:
+        maxConcurrentStreams: 1000
+        maxRecvMsgSize: 4194304
+        maxSendMsgSize: 4194304
+        reflection: true
+        healthCheck: true
+        keepalive:
+          time: 30s
+          timeout: 10s
+          maxConnectionIdle: 5m
+          maxConnectionAge: 30m
+          maxConnectionAgeGrace: 10s
+          permitWithoutStream: true
+
+  # Authentication configuration
+  authentication:
+    # JWT/OIDC authentication using Keycloak
+    jwt:
+      enabled: true
+      issuer: http://127.0.0.1:8090/realms/gateway-test
+      jwksUri: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience: gateway
+      # Cache JWKS for performance
+      jwksCacheDuration: 5m
+      # Allow clock skew
+      clockSkew: 30s
+      # Header to extract token from
+      headerName: Authorization
+      headerPrefix: Bearer
+      # Claims to validate
+      requiredClaims:
+        - iss
+        - sub
+        - exp
+
+  routes:
+    # Health check endpoint - no auth required
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"perftest-secure"}'
+        headers:
+          Content-Type: application/json
+
+    # Public endpoint - no auth required
+    - name: public-simple
+      match:
+        - uri:
+            exact: /api/v1/public
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 10s
+
+    # Simple GET endpoint for throughput testing (no auth)
+    - name: simple-get
+      match:
+        - uri:
+            exact: /api/v1/simple
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 10s
+
+    # Protected endpoint - requires JWT auth
+    - name: protected-items
+      match:
+        - uri:
+            prefix: /api/v1/protected/items
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      authentication:
+        required: true
+        jwt:
+          enabled: true
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "5xx,reset,connect-failure"
+
+    # Protected users API - requires JWT auth
+    - name: protected-users
+      match:
+        - uri:
+            prefix: /api/v1/protected/users
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      authentication:
+        required: true
+        jwt:
+          enabled: true
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 30s
+
+    # Items API with load balancing (no auth)
+    - name: items-api-balanced
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "5xx,reset,connect-failure"
+
+    # Users API - single backend
+    - name: users-api
+      match:
+        - uri:
+            prefix: /api/v1/users
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 30s
+
+    # Orders API - single backend
+    - name: orders-api
+      match:
+        - uri:
+            prefix: /api/v1/orders
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+      timeout: 30s
+
+    # Echo endpoint for POST testing
+    - name: echo-api
+      match:
+        - uri:
+            prefix: /api/v1/echo
+          methods:
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 10s
+
+    # WebSocket endpoint - no auth
+    - name: websocket-public
+      match:
+        - uri:
+            prefix: /ws
+          methods:
+            - GET
+      websocket:
+        enabled: true
+        pingInterval: 30s
+        pongTimeout: 10s
+        maxMessageSize: 65536
+        readBufferSize: 4096
+        writeBufferSize: 4096
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 0s  # No timeout for WebSocket
+
+    # WebSocket endpoint - with auth
+    - name: websocket-protected
+      match:
+        - uri:
+            prefix: /ws/protected
+          methods:
+            - GET
+      authentication:
+        required: true
+        jwt:
+          enabled: true
+      websocket:
+        enabled: true
+        pingInterval: 30s
+        pongTimeout: 10s
+        maxMessageSize: 65536
+        readBufferSize: 4096
+        writeBufferSize: 4096
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 0s
+
+    # Rate limited endpoint for rate limiting tests
+    - name: rate-limited-api
+      match:
+        - uri:
+            prefix: /api/v1/limited
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 10s
+
+    # Backend health check
+    - name: backend-health
+      match:
+        - uri:
+            exact: /backend/health
+          methods:
+            - GET
+      rewrite:
+        uri: /health
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+    # Catch-all route
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    - name: backend-service-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+    - name: backend-service-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+  grpcRoutes:
+    # Public gRPC route - no auth
+    - name: test-service-route
+      match:
+        - service:
+            exact: api.v1.TestService
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8804
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "unavailable,resource-exhausted"
+
+    # Protected gRPC route - requires JWT auth
+    - name: protected-service-route
+      match:
+        - service:
+            exact: api.v1.ProtectedService
+      authentication:
+        required: true
+        jwt:
+          enabled: true
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8804
+          weight: 50
+      timeout: 30s
+
+    - name: catch-all-grpc
+      match:
+        - service:
+            prefix: "/"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8803
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+    - name: grpc-backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8804
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+  # Rate limiting - higher limits for performance testing
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5000
+    burst: 10000
+    perClient: true
+
+  # Circuit breaker - tuned for performance testing
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+    timeout: 30s
+    halfOpenRequests: 5
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - X-Perf-Test
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+      samplingRate: 0.01  # Low sampling for perf tests
+      otlpEndpoint: ""
+      serviceName: avapigw-perftest-secure
+    logging:
+      level: warn  # Reduced logging for performance
+      format: json

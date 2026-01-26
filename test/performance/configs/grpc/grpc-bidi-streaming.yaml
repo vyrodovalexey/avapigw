@@ -1,0 +1,78 @@
+# gRPC Performance Test Configuration: Bidirectional Streaming
+# Purpose: Measure throughput for bidirectional streaming RPCs
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000+ calls/second
+# Tool: ghz (https://ghz.sh)
+
+# Test metadata
+name: grpc-bidi-streaming
+description: Bidirectional streaming RPC throughput test through API Gateway
+
+# Target configuration
+target:
+  host: "127.0.0.1"
+  port: 9000
+
+# Call configuration
+call:
+  service: "api.v1.TestService"
+  method: "BidiStream"
+  reflection: true
+
+# Request data - messages to send in the bidirectional stream
+data:
+  - message: "Bidi message 1 for performance testing"
+    sequence: 1
+    expectResponse: true
+  - message: "Bidi message 2 for performance testing"
+    sequence: 2
+    expectResponse: true
+  - message: "Bidi message 3 for performance testing"
+    sequence: 3
+    expectResponse: true
+
+# Load configuration
+load:
+  # Total number of bidirectional streaming calls
+  total: 600000
+  
+  # Concurrency for complex streaming
+  concurrency: 30
+  
+  # Calls per second - target 2000+ RPS
+  rps: 2000
+  
+  # Duration: 5 minutes
+  duration: "5m"
+
+# Connection configuration
+connection:
+  timeout: "60s"
+  keepalive:
+    time: "30s"
+    timeout: "10s"
+  insecure: true
+  connections: 10
+
+# Metadata
+metadata:
+  "x-perf-test": "grpc-bidi-streaming"
+  "x-request-id": "{{.RequestNumber}}"
+
+# Output configuration
+output:
+  format: "json"
+
+# Streaming-specific options
+streaming:
+  # Count both sent and received messages
+  countMessages: true
+  
+  # Delay between sending messages (ms)
+  sendDelay: 0
+  
+  # Timeout for the entire bidirectional stream
+  streamTimeout: "120s"
+  
+  # Whether to wait for all responses before closing
+  waitForResponses: true

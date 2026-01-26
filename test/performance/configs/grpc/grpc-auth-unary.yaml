@@ -1,0 +1,64 @@
+# gRPC Performance Test Configuration: Unary RPC with JWT Authentication
+# Purpose: Measure throughput for authenticated unary gRPC calls
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000+ RPS
+# Tool: ghz (https://ghz.sh)
+# Note: Requires valid JWT token from Keycloak
+
+# Test metadata
+name: grpc-auth-unary-throughput
+description: Unary RPC throughput test with JWT authentication through API Gateway
+
+# Target configuration
+target:
+  host: "127.0.0.1"
+  port: 9000
+  
+# Call configuration
+call:
+  # Use protected service that requires authentication
+  service: "api.v1.ProtectedService"
+  method: "Echo"
+  reflection: true
+
+# Request data
+data:
+  message: "Performance test message for authenticated unary RPC"
+  timestamp: "2024-01-01T00:00:00Z"
+
+# Load configuration
+load:
+  total: 600000
+  concurrency: 100
+  rps: 2000
+  duration: "5m"
+
+# Connection configuration
+connection:
+  timeout: "15s"  # Slightly higher for auth validation
+  keepalive:
+    time: "30s"
+    timeout: "10s"
+  insecure: true
+  connections: 20
+
+# Metadata (headers) - JWT token will be injected by test runner
+# The token should be obtained from Keycloak before running the test:
+# curl -X POST http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/token \
+#   -d "grant_type=client_credentials" \
+#   -d "client_id=gateway" \
+#   -d "client_secret=gateway-secret"
+metadata:
+  "x-perf-test": "grpc-auth-unary"
+  "x-request-id": "{{.RequestNumber}}"
+  # Authorization header will be added by the test runner script
+  # "authorization": "Bearer <JWT_TOKEN>"
+
+# Output configuration
+output:
+  format: "json"
+
+# Advanced options
+options:
+  binary: false
+  skipTLSVerify: true

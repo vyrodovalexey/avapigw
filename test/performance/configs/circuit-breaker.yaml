@@ -1,0 +1,66 @@
+# Yandex Tank Configuration: Circuit Breaker Test
+# Purpose: Verify circuit breaker behavior when backend fails
+# Target: Items API - requires backend failure simulation
+# Duration: 10 minutes total
+# Note: This test requires manual backend failure injection
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp to 100 RPS
+    # Sustain: 8 min at 100 RPS (time for circuit breaker to trigger and recover)
+    # Cooldown: 1 min ramp down
+    #
+    # Test procedure:
+    # 1. Start test
+    # 2. After 2 min, stop one backend (simulate failure)
+    # 3. Observe circuit breaker opening
+    # 4. After 2 min, restart backend
+    # 5. Observe circuit breaker recovery
+    schedule: line(1, 100, 1m) const(100, 8m) line(100, 1, 1m)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 15s
+
+  # Instance settings - moderate load
+  instances: 200
+  threads: 2
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: circuit-breaker]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Higher tolerance for errors during circuit breaker test
+    # Stop if 5xx errors exceed 50% (circuit breaker should prevent this)
+    - http(5xx,50%,30)
+    # Stop if network errors exceed 5%
+    - net(5%,30)
+    # Stop if response time exceeds 5000ms for 50% of requests
+    - time(5000,50%,60)

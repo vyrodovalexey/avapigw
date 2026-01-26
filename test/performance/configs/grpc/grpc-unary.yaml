@@ -1,0 +1,87 @@
+# gRPC Performance Test Configuration: Unary RPC Throughput
+# Purpose: Measure maximum throughput for unary gRPC calls
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000+ RPS
+# Tool: ghz (https://ghz.sh)
+
+# Test metadata
+name: grpc-unary-throughput
+description: Unary RPC throughput test through API Gateway
+
+# Target configuration
+target:
+  host: "127.0.0.1"
+  port: 9000
+  # Use gateway's gRPC port
+  
+# Call configuration
+call:
+  # Service and method to call
+  # Format: package.Service/Method
+  service: "api.v1.TestService"
+  method: "Echo"
+  
+  # Proto file for reflection (if not using server reflection)
+  # proto: "/path/to/test.proto"
+  
+  # Use server reflection
+  reflection: true
+
+# Request data
+data:
+  message: "Performance test message for unary RPC throughput measurement"
+  timestamp: "2024-01-01T00:00:00Z"
+
+# Load configuration
+load:
+  # Total number of requests (used if duration not set)
+  total: 600000
+  
+  # Concurrency (number of workers)
+  concurrency: 100
+  
+  # Requests per second - target 2000+ RPS
+  rps: 2000
+  
+  # Duration: 5 minutes total
+  duration: "5m"
+
+# Connection configuration
+connection:
+  # Connection timeout
+  timeout: "10s"
+  
+  # Keep-alive settings
+  keepalive:
+    time: "30s"
+    timeout: "10s"
+  
+  # Use insecure connection (no TLS)
+  insecure: true
+  
+  # Number of connections to use
+  connections: 20
+
+# Metadata (headers)
+metadata:
+  "x-perf-test": "grpc-unary"
+  "x-request-id": "{{.RequestNumber}}"
+
+# Output configuration
+output:
+  # Output format: summary, csv, json, pretty, html, influx-summary, influx-details
+  format: "json"
+  
+  # Output file (optional)
+  # file: "results/grpc-unary-results.json"
+
+# Advanced options
+options:
+  # Enable binary data output
+  binary: false
+  
+  # Skip TLS verification
+  skipTLSVerify: true
+  
+  # Enable compression
+  # compression: "gzip"

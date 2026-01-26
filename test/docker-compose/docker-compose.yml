@@ -1,0 +1,96 @@
+version: '3.6'
+
+services:
+  vault:
+    image: vault:1.13.3
+    container_name: vault
+    volumes:
+      - vault_data:/vault/file
+    environment: 
+      VAULT_DEV_ROOT_TOKEN_ID: myroot
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - 8200:8200
+
+
+  rest_api_1:
+    image: ghcr.io/vyrodovalexey/restapi-example:e9416f5
+    container_name: rest_api_1
+    ports:
+      - 8801:8080
+
+  rest_api_2:
+    image: ghcr.io/vyrodovalexey/restapi-example:e9416f5
+    container_name: rest_api_2
+    ports:
+      - 8802:8080
+
+  grpc_1:
+    image: ghcr.io/vyrodovalexey/grpc-example:21f4570
+    container_name: grpc_1
+    environment:
+      GRPC_PORT: 8080
+      LOG_LEVEL: debug
+    ports:
+      - 8803:8080
+
+  grpc_2:
+    image: ghcr.io/vyrodovalexey/grpc-example:21f4570
+    container_name: grpc_2
+    environment:
+      GRPC_PORT: 8080
+      LOG_LEVEL: debug
+    ports:
+      - 8804:8080
+
+  redis:
+    image: bitnami/redis:latest
+    container_name: redis
+    environment:
+      REDIS_PASSWORD: password
+    volumes:
+      - redis_data:/bitnami/redis/data
+    ports:
+      - 6379:6379
+
+
+  keycloak_web:
+    image: quay.io/keycloak/keycloak:26.5
+    container_name: keycloak_web
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloakdb:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: password
+
+      KC_HOSTNAME: 127.0.0.1
+      KC_HTTP_PORT: 8090
+      KC_HOSTNAME_STRICT: false
+      KC_HOSTNAME_STRICT_HTTPS: false
+
+      KC_LOG_LEVEL: info
+      KC_METRICS_ENABLED: true
+      KC_HEALTH_ENABLED: true
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    command: start-dev
+    depends_on:
+      - keycloakdb
+    ports:
+      - 8090:8090
+      - 8091:9000
+
+  keycloakdb:
+    image: postgres:16
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: password
+
+volumes:
+  postgres_data:
+  vault_data:
+  redis_data:
