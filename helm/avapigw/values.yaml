@@ -332,6 +332,38 @@ gateway:
     # -- Allow credentials
     allowCredentials: false
 
+  # Audit logging configuration
+  audit:
+    # -- Enable audit logging
+    enabled: true
+    # -- Audit output destination (stdout, stderr, or file path)
+    output: stdout
+    # -- Audit log format (json, text)
+    format: json
+    # -- Minimum audit level (debug, info, warn, error)
+    level: info
+    # -- Events to audit
+    events:
+      authentication: true
+      authorization: true
+      request: false
+      response: false
+      configuration: true
+      security: true
+    # -- Paths to skip from auditing
+    skipPaths:
+      - /health
+      - /metrics
+      - /ready
+      - /live
+    # -- Fields to redact from audit logs
+    redactFields:
+      - password
+      - secret
+      - token
+      - authorization
+      - cookie
+
   # Observability configuration
   observability:
     metrics:
@@ -410,6 +442,15 @@ gateway:
     #       enabled: true
     #       caFile: /app/certs/routes/tenant-a/ca.crt
     #       verifyMode: require  # Options: require, optional, none
+    #     # Optional: Vault PKI for route-level certificate (instead of certFile/keyFile)
+    #     vault:
+    #       enabled: true
+    #       pkiMount: pki
+    #       role: my-role
+    #       commonName: tenant-a.example.com
+    #       altNames:
+    #         - api.tenant-a.example.com
+    #       ttl: "24h"
 
   # Backends configuration
   # Define backend services with optional authentication, circuit breaker, maxSessions, and rateLimit
@@ -501,6 +542,23 @@ gateway:
     #       enabled: true
     #       headerName: X-API-Key
     #       vaultPath: secret/data/gateway/api-keys
+    #
+    # Example: Backend with Vault PKI mTLS (client certificate from Vault)
+    # - name: vault-mtls-backend
+    #   hosts:
+    #     - address: secure-backend.example.com
+    #       port: 8443
+    #   tls:
+    #     enabled: true
+    #     mode: MUTUAL
+    #     vault:
+    #       enabled: true
+    #       pkiMount: pki
+    #       role: backend-client
+    #       commonName: gateway-client.example.com
+    #       altNames:
+    #         - gateway.internal
+    #       ttl: "24h"
 
   # gRPC routes configuration
   grpcRoutes: []
@@ -579,7 +637,7 @@ vault:
   token: ""
   # -- Secret path in Vault
   secretPath: ""
-  # -- TLS configuration
+  # -- TLS configuration for Vault connection
   tls:
     # -- Enable TLS for Vault connection
     enabled: false
@@ -587,6 +645,24 @@ vault:
     caSecretName: ""
     # -- Skip TLS verification (not recommended for production)
     skipVerify: false
+  # -- Vault PKI configuration for listener TLS certificates
+  # When enabled, the gateway obtains its TLS certificate from Vault PKI
+  # instead of using static certificate files.
+  pki:
+    # -- Enable Vault PKI for listener TLS
+    enabled: false
+    # -- Vault PKI secrets engine mount path
+    pkiMount: "pki"
+    # -- Vault PKI role name
+    role: ""
+    # -- Common name for certificate requests
+    commonName: ""
+    # -- Subject alternative names (DNS)
+    altNames: []
+    # -- Certificate TTL (e.g., "24h", "720h")
+    ttl: "24h"
+    # -- Duration before expiry to renew (e.g., "1h", "30m")
+    renewBefore: "1h"
 
 # Keycloak configuration
 keycloak:

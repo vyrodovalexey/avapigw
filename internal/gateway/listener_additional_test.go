@@ -992,6 +992,77 @@ func (tc *listenerTestCertificates) cleanup() {
 	}
 }
 
+func TestListener_WithVaultProviderFactory(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     8080,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	factory := func(_ *tlspkg.VaultTLSConfig, _ observability.Logger) (tlspkg.CertificateProvider, error) {
+		return tlspkg.NewNopProvider(), nil
+	}
+
+	listener, err := NewListener(cfg,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		WithVaultProviderFactory(factory),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.NotNil(t, listener.vaultProviderFactory)
+}
+
+func TestListener_WithVaultProviderFactory_NilFactory(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     8080,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	listener, err := NewListener(cfg,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		WithVaultProviderFactory(nil),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Nil(t, listener.vaultProviderFactory)
+}
+
+func TestListener_InitTLS_WithVaultProviderFactory(t *testing.T) {
+	t.Parallel()
+
+	certs, err := createListenerTestCertificates(t)
+	require.NoError(t, err)
+	defer certs.cleanup()
+
+	factory := func(_ *tlspkg.VaultTLSConfig, _ observability.Logger) (tlspkg.CertificateProvider, error) {
+		return tlspkg.NewNopProvider(), nil
+	}
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     8443,
+		Protocol: config.ProtocolHTTPS,
+		TLS: &config.ListenerTLSConfig{
+			Mode:     "SIMPLE",
+			CertFile: certs.certFile,
+			KeyFile:  certs.keyFile,
+		},
+	}
+
+	listener, err := NewListener(cfg,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		WithVaultProviderFactory(factory),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.NotNil(t, listener.tlsManager)
+}
+
 // createListenerTestCertificates creates test certificates for listener tests.
 func createListenerTestCertificates(t *testing.T) (*listenerTestCertificates, error) {
 	t.Helper()

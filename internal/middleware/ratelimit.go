@@ -76,10 +76,15 @@ func NewRateLimiter(rps, burst int, perClient bool, opts ...RateLimiterOption) *
 
 // Allow checks if a request is allowed.
 func (rl *RateLimiter) Allow(clientIP string) bool {
-	if rl.perClient {
+	rl.mu.RLock()
+	perClient := rl.perClient
+	limiter := rl.limiter
+	rl.mu.RUnlock()
+
+	if perClient {
 		return rl.allowPerClient(clientIP)
 	}
-	return rl.limiter.Allow()
+	return limiter.Allow()
 }
 
 // allowPerClient checks rate limit per client.
@@ -247,6 +252,32 @@ func (rl *RateLimiter) Stop() {
 		rl.stopped = true
 		close(rl.stopCh)
 	}
+}
+
+// UpdateConfig updates the rate limiter with new configuration.
+// It replaces the global limiter and clears all per-client entries
+// so they are recreated with the new RPS/burst values.
+func (rl *RateLimiter) UpdateConfig(cfg *config.RateLimitConfig) {
+	if cfg == nil {
+		return
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	rl.rps = cfg.RequestsPerSecond
+	rl.burst = cfg.Burst
+	rl.perClient = cfg.PerClient
+	rl.limiter = rate.NewLimiter(rate.Limit(cfg.RequestsPerSecond), cfg.Burst)
+
+	// Clear per-client entries so they are recreated with new values
+	rl.clients = make(map[string]*clientEntry)
+
+	rl.logger.Info("rate limiter configuration updated",
+		observability.Int("rps", cfg.RequestsPerSecond),
+		observability.Int("burst", cfg.Burst),
+		observability.Bool("perClient", cfg.PerClient),
+	)
 }
 
 // SetClientTTL sets the TTL for client entries.

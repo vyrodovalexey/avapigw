@@ -170,28 +170,28 @@ func TestGetClientIP(t *testing.T) {
 		expectedIP string
 	}{
 		{
-			name:       "uses X-Forwarded-For",
+			name:       "ignores X-Forwarded-For without trusted proxies",
 			headers:    map[string]string{"X-Forwarded-For": "10.0.0.1"},
 			remoteAddr: "192.168.1.1:12345",
-			expectedIP: "10.0.0.1",
+			expectedIP: "192.168.1.1",
 		},
 		{
-			name:       "uses X-Real-IP when no X-Forwarded-For",
+			name:       "ignores X-Real-IP without trusted proxies",
 			headers:    map[string]string{"X-Real-IP": "10.0.0.2"},
 			remoteAddr: "192.168.1.1:12345",
-			expectedIP: "10.0.0.2",
+			expectedIP: "192.168.1.1",
 		},
 		{
-			name:       "falls back to RemoteAddr",
+			name:       "returns RemoteAddr with port stripped",
 			headers:    map[string]string{},
 			remoteAddr: "192.168.1.1:12345",
-			expectedIP: "192.168.1.1:12345",
+			expectedIP: "192.168.1.1",
 		},
 		{
-			name:       "X-Forwarded-For takes precedence over X-Real-IP",
+			name:       "ignores both headers without trusted proxies",
 			headers:    map[string]string{"X-Forwarded-For": "10.0.0.1", "X-Real-IP": "10.0.0.2"},
 			remoteAddr: "192.168.1.1:12345",
-			expectedIP: "10.0.0.1",
+			expectedIP: "192.168.1.1",
 		},
 	}
 

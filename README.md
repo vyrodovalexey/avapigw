@@ -21,6 +21,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **gRPC Routing** - Service and method-based routing with metadata matching
 - **gRPC Health Service** - Built-in grpc.health.v1.Health implementation
 - **gRPC Reflection** - Optional gRPC reflection service for service discovery
+- **Streaming Support** - HTTP Flusher interface support for SSE, WebSocket, and streaming responses
 
 ### Security & TLS
 - **Comprehensive TLS Support** - TLS 1.2/1.3 with multiple modes (SIMPLE, MUTUAL, OPTIONAL_MUTUAL)
@@ -32,8 +33,11 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **HashiCorp Vault Integration** - Dynamic secrets, PKI certificates, and secure credential management
 - **Multiple Auth Methods** - Kubernetes, AppRole, Token, AWS, and GCP authentication for Vault
 - **Secret Injection** - Dynamic secret injection into configuration and backends
-- **Certificate Auto-Renewal** - Automatic certificate renewal with Vault PKI
+- **Vault PKI Integration** - Automated certificate management for listener, route, and backend TLS
+- **Certificate Auto-Renewal** - Automatic certificate renewal with Vault PKI and hot-reload
+- **SNI Certificate Management** - Per-route certificates with Vault PKI for multi-tenant deployments
 - **Backend Authentication** - JWT, Basic Auth, and mTLS authentication for backend connections
+- **X-Forwarded-For Security** - TrustedProxies configuration for secure client IP handling
 
 ### Authentication & Authorization
 - **JWT Authentication** - Multiple algorithms (RS256, ES256, HS256, etc.) with JWK URL support
@@ -45,7 +49,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **External Authorization** - OPA integration for complex policies
 - **Policy Caching** - Configurable TTL for authorization decisions
 - **Security Headers** - HSTS, CSP, X-Frame-Options, and more
-- **Audit Logging** - Comprehensive authentication and authorization logging
+- **Audit Logging** - Comprehensive authentication and authorization logging with stdout as default output
 
 ### Traffic Management
 - **Load Balancing** - Round-robin, weighted, least connections, and capacity-aware load balancing algorithms
@@ -95,19 +99,20 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Content Negotiation** - Automatic content type negotiation based on Accept header
 
 ### Observability
-- **Prometheus Metrics** - Comprehensive metrics collection
-- **OpenTelemetry Tracing** - Distributed tracing support
+- **Prometheus Metrics** - Comprehensive metrics collection with route-based labels for cardinality control
+- **OpenTelemetry Tracing** - Distributed tracing support with trace context in audit logs
 - **Structured Logging** - JSON and console logging formats
 - **Health Endpoints** - Health, readiness, and liveness probes
 - **Access Logs** - Detailed request/response logging
 
 ### Operations
-- **Hot Configuration Reload** - Update configuration without restart with timer leak prevention
+- **Hot Configuration Reload** - Update configuration without restart with atomic config updates and timer leak prevention
 - **Graceful Shutdown** - Clean shutdown with connection draining
 - **Docker Support** - Production-ready container images with security optimizations
 - **Multi-platform Builds** - Support for Linux, macOS, and Windows
 - **Shared Error Types** - Consistent error handling with ServerError and StatusCapturingResponseWriter
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
+- **Circuit Breaker Limitation** - Circuit breaker does not support runtime reconfiguration (requires restart)
 
 ## 📋 Table of Contents
 
@@ -116,6 +121,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Configuration](#-configuration)
 - [TLS & Transport Security](#-tls--transport-security)
 - [Vault Integration](#-vault-integration)
+- [Vault PKI Integration](#-vault-pki-integration)
 - [Authentication](#-authentication)
 - [Authorization](#-authorization)
 - [Data Transformation](#-data-transformation)
@@ -639,9 +645,107 @@ spec:
       accessLog: true
 ```
 
+### Security Configuration
+
+Configure trusted proxies for secure X-Forwarded-For handling:
+
+```yaml
+spec:
+  security:
+    trustedProxies:
+      enabled: true
+      cidrs:
+        - "10.0.0.0/8"         # Private network
+        - "172.16.0.0/12"      # Private network
+        - "192.168.0.0/16"     # Private network
+        - "127.0.0.1/32"       # Localhost
+      # When no trusted proxies are configured, only RemoteAddr is used (secure default)
+```
+
+### Audit Configuration
+
+Configure comprehensive audit logging for security and compliance:
+
+```yaml
+spec:
+  audit:
+    enabled: true
+    output: stdout             # stdout, stderr, or file path
+    format: json               # json, text
+    level: info                # debug, info, warn, error
+    events:
+      authentication: true     # Log authentication events
+      authorization: true      # Log authorization events
+      request: false           # Log request events
+      response: false          # Log response events
+      configuration: true      # Log configuration changes
+      security: true           # Log security events
+    skipPaths:
+      - /health
+      - /metrics
+      - /ready
+      - /live
+    redactFields:
+      - password
+      - secret
+      - token
+      - authorization
+      - cookie
+```
+
+The audit middleware is automatically integrated into the HTTP middleware chain when enabled, providing comprehensive logging of security-related events with configurable output destinations and field redaction for sensitive data.
+
 ### Complete Example Configuration
 
 See [configs/gateway.yaml](configs/gateway.yaml) for a complete example configuration demonstrating all features.
+
+### Hot Configuration Reload
+
+The gateway supports hot configuration reload, allowing you to update configuration without restarting the service. The following components support runtime reconfiguration:
+
+#### Supported Components
+- **Rate Limiter** - Request rate limits are updated immediately
+- **Max Sessions** - Connection limits are updated immediately  
+- **Router** - Routes, backends, and routing rules are updated immediately
+- **Backends** - Backend hosts, health checks, and load balancing are updated immediately
+- **Authentication** - JWT, API key, and mTLS authentication settings are updated immediately
+- **Authorization** - RBAC, ABAC, and external authorization policies are updated immediately
+- **TLS** - Certificate rotation and TLS settings are updated immediately
+- **Observability** - Metrics, tracing, and logging configuration are updated immediately
+
+#### Limitations
+- **Circuit Breaker** - Does NOT support runtime reconfiguration (requires restart)
+  - Circuit breaker state and configuration changes require a full gateway restart
+  - This is a documented limitation due to the stateful nature of circuit breaker instances
+
+#### How It Works
+1. **Atomic Updates** - Configuration uses `atomic.Pointer` for lock-free concurrent access
+2. **File Watching** - Configuration file changes are detected automatically
+3. **Validation** - New configuration is validated before applying
+4. **Graceful Rollback** - Invalid configurations are rejected, keeping the current config
+5. **Timer Leak Prevention** - Robust cleanup prevents memory leaks during config updates
+
+#### Usage
+```bash
+# Start gateway with config watching enabled (default)
+./bin/gateway -config configs/gateway.yaml
+
+# Modify configuration file
+vim configs/gateway.yaml
+
+# Configuration is automatically reloaded within seconds
+# Check logs for reload confirmation:
+# {"level":"info","msg":"Configuration reloaded successfully"}
+```
+
+#### Monitoring Reload Events
+```bash
+# Watch for configuration reload events
+curl http://localhost:9090/metrics | grep config_reload
+
+# Check audit logs for configuration changes
+tail -f /var/log/gateway/audit.log | grep configuration
+```
 
 ## 📋 Configuration Levels Reference
 
@@ -1825,6 +1929,121 @@ spec:
       - name: Referrer-Policy
         value: "strict-origin-when-cross-origin"
 ```
+
+## 🔐 Vault PKI Integration
+
+The AV API Gateway provides comprehensive integration with HashiCorp Vault's PKI (Public Key Infrastructure) secrets engine for automated certificate management. This integration enables dynamic certificate issuance, automatic renewal, and hot-reload across three key areas:
+
+### Key Features
+
+- **Listener-level TLS** - Gateway's own TLS certificates with automatic renewal
+- **Route-level TLS** - Per-route certificates for SNI-based selection and multi-tenant deployments
+- **Backend mTLS** - Client certificates for mutual TLS authentication to backends
+- **Automatic Renewal** - Proactive certificate renewal before expiration
+- **Hot-Reload** - Certificate updates without service restart
+- **Prometheus Metrics** - Certificate expiry monitoring and renewal tracking
+
+### Listener TLS with Vault PKI
+
+Configure the gateway's main TLS certificate from Vault:
+
+```yaml
+spec:
+  listeners:
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hosts: ["*"]
+      tls:
+        mode: SIMPLE
+        vault:
+          enabled: true
+          pkiMount: pki
+          role: gateway-server
+          commonName: gateway.example.com
+          altNames:
+            - api.example.com
+            - "*.api.example.com"
+          ttl: 24h
+          renewBefore: 1h
+        minVersion: "1.2"
+        hsts:
+          enabled: true
+          maxAge: 31536000
+```
+
+### Route-Level TLS with Vault PKI
+
+Configure per-route certificates for multi-tenant scenarios:
+
+```yaml
+spec:
+  routes:
+    - name: tenant-a-api
+      match:
+        - uri:
+            prefix: /api/tenant-a
+      route:
+        - destination:
+            host: backend-a
+            port: 8080
+      tls:
+        vault:
+          enabled: true
+          pkiMount: pki
+          role: gateway-server
+          commonName: tenant-a.example.com
+          altNames:
+            - api.tenant-a.example.com
+          ttl: 24h
+        sniHosts:
+          - tenant-a.example.com
+          - api.tenant-a.example.com
+        minVersion: "1.2"
+```
+
+### Backend mTLS with Vault PKI
+
+Configure client certificates for backend authentication:
+
+```yaml
+spec:
+  backends:
+    - name: secure-backend
+      hosts:
+        - address: secure-api.example.com
+          port: 8443
+      tls:
+        enabled: true
+        mode: MUTUAL
+        vault:
+          enabled: true
+          pkiMount: pki-client
+          role: gateway-client
+          commonName: gateway-client.example.com
+          ttl: 24h
+        serverName: secure-api.example.com
+```
+
+### Certificate Monitoring
+
+Monitor certificate expiry and renewal with Prometheus metrics:
+
+```prometheus
+# Certificate expiry timestamps
+gateway_tls_certificate_expiry_seconds{type="listener",name="https"}
+gateway_tls_certificate_expiry_seconds{type="route",name="tenant-a"}
+gateway_tls_certificate_expiry_seconds{type="backend",name="secure-backend"}
+
+# Certificate renewal operations
+gateway_tls_certificate_renewals_total{type="listener",status="success"}
+gateway_vault_pki_operations_total{operation="issue",status="success"}
+```
+
+For detailed configuration and troubleshooting, see:
+- [Vault PKI Integration Guide](docs/vault-pki-integration.md)
+- [Configuration Reference](docs/configuration-reference.md)
+- [Troubleshooting Guide](docs/troubleshooting-vault-pki.md)
 
 ## 🔐 Vault Integration
 
@@ -3985,10 +4204,10 @@ fault:
 The gateway exposes comprehensive metrics:
 
 #### HTTP Request Metrics
-- `gateway_requests_total` - Total HTTP requests
-- `gateway_request_duration_seconds` - Request duration histogram
-- `gateway_request_size_bytes` - Request size histogram
-- `gateway_response_size_bytes` - Response size histogram
+- `gateway_requests_total{route, method, status}` - Total HTTP requests (uses route label for cardinality control)
+- `gateway_request_duration_seconds{route, method}` - Request duration histogram
+- `gateway_request_size_bytes{route}` - Request size histogram
+- `gateway_response_size_bytes{route}` - Response size histogram
 - `gateway_active_requests` - Active requests gauge
 
 #### gRPC Request Metrics
@@ -4009,7 +4228,7 @@ The gateway exposes comprehensive metrics:
 - `gateway_circuit_breaker_requests_total` - Circuit breaker requests
 
 #### Rate Limiting Metrics
-- `gateway_rate_limit_hits_total` - Rate limit hits
+- `gateway_rate_limit_hits_total{route}` - Rate limit hits (no client_ip label for cardinality control)
 
 #### Authentication Metrics
 - `gateway_auth_requests_total{method, status, auth_type}` - Authentication attempts

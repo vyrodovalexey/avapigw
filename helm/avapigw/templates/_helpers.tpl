@@ -106,7 +106,24 @@ spec:
     {{- if .Values.gateway.listeners.http.enabled }}
     - name: http
       port: {{ .Values.gateway.listeners.http.port | default 8080 }}
+      {{- if and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled }}
+      protocol: HTTPS
+      tls:
+        vault:
+          enabled: true
+          pkiMount: {{ .Values.vault.pki.pkiMount | default "pki" | quote }}
+          role: {{ .Values.vault.pki.role | quote }}
+          commonName: {{ .Values.vault.pki.commonName | quote }}
+          {{- if .Values.vault.pki.altNames }}
+          altNames:
+            {{- toYaml .Values.vault.pki.altNames | nindent 12 }}
+          {{- end }}
+          {{- if .Values.vault.pki.ttl }}
+          ttl: {{ .Values.vault.pki.ttl | quote }}
+          {{- end }}
+      {{- else }}
       protocol: HTTP
+      {{- end }}
       hosts:
         {{- toYaml .Values.gateway.listeners.http.hosts | nindent 8 }}
       bind: {{ .Values.gateway.listeners.http.bind | default "0.0.0.0" }}
@@ -208,6 +225,31 @@ spec:
     maxAge: {{ .Values.gateway.cors.maxAge | default 86400 }}
     allowCredentials: {{ .Values.gateway.cors.allowCredentials | default false }}
 
+  {{- if .Values.gateway.audit }}
+  audit:
+    enabled: {{ .Values.gateway.audit.enabled | default true }}
+    output: {{ .Values.gateway.audit.output | default "stdout" }}
+    format: {{ .Values.gateway.audit.format | default "json" }}
+    level: {{ .Values.gateway.audit.level | default "info" }}
+    {{- if .Values.gateway.audit.events }}
+    events:
+      authentication: {{ .Values.gateway.audit.events.authentication | default true }}
+      authorization: {{ .Values.gateway.audit.events.authorization | default true }}
+      request: {{ .Values.gateway.audit.events.request | default false }}
+      response: {{ .Values.gateway.audit.events.response | default false }}
+      configuration: {{ .Values.gateway.audit.events.configuration | default true }}
+      security: {{ .Values.gateway.audit.events.security | default true }}
+    {{- end }}
+    {{- if .Values.gateway.audit.skipPaths }}
+    skipPaths:
+      {{- toYaml .Values.gateway.audit.skipPaths | nindent 6 }}
+    {{- end }}
+    {{- if .Values.gateway.audit.redactFields }}
+    redactFields:
+      {{- toYaml .Values.gateway.audit.redactFields | nindent 6 }}
+    {{- end }}
+  {{- end }}
+
   observability:
     metrics:
       enabled: {{ .Values.gateway.observability.metrics.enabled | default true }}
@@ -221,6 +263,20 @@ spec:
     logging:
       level: {{ .Values.gateway.observability.logging.level | default "info" }}
       format: {{ .Values.gateway.observability.logging.format | default "json" }}
+
+  {{- if and .Values.vault .Values.vault.enabled }}
+  vault:
+    enabled: true
+    address: {{ .Values.vault.address | quote }}
+    authMethod: {{ .Values.vault.authMethod | default "kubernetes" }}
+    {{- if eq (.Values.vault.authMethod | default "kubernetes") "token" }}
+    token: ${VAULT_TOKEN}
+    {{- end }}
+    {{- if eq (.Values.vault.authMethod | default "kubernetes") "kubernetes" }}
+    kubernetes:
+      role: {{ .Values.vault.role | default "" | quote }}
+    {{- end }}
+  {{- end }}
 
   {{- if .Values.gateway.customConfig }}
   {{- toYaml .Values.gateway.customConfig | nindent 2 }}

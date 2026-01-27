@@ -51,7 +51,7 @@ func TestNew(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, gw)
-	assert.Equal(t, cfg, gw.config)
+	assert.Equal(t, cfg, gw.Config())
 	assert.Equal(t, StateStopped, gw.State())
 }
 
@@ -62,7 +62,7 @@ func TestNew_NilConfig(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Nil(t, gw)
-	assert.Contains(t, err.Error(), "configuration is required")
+	assert.ErrorIs(t, err, ErrNilConfig)
 }
 
 func TestNew_WithOptions(t *testing.T) {
@@ -176,7 +176,7 @@ func TestGateway_Start_AlreadyStarted(t *testing.T) {
 	// Try to start again
 	err = gw.Start(ctx)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not in stopped state")
+	assert.ErrorIs(t, err, ErrGatewayNotStopped)
 
 	// Cleanup
 	_ = gw.Stop(ctx)
@@ -196,7 +196,7 @@ func TestGateway_Stop_NotRunning(t *testing.T) {
 	err = gw.Stop(ctx)
 
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not running")
+	assert.ErrorIs(t, err, ErrGatewayNotRunning)
 }
 
 func TestGateway_StartStop(t *testing.T) {
@@ -292,7 +292,7 @@ func TestGateway_Reload_InvalidConfig(t *testing.T) {
 
 	err = gw.Reload(invalidCfg)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid configuration")
+	assert.ErrorIs(t, err, ErrInvalidConfig)
 }
 
 func TestGateway_Engine(t *testing.T) {

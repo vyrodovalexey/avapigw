@@ -1,12 +1,14 @@
 package observability
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 func TestNewMetrics(t *testing.T) {
@@ -51,10 +53,9 @@ func TestMetrics_RecordRequest(t *testing.T) {
 
 	metrics := NewMetrics("test")
 
-	// Should not panic
+	// Should not panic — uses route name, not raw path
 	metrics.RecordRequest(
 		"GET",
-		"/api/users",
 		"users-route",
 		200,
 		100*time.Millisecond,
@@ -68,8 +69,8 @@ func TestMetrics_IncrementActiveRequests(t *testing.T) {
 
 	metrics := NewMetrics("test")
 
-	// Should not panic
-	metrics.IncrementActiveRequests("GET", "/api/users")
+	// Should not panic — uses route name
+	metrics.IncrementActiveRequests("GET", "users-route")
 }
 
 func TestMetrics_DecrementActiveRequests(t *testing.T) {
@@ -78,10 +79,10 @@ func TestMetrics_DecrementActiveRequests(t *testing.T) {
 	metrics := NewMetrics("test")
 
 	// Increment first
-	metrics.IncrementActiveRequests("GET", "/api/users")
+	metrics.IncrementActiveRequests("GET", "users-route")
 
 	// Should not panic
-	metrics.DecrementActiveRequests("GET", "/api/users")
+	metrics.DecrementActiveRequests("GET", "users-route")
 }
 
 func TestMetrics_SetBackendHealth(t *testing.T) {
@@ -110,8 +111,8 @@ func TestMetrics_RecordRateLimitHit(t *testing.T) {
 
 	metrics := NewMetrics("test")
 
-	// Should not panic
-	metrics.RecordRateLimitHit("192.168.1.1", "/api/users")
+	// Should not panic — uses route, not client_ip
+	metrics.RecordRateLimitHit("users-route")
 }
 
 func TestMetrics_Handler(t *testing.T) {
@@ -122,7 +123,9 @@ func TestMetrics_Handler(t *testing.T) {
 
 	assert.NotNil(t, handler)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(
+		http.MethodGet, "/metrics", nil,
+	)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -147,12 +150,18 @@ func TestMetricsMiddleware(t *testing.T) {
 	metrics := NewMetrics("test")
 	middleware := MetricsMiddleware(metrics)
 
-	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
-	}))
+	handler := middleware(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("OK"))
+			},
+		),
+	)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/users", nil,
+	)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -166,17 +175,118 @@ func TestMetricsMiddleware_RecordsMetrics(t *testing.T) {
 	metrics := NewMetrics("test")
 	middleware := MetricsMiddleware(metrics)
 
-	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte("created"))
-	}))
+	handler := middleware(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte("created"))
+			},
+		),
+	)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/users", nil)
+	req := httptest.NewRequest(
+		http.MethodPost, "/api/users", nil,
+	)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusCreated, rec.Code)
+}
+
+func TestMetricsMiddleware_UsesRouteFromContext(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics("test_ctx")
+	middleware := MetricsMiddleware(metrics)
+
+	// Inner handler sets route in context before response
+	handler := middleware(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				ctx := util.ContextWithRoute(
+					r.Context(), "api-users",
+				)
+				*r = *r.WithContext(ctx)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("OK"))
+			},
+		),
+	)
+
+	req := httptest.NewRequest(
+		http.MethodGet, "/api/users/123", nil,
+	)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestMetricsMiddleware_UnmatchedRoute(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics("test_unmatched")
+	middleware := MetricsMiddleware(metrics)
+
+	// Inner handler does NOT set route in context
+	handler := middleware(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+		),
+	)
+
+	req := httptest.NewRequest(
+		http.MethodGet, "/unknown/path/123", nil,
+	)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRouteFromRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		route    string
+		expected string
+	}{
+		{
+			name:     "with route set in context",
+			route:    "api-users",
+			expected: "api-users",
+		},
+		{
+			name:     "without route returns unmatched",
+			route:    "",
+			expected: unmatchedRoute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			if tt.route != "" {
+				ctx = util.ContextWithRoute(ctx, tt.route)
+			}
+
+			req := httptest.NewRequest(
+				http.MethodGet, "/test", nil,
+			)
+			req = req.WithContext(ctx)
+
+			result := routeFromRequest(req)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }
 
 func TestMetricsResponseWriter_WriteHeader(t *testing.T) {
@@ -223,5 +333,43 @@ func TestMetricsResponseWriter_MultipleWrites(t *testing.T) {
 	_, _ = mrw.Write([]byte("first"))
 	_, _ = mrw.Write([]byte("second"))
 
-	assert.Equal(t, 11, mrw.size) // "first" + "second" = 11 bytes
+	// "first" + "second" = 11 bytes
+	assert.Equal(t, 11, mrw.size)
+}
+
+func TestMetrics_BoundedCardinality(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics("cardinality_test")
+
+	// Simulate many unique paths hitting the same route.
+	// All should map to the same route label, not unique paths.
+	for i := 0; i < 100; i++ {
+		metrics.RecordRequest(
+			"GET", "users-route", 200,
+			10*time.Millisecond, 100, 200,
+		)
+	}
+
+	// Record rate limit hits by route, not by client IP
+	metrics.RecordRateLimitHit("users-route")
+	metrics.RecordRateLimitHit("admin-route")
+
+	// Verify metrics endpoint returns valid Prometheus format
+	handler := metrics.Handler()
+	req := httptest.NewRequest(
+		http.MethodGet, "/metrics", nil,
+	)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.String()
+	assert.Contains(t, body, "cardinality_test_requests_total")
+	assert.Contains(t, body, "cardinality_test_rate_limit_hits_total")
+	// Verify route label is present, not path
+	assert.Contains(t, body, `route="users-route"`)
+	// Verify client_ip label is NOT present
+	assert.NotContains(t, body, "client_ip")
 }

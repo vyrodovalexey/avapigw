@@ -28,6 +28,13 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush implements http.Flusher interface for streaming support.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // Logging returns a middleware that logs HTTP requests.
 func Logging(logger observability.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -104,18 +111,8 @@ func AccessLog(logger observability.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// getClientIP extracts the client IP from the request.
+// getClientIP extracts the client IP from the request using the global
+// extractor (secure default: only RemoteAddr, no header trust).
 func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return xff
-	}
-
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr
-	return r.RemoteAddr
+	return globalExtractor.Extract(r)
 }

@@ -28,10 +28,13 @@ phantom:
   threads: 4
 
   # HTTP settings
+  header_http: "1.1"
   headers:
     - "[Host: localhost]"
     - "[User-Agent: YandexTank/Perftest]"
     - "[Accept: application/json]"
+    - "[Content-Type: application/json]"
+    - "[Connection: keep-alive]"
     - "[X-Perf-Test: http-post]"
 
 console:
@@ -52,6 +55,6 @@ autostop:
     # Stop if response time exceeds 1000ms for 50% of requests
     - time(1000,50%,30)
     # Stop if network errors exceed 1%
-    - net(1%,10)
+    - http(net,1%,10s)
     # Stop if 4xx errors exceed 10% (might indicate payload issues)
     - http(4xx,10%,10)

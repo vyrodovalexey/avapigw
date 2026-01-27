@@ -56,3 +56,13 @@ func (w *StatusCapturingResponseWriter) Write(b []byte) (int, error) {
 	}
 	return w.ResponseWriter.Write(b)
 }
+
+// Flush implements http.Flusher interface for streaming support.
+func (w *StatusCapturingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Compile-time interface assertion.
+var _ http.Flusher = (*StatusCapturingResponseWriter)(nil)

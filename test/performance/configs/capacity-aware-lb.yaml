@@ -57,6 +57,6 @@ autostop:
     # Stop if 5xx errors exceed 15% (some 503s expected when all hosts at capacity)
     - http(5xx,15%,30s)
     # Stop if network errors exceed 3%
-    - net(3%,30s)
+    - http(net,3%,30s)
     # Stop if response time exceeds 10000ms for 30% of requests
     - time(10000,30%,60s)

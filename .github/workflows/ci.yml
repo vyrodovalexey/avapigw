@@ -178,13 +178,6 @@ jobs:
         env:
           VAULT_DEV_ROOT_TOKEN_ID: myroot
           VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-        options: >-
-          --cap-add=IPC_LOCK
-          --health-cmd "wget -q --spider http://127.0.0.1:8200/v1/sys/health || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-          --health-start-period 10s
       # HTTP REST API backends
       backend1:
         image: ghcr.io/vyrodovalexey/restapi-example:e9416f5

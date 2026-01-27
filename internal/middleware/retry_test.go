@@ -13,6 +13,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
 func TestDefaultRetryConfig(t *testing.T) {
@@ -350,18 +351,19 @@ func TestCalculateBackoff(t *testing.T) {
 
 	base := 100 * time.Millisecond
 	maxBackoff := 10 * time.Second
+	jitter := retry.DefaultJitterFactor
 
 	// First attempt
-	backoff0 := calculateBackoff(0, base, maxBackoff)
+	backoff0 := retry.CalculateBackoff(0, base, maxBackoff, jitter)
 	assert.GreaterOrEqual(t, backoff0, base)
 	assert.LessOrEqual(t, backoff0, base+base/4) // With jitter
 
 	// Second attempt (should be roughly 2x)
-	backoff1 := calculateBackoff(1, base, maxBackoff)
+	backoff1 := retry.CalculateBackoff(1, base, maxBackoff, jitter)
 	assert.GreaterOrEqual(t, backoff1, 2*base)
 
 	// High attempt should be capped at max
-	backoff10 := calculateBackoff(10, base, maxBackoff)
+	backoff10 := retry.CalculateBackoff(10, base, maxBackoff, jitter)
 	assert.LessOrEqual(t, backoff10, maxBackoff)
 }
 
@@ -508,16 +510,5 @@ func TestRetryFromConfig(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, rec.Code)
 		})
-	}
-}
-
-func TestSecureRandomFloat(t *testing.T) {
-	t.Parallel()
-
-	// Test that it returns values in [0, 1)
-	for i := 0; i < 100; i++ {
-		val := secureRandomFloat()
-		assert.GreaterOrEqual(t, val, 0.0)
-		assert.Less(t, val, 1.0)
 	}
 }

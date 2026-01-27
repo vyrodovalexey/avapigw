@@ -19,16 +19,17 @@ import (
 
 // GRPCListener represents a gRPC listener.
 type GRPCListener struct {
-	config          config.Listener
-	server          *grpcserver.Server
-	router          *grpcrouter.Router
-	proxy           *grpcproxy.Proxy
-	metrics         *grpcmiddleware.GRPCMetrics
-	logger          observability.Logger
-	running         atomic.Bool
-	tlsManager      *tlspkg.Manager
-	routeTLSManager *tlspkg.RouteTLSManager
-	tlsMetrics      tlspkg.MetricsRecorder
+	config               config.Listener
+	server               *grpcserver.Server
+	router               *grpcrouter.Router
+	proxy                *grpcproxy.Proxy
+	metrics              *grpcmiddleware.GRPCMetrics
+	logger               observability.Logger
+	running              atomic.Bool
+	tlsManager           *tlspkg.Manager
+	routeTLSManager      *tlspkg.RouteTLSManager
+	tlsMetrics           tlspkg.MetricsRecorder
+	vaultProviderFactory tlspkg.VaultProviderFactory
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -74,6 +75,14 @@ func WithGRPCTLSMetrics(metrics tlspkg.MetricsRecorder) GRPCListenerOption {
 func WithGRPCRouteTLSManager(manager *tlspkg.RouteTLSManager) GRPCListenerOption {
 	return func(l *GRPCListener) {
 		l.routeTLSManager = manager
+	}
+}
+
+// WithGRPCVaultProviderFactory sets the Vault provider factory for the gRPC listener.
+// This enables Vault-based certificate management for TLS.
+func WithGRPCVaultProviderFactory(factory tlspkg.VaultProviderFactory) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.vaultProviderFactory = factory
 	}
 }
 
@@ -302,6 +311,9 @@ func (l *GRPCListener) createTLSManagerFromConfig(cfg *config.TLSConfig) (*tlspk
 	}
 	if l.tlsMetrics != nil {
 		managerOpts = append(managerOpts, tlspkg.WithManagerMetrics(l.tlsMetrics))
+	}
+	if l.vaultProviderFactory != nil {
+		managerOpts = append(managerOpts, tlspkg.WithVaultProviderFactory(l.vaultProviderFactory))
 	}
 
 	return tlspkg.NewManager(tlsConfig, managerOpts...)

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/gateway"
@@ -48,6 +49,7 @@ func main() {
 	defer func() { _ = logger.Sync() }()
 
 	cfg := loadAndValidateConfig(flags.configPath, logger)
+	initClientIPExtractor(cfg, logger)
 	app := initApplication(cfg, logger)
 
 	runGateway(app, flags.configPath, logger)
@@ -101,6 +103,25 @@ func fatalWithSync(logger observability.Logger, msg string, fields ...observabil
 	os.Exit(1)
 }
 
+// initClientIPExtractor creates and sets the global ClientIPExtractor
+// from the gateway configuration's trusted proxies list.
+func initClientIPExtractor(
+	cfg *config.GatewayConfig,
+	logger observability.Logger,
+) {
+	proxies := cfg.Spec.TrustedProxies
+	extractor := middleware.NewClientIPExtractor(proxies)
+	middleware.SetGlobalIPExtractor(extractor)
+
+	if len(proxies) > 0 {
+		logger.Info("client IP extraction configured with trusted proxies",
+			observability.Int("trusted_proxy_count", len(proxies)),
+		)
+	} else {
+		logger.Info("client IP extraction using RemoteAddr only (no trusted proxies)")
+	}
+}
+
 // loadAndValidateConfig loads and validates the configuration.
 func loadAndValidateConfig(configPath string, logger observability.Logger) *config.GatewayConfig {
 	logger.Info("starting avapigw",
@@ -145,6 +166,7 @@ func loadAndValidateConfig(configPath string, logger observability.Logger) *conf
 type application struct {
 	gateway            *gateway.Gateway
 	backendRegistry    *backend.Registry
+	router             *router.Router
 	healthChecker      *health.Checker
 	metrics            *observability.Metrics
 	metricsServer      *http.Server
@@ -152,6 +174,7 @@ type application struct {
 	config             *config.GatewayConfig
 	rateLimiter        *middleware.RateLimiter
 	maxSessionsLimiter *middleware.MaxSessionsLimiter
+	auditLogger        audit.Logger
 }
 
 // initApplication initializes all application components.
@@ -159,6 +182,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	metrics := observability.NewMetrics("gateway")
 	tracer := initTracer(cfg, logger)
 	healthChecker := health.NewChecker(version)
+	auditLogger := initAuditLogger(cfg, logger)
 
 	backendRegistry := backend.NewRegistry(logger)
 	if err := backendRegistry.LoadFromConfig(cfg.Spec.Backends); err != nil {
@@ -171,7 +195,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	}
 
 	reverseProxy := proxy.NewReverseProxy(r, backendRegistry, proxy.WithProxyLogger(logger))
-	middlewareResult := buildMiddlewareChain(reverseProxy, cfg, logger, metrics, tracer)
+	middlewareResult := buildMiddlewareChain(reverseProxy, cfg, logger, metrics, tracer, auditLogger)
 
 	gw, err := gateway.New(cfg,
 		gateway.WithLogger(logger),
@@ -185,13 +209,64 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	return &application{
 		gateway:            gw,
 		backendRegistry:    backendRegistry,
+		router:             r,
 		healthChecker:      healthChecker,
 		metrics:            metrics,
 		tracer:             tracer,
 		config:             cfg,
 		rateLimiter:        middlewareResult.rateLimiter,
 		maxSessionsLimiter: middlewareResult.maxSessionsLimiter,
+		auditLogger:        auditLogger,
 	}
+}
+
+// initAuditLogger creates an audit logger from the gateway configuration.
+// If audit is not configured or disabled, a no-op logger is returned.
+func initAuditLogger(cfg *config.GatewayConfig, logger observability.Logger) audit.Logger {
+	if cfg.Spec.Audit == nil || !cfg.Spec.Audit.Enabled {
+		logger.Info("audit logging disabled")
+		return audit.NewNoopLogger()
+	}
+
+	auditCfg := &audit.Config{
+		Enabled:      cfg.Spec.Audit.Enabled,
+		Level:        audit.Level(cfg.Spec.Audit.Level),
+		Output:       cfg.Spec.Audit.Output,
+		Format:       cfg.Spec.Audit.Format,
+		SkipPaths:    cfg.Spec.Audit.SkipPaths,
+		RedactFields: cfg.Spec.Audit.RedactFields,
+	}
+
+	// Default output to stdout when not specified
+	if auditCfg.Output == "" {
+		auditCfg.Output = "stdout"
+	}
+
+	// Convert events configuration
+	if cfg.Spec.Audit.Events != nil {
+		auditCfg.Events = &audit.EventsConfig{
+			Authentication: cfg.Spec.Audit.Events.Authentication,
+			Authorization:  cfg.Spec.Audit.Events.Authorization,
+			Request:        cfg.Spec.Audit.Events.Request,
+			Response:       cfg.Spec.Audit.Events.Response,
+			Configuration:  cfg.Spec.Audit.Events.Configuration,
+			Security:       cfg.Spec.Audit.Events.Security,
+		}
+	}
+
+	auditLogger, err := audit.NewLogger(auditCfg, audit.WithLoggerLogger(logger))
+	if err != nil {
+		logger.Warn("failed to create audit logger, using noop", observability.Error(err))
+		return audit.NewNoopLogger()
+	}
+
+	logger.Info("audit logging enabled",
+		observability.String("output", auditCfg.Output),
+		observability.String("format", auditCfg.GetEffectiveFormat()),
+		observability.String("level", string(auditCfg.GetEffectiveLevel())),
+	)
+
+	return auditLogger
 }
 
 // initTracer initializes the tracer.
@@ -266,9 +341,7 @@ func startConfigWatcher(
 ) *config.Watcher {
 	watcher, err := config.NewWatcher(configPath, func(newCfg *config.GatewayConfig) {
 		logger.Info("configuration changed, reloading")
-		if reloadErr := app.gateway.Reload(newCfg); reloadErr != nil {
-			logger.Error("failed to reload configuration", observability.Error(reloadErr))
-		}
+		reloadComponents(app, newCfg, logger)
 	}, config.WithLogger(logger))
 
 	if err != nil {
@@ -281,6 +354,62 @@ func startConfigWatcher(
 	}
 
 	return watcher
+}
+
+// reloadComponents reloads all gateway components with new config.
+// Circuit breaker from sony/gobreaker does not support runtime
+// reconfiguration; a gateway restart is required to change its
+// threshold or timeout settings.
+func reloadComponents(
+	app *application,
+	newCfg *config.GatewayConfig,
+	logger observability.Logger,
+) {
+	// Reload gateway config (atomic pointer swap)
+	if err := app.gateway.Reload(newCfg); err != nil {
+		logger.Error("failed to reload gateway config",
+			observability.Error(err),
+		)
+		return
+	}
+
+	// Update rate limiter
+	if app.rateLimiter != nil && newCfg.Spec.RateLimit != nil {
+		app.rateLimiter.UpdateConfig(newCfg.Spec.RateLimit)
+	}
+
+	// Update max sessions limiter
+	if app.maxSessionsLimiter != nil && newCfg.Spec.MaxSessions != nil {
+		app.maxSessionsLimiter.UpdateConfig(newCfg.Spec.MaxSessions)
+	}
+
+	// Reload routes
+	if app.router != nil {
+		if err := app.router.LoadRoutes(newCfg.Spec.Routes); err != nil {
+			logger.Error("failed to reload routes",
+				observability.Error(err),
+			)
+		}
+	}
+
+	// Reload backends
+	if app.backendRegistry != nil {
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 30*time.Second,
+		)
+		defer cancel()
+
+		if err := app.backendRegistry.ReloadFromConfig(
+			ctx, newCfg.Spec.Backends,
+		); err != nil {
+			logger.Error("failed to reload backends",
+				observability.Error(err),
+			)
+		}
+	}
+
+	app.config = newCfg
+	logger.Info("all components reloaded successfully")
 }
 
 // waitForShutdown waits for shutdown signal and performs graceful shutdown.
@@ -328,6 +457,13 @@ func waitForShutdown(app *application, watcher *config.Watcher, logger observabi
 		app.maxSessionsLimiter.Stop()
 	}
 
+	// Close audit logger to flush pending events
+	if app.auditLogger != nil {
+		if err := app.auditLogger.Close(); err != nil {
+			logger.Error("failed to close audit logger", observability.Error(err))
+		}
+	}
+
 	logger.Info("gateway stopped")
 }
 
@@ -339,12 +475,19 @@ type middlewareChainResult struct {
 }
 
 // buildMiddlewareChain builds the middleware chain.
+// The execution order (outermost executes first):
+// Recovery -> RequestID -> Logging -> Tracing -> Audit -> Metrics ->
+// CORS -> MaxSessions -> CircuitBreaker -> RateLimit -> [proxy]
+//
+// Tracing runs before Audit so that trace context (TraceID/SpanID)
+// is available in the request context when audit events are created.
 func buildMiddlewareChain(
 	handler http.Handler,
 	cfg *config.GatewayConfig,
 	logger observability.Logger,
 	metrics *observability.Metrics,
 	tracer *observability.Tracer,
+	auditLogger audit.Logger,
 ) middlewareChainResult {
 	h := handler
 	var rateLimiter *middleware.RateLimiter
@@ -372,6 +515,7 @@ func buildMiddlewareChain(
 	}
 
 	h = observability.MetricsMiddleware(metrics)(h)
+	h = middleware.Audit(auditLogger)(h)
 	h = observability.TracingMiddleware(tracer)(h)
 	h = middleware.Logging(logger)(h)
 	h = middleware.RequestID()(h)

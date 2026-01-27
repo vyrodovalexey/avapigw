@@ -1,0 +1,90 @@
+# Yandex Tank Configuration: Certificate Renewal Under Load
+# Purpose: Measure latency impact during Vault certificate renewal
+# Duration: 5 minutes total - spans multiple cert renewal cycles
+# Target: Sustained 500 RPS during renewal events
+#
+# Test Case 2: Certificate Renewal Under Load
+# =============================================
+# Measures:
+#   - Latency spikes during certificate renewal
+#   - Error rate during renewal window
+#   - Connection stability across renewal boundaries
+#
+# Expected Behavior:
+#   - Vault cert TTL: 2 minutes, renewBefore: 1 minute
+#   - Renewal happens every ~1 minute (at TTL - renewBefore)
+#   - During 5-minute test, expect 4-5 renewal events
+#   - atomic.Pointer swap should be transparent to clients
+#   - No errors or latency spikes expected during renewal
+#
+# Baselines & Thresholds:
+#   - p50 latency: < 10ms (steady state)
+#   - p95 latency: < 30ms (even during renewal)
+#   - p99 latency: < 100ms (even during renewal)
+#   - Error rate during renewal: 0% (zero tolerance)
+#   - No connection resets during renewal
+#
+# Prerequisites:
+#   - Vault running at localhost:8200 with PKI engine configured
+#   - Gateway running with gateway-perftest-vault-tls.yaml config
+#     (Vault cert TTL=2m, renewBefore=1m)
+#   - Backend services on ports 8801, 8802
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8443
+  load_profile:
+    load_type: rps
+    # Steady moderate load to observe renewal behavior clearly
+    # Warmup: 30s ramp from 50 to 500 RPS
+    # Sustain: 4 min at 500 RPS (covers multiple renewal cycles)
+    # Cooldown: 30s ramp down
+    schedule: line(50, 500, 30s) const(500, 4m) line(500, 50, 30s)
+
+  ammofile: /var/loadtest/ammo/vault-cert-renewal.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+
+  # TLS settings
+  ssl: true
+  timeout: 15s
+
+  # Moderate concurrency - focus on stability not max throughput
+  instances: 800
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-VaultRenewal]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: vault-cert-renewal]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Strict error thresholds - renewal should be transparent
+    # Stop if ANY 5xx errors for 10 seconds (zero tolerance)
+    - http(5xx,1%,10s)
+    # Stop if response time exceeds 2 seconds for 30% of requests
+    - time(2000,30%,30s)
+    # Stop if net errors exceed 1% (connection resets during renewal)
+    - http(net,1%,10s)
+    # Stop if 4xx errors exceed 5%
+    - http(4xx,5%,10s)

@@ -16,14 +16,15 @@ import (
 
 // Listener represents an HTTP/HTTPS listener.
 type Listener struct {
-	config          config.Listener
-	server          *http.Server
-	handler         http.Handler
-	logger          observability.Logger
-	running         atomic.Bool
-	tlsManager      *tlspkg.Manager
-	routeTLSManager *tlspkg.RouteTLSManager
-	tlsMetrics      tlspkg.MetricsRecorder
+	config               config.Listener
+	server               *http.Server
+	handler              http.Handler
+	logger               observability.Logger
+	running              atomic.Bool
+	tlsManager           *tlspkg.Manager
+	routeTLSManager      *tlspkg.RouteTLSManager
+	tlsMetrics           tlspkg.MetricsRecorder
+	vaultProviderFactory tlspkg.VaultProviderFactory
 }
 
 // ListenerOption is a functional option for configuring a listener.
@@ -48,6 +49,14 @@ func WithTLSMetrics(metrics tlspkg.MetricsRecorder) ListenerOption {
 func WithRouteTLSManager(manager *tlspkg.RouteTLSManager) ListenerOption {
 	return func(l *Listener) {
 		l.routeTLSManager = manager
+	}
+}
+
+// WithVaultProviderFactory sets the Vault provider factory for the listener.
+// This enables Vault-based certificate management for TLS.
+func WithVaultProviderFactory(factory tlspkg.VaultProviderFactory) ListenerOption {
+	return func(l *Listener) {
+		l.vaultProviderFactory = factory
 	}
 }
 
@@ -82,11 +91,15 @@ func NewListener(
 func (l *Listener) initTLS() error {
 	tlsCfg := l.convertToTLSConfig(l.config.TLS)
 
-	manager, err := tlspkg.NewManager(
-		tlsCfg,
+	managerOpts := []tlspkg.ManagerOption{
 		tlspkg.WithManagerLogger(l.logger),
 		tlspkg.WithManagerMetrics(l.tlsMetrics),
-	)
+	}
+	if l.vaultProviderFactory != nil {
+		managerOpts = append(managerOpts, tlspkg.WithVaultProviderFactory(l.vaultProviderFactory))
+	}
+
+	manager, err := tlspkg.NewManager(tlsCfg, managerOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to create TLS manager: %w", err)
 	}

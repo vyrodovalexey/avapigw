@@ -275,6 +275,13 @@ func (rw *tracingResponseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// Flush implements http.Flusher interface for streaming support.
+func (rw *tracingResponseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // InjectTraceContext injects trace context into outgoing request headers.
 func InjectTraceContext(ctx context.Context, r *http.Request) {
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(r.Header))

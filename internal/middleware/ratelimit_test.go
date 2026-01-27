@@ -347,3 +347,89 @@ func TestRateLimiter_AllowPerClient_DoubleCheck(t *testing.T) {
 
 	assert.True(t, exists)
 }
+
+func TestRateLimiter_UpdateConfig(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(10, 5, true, WithRateLimiterLogger(observability.NopLogger()))
+
+	// Add some clients
+	for i := 0; i < 5; i++ {
+		rl.Allow("client-" + string(rune('a'+i)))
+	}
+
+	rl.mu.RLock()
+	assert.Equal(t, 5, len(rl.clients))
+	rl.mu.RUnlock()
+
+	// Update config with new values
+	newCfg := &config.RateLimitConfig{
+		Enabled:           true,
+		RequestsPerSecond: 50,
+		Burst:             20,
+		PerClient:         false,
+	}
+	rl.UpdateConfig(newCfg)
+
+	// Verify updated values
+	assert.Equal(t, 50, rl.rps)
+	assert.Equal(t, 20, rl.burst)
+	assert.False(t, rl.perClient)
+
+	// Per-client entries should be cleared
+	rl.mu.RLock()
+	assert.Equal(t, 0, len(rl.clients))
+	rl.mu.RUnlock()
+
+	// Global limiter should work with new burst
+	for i := 0; i < 20; i++ {
+		assert.True(t, rl.Allow("any"))
+	}
+	// After exhausting burst, should be denied
+	assert.False(t, rl.Allow("any"))
+}
+
+func TestRateLimiter_UpdateConfig_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(10, 5, false)
+	originalRPS := rl.rps
+
+	// Nil config should be a no-op
+	rl.UpdateConfig(nil)
+
+	assert.Equal(t, originalRPS, rl.rps)
+}
+
+func TestRateLimiter_UpdateConfig_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(100, 50, true, WithRateLimiterLogger(observability.NopLogger()))
+
+	var wg sync.WaitGroup
+
+	// Concurrent Allow calls
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			clientIP := "192.168.1." + string(rune('0'+n%10))
+			_ = rl.Allow(clientIP)
+		}(i)
+	}
+
+	// Concurrent UpdateConfig call
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rl.UpdateConfig(&config.RateLimitConfig{
+			Enabled:           true,
+			RequestsPerSecond: 200,
+			Burst:             100,
+			PerClient:         true,
+		})
+	}()
+
+	wg.Wait()
+	// Should not panic or deadlock
+}

@@ -1,4 +1,22 @@
 // Package util provides utility functions and types for the API Gateway.
+//
+// # Error Conventions
+//
+// This project follows a standardized error pattern across all packages:
+//
+//   - Sentinel errors (errors.New) for well-known, stable conditions
+//     that callers check with errors.Is(). Example: ErrNotFound.
+//   - Structured error types for context-rich errors that carry
+//     additional fields (e.g., ConfigError, BackendError). Each type
+//     implements Error(), Unwrap() (if wrapping), and Is().
+//   - fmt.Errorf with %w for ad-hoc wrapping that adds context to an
+//     existing error without introducing a new type.
+//
+// All custom error types must implement:
+//
+//	Error() string           – human-readable message
+//	Unwrap() error           – if the type wraps another error
+//	Is(target error) bool    – for errors.Is() compatibility
 package util
 
 import (

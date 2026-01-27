@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -599,7 +600,7 @@ func TestNewManager_VaultNotImplemented(t *testing.T) {
 	manager, err := NewManager(config)
 	assert.Error(t, err)
 	assert.Nil(t, manager)
-	assert.Contains(t, err.Error(), "Vault provider not yet implemented")
+	assert.Contains(t, err.Error(), "vault provider factory is required when vault TLS is enabled")
 }
 
 func TestNewManager_InvalidCertificateFile(t *testing.T) {
@@ -1718,4 +1719,248 @@ func TestWithCertificateProvider(t *testing.T) {
 	opt(m)
 
 	assert.NotNil(t, m.provider)
+}
+
+func TestWithVaultProviderFactory(t *testing.T) {
+	t.Parallel()
+
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		return newMockProvider(), nil
+	}
+	opt := WithVaultProviderFactory(factory)
+
+	m := &Manager{}
+	opt(m)
+
+	assert.NotNil(t, m.vaultProviderFactory)
+}
+
+func TestNewManager_WithVaultProviderFactory(t *testing.T) {
+	t.Parallel()
+
+	certs := generateTestCertificates(t)
+	defer certs.cleanup()
+
+	factoryCalled := false
+	mockProv := newMockProvider()
+	cert, err := tls.LoadX509KeyPair(certs.certFile, certs.keyFile)
+	require.NoError(t, err)
+	mockProv.setCertificate(&cert)
+
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		factoryCalled = true
+		return mockProv, nil
+	}
+
+	config := &Config{
+		Mode:       TLSModeSimple,
+		MinVersion: TLSVersion12,
+		ServerCertificate: &CertificateConfig{
+			Source:   CertificateSourceVault,
+			CertFile: "unused",
+			KeyFile:  "unused",
+		},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "role",
+			CommonName: "test.example.com",
+		},
+	}
+
+	manager, err := NewManager(config, WithVaultProviderFactory(factory))
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	defer manager.Close()
+
+	assert.True(t, factoryCalled, "vault provider factory should have been called")
+}
+
+func TestNewManager_VaultEnabled_NoFactory(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Mode:       TLSModeSimple,
+		MinVersion: TLSVersion12,
+		ServerCertificate: &CertificateConfig{
+			CertFile: "/path/to/cert.pem",
+			KeyFile:  "/path/to/key.pem",
+		},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "example.com",
+		},
+	}
+
+	manager, err := NewManager(config)
+	assert.Error(t, err)
+	assert.Nil(t, manager)
+	assert.Contains(t, err.Error(), "vault provider factory is required")
+}
+
+func TestNewManager_VaultEnabled_FactoryError(t *testing.T) {
+	t.Parallel()
+
+	factoryErr := fmt.Errorf("vault connection failed")
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		return nil, factoryErr
+	}
+
+	config := &Config{
+		Mode:       TLSModeSimple,
+		MinVersion: TLSVersion12,
+		ServerCertificate: &CertificateConfig{
+			CertFile: "/path/to/cert.pem",
+			KeyFile:  "/path/to/key.pem",
+		},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "example.com",
+		},
+	}
+
+	manager, err := NewManager(config, WithVaultProviderFactory(factory))
+	assert.Error(t, err)
+	assert.Nil(t, manager)
+	assert.Contains(t, err.Error(), "failed to create vault provider")
+	assert.ErrorIs(t, err, factoryErr)
+}
+
+func TestNewManager_VaultDisabled_FileProvider(t *testing.T) {
+	t.Parallel()
+
+	certs := generateTestCertificates(t)
+	defer certs.cleanup()
+
+	config := &Config{
+		Mode:       TLSModeSimple,
+		MinVersion: TLSVersion12,
+		ServerCertificate: &CertificateConfig{
+			CertFile: certs.certFile,
+			KeyFile:  certs.keyFile,
+		},
+		// No Vault config
+	}
+
+	manager, err := NewManager(config)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	defer manager.Close()
+
+	assert.True(t, manager.IsEnabled())
+	assert.NotNil(t, manager.GetTLSConfig())
+}
+
+func TestNewManager_WithVaultProviderFactory_NilFactory(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Mode:       TLSModeSimple,
+		MinVersion: TLSVersion12,
+		ServerCertificate: &CertificateConfig{
+			CertFile: "/path/to/cert.pem",
+			KeyFile:  "/path/to/key.pem",
+		},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "example.com",
+		},
+	}
+
+	manager, err := NewManager(config, WithVaultProviderFactory(nil))
+	assert.Error(t, err)
+	assert.Nil(t, manager)
+	assert.Contains(t, err.Error(), "vault provider factory is required")
+}
+
+func TestNewManager_VaultEnabled_PassthroughMode(t *testing.T) {
+	t.Parallel()
+
+	// Passthrough mode should use NopProvider even with Vault enabled
+	config := &Config{
+		Mode: TLSModePassthrough,
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "example.com",
+		},
+	}
+
+	manager, err := NewManager(config)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	defer manager.Close()
+
+	assert.Equal(t, TLSModePassthrough, manager.GetMode())
+}
+
+func TestNewManager_HandleCertificateEvent_LoadedWithCert(t *testing.T) {
+	t.Parallel()
+
+	certs := generateTestCertificates(t)
+	defer certs.cleanup()
+
+	metrics := newMockMetrics()
+	provider := newMockProvider()
+
+	cert, err := tls.LoadX509KeyPair(certs.certFile, certs.keyFile)
+	require.NoError(t, err)
+	provider.setCertificate(&cert)
+
+	config := &Config{
+		Mode:       TLSModeSimple,
+		MinVersion: TLSVersion12,
+		ServerCertificate: &CertificateConfig{
+			CertFile: certs.certFile,
+			KeyFile:  certs.keyFile,
+		},
+	}
+
+	manager, err := NewManager(config,
+		WithCertificateProvider(provider),
+		WithManagerMetrics(metrics),
+	)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	// Test CertificateEventLoaded with certificate - should update expiry
+	manager.handleCertificateEvent(CertificateEvent{
+		Type:        CertificateEventLoaded,
+		Certificate: &cert,
+		Message:     "certificate loaded",
+	})
+	assert.Equal(t, 1, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 1, metrics.getCertExpiryCount())
+
+	// Test CertificateEventLoaded with nil certificate - should not update expiry
+	manager.handleCertificateEvent(CertificateEvent{
+		Type:    CertificateEventLoaded,
+		Message: "certificate loaded without cert",
+	})
+	assert.Equal(t, 2, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 1, metrics.getCertExpiryCount()) // unchanged
+
+	// Test CertificateEventReloaded with certificate - should update expiry
+	manager.handleCertificateEvent(CertificateEvent{
+		Type:        CertificateEventReloaded,
+		Certificate: &cert,
+		Message:     "certificate reloaded",
+	})
+	assert.Equal(t, 3, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 2, metrics.getCertExpiryCount())
+
+	// Test CertificateEventReloaded with nil certificate - should not update expiry
+	manager.handleCertificateEvent(CertificateEvent{
+		Type:    CertificateEventReloaded,
+		Message: "certificate reloaded without cert",
+	})
+	assert.Equal(t, 4, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 2, metrics.getCertExpiryCount()) // unchanged
 }

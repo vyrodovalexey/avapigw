@@ -8,7 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
+
+// unmatchedRoute is the label value used for requests that do not
+// match any configured route, ensuring bounded cardinality.
+const unmatchedRoute = "unmatched"
 
 // Metrics holds all Prometheus metrics for the gateway.
 type Metrics struct {
@@ -39,7 +44,7 @@ func NewMetrics(namespace string) *Metrics {
 			Name:      "requests_total",
 			Help:      "Total number of HTTP requests",
 		},
-		[]string{"method", "path", "status", "route"},
+		[]string{"method", "route", "status"},
 	)
 
 	m.requestDuration = prometheus.NewHistogramVec(
@@ -47,9 +52,12 @@ func NewMetrics(namespace string) *Metrics {
 			Namespace: namespace,
 			Name:      "request_duration_seconds",
 			Help:      "HTTP request duration in seconds",
-			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+			Buckets: []float64{
+				.001, .005, .01, .025, .05,
+				.1, .25, .5, 1, 2.5, 5, 10,
+			},
 		},
-		[]string{"method", "path", "status", "route"},
+		[]string{"method", "route", "status"},
 	)
 
 	m.requestSize = prometheus.NewHistogramVec(
@@ -57,9 +65,11 @@ func NewMetrics(namespace string) *Metrics {
 			Namespace: namespace,
 			Name:      "request_size_bytes",
 			Help:      "HTTP request size in bytes",
-			Buckets:   prometheus.ExponentialBuckets(100, 10, 8),
+			Buckets: prometheus.ExponentialBuckets(
+				100, 10, 8,
+			),
 		},
-		[]string{"method", "path"},
+		[]string{"method", "route"},
 	)
 
 	m.responseSize = prometheus.NewHistogramVec(
@@ -67,25 +77,29 @@ func NewMetrics(namespace string) *Metrics {
 			Namespace: namespace,
 			Name:      "response_size_bytes",
 			Help:      "HTTP response size in bytes",
-			Buckets:   prometheus.ExponentialBuckets(100, 10, 8),
+			Buckets: prometheus.ExponentialBuckets(
+				100, 10, 8,
+			),
 		},
-		[]string{"method", "path", "status"},
+		[]string{"method", "route", "status"},
 	)
 
 	m.activeRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "active_requests",
-			Help:      "Number of active HTTP requests",
+			Help: "Number of active HTTP " +
+				"requests",
 		},
-		[]string{"method", "path"},
+		[]string{"method", "route"},
 	)
 
 	m.backendHealth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "backend_health",
-			Help:      "Backend health status (1=healthy, 0=unhealthy)",
+			Help: "Backend health status " +
+				"(1=healthy, 0=unhealthy)",
 		},
 		[]string{"backend", "host"},
 	)
@@ -94,7 +108,8 @@ func NewMetrics(namespace string) *Metrics {
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Name:      "circuit_breaker_state",
-			Help:      "Circuit breaker state (0=closed, 1=half-open, 2=open)",
+			Help: "Circuit breaker state " +
+				"(0=closed, 1=half-open, 2=open)",
 		},
 		[]string{"name"},
 	)
@@ -103,12 +118,20 @@ func NewMetrics(namespace string) *Metrics {
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Name:      "rate_limit_hits_total",
-			Help:      "Total number of rate limit hits",
+			Help: "Total number of rate " +
+				"limit hits",
 		},
-		[]string{"client_ip", "path"},
+		[]string{"route"},
 	)
 
-	// Register all metrics
+	m.registerCollectors()
+
+	return m
+}
+
+// registerCollectors registers all metric collectors with the
+// Prometheus registry.
+func (m *Metrics) registerCollectors() {
 	m.registry.MustRegister(
 		m.requestsTotal,
 		m.requestDuration,
@@ -120,40 +143,57 @@ func NewMetrics(namespace string) *Metrics {
 		m.rateLimitHits,
 	)
 
-	// Register default Go metrics using the new collectors package
 	m.registry.MustRegister(collectors.NewGoCollector())
-	m.registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-
-	return m
+	m.registry.MustRegister(
+		collectors.NewProcessCollector(
+			collectors.ProcessCollectorOpts{},
+		),
+	)
 }
 
 // RecordRequest records a completed HTTP request.
+// The route parameter should be the matched route name/pattern,
+// not the raw request path, to prevent cardinality explosion.
 func (m *Metrics) RecordRequest(
-	method, path, route string,
+	method, route string,
 	status int,
 	duration time.Duration,
 	reqSize, respSize int64,
 ) {
 	statusStr := strconv.Itoa(status)
 
-	m.requestsTotal.WithLabelValues(method, path, statusStr, route).Inc()
-	m.requestDuration.WithLabelValues(method, path, statusStr, route).Observe(duration.Seconds())
-	m.requestSize.WithLabelValues(method, path).Observe(float64(reqSize))
-	m.responseSize.WithLabelValues(method, path, statusStr).Observe(float64(respSize))
+	m.requestsTotal.WithLabelValues(
+		method, route, statusStr,
+	).Inc()
+	m.requestDuration.WithLabelValues(
+		method, route, statusStr,
+	).Observe(duration.Seconds())
+	m.requestSize.WithLabelValues(
+		method, route,
+	).Observe(float64(reqSize))
+	m.responseSize.WithLabelValues(
+		method, route, statusStr,
+	).Observe(float64(respSize))
 }
 
 // IncrementActiveRequests increments the active requests gauge.
-func (m *Metrics) IncrementActiveRequests(method, path string) {
-	m.activeRequests.WithLabelValues(method, path).Inc()
+func (m *Metrics) IncrementActiveRequests(
+	method, route string,
+) {
+	m.activeRequests.WithLabelValues(method, route).Inc()
 }
 
 // DecrementActiveRequests decrements the active requests gauge.
-func (m *Metrics) DecrementActiveRequests(method, path string) {
-	m.activeRequests.WithLabelValues(method, path).Dec()
+func (m *Metrics) DecrementActiveRequests(
+	method, route string,
+) {
+	m.activeRequests.WithLabelValues(method, route).Dec()
 }
 
 // SetBackendHealth sets the backend health status.
-func (m *Metrics) SetBackendHealth(backend, host string, healthy bool) {
+func (m *Metrics) SetBackendHealth(
+	backend, host string, healthy bool,
+) {
 	value := 0.0
 	if healthy {
 		value = 1.0
@@ -162,20 +202,25 @@ func (m *Metrics) SetBackendHealth(backend, host string, healthy bool) {
 }
 
 // SetCircuitBreakerState sets the circuit breaker state.
-func (m *Metrics) SetCircuitBreakerState(name string, state int) {
+func (m *Metrics) SetCircuitBreakerState(
+	name string, state int,
+) {
 	m.circuitBreaker.WithLabelValues(name).Set(float64(state))
 }
 
 // RecordRateLimitHit records a rate limit hit.
-func (m *Metrics) RecordRateLimitHit(clientIP, path string) {
-	m.rateLimitHits.WithLabelValues(clientIP, path).Inc()
+// Uses route label instead of client_ip to prevent unbounded
+// cardinality. Client IP tracking should be done via logs.
+func (m *Metrics) RecordRateLimitHit(route string) {
+	m.rateLimitHits.WithLabelValues(route).Inc()
 }
 
 // Handler returns an HTTP handler for the metrics endpoint.
 func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{
-		EnableOpenMetrics: true,
-	})
+	return promhttp.HandlerFor(
+		m.registry,
+		promhttp.HandlerOpts{EnableOpenMetrics: true},
+	)
 }
 
 // Registry returns the Prometheus registry.
@@ -184,32 +229,55 @@ func (m *Metrics) Registry() *prometheus.Registry {
 }
 
 // MetricsMiddleware returns a middleware that records metrics.
-func MetricsMiddleware(metrics *Metrics) func(http.Handler) http.Handler {
+// It extracts the route name from context (set by the proxy/router)
+// instead of using the raw request path, preventing metrics
+// cardinality explosion from dynamic path segments.
+func MetricsMiddleware(
+	metrics *Metrics,
+) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			path := r.URL.Path
-			method := r.Method
+		return http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				start := time.Now()
+				method := r.Method
 
-			metrics.IncrementActiveRequests(method, path)
-			defer metrics.DecrementActiveRequests(method, path)
+				rw := &metricsResponseWriter{
+					ResponseWriter: w,
+					status:         http.StatusOK,
+				}
 
-			rw := &metricsResponseWriter{
-				ResponseWriter: w,
-				status:         http.StatusOK,
-			}
+				next.ServeHTTP(rw, r)
 
-			next.ServeHTTP(rw, r)
+				route := routeFromRequest(r)
+				duration := time.Since(start)
 
-			duration := time.Since(start)
-			route := "" // Route is set by proxy
+				metrics.IncrementActiveRequests(method, route)
+				defer metrics.DecrementActiveRequests(
+					method, route,
+				)
 
-			metrics.RecordRequest(method, path, route, rw.status, duration, r.ContentLength, int64(rw.size))
-		})
+				metrics.RecordRequest(
+					method, route, rw.status,
+					duration,
+					r.ContentLength, int64(rw.size),
+				)
+			},
+		)
 	}
 }
 
-// metricsResponseWriter wraps http.ResponseWriter to capture metrics.
+// routeFromRequest extracts the route name from the request
+// context. Returns unmatchedRoute if no route is set.
+func routeFromRequest(r *http.Request) string {
+	route := util.RouteFromContext(r.Context())
+	if route == "" {
+		return unmatchedRoute
+	}
+	return route
+}
+
+// metricsResponseWriter wraps http.ResponseWriter to capture
+// metrics.
 type metricsResponseWriter struct {
 	http.ResponseWriter
 	status int
@@ -227,4 +295,11 @@ func (rw *metricsResponseWriter) Write(b []byte) (int, error) {
 	n, err := rw.ResponseWriter.Write(b)
 	rw.size += n
 	return n, err
+}
+
+// Flush implements http.Flusher interface for streaming support.
+func (rw *metricsResponseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

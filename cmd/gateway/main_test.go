@@ -13,9 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vyrodovalexey/avapigw/internal/audit"
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	"github.com/vyrodovalexey/avapigw/internal/gateway"
 	"github.com/vyrodovalexey/avapigw/internal/health"
+	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/router"
 )
 
 func TestGetEnvOrDefault(t *testing.T) {
@@ -203,7 +208,7 @@ func TestBuildMiddlewareChain(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			result := buildMiddlewareChain(baseHandler, tt.config, logger, metrics, tracer)
+			result := buildMiddlewareChain(baseHandler, tt.config, logger, metrics, tracer, audit.NewNoopLogger())
 
 			// Verify handler is not nil
 			assert.NotNil(t, result.handler)
@@ -542,7 +547,7 @@ func TestBuildMiddlewareChain_NilConfigs(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger())
 
 	assert.NotNil(t, result.handler)
 	assert.Nil(t, result.rateLimiter)
@@ -580,7 +585,7 @@ func TestBuildMiddlewareChain_PerClientRateLimiter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger())
 
 	assert.NotNil(t, result.handler)
 	assert.NotNil(t, result.rateLimiter)
@@ -613,7 +618,7 @@ func TestBuildMiddlewareChain_WithMaxSessions(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger())
 
 	assert.NotNil(t, result.handler)
 	assert.NotNil(t, result.maxSessionsLimiter)
@@ -645,7 +650,7 @@ func TestBuildMiddlewareChain_WithMaxSessionsDisabled(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger())
 
 	assert.NotNil(t, result.handler)
 	assert.Nil(t, result.maxSessionsLimiter)
@@ -1051,7 +1056,7 @@ func TestBuildMiddlewareChain_AllMiddlewareEnabled(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger())
 
 	assert.NotNil(t, result.handler)
 	assert.NotNil(t, result.rateLimiter)
@@ -1095,4 +1100,125 @@ func TestVersionVariables(t *testing.T) {
 	assert.NotEmpty(t, version)
 	assert.NotEmpty(t, buildTime)
 	assert.NotEmpty(t, gitCommit)
+}
+
+// validGatewayConfig creates a valid GatewayConfig for testing.
+func validGatewayConfig(name string) *config.GatewayConfig {
+	return &config.GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   config.Metadata{Name: name},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{
+					Name:     "http",
+					Port:     8080,
+					Protocol: config.ProtocolHTTP,
+				},
+			},
+			Routes:   []config.Route{},
+			Backends: []config.Backend{},
+		},
+	}
+}
+
+func TestReloadComponents_AllComponents(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := validGatewayConfig("test")
+	cfg.Spec.RateLimit = &config.RateLimitConfig{
+		Enabled:           true,
+		RequestsPerSecond: 100,
+		Burst:             200,
+	}
+	cfg.Spec.MaxSessions = &config.MaxSessionsConfig{
+		Enabled:       true,
+		MaxConcurrent: 50,
+	}
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	rl := middleware.NewRateLimiter(
+		100, 200, false,
+		middleware.WithRateLimiterLogger(logger),
+	)
+	msl := middleware.NewMaxSessionsLimiter(50, 0, 0)
+	r := router.New()
+	reg := backend.NewRegistry(logger)
+
+	app := &application{
+		gateway:            gw,
+		backendRegistry:    reg,
+		router:             r,
+		config:             cfg,
+		rateLimiter:        rl,
+		maxSessionsLimiter: msl,
+	}
+
+	newCfg := validGatewayConfig("test-updated")
+	newCfg.Spec.RateLimit = &config.RateLimitConfig{
+		Enabled:           true,
+		RequestsPerSecond: 200,
+		Burst:             400,
+	}
+	newCfg.Spec.MaxSessions = &config.MaxSessionsConfig{
+		Enabled:       true,
+		MaxConcurrent: 100,
+	}
+
+	reloadComponents(app, newCfg, logger)
+
+	// Verify config was updated
+	assert.Equal(t, newCfg, app.config)
+}
+
+func TestReloadComponents_NilMiddleware(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := validGatewayConfig("test")
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	// All middleware components are nil
+	app := &application{
+		gateway: gw,
+		config:  cfg,
+	}
+
+	newCfg := validGatewayConfig("test-updated")
+
+	// Should not panic with nil components
+	reloadComponents(app, newCfg, logger)
+	assert.Equal(t, newCfg, app.config)
+}
+
+func TestReloadComponents_InvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := validGatewayConfig("test")
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	app := &application{
+		gateway: gw,
+		config:  cfg,
+	}
+
+	// Invalid config (missing required fields)
+	invalidCfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: ""},
+		Spec:     config.GatewaySpec{},
+	}
+
+	// Should not panic; gateway.Reload will reject invalid config
+	reloadComponents(app, invalidCfg, logger)
+
+	// Config should NOT be updated since reload failed
+	assert.Equal(t, cfg, app.config)
 }

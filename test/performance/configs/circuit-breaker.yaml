@@ -61,6 +61,6 @@ autostop:
     # Stop if 5xx errors exceed 50% (circuit breaker should prevent this)
     - http(5xx,50%,30)
     # Stop if network errors exceed 5%
-    - net(5%,30)
+    - http(net,5%,30s)
     # Stop if response time exceeds 5000ms for 50% of requests
     - time(5000,50%,60)

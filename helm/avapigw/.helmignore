@@ -21,8 +21,7 @@
 .idea/
 *.tmproj
 .vscode/
-# Test files
-tests/
+# Test files (do not exclude templates/tests/ which contains Helm test hooks)
 *_test.yaml
 # Documentation source
 docs/

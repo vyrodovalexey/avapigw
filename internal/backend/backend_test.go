@@ -904,3 +904,99 @@ func TestHost_URLWithScheme(t *testing.T) {
 	assert.Equal(t, "http://10.0.0.1:8080", host.URLWithScheme(false))
 	assert.Equal(t, "https://10.0.0.1:8080", host.URLWithScheme(true))
 }
+
+func TestRegistry_ReloadFromConfig(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := NewRegistry(logger)
+	ctx := context.Background()
+
+	// Load initial backends
+	initial := []config.Backend{
+		{
+			Name: "backend-a",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 8080},
+			},
+		},
+	}
+	err := reg.LoadFromConfig(initial)
+	require.NoError(t, err)
+
+	_, exists := reg.Get("backend-a")
+	assert.True(t, exists)
+
+	// Reload with different backends
+	updated := []config.Backend{
+		{
+			Name: "backend-b",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.2", Port: 9090},
+			},
+		},
+		{
+			Name: "backend-c",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.3", Port: 7070},
+			},
+		},
+	}
+	err = reg.ReloadFromConfig(ctx, updated)
+	require.NoError(t, err)
+
+	// Old backend should be gone
+	_, exists = reg.Get("backend-a")
+	assert.False(t, exists)
+
+	// New backends should exist
+	_, exists = reg.Get("backend-b")
+	assert.True(t, exists)
+	_, exists = reg.Get("backend-c")
+	assert.True(t, exists)
+}
+
+func TestRegistry_ReloadFromConfig_Empty(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := NewRegistry(logger)
+	ctx := context.Background()
+
+	// Load initial backends
+	initial := []config.Backend{
+		{
+			Name: "backend-a",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 8080},
+			},
+		},
+	}
+	err := reg.LoadFromConfig(initial)
+	require.NoError(t, err)
+
+	// Reload with empty list
+	err = reg.ReloadFromConfig(ctx, []config.Backend{})
+	require.NoError(t, err)
+
+	all := reg.GetAll()
+	assert.Empty(t, all)
+}
+
+func TestRegistry_ReloadFromConfig_InvalidBackend(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := NewRegistry(logger)
+	ctx := context.Background()
+
+	// Reload with invalid backend (no hosts)
+	invalid := []config.Backend{
+		{
+			Name:  "invalid",
+			Hosts: []config.BackendHost{},
+		},
+	}
+	err := reg.ReloadFromConfig(ctx, invalid)
+	assert.Error(t, err)
+}

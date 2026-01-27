@@ -157,7 +157,7 @@ spec:
 
 ### Vault-Based Certificate Management
 
-Using HashiCorp Vault for dynamic certificate provisioning:
+Using HashiCorp Vault PKI for dynamic certificate provisioning with automatic renewal:
 
 ```yaml
 routes:
@@ -179,10 +179,57 @@ routes:
           - api.secure.example.com
           - www.secure.example.com
         ttl: 24h
+        renewBefore: 1h  # Renew 1 hour before expiry
       sniHosts:
         - secure.example.com
         - api.secure.example.com
       minVersion: "1.3"
+```
+
+#### Advanced Vault PKI Configuration
+
+```yaml
+routes:
+  - name: advanced-vault-route
+    match:
+      - uri:
+          prefix: /api/tenant-a
+    route:
+      - destination:
+          host: tenant-a-backend
+          port: 8080
+    tls:
+      vault:
+        enabled: true
+        pkiMount: pki-tenant-a
+        role: tenant-server
+        commonName: tenant-a.example.com
+        altNames:
+          - api.tenant-a.example.com
+          - "*.tenant-a.example.com"
+        ipSans:
+          - "10.0.1.100"
+        ttl: 12h
+        renewBefore: 30m
+        format: pem
+        privateKeyFormat: pkcs8
+        excludeCnFromSans: false
+      sniHosts:
+        - tenant-a.example.com
+        - api.tenant-a.example.com
+        - "*.tenant-a.example.com"
+      minVersion: "1.2"
+      maxVersion: "1.3"
+      # Client certificate validation with Vault PKI
+      clientValidation:
+        enabled: true
+        vault:
+          enabled: true
+          pkiMount: pki-client
+          role: tenant-a-clients
+        requireClientCert: true
+        allowedCNs:
+          - "client.tenant-a.example.com"
 ```
 
 ### Mutual TLS (mTLS) Configuration

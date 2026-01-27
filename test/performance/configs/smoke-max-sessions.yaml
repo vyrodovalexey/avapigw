@@ -44,4 +44,4 @@ autostop:
     # Stop if HTTP 5xx errors exceed 20% for 10 seconds
     - http(5xx,20%,10s)
     # Stop if net errors exceed 10%
-    - net(10%,10s)
+    - http(net,10%,10s)

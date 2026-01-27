@@ -93,6 +93,10 @@ spec:
                   name: {{ include "avapigw.fullname" . }}-vault
                   key: token
             {{- end }}
+            {{- if eq .Values.vault.authMethod "kubernetes" }}
+            - name: VAULT_ROLE
+              value: {{ .Values.vault.role | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.keycloak.enabled }}
             - name: KEYCLOAK_URL

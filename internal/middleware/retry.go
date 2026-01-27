@@ -3,16 +3,14 @@ package middleware
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
 // DefaultMaxBodySize is the default maximum body size for retry buffering (1MB).
@@ -144,7 +142,10 @@ func executeWithRetry(
 		logRetryAttempt(logger, r, attempt, cfg.Attempts, rw.status)
 
 		if attempt < cfg.Attempts-1 {
-			backoff := calculateBackoff(attempt, cfg.BackoffBase, cfg.BackoffMax)
+			backoff := retry.CalculateBackoff(
+				attempt, cfg.BackoffBase, cfg.BackoffMax,
+				retry.DefaultJitterFactor,
+			)
 			time.Sleep(backoff)
 		}
 	}
@@ -222,6 +223,14 @@ func (rw *retryResponseWriter) Write(b []byte) (int, error) {
 	return rw.body.Write(b)
 }
 
+// Flush implements http.Flusher interface.
+// This is intentionally a no-op because retryResponseWriter buffers
+// the entire response body for potential retry attempts. Flushing
+// mid-response would prevent retries from working correctly.
+func (rw *retryResponseWriter) Flush() {
+	// no-op: response is buffered for retry, cannot flush mid-response
+}
+
 // shouldRetry determines if a request should be retried based on status.
 func shouldRetry(status int, retryOn []string) bool {
 	for _, condition := range retryOn {
@@ -242,28 +251,6 @@ func matchRetryCondition(status int, condition string) bool {
 	default:
 		return false
 	}
-}
-
-// calculateBackoff calculates exponential backoff with jitter.
-func calculateBackoff(attempt int, base, maxBackoff time.Duration) time.Duration {
-	backoff := float64(base) * math.Pow(2, float64(attempt))
-	jitter := backoff * 0.25 * secureRandomFloat()
-	backoff += jitter
-
-	if backoff > float64(maxBackoff) {
-		backoff = float64(maxBackoff)
-	}
-
-	return time.Duration(backoff)
-}
-
-// secureRandomFloat returns a cryptographically secure random float64 between 0 and 1.
-func secureRandomFloat() float64 {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0.5 // fallback to middle value
-	}
-	return float64(binary.LittleEndian.Uint64(b[:])) / float64(^uint64(0))
 }
 
 // RetryFromConfig creates retry middleware from gateway config.

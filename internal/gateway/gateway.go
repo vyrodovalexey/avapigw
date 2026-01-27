@@ -15,6 +15,11 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// configField is an atomic pointer for lock-free config access.
+// It eliminates the race condition where readers calling Config()
+// with RLock could see stale data after Reload() swaps the pointer.
+type configField = atomic.Pointer[config.GatewayConfig]
+
 // State represents the gateway state.
 type State int32
 
@@ -47,14 +52,17 @@ func (s State) String() string {
 
 // Gateway is the main API Gateway struct.
 type Gateway struct {
-	config        *config.GatewayConfig
+	// config uses atomic.Pointer for lock-free concurrent access.
+	// Reload() stores a new pointer atomically; Config() loads it
+	// without acquiring a mutex, preventing stale-read races.
+	config configField
+
 	logger        observability.Logger
 	engine        *gin.Engine
 	listeners     []*Listener
 	grpcListeners []*GRPCListener
 	state         atomic.Int32
 	startTime     time.Time
-	mu            sync.RWMutex
 
 	// Handlers
 	routeHandler http.Handler
@@ -90,14 +98,14 @@ func WithRouteHandler(handler http.Handler) Option {
 // New creates a new Gateway instance.
 func New(cfg *config.GatewayConfig, opts ...Option) (*Gateway, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("configuration is required")
+		return nil, ErrNilConfig
 	}
 
 	g := &Gateway{
-		config:          cfg,
 		logger:          observability.NopLogger(),
 		shutdownTimeout: 30 * time.Second,
 	}
+	g.config.Store(cfg)
 
 	for _, opt := range opts {
 		opt(g)
@@ -111,11 +119,11 @@ func New(cfg *config.GatewayConfig, opts ...Option) (*Gateway, error) {
 // Start starts the gateway.
 func (g *Gateway) Start(ctx context.Context) error {
 	if !g.state.CompareAndSwap(int32(StateStopped), int32(StateStarting)) {
-		return fmt.Errorf("gateway is not in stopped state")
+		return ErrGatewayNotStopped
 	}
 
 	g.logger.Info("starting gateway",
-		observability.String("name", g.config.Metadata.Name),
+		observability.String("name", g.config.Load().Metadata.Name),
 	)
 
 	// Initialize gin engine
@@ -155,7 +163,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	g.state.Store(int32(StateRunning))
 
 	g.logger.Info("gateway started",
-		observability.String("name", g.config.Metadata.Name),
+		observability.String("name", g.config.Load().Metadata.Name),
 		observability.Int("http_listeners", len(g.listeners)),
 		observability.Int("grpc_listeners", len(g.grpcListeners)),
 	)
@@ -166,11 +174,11 @@ func (g *Gateway) Start(ctx context.Context) error {
 // Stop stops the gateway gracefully.
 func (g *Gateway) Stop(ctx context.Context) error {
 	if !g.state.CompareAndSwap(int32(StateRunning), int32(StateStopping)) {
-		return fmt.Errorf("gateway is not running")
+		return ErrGatewayNotRunning
 	}
 
 	g.logger.Info("stopping gateway",
-		observability.String("name", g.config.Metadata.Name),
+		observability.String("name", g.config.Load().Metadata.Name),
 	)
 
 	// Create timeout context if not already set
@@ -186,30 +194,34 @@ func (g *Gateway) Stop(ctx context.Context) error {
 	g.state.Store(int32(StateStopped))
 
 	g.logger.Info("gateway stopped",
-		observability.String("name", g.config.Metadata.Name),
+		observability.String("name", g.config.Load().Metadata.Name),
 	)
 
 	return nil
 }
 
 // Reload reloads the gateway configuration.
+// The new config is validated first, then stored atomically so that
+// concurrent readers via Config() never observe a partially-updated
+// pointer and never block on a mutex.
 func (g *Gateway) Reload(cfg *config.GatewayConfig) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
 	g.logger.Info("reloading gateway configuration",
 		observability.String("name", cfg.Metadata.Name),
 	)
 
-	// Validate new configuration
+	// Validate new configuration before swapping
 	if err := config.ValidateConfig(cfg); err != nil {
-		return fmt.Errorf("invalid configuration: %w", err)
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 
-	// Update configuration
-	g.config = cfg
+	// Atomic store ensures concurrent Config() callers see
+	// either the old or the new pointer, never a torn read.
+	g.config.Store(cfg)
 
-	// TODO: Implement hot-reload of routes and backends
+	// Hot-reload of middleware, routes, and backends is handled
+	// by the config watcher callback in cmd/gateway/main.go via
+	// reloadComponents(), which calls UpdateConfig on each
+	// middleware component after this method returns.
 
 	g.logger.Info("gateway configuration reloaded",
 		observability.String("name", cfg.Metadata.Name),
@@ -236,11 +248,10 @@ func (g *Gateway) Uptime() time.Duration {
 	return time.Since(g.startTime)
 }
 
-// Config returns the current configuration.
+// Config returns the current configuration via an atomic load,
+// providing lock-free, race-free access for concurrent readers.
 func (g *Gateway) Config() *config.GatewayConfig {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.config
+	return g.config.Load()
 }
 
 // Engine returns the gin engine.
@@ -261,30 +272,43 @@ func (g *Gateway) setupRoutes() {
 
 // createListeners creates listeners from configuration.
 func (g *Gateway) createListeners() error {
-	g.listeners = make([]*Listener, 0, len(g.config.Spec.Listeners))
+	cfg := g.config.Load()
+	g.listeners = make([]*Listener, 0, len(cfg.Spec.Listeners))
 	g.grpcListeners = make([]*GRPCListener, 0)
 
-	for _, listenerCfg := range g.config.Spec.Listeners {
+	for _, listenerCfg := range cfg.Spec.Listeners {
 		// Check if this is a gRPC listener
 		if listenerCfg.Protocol == config.ProtocolGRPC {
 			grpcListener, err := NewGRPCListener(listenerCfg,
 				WithGRPCListenerLogger(g.logger),
 			)
 			if err != nil {
-				return fmt.Errorf("failed to create gRPC listener %s: %w", listenerCfg.Name, err)
+				return fmt.Errorf(
+					"failed to create gRPC listener %s: %w",
+					listenerCfg.Name, err,
+				)
 			}
 
 			// Load gRPC routes
-			if err := grpcListener.LoadRoutes(g.config.Spec.GRPCRoutes); err != nil {
-				return fmt.Errorf("failed to load gRPC routes for listener %s: %w", listenerCfg.Name, err)
+			if err := grpcListener.LoadRoutes(cfg.Spec.GRPCRoutes); err != nil {
+				return fmt.Errorf(
+					"failed to load gRPC routes for listener %s: %w",
+					listenerCfg.Name, err,
+				)
 			}
 
 			g.grpcListeners = append(g.grpcListeners, grpcListener)
 		} else {
 			// HTTP listener
-			listener, err := NewListener(listenerCfg, g.engine, WithListenerLogger(g.logger))
+			listener, err := NewListener(
+				listenerCfg, g.engine,
+				WithListenerLogger(g.logger),
+			)
 			if err != nil {
-				return fmt.Errorf("failed to create listener %s: %w", listenerCfg.Name, err)
+				return fmt.Errorf(
+					"failed to create listener %s: %w",
+					listenerCfg.Name, err,
+				)
 			}
 			g.listeners = append(g.listeners, listener)
 		}

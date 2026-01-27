@@ -216,6 +216,30 @@ spec:
     maxAge: 86400
     allowCredentials: false
 
+  audit:
+    enabled: true
+    output: stdout
+    format: json
+    level: info
+    events:
+      authentication: true
+      authorization: true
+      request: false
+      response: false
+      configuration: true
+      security: true
+    skipPaths:
+      - /health
+      - /metrics
+      - /ready
+      - /live
+    redactFields:
+      - password
+      - secret
+      - token
+      - authorization
+      - cookie
+
   observability:
     metrics:
       enabled: true

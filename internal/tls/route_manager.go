@@ -73,6 +73,8 @@ type RouteTLSManager struct {
 	sniMapping   map[string]string          // SNI hostname -> route name (exact match)
 	wildcardSNI  map[string]string          // Wildcard pattern -> route name
 
+	vaultProviderFactory VaultProviderFactory
+
 	mu      sync.RWMutex
 	started bool
 	closed  bool
@@ -100,6 +102,15 @@ func WithRouteTLSManagerMetrics(metrics MetricsRecorder) RouteTLSManagerOption {
 func WithBaseManager(baseManager *Manager) RouteTLSManagerOption {
 	return func(m *RouteTLSManager) {
 		m.baseManager = baseManager
+	}
+}
+
+// WithRouteTLSManagerVaultProviderFactory sets the Vault provider factory for Vault-based
+// route certificate management. The factory is called when a route has Vault TLS configured
+// and enabled, creating a CertificateProvider that manages certificates via Vault PKI.
+func WithRouteTLSManagerVaultProviderFactory(factory VaultProviderFactory) RouteTLSManagerOption {
+	return func(m *RouteTLSManager) {
+		m.vaultProviderFactory = factory
 	}
 }
 
@@ -462,6 +473,9 @@ func (m *RouteTLSManager) handleRouteEvent(routeName string, event CertificateEv
 			observability.String("message", event.Message),
 		)
 		m.metrics.RecordCertificateReload(true)
+		if event.Certificate != nil {
+			m.metrics.UpdateCertificateExpiryFromTLS(event.Certificate, "route_"+routeName)
+		}
 
 	case CertificateEventReloaded:
 		m.logger.Info("route certificate reloaded",
@@ -469,6 +483,9 @@ func (m *RouteTLSManager) handleRouteEvent(routeName string, event CertificateEv
 			observability.String("message", event.Message),
 		)
 		m.metrics.RecordCertificateReload(true)
+		if event.Certificate != nil {
+			m.metrics.UpdateCertificateExpiryFromTLS(event.Certificate, "route_"+routeName)
+		}
 
 	case CertificateEventExpiring:
 		m.logger.Warn("route certificate expiring soon",
@@ -686,8 +703,16 @@ func (m *RouteTLSManager) validateRouteConfig(cfg *RouteTLSConfig) error {
 func (m *RouteTLSManager) createRouteProvider(routeName string, cfg *RouteTLSConfig) (CertificateProvider, error) {
 	// Check if Vault is configured
 	if cfg.Vault != nil && cfg.Vault.Enabled {
-		// Vault provider would be implemented separately
-		return nil, NewConfigurationError("vault", "Vault provider not yet implemented for route TLS")
+		if m.vaultProviderFactory == nil {
+			return nil, NewConfigurationError("vault",
+				"vault provider factory is required when vault TLS is enabled for route "+routeName)
+		}
+		provider, err := m.vaultProviderFactory(cfg.Vault, m.logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create vault provider for route %s: %w",
+				routeName, err)
+		}
+		return provider, nil
 	}
 
 	// Use file provider

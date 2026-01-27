@@ -159,6 +159,23 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.observability.metrics.enabled` | Enable metrics | `true` |
 | `gateway.observability.tracing.enabled` | Enable tracing | `false` |
 
+### Audit Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `gateway.audit.enabled` | Enable audit logging | `true` |
+| `gateway.audit.output` | Audit output destination (stdout, stderr, file path) | `stdout` |
+| `gateway.audit.format` | Audit log format (json, text) | `json` |
+| `gateway.audit.level` | Minimum audit level (debug, info, warn, error) | `info` |
+| `gateway.audit.events.authentication` | Audit authentication events | `true` |
+| `gateway.audit.events.authorization` | Audit authorization events | `true` |
+| `gateway.audit.events.request` | Audit request events | `false` |
+| `gateway.audit.events.response` | Audit response events | `false` |
+| `gateway.audit.events.configuration` | Audit configuration changes | `true` |
+| `gateway.audit.events.security` | Audit security events | `true` |
+| `gateway.audit.skipPaths` | Paths to skip from auditing | `["/health", "/metrics", "/ready", "/live"]` |
+| `gateway.audit.redactFields` | Fields to redact from audit logs | `["password", "secret", "token", "authorization", "cookie"]` |
+
 ### Redis (Bitnami Subchart)
 
 | Parameter | Description | Default |
@@ -260,6 +277,31 @@ gateway:
     queueTimeout: 30s
 ```
 
+### Enable Audit Logging
+
+```yaml
+gateway:
+  audit:
+    enabled: true
+    output: stdout
+    format: json
+    level: info
+    events:
+      authentication: true
+      authorization: true
+      request: true
+      response: false
+      configuration: true
+      security: true
+    skipPaths:
+      - /health
+      - /metrics
+    redactFields:
+      - password
+      - secret
+      - token
+```
+
 ### Backend with Rate Limiting and Max Sessions
 
 ```yaml
@@ -355,6 +397,21 @@ affinity:
 ```
 
 ## Upgrading
+
+### To 0.4.0
+
+Added new features and improvements:
+- **HTTP Flusher support** - All response writer wrappers now implement http.Flusher for streaming/SSE/WebSocket support
+- **Config reload race fix** - Gateway config now uses atomic.Pointer for lock-free concurrent access
+- **Hot-reload completion** - Rate limiter, max sessions, router, and backends now properly reload on config change
+- **Circuit breaker limitation** - Circuit breaker does NOT support runtime reconfiguration (documented limitation)
+- **Audit trace context** - Audit events now include TraceID and SpanID when tracing is enabled
+- **Metrics cardinality fix** - Prometheus metrics now use "route" label instead of "path" to prevent cardinality explosion
+- **Retry deduplication** - internal/retry package is now the single source of truth for exponential backoff
+- **X-Forwarded-For security** - New TrustedProxies configuration option with secure defaults
+- **Gateway sentinel errors** - ErrGatewayNotStopped, ErrGatewayNotRunning, ErrNilConfig, ErrInvalidConfig
+- **Complete documentation** - All 33 internal packages now have doc.go files
+- **Helm chart fixes** - Fixed .helmignore excluding test hooks, fixed wget in test-connection.yaml for read-only filesystem
 
 ### To 0.3.0
 

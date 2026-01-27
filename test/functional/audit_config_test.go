@@ -495,3 +495,230 @@ func TestFunctional_AuditConfig_BodyInclusion(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+func TestFunctional_AuditConfig_StdoutOutput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stdout output is valid", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Level:   audit.LevelInfo,
+			Output:  "stdout",
+			Format:  "json",
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+		assert.Equal(t, "stdout", cfg.Output)
+		assert.Equal(t, "stdout", cfg.GetEffectiveOutput())
+	})
+
+	t.Run("empty output defaults to stdout", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Level:   audit.LevelInfo,
+			Output:  "",
+			Format:  "json",
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+		assert.Equal(t, "stdout", cfg.GetEffectiveOutput())
+	})
+
+	t.Run("stderr output is valid", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Level:   audit.LevelInfo,
+			Output:  "stderr",
+			Format:  "json",
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+		assert.Equal(t, "stderr", cfg.GetEffectiveOutput())
+	})
+
+	t.Run("default config uses stdout output", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := audit.DefaultConfig()
+		require.NotNil(t, cfg)
+		assert.Equal(t, "stdout", cfg.Output)
+		assert.Equal(t, "stdout", cfg.GetEffectiveOutput())
+	})
+}
+
+func TestFunctional_AuditConfig_EventsMapping(t *testing.T) {
+	t.Parallel()
+
+	t.Run("all events enabled", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Events: &audit.EventsConfig{
+				Authentication: true,
+				Authorization:  true,
+				Request:        true,
+				Response:       true,
+				Configuration:  true,
+				Administrative: true,
+				Security:       true,
+			},
+		}
+
+		assert.True(t, cfg.ShouldAuditAuthentication())
+		assert.True(t, cfg.ShouldAuditAuthorization())
+		assert.True(t, cfg.ShouldAuditRequest())
+		assert.True(t, cfg.ShouldAuditResponse())
+		assert.True(t, cfg.ShouldAuditConfiguration())
+		assert.True(t, cfg.ShouldAuditAdministrative())
+		assert.True(t, cfg.ShouldAuditSecurity())
+	})
+
+	t.Run("all events disabled", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Events: &audit.EventsConfig{
+				Authentication: false,
+				Authorization:  false,
+				Request:        false,
+				Response:       false,
+				Configuration:  false,
+				Administrative: false,
+				Security:       false,
+			},
+		}
+
+		assert.False(t, cfg.ShouldAuditAuthentication())
+		assert.False(t, cfg.ShouldAuditAuthorization())
+		assert.False(t, cfg.ShouldAuditRequest())
+		assert.False(t, cfg.ShouldAuditResponse())
+		assert.False(t, cfg.ShouldAuditConfiguration())
+		assert.False(t, cfg.ShouldAuditAdministrative())
+		assert.False(t, cfg.ShouldAuditSecurity())
+	})
+
+	t.Run("nil events config uses defaults", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Events:  nil,
+		}
+
+		// With nil events, authentication/authorization/configuration/administrative/security default to true
+		assert.True(t, cfg.ShouldAuditAuthentication())
+		assert.True(t, cfg.ShouldAuditAuthorization())
+		assert.True(t, cfg.ShouldAuditConfiguration())
+		assert.True(t, cfg.ShouldAuditAdministrative())
+		assert.True(t, cfg.ShouldAuditSecurity())
+
+		// Request and Response require explicit Events config
+		assert.False(t, cfg.ShouldAuditRequest())
+		assert.False(t, cfg.ShouldAuditResponse())
+	})
+
+	t.Run("disabled config disables all events", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: false,
+			Events: &audit.EventsConfig{
+				Authentication: true,
+				Authorization:  true,
+				Request:        true,
+				Response:       true,
+				Configuration:  true,
+				Administrative: true,
+				Security:       true,
+			},
+		}
+
+		assert.False(t, cfg.ShouldAuditAuthentication())
+		assert.False(t, cfg.ShouldAuditAuthorization())
+		assert.False(t, cfg.ShouldAuditRequest())
+		assert.False(t, cfg.ShouldAuditResponse())
+		assert.False(t, cfg.ShouldAuditConfiguration())
+		assert.False(t, cfg.ShouldAuditAdministrative())
+		assert.False(t, cfg.ShouldAuditSecurity())
+	})
+}
+
+func TestFunctional_AuditConfig_MiddlewareIntegration(t *testing.T) {
+	t.Parallel()
+
+	t.Run("config with stdout output creates valid logger", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Level:   audit.LevelInfo,
+			Output:  "stdout",
+			Format:  "json",
+			Events: &audit.EventsConfig{
+				Request:  true,
+				Response: true,
+			},
+			SkipPaths: []string{"/health", "/metrics"},
+			RedactFields: []string{
+				"password",
+				"secret",
+				"token",
+			},
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+
+		// Verify the config is suitable for middleware use
+		assert.True(t, cfg.Enabled)
+		assert.Equal(t, "stdout", cfg.GetEffectiveOutput())
+		assert.Equal(t, "json", cfg.GetEffectiveFormat())
+		assert.Equal(t, audit.LevelInfo, cfg.GetEffectiveLevel())
+		assert.True(t, cfg.ShouldAuditRequest())
+		assert.True(t, cfg.ShouldAuditResponse())
+		assert.True(t, cfg.ShouldSkipPath("/health"))
+		assert.True(t, cfg.ShouldSkipPath("/metrics"))
+		assert.False(t, cfg.ShouldSkipPath("/api/v1/items"))
+	})
+
+	t.Run("config with all defaults creates valid logger", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := audit.DefaultConfig()
+		require.NotNil(t, cfg)
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+
+		assert.True(t, cfg.Enabled)
+		assert.Equal(t, "stdout", cfg.GetEffectiveOutput())
+		assert.Equal(t, "json", cfg.GetEffectiveFormat())
+		assert.Equal(t, audit.LevelInfo, cfg.GetEffectiveLevel())
+	})
+
+	t.Run("config with text format is valid", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &audit.Config{
+			Enabled: true,
+			Level:   audit.LevelInfo,
+			Output:  "stdout",
+			Format:  "text",
+		}
+
+		err := cfg.Validate()
+		require.NoError(t, err)
+		assert.Equal(t, "text", cfg.GetEffectiveFormat())
+	})
+}

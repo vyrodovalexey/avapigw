@@ -95,11 +95,15 @@ parse_phout() {
     local phout_file="$RESULTS_DIR/phout.txt"
     
     if [ ! -f "$phout_file" ]; then
-        log_warn "phout.txt not found in $RESULTS_DIR"
-        return 1
+        # Search for phout_*.log files (Yandex Tank naming convention)
+        phout_file=$(find "$RESULTS_DIR" -name "phout_*.log" -o -name "phout*.log" -o -name "phout*.txt" 2>/dev/null | head -1)
+        if [ -z "$phout_file" ] || [ ! -f "$phout_file" ]; then
+            log_warn "phout file not found in $RESULTS_DIR"
+            return 1
+        fi
     fi
     
-    log_info "Parsing phout.txt..."
+    log_info "Parsing $phout_file..."
     
     # phout.txt format:
     # timestamp tag interval_real connect_time send_time latency receive_time interval_event size_out size_in net_code proto_code

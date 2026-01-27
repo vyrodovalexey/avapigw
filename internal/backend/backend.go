@@ -420,7 +420,11 @@ func (b *ServiceBackend) initTLS(cfg config.Backend) error {
 		return nil
 	}
 
-	b.tlsBuilder = NewTLSConfigBuilder(cfg.TLS, WithTLSLogger(b.logger))
+	tlsOpts := []TLSConfigBuilderOption{WithTLSLogger(b.logger)}
+	if b.vaultClient != nil {
+		tlsOpts = append(tlsOpts, WithTLSVaultClient(b.vaultClient))
+	}
+	b.tlsBuilder = NewTLSConfigBuilder(cfg.TLS, tlsOpts...)
 	tlsConfig, err := b.tlsBuilder.Build()
 	if err != nil {
 		return fmt.Errorf("failed to build TLS config for backend %s: %w", cfg.Name, err)
@@ -814,15 +818,63 @@ func (r *Registry) StopAll(ctx context.Context) error {
 // LoadFromConfig loads backends from configuration.
 func (r *Registry) LoadFromConfig(backends []config.Backend) error {
 	for _, cfg := range backends {
-		backend, err := NewBackend(cfg, WithBackendLogger(r.logger))
+		b, err := NewBackend(cfg, WithBackendLogger(r.logger))
 		if err != nil {
 			return fmt.Errorf("failed to create backend %s: %w", cfg.Name, err)
 		}
 
-		if err := r.Register(backend); err != nil {
+		if err := r.Register(b); err != nil {
 			return err
 		}
 	}
+
+	return nil
+}
+
+// ReloadFromConfig replaces all backends with new configuration.
+// Existing backends are stopped before being replaced.
+func (r *Registry) ReloadFromConfig(
+	ctx context.Context,
+	backends []config.Backend,
+) error {
+	r.mu.Lock()
+
+	// Stop and remove existing backends
+	for name, b := range r.backends {
+		if err := b.Stop(ctx); err != nil {
+			r.logger.Error("failed to stop backend during reload",
+				observability.String("name", name),
+				observability.Error(err),
+			)
+		}
+		delete(r.backends, name)
+	}
+
+	r.mu.Unlock()
+
+	// Load new backends
+	for _, cfg := range backends {
+		b, err := NewBackend(cfg, WithBackendLogger(r.logger))
+		if err != nil {
+			return fmt.Errorf(
+				"failed to create backend %s: %w", cfg.Name, err,
+			)
+		}
+
+		if err := r.Register(b); err != nil {
+			return err
+		}
+
+		if err := b.Start(ctx); err != nil {
+			return fmt.Errorf(
+				"failed to start backend %s: %w", cfg.Name, err,
+			)
+		}
+	}
+
+	r.logger.Info("backends reloaded",
+		observability.Int("count", len(backends)),
+	)
 
 	return nil
 }

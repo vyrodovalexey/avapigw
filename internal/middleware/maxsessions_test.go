@@ -587,3 +587,91 @@ func TestMaxSessionsLimiter_ConcurrentAcquireRelease(t *testing.T) {
 		t.Error("expected some successful acquires")
 	}
 }
+
+func TestMaxSessionsLimiter_UpdateConfig(t *testing.T) {
+	msl := NewMaxSessionsLimiter(2, 0, 0, WithMaxSessionsLogger(observability.NopLogger()))
+	ctx := context.Background()
+
+	// Acquire 2 slots (at limit)
+	if !msl.Acquire(ctx) {
+		t.Fatal("first acquire should succeed")
+	}
+	if !msl.Acquire(ctx) {
+		t.Fatal("second acquire should succeed")
+	}
+
+	// Third should fail
+	if msl.Acquire(ctx) {
+		t.Error("third acquire should fail at limit 2")
+	}
+
+	// Update to allow more concurrent sessions
+	msl.UpdateConfig(&config.MaxSessionsConfig{
+		Enabled:       true,
+		MaxConcurrent: 5,
+	})
+
+	if msl.MaxConcurrent() != 5 {
+		t.Errorf("expected maxConcurrent 5, got %d", msl.MaxConcurrent())
+	}
+
+	// Now third acquire should succeed
+	if !msl.Acquire(ctx) {
+		t.Error("third acquire should succeed after update to 5")
+	}
+
+	// Release all
+	msl.Release()
+	msl.Release()
+	msl.Release()
+}
+
+func TestMaxSessionsLimiter_UpdateConfig_NilConfig(t *testing.T) {
+	msl := NewMaxSessionsLimiter(10, 0, 0)
+	original := msl.MaxConcurrent()
+
+	// Nil config should be a no-op
+	msl.UpdateConfig(nil)
+
+	if msl.MaxConcurrent() != original {
+		t.Errorf("expected maxConcurrent %d, got %d", original, msl.MaxConcurrent())
+	}
+}
+
+func TestMaxSessionsLimiter_UpdateConfig_ReduceLimit(t *testing.T) {
+	msl := NewMaxSessionsLimiter(10, 0, 0, WithMaxSessionsLogger(observability.NopLogger()))
+	ctx := context.Background()
+
+	// Acquire 5 slots
+	for i := 0; i < 5; i++ {
+		if !msl.Acquire(ctx) {
+			t.Fatalf("acquire %d should succeed", i)
+		}
+	}
+
+	// Reduce limit to 3 (below current usage)
+	msl.UpdateConfig(&config.MaxSessionsConfig{
+		Enabled:       true,
+		MaxConcurrent: 3,
+	})
+
+	// New acquires should fail since current (5) > new limit (3)
+	if msl.Acquire(ctx) {
+		t.Error("acquire should fail when current exceeds new limit")
+	}
+
+	// Release down to 2 (below new limit)
+	msl.Release()
+	msl.Release()
+	msl.Release()
+
+	// Now acquire should succeed
+	if !msl.Acquire(ctx) {
+		t.Error("acquire should succeed after releasing below limit")
+	}
+
+	// Clean up
+	msl.Release()
+	msl.Release()
+	msl.Release()
+}

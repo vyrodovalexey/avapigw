@@ -802,3 +802,43 @@ func TestGRPCListener_IsRouteTLSEnabled_EmptyManager(t *testing.T) {
 	// Should return false when route TLS manager has no routes
 	assert.False(t, listener.IsRouteTLSEnabled())
 }
+
+func TestGRPCListener_WithGRPCVaultProviderFactory(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	factory := func(_ *tlspkg.VaultTLSConfig, _ observability.Logger) (tlspkg.CertificateProvider, error) {
+		return tlspkg.NewNopProvider(), nil
+	}
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCVaultProviderFactory(factory),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.NotNil(t, listener.vaultProviderFactory)
+}
+
+func TestGRPCListener_WithGRPCVaultProviderFactory_NilFactory(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCVaultProviderFactory(nil),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Nil(t, listener.vaultProviderFactory)
+}

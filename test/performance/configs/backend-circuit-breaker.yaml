@@ -62,6 +62,6 @@ autostop:
     # Stop if 5xx errors exceed 50% for 60 seconds
     - http(5xx,50%,60s)
     # Stop if net errors exceed 10%
-    - net(10%,30s)
+    - http(net,10%,30s)
     # Stop if response time exceeds 10 seconds for 50% of requests
     - time(10000,50%,60s)

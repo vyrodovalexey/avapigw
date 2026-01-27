@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/gateway"
@@ -568,4 +569,184 @@ func TestInitTracer_WithEmptyServiceName(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = tracer.Shutdown(ctx)
+}
+
+// ============================================================
+// initAuditLogger coverage
+// ============================================================
+
+// TestInitAuditLogger tests all initAuditLogger code paths.
+// audit.NewLogger uses promauto which registers metrics with the global
+// Prometheus registry and panics on duplicate registration. Therefore,
+// only ONE subtest may create a real (enabled) audit logger. The enabled
+// test covers all config mapping paths in a single call.
+func TestInitAuditLogger(t *testing.T) {
+	// Not parallel - audit logger creates global Prometheus metrics
+
+	t.Run("nil_config", func(t *testing.T) {
+		logger := observability.NopLogger()
+		cfg := &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Audit: nil,
+			},
+		}
+
+		auditLogger := initAuditLogger(cfg, logger)
+
+		assert.NotNil(t, auditLogger)
+		assert.NoError(t, auditLogger.Close())
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		logger := observability.NopLogger()
+		cfg := &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Audit: &config.AuditConfig{
+					Enabled: false,
+				},
+			},
+		}
+
+		auditLogger := initAuditLogger(cfg, logger)
+
+		assert.NotNil(t, auditLogger)
+		assert.NoError(t, auditLogger.Close())
+	})
+
+	// This single test covers the full enabled path with all config options:
+	// - Enabled=true (real logger creation)
+	// - Empty output (defaults to stdout)
+	// - Events config mapping
+	// - SkipPaths mapping
+	// - RedactFields mapping
+	// Only ONE enabled test is allowed due to promauto global registration.
+	t.Run("enabled_with_all_options", func(t *testing.T) {
+		logger := observability.NopLogger()
+		cfg := &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Audit: &config.AuditConfig{
+					Enabled:      true,
+					Output:       "", // Empty output should default to stdout
+					Format:       "json",
+					Level:        "info",
+					SkipPaths:    []string{"/health", "/ready", "/metrics"},
+					RedactFields: []string{"password", "token", "authorization"},
+					Events: &config.AuditEventsConfig{
+						Authentication: true,
+						Authorization:  true,
+						Request:        true,
+						Response:       true,
+						Configuration:  true,
+						Security:       true,
+					},
+				},
+			},
+		}
+
+		auditLogger := initAuditLogger(cfg, logger)
+
+		assert.NotNil(t, auditLogger)
+		assert.NoError(t, auditLogger.Close())
+	})
+}
+
+// Verify that initAuditLogger is called during initApplication with audit disabled.
+func TestInitApplication_WithAuditDisabled(t *testing.T) {
+	// Not parallel - creates global Prometheus metrics
+	logger := observability.NopLogger()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-app-no-audit"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{
+					Name:     "http",
+					Bind:     "127.0.0.1",
+					Port:     19088,
+					Protocol: config.ProtocolHTTP,
+				},
+			},
+			Routes:   []config.Route{},
+			Backends: []config.Backend{},
+			Audit: &config.AuditConfig{
+				Enabled: false,
+			},
+		},
+	}
+
+	app := initApplication(cfg, logger)
+	assert.NotNil(t, app)
+	assert.NotNil(t, app.auditLogger) // Should be noop logger
+
+	// Clean up
+	_ = app.auditLogger.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = app.tracer.Shutdown(ctx)
+}
+
+// Verify the waitForShutdown closes audit logger.
+func TestWaitForShutdown_WithAuditLogger(t *testing.T) {
+	// Not parallel - sends SIGINT to process
+	logger := observability.NopLogger()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{
+					Name:     "http",
+					Bind:     "127.0.0.1",
+					Port:     19089,
+					Protocol: config.ProtocolHTTP,
+				},
+			},
+		},
+	}
+
+	gw, err := gateway.New(cfg,
+		gateway.WithLogger(logger),
+		gateway.WithShutdownTimeout(1*time.Second),
+	)
+	require.NoError(t, err)
+
+	err = gw.Start(context.Background())
+	require.NoError(t, err)
+
+	backendReg := backend.NewRegistry(logger)
+	tracer, err := observability.NewTracer(observability.TracerConfig{
+		ServiceName: "test",
+		Enabled:     false,
+	})
+	require.NoError(t, err)
+
+	app := &application{
+		gateway:         gw,
+		backendRegistry: backendReg,
+		healthChecker:   health.NewChecker("test"),
+		metrics:         observability.NewMetrics("test"),
+		tracer:          tracer,
+		config:          cfg,
+		auditLogger:     audit.NewNoopLogger(),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		waitForShutdown(app, nil, logger)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	p, err := os.FindProcess(os.Getpid())
+	require.NoError(t, err)
+	err = p.Signal(syscall.SIGINT)
+	require.NoError(t, err)
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(10 * time.Second):
+		t.Fatal("waitForShutdown did not complete in time")
+	}
 }

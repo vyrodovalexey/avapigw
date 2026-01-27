@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"sync"
 	"time"
 
@@ -35,6 +36,8 @@ type Manager struct {
 	tlsConfig *tls.Config
 	validator *Validator
 
+	vaultProviderFactory VaultProviderFactory
+
 	mu      sync.RWMutex
 	started bool
 	closed  bool
@@ -62,6 +65,15 @@ func WithManagerMetrics(metrics MetricsRecorder) ManagerOption {
 func WithCertificateProvider(provider CertificateProvider) ManagerOption {
 	return func(m *Manager) {
 		m.provider = provider
+	}
+}
+
+// WithVaultProviderFactory sets the Vault provider factory for Vault-based certificate management.
+// The factory is called when Vault TLS is configured and enabled, creating a CertificateProvider
+// that manages certificates via Vault PKI secrets engine.
+func WithVaultProviderFactory(factory VaultProviderFactory) ManagerOption {
+	return func(m *Manager) {
+		m.vaultProviderFactory = factory
 	}
 }
 
@@ -122,8 +134,16 @@ func (m *Manager) createProvider() error {
 
 	// Check if Vault is configured
 	if m.config.Vault != nil && m.config.Vault.Enabled {
-		// Vault provider would be implemented separately
-		return NewConfigurationError("vault", "Vault provider not yet implemented")
+		if m.vaultProviderFactory == nil {
+			return NewConfigurationError("vault",
+				"vault provider factory is required when vault TLS is enabled")
+		}
+		provider, err := m.vaultProviderFactory(m.config.Vault, m.logger)
+		if err != nil {
+			return fmt.Errorf("failed to create vault provider: %w", err)
+		}
+		m.provider = provider
+		return nil
 	}
 
 	// Use file provider

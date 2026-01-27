@@ -150,6 +150,29 @@ func (msl *MaxSessionsLimiter) QueueLength() int {
 	return len(msl.queue)
 }
 
+// UpdateConfig updates the max sessions limiter configuration.
+// Only maxConcurrent is updated atomically; queueSize and
+// queueTimeout cannot be changed at runtime because the queue
+// channel is fixed at creation time.
+func (msl *MaxSessionsLimiter) UpdateConfig(
+	cfg *config.MaxSessionsConfig,
+) {
+	if cfg == nil {
+		return
+	}
+
+	msl.mu.Lock()
+	defer msl.mu.Unlock()
+
+	msl.maxConcurrent = int64(cfg.MaxConcurrent)
+	msl.queueTimeout = cfg.GetEffectiveQueueTimeout()
+
+	msl.logger.Info("max sessions configuration updated",
+		observability.Int("maxConcurrent", cfg.MaxConcurrent),
+		observability.Duration("queueTimeout", msl.queueTimeout),
+	)
+}
+
 // Stop stops the max sessions limiter.
 func (msl *MaxSessionsLimiter) Stop() {
 	msl.mu.Lock()

@@ -25,6 +25,12 @@
 #     backend-jwt-auth        - Backend JWT authentication overhead
 #     backend-basic-auth      - Backend Basic authentication overhead
 #
+#   Vault PKI TLS Tests:
+#     vault-tls-handshake     - TLS handshake with Vault-issued certs
+#     vault-cert-renewal      - Certificate renewal under load
+#     vault-backend-mtls      - Backend mTLS with Vault client certs
+#     vault-multi-route-sni   - Multi-route SNI with Vault certs
+#
 #   all                   - Run all tests sequentially
 #
 # Options:
@@ -381,6 +387,26 @@ get_test_config() {
             CONFIG_FILE="backend-ratelimit.yaml"
             AMMO_FILE="backend-ratelimit.txt"
             ;;
+        # Vault PKI TLS tests
+        vault-tls-handshake)
+            CONFIG_FILE="vault-tls-handshake.yaml"
+            AMMO_FILE="vault-tls-handshake.txt"
+            USE_SECURE_CONFIG=true
+            ;;
+        vault-cert-renewal)
+            CONFIG_FILE="vault-cert-renewal.yaml"
+            AMMO_FILE="vault-cert-renewal.txt"
+            USE_SECURE_CONFIG=true
+            ;;
+        vault-backend-mtls)
+            CONFIG_FILE="vault-backend-mtls.yaml"
+            AMMO_FILE="vault-backend-mtls.txt"
+            ;;
+        vault-multi-route-sni)
+            CONFIG_FILE="vault-multi-route-sni.yaml"
+            AMMO_FILE="vault-multi-route-sni.txt"
+            USE_SECURE_CONFIG=true
+            ;;
         *)
             log_error "Unknown test: $test_name"
             echo "Available tests:"
@@ -389,6 +415,7 @@ get_test_config() {
             echo "  Features: smoke-test, route-request-limits, route-cors"
             echo "  Backend: backend-circuit-breaker, backend-jwt-auth, backend-basic-auth"
             echo "  Advanced: max-sessions, smoke-max-sessions, capacity-aware-lb, backend-ratelimit"
+            echo "  Vault TLS: vault-tls-handshake, vault-cert-renewal, vault-backend-mtls, vault-multi-route-sni"
             exit 1
             ;;
     esac
@@ -543,6 +570,10 @@ Test names:
   rate-limiting         Rate limiting stress test
   circuit-breaker       Circuit breaker test
   mixed-workload        Mixed HTTP workload test
+  vault-tls-handshake   TLS handshake with Vault-issued certs
+  vault-cert-renewal    Certificate renewal under load
+  vault-backend-mtls    Backend mTLS with Vault client certs
+  vault-multi-route-sni Multi-route SNI with Vault certs
   all                   Run all tests sequentially
 
 Options:

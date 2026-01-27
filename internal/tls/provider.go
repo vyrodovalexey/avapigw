@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 // CertificateProvider defines the interface for certificate providers.
@@ -139,6 +141,19 @@ func ExtractCertificateInfo(cert *x509.Certificate) *CertificateInfo {
 
 	return info
 }
+
+// VaultProviderFactory is a function that creates a CertificateProvider from Vault TLS configuration.
+// This factory pattern avoids circular imports between the tls and vault packages.
+// The factory is provided by the application bootstrap code, which has access to both packages.
+//
+// Parameters:
+//   - config: The Vault TLS configuration specifying PKI mount, role, common name, etc.
+//   - logger: The logger for the provider to use.
+//
+// Returns:
+//   - CertificateProvider: A provider that manages certificates via Vault PKI.
+//   - error: An error if the provider could not be created.
+type VaultProviderFactory func(config *VaultTLSConfig, logger observability.Logger) (CertificateProvider, error)
 
 // NopProvider is a certificate provider that returns no certificates.
 // It is useful for testing or when TLS is disabled.

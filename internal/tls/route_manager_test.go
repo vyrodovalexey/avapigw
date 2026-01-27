@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -976,7 +977,7 @@ func TestRouteTLSManager_VaultNotImplemented(t *testing.T) {
 
 	err := manager.AddRoute("vault-route", cfg)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "Vault provider not yet implemented")
+	assert.Contains(t, err.Error(), "vault provider factory is required when vault TLS is enabled")
 }
 
 func TestRouteTLSManager_WithClientValidation(t *testing.T) {
@@ -1053,4 +1054,338 @@ func TestWithBaseManager(t *testing.T) {
 	opt(m)
 
 	assert.Equal(t, baseManager, m.baseManager)
+}
+
+func TestWithRouteTLSManagerVaultProviderFactory(t *testing.T) {
+	t.Parallel()
+
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		return newMockProvider(), nil
+	}
+	opt := WithRouteTLSManagerVaultProviderFactory(factory)
+
+	m := &RouteTLSManager{}
+	opt(m)
+
+	assert.NotNil(t, m.vaultProviderFactory)
+}
+
+func TestRouteTLSManager_AddRoute_VaultEnabled_WithFactory(t *testing.T) {
+	t.Parallel()
+
+	factoryCalled := false
+	mockProv := newMockProvider()
+
+	// Generate a real cert so the mock provider can return it
+	certs := generateRouteTestCertificates(t, []string{"vault.example.com"})
+	defer certs.cleanup()
+
+	cert, err := tls.LoadX509KeyPair(certs.certFile, certs.keyFile)
+	require.NoError(t, err)
+	mockProv.setCertificate(&cert)
+
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		factoryCalled = true
+		return mockProv, nil
+	}
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerVaultProviderFactory(factory),
+	)
+	defer manager.Close()
+
+	cfg := &RouteTLSConfig{
+		SNIHosts: []string{"vault.example.com"},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "vault.example.com",
+		},
+	}
+
+	err = manager.AddRoute("vault-route", cfg)
+	require.NoError(t, err)
+
+	assert.True(t, factoryCalled, "vault provider factory should have been called")
+	assert.True(t, manager.HasRoute("vault-route"))
+	assert.Equal(t, 1, manager.RouteCount())
+}
+
+func TestRouteTLSManager_AddRoute_VaultEnabled_NoFactory(t *testing.T) {
+	t.Parallel()
+
+	manager := NewRouteTLSManager()
+	defer manager.Close()
+
+	cfg := &RouteTLSConfig{
+		SNIHosts: []string{"vault.example.com"},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "vault.example.com",
+		},
+	}
+
+	err := manager.AddRoute("vault-route", cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "vault provider factory is required")
+	assert.False(t, manager.HasRoute("vault-route"))
+}
+
+func TestRouteTLSManager_AddRoute_VaultEnabled_FactoryError(t *testing.T) {
+	t.Parallel()
+
+	factoryErr := fmt.Errorf("vault connection failed")
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		return nil, factoryErr
+	}
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerVaultProviderFactory(factory),
+	)
+	defer manager.Close()
+
+	cfg := &RouteTLSConfig{
+		SNIHosts: []string{"vault.example.com"},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "vault.example.com",
+		},
+	}
+
+	err := manager.AddRoute("vault-route", cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to create vault provider")
+	assert.ErrorIs(t, err, factoryErr)
+	assert.False(t, manager.HasRoute("vault-route"))
+}
+
+func TestRouteTLSManager_AddRoute_FileProvider_StillWorks(t *testing.T) {
+	t.Parallel()
+
+	certs := generateRouteTestCertificates(t, []string{"file.example.com"})
+	defer certs.cleanup()
+
+	// Even with a vault factory set, file-based routes should still work
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		t.Fatal("vault factory should not be called for file-based routes")
+		return nil, nil
+	}
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerVaultProviderFactory(factory),
+	)
+	defer manager.Close()
+
+	cfg := &RouteTLSConfig{
+		CertFile: certs.certFile,
+		KeyFile:  certs.keyFile,
+		SNIHosts: []string{"file.example.com"},
+	}
+
+	err := manager.AddRoute("file-route", cfg)
+	require.NoError(t, err)
+
+	assert.True(t, manager.HasRoute("file-route"))
+	assert.Equal(t, 1, manager.RouteCount())
+}
+
+func TestRouteTLSManager_HandleRouteEvent_UpdatesExpiryMetrics(t *testing.T) {
+	t.Parallel()
+
+	certs := generateRouteTestCertificates(t, []string{"metrics.example.com"})
+	defer certs.cleanup()
+
+	metrics := newMockMetrics()
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerMetrics(metrics),
+	)
+	defer manager.Close()
+
+	cert, err := tls.LoadX509KeyPair(certs.certFile, certs.keyFile)
+	require.NoError(t, err)
+
+	// Test CertificateEventLoaded with certificate - should update expiry
+	manager.handleRouteEvent("test-route", CertificateEvent{
+		Type:        CertificateEventLoaded,
+		Certificate: &cert,
+		Message:     "certificate loaded",
+	})
+	assert.Equal(t, 1, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 1, metrics.getCertExpiryCount())
+
+	// Test CertificateEventLoaded with nil certificate - should not update expiry
+	manager.handleRouteEvent("test-route", CertificateEvent{
+		Type:    CertificateEventLoaded,
+		Message: "certificate loaded without cert",
+	})
+	assert.Equal(t, 2, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 1, metrics.getCertExpiryCount()) // unchanged
+
+	// Test CertificateEventReloaded with certificate - should update expiry
+	manager.handleRouteEvent("test-route", CertificateEvent{
+		Type:        CertificateEventReloaded,
+		Certificate: &cert,
+		Message:     "certificate reloaded",
+	})
+	assert.Equal(t, 3, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 2, metrics.getCertExpiryCount())
+
+	// Test CertificateEventReloaded with nil certificate - should not update expiry
+	manager.handleRouteEvent("test-route", CertificateEvent{
+		Type:    CertificateEventReloaded,
+		Message: "certificate reloaded without cert",
+	})
+	assert.Equal(t, 4, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 2, metrics.getCertExpiryCount()) // unchanged
+}
+
+func TestRouteTLSManager_HandleRouteEvent_NilCertificate(t *testing.T) {
+	t.Parallel()
+
+	metrics := newMockMetrics()
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerMetrics(metrics),
+	)
+	defer manager.Close()
+
+	// Should not panic with nil certificate
+	manager.handleRouteEvent("test-route", CertificateEvent{
+		Type:    CertificateEventLoaded,
+		Message: "loaded without cert",
+	})
+	assert.Equal(t, 1, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 0, metrics.getCertExpiryCount())
+}
+
+func TestRouteTLSManager_HandleRouteEvent_Expiring(t *testing.T) {
+	t.Parallel()
+
+	metrics := newMockMetrics()
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerMetrics(metrics),
+	)
+	defer manager.Close()
+
+	// Expiring event should not record reload success/failure
+	manager.handleRouteEvent("test-route", CertificateEvent{
+		Type:    CertificateEventExpiring,
+		Message: "certificate expiring soon",
+	})
+	assert.Equal(t, 0, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 0, metrics.getCertReloadFailureCount())
+}
+
+func TestRouteTLSManager_HandleRouteEvent_Error(t *testing.T) {
+	t.Parallel()
+
+	metrics := newMockMetrics()
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerMetrics(metrics),
+	)
+	defer manager.Close()
+
+	// Error event should record reload failure
+	manager.handleRouteEvent("test-route", CertificateEvent{
+		Type:    CertificateEventError,
+		Error:   fmt.Errorf("certificate error"),
+		Message: "failed to load certificate",
+	})
+	assert.Equal(t, 0, metrics.getCertReloadSuccessCount())
+	assert.Equal(t, 1, metrics.getCertReloadFailureCount())
+}
+
+func TestRouteTLSManager_AddRoute_VaultEnabled_NilFactory(t *testing.T) {
+	t.Parallel()
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerVaultProviderFactory(nil),
+	)
+	defer manager.Close()
+
+	cfg := &RouteTLSConfig{
+		SNIHosts: []string{"vault.example.com"},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "vault.example.com",
+		},
+	}
+
+	err := manager.AddRoute("vault-route", cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "vault provider factory is required")
+}
+
+func TestRouteTLSManager_AddRoute_VaultDisabled_FileProvider(t *testing.T) {
+	t.Parallel()
+
+	certs := generateRouteTestCertificates(t, []string{"file.example.com"})
+	defer certs.cleanup()
+
+	// No vault factory set, vault disabled - should use file provider
+	manager := NewRouteTLSManager()
+	defer manager.Close()
+
+	cfg := &RouteTLSConfig{
+		CertFile: certs.certFile,
+		KeyFile:  certs.keyFile,
+		SNIHosts: []string{"file.example.com"},
+	}
+
+	err := manager.AddRoute("file-route", cfg)
+	require.NoError(t, err)
+
+	assert.True(t, manager.HasRoute("file-route"))
+}
+
+func TestRouteTLSManager_GetCertificate_VaultRoute(t *testing.T) {
+	t.Parallel()
+
+	certs := generateRouteTestCertificates(t, []string{"vault.example.com"})
+	defer certs.cleanup()
+
+	mockProv := newMockProvider()
+	cert, err := tls.LoadX509KeyPair(certs.certFile, certs.keyFile)
+	require.NoError(t, err)
+	mockProv.setCertificate(&cert)
+
+	factory := func(_ *VaultTLSConfig, _ observability.Logger) (CertificateProvider, error) {
+		return mockProv, nil
+	}
+
+	manager := NewRouteTLSManager(
+		WithRouteTLSManagerVaultProviderFactory(factory),
+	)
+	defer manager.Close()
+
+	cfg := &RouteTLSConfig{
+		SNIHosts: []string{"vault.example.com"},
+		Vault: &VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "my-role",
+			CommonName: "vault.example.com",
+		},
+	}
+
+	err = manager.AddRoute("vault-route", cfg)
+	require.NoError(t, err)
+
+	hello := &tls.ClientHelloInfo{
+		ServerName: "vault.example.com",
+	}
+
+	gotCert, err := manager.GetCertificate(hello)
+	require.NoError(t, err)
+	require.NotNil(t, gotCert)
 }

@@ -40,6 +40,11 @@ type GatewaySpec struct {
 	RequestLimits *RequestLimitsConfig `yaml:"requestLimits,omitempty" json:"requestLimits,omitempty"`
 	// MaxSessions configures maximum concurrent sessions at the gateway level.
 	MaxSessions *MaxSessionsConfig `yaml:"maxSessions,omitempty" json:"maxSessions,omitempty"`
+	// TrustedProxies is a list of trusted proxy CIDRs for X-Forwarded-For validation.
+	// When configured, only requests from these CIDRs will have their
+	// X-Forwarded-For headers trusted for client IP extraction.
+	// When empty, only RemoteAddr is used (secure default).
+	TrustedProxies []string `yaml:"trustedProxies,omitempty" json:"trustedProxies,omitempty"`
 }
 
 // Listener represents a network listener configuration.

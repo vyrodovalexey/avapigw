@@ -54,6 +54,6 @@ autostop:
     # Stop if response time exceeds 1000ms for 30% of requests
     - time(1000,30%,30)
     # Stop if network errors exceed 1%
-    - net(1%,10)
+    - http(net,1%,10s)
     # Stop if 4xx errors exceed 10%
     - http(4xx,10%,10)

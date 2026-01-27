@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
 func TestCalculateBackoff(t *testing.T) {
@@ -46,9 +48,12 @@ func TestCalculateBackoff(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Run multiple times to account for jitter
 			for i := 0; i < 10; i++ {
-				result := calculateBackoff(tt.attempt, tt.base, tt.maxBackoff)
+				result := retry.CalculateBackoff(
+					tt.attempt, tt.base, tt.maxBackoff,
+					retry.DefaultJitterFactor,
+				)
 				if result < tt.minExpect || result > tt.maxExpect {
-					t.Errorf("calculateBackoff() = %v, want between %v and %v",
+					t.Errorf("CalculateBackoff() = %v, want between %v and %v",
 						result, tt.minExpect, tt.maxExpect)
 				}
 			}
@@ -61,9 +66,12 @@ func TestCalculateBackoff_MaxCap(t *testing.T) {
 	maxBackoff := 500 * time.Millisecond
 
 	// High attempt number should be capped at maxBackoff
-	result := calculateBackoff(10, base, maxBackoff)
+	result := retry.CalculateBackoff(
+		10, base, maxBackoff, retry.DefaultJitterFactor,
+	)
 	if result > maxBackoff {
-		t.Errorf("calculateBackoff() = %v, should be capped at %v", result, maxBackoff)
+		t.Errorf("CalculateBackoff() = %v, should be capped at %v",
+			result, maxBackoff)
 	}
 }
 
@@ -342,17 +350,21 @@ func TestRetry_ContextDeadlineExceeded(t *testing.T) {
 }
 
 func TestCalculateBackoff_ZeroBase(t *testing.T) {
-	result := calculateBackoff(0, 0, 5*time.Second)
+	result := retry.CalculateBackoff(
+		0, 0, 5*time.Second, retry.DefaultJitterFactor,
+	)
 	if result != 0 {
-		t.Errorf("calculateBackoff() with zero base = %v, want 0", result)
+		t.Errorf("CalculateBackoff() with zero base = %v, want 0", result)
 	}
 }
 
 func TestCalculateBackoff_ZeroMax(t *testing.T) {
-	result := calculateBackoff(5, 100*time.Millisecond, 0)
+	result := retry.CalculateBackoff(
+		5, 100*time.Millisecond, 0, retry.DefaultJitterFactor,
+	)
 	// With zero max, the backoff should still be calculated but not capped
 	if result < 0 {
-		t.Errorf("calculateBackoff() = %v, should not be negative", result)
+		t.Errorf("CalculateBackoff() = %v, should not be negative", result)
 	}
 }
 
@@ -362,12 +374,17 @@ func TestCalculateBackoff_ExponentialGrowth(t *testing.T) {
 
 	var prevBackoff time.Duration
 	for attempt := 0; attempt < 5; attempt++ {
-		backoff := calculateBackoff(attempt, base, maxBackoff)
+		backoff := retry.CalculateBackoff(
+			attempt, base, maxBackoff,
+			retry.DefaultJitterFactor,
+		)
 		if attempt > 0 && backoff <= prevBackoff {
 			// Note: Due to jitter, this might occasionally fail
 			// but generally backoff should increase
-			t.Logf("Warning: backoff did not increase at attempt %d: %v <= %v",
-				attempt, backoff, prevBackoff)
+			t.Logf(
+				"Warning: backoff did not increase at attempt %d: %v <= %v",
+				attempt, backoff, prevBackoff,
+			)
 		}
 		prevBackoff = backoff
 	}

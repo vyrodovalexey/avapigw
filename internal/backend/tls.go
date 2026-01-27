@@ -2,16 +2,19 @@
 package backend
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // TLSConfigBuilder builds TLS configurations for backend connections.
@@ -19,6 +22,9 @@ type TLSConfigBuilder struct {
 	config  *config.BackendTLSConfig
 	logger  observability.Logger
 	metrics tlspkg.MetricsRecorder
+
+	vaultClient   vault.Client
+	vaultProvider *vault.VaultProvider
 
 	// Cached TLS config
 	mu        sync.RWMutex
@@ -39,6 +45,13 @@ func WithTLSLogger(logger observability.Logger) TLSConfigBuilderOption {
 func WithTLSMetrics(metrics tlspkg.MetricsRecorder) TLSConfigBuilderOption {
 	return func(b *TLSConfigBuilder) {
 		b.metrics = metrics
+	}
+}
+
+// WithTLSVaultClient sets the Vault client for Vault-based backend certificate management.
+func WithTLSVaultClient(client vault.Client) TLSConfigBuilderOption {
+	return func(b *TLSConfigBuilder) {
+		b.vaultClient = client
 	}
 }
 
@@ -220,14 +233,20 @@ func (b *TLSConfigBuilder) loadCACertificate(cfg *tls.Config) error {
 	return nil
 }
 
+// Vault provider timeout constants for backend TLS.
+const (
+	// vaultProviderStartTimeout is the timeout for starting the Vault provider.
+	vaultProviderStartTimeout = 30 * time.Second
+
+	// vaultCertificateFetchTimeout is the timeout for fetching a certificate from the Vault provider.
+	vaultCertificateFetchTimeout = 5 * time.Second
+)
+
 // loadClientCertificate loads the client certificate for mTLS.
 func (b *TLSConfigBuilder) loadClientCertificate(cfg *tls.Config) error {
 	// Check if Vault is configured for client certificates
 	if b.config.Vault != nil && b.config.Vault.Enabled {
-		b.logger.Debug("Vault-based client certificates configured (will be loaded at runtime)")
-		// Vault certificates are loaded dynamically at runtime
-		// This would require integration with the Vault PKI provider
-		return nil
+		return b.loadVaultClientCertificate(cfg)
 	}
 
 	// Load from files
@@ -253,11 +272,86 @@ func (b *TLSConfigBuilder) loadClientCertificate(cfg *tls.Config) error {
 	return nil
 }
 
+// loadVaultClientCertificate configures Vault-based client certificate for mTLS.
+//
+//nolint:contextcheck // TLS callback has no context; bounded background contexts are appropriate
+func (b *TLSConfigBuilder) loadVaultClientCertificate(cfg *tls.Config) error {
+	if b.vaultClient == nil {
+		return fmt.Errorf("vault client is required when vault TLS is enabled for backend")
+	}
+
+	// Parse TTL from config
+	var ttl time.Duration
+	if b.config.Vault.TTL != "" {
+		var err error
+		ttl, err = time.ParseDuration(b.config.Vault.TTL)
+		if err != nil {
+			return fmt.Errorf("invalid vault TTL %q: %w", b.config.Vault.TTL, err)
+		}
+	}
+
+	providerConfig := &vault.VaultProviderConfig{
+		PKIMount:   b.config.Vault.PKIMount,
+		Role:       b.config.Vault.Role,
+		CommonName: b.config.Vault.CommonName,
+		AltNames:   b.config.Vault.AltNames,
+		TTL:        ttl,
+	}
+	provider, err := vault.NewVaultProvider(
+		b.vaultClient,
+		providerConfig,
+		vault.WithVaultProviderLogger(b.logger),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create vault provider for backend TLS: %w", err)
+	}
+
+	// Start the provider to issue initial certificate
+	startCtx, startCancel := context.WithTimeout(context.Background(), vaultProviderStartTimeout)
+	defer startCancel()
+	if err := provider.Start(startCtx); err != nil {
+		_ = provider.Close()
+		return fmt.Errorf("failed to start vault provider for backend TLS: %w", err)
+	}
+
+	// Store provider for lifecycle management
+	b.vaultProvider = provider
+
+	// Use GetClientCertificate callback for dynamic cert loading.
+	// The TLS library callback does not provide a context, so we create a
+	// bounded background context for each certificate fetch operation.
+	cfg.GetClientCertificate = func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		certCtx, certCancel := context.WithTimeout(context.Background(), vaultCertificateFetchTimeout)
+		defer certCancel()
+		cert, certErr := provider.GetCertificate(certCtx, nil)
+		if certErr != nil {
+			return nil, certErr
+		}
+		// Update metrics on each certificate fetch
+		b.metrics.UpdateCertificateExpiryFromTLS(cert, "backend_client")
+		return cert, nil
+	}
+
+	b.logger.Info("vault-based client certificate configured for backend mTLS",
+		observability.String("commonName", b.config.Vault.CommonName),
+	)
+	return nil
+}
+
 // Invalidate invalidates the cached TLS config, forcing a rebuild on next Build call.
 func (b *TLSConfigBuilder) Invalidate() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.tlsConfig = nil
+}
+
+// Close releases resources held by the TLS config builder.
+// If a Vault provider was created, it will be stopped and closed.
+func (b *TLSConfigBuilder) Close() error {
+	if b.vaultProvider != nil {
+		return b.vaultProvider.Close()
+	}
+	return nil
 }
 
 // parseTLSVersion parses a TLS version string to the corresponding constant.
@@ -313,4 +407,9 @@ func (t *BackendTLSTransport) Transport() *http.Transport {
 // TLSConfig returns the TLS configuration.
 func (t *BackendTLSTransport) TLSConfig() *tls.Config {
 	return t.transport.TLSClientConfig
+}
+
+// Close releases resources held by the transport.
+func (t *BackendTLSTransport) Close() error {
+	return t.builder.Close()
 }

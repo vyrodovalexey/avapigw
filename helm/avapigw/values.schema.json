@@ -522,6 +522,84 @@
             }
           }
         },
+        "audit": {
+          "type": "object",
+          "description": "Audit logging configuration",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable audit logging"
+            },
+            "output": {
+              "type": "string",
+              "default": "stdout",
+              "description": "Audit output destination (stdout, stderr, or file path)"
+            },
+            "format": {
+              "type": "string",
+              "enum": ["json", "text"],
+              "default": "json",
+              "description": "Audit log format"
+            },
+            "level": {
+              "type": "string",
+              "enum": ["debug", "info", "warn", "error"],
+              "default": "info",
+              "description": "Minimum audit level"
+            },
+            "events": {
+              "type": "object",
+              "description": "Events to audit",
+              "properties": {
+                "authentication": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit authentication events"
+                },
+                "authorization": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit authorization events"
+                },
+                "request": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Audit request events"
+                },
+                "response": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Audit response events"
+                },
+                "configuration": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit configuration change events"
+                },
+                "security": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit security events"
+                }
+              }
+            },
+            "skipPaths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths to skip from auditing"
+            },
+            "redactFields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Fields to redact from audit logs"
+            }
+          }
+        },
         "backends": {
           "type": "array",
           "description": "Backend service configurations",
@@ -631,6 +709,86 @@
           "enum": ["token", "kubernetes", "approle"],
           "default": "kubernetes",
           "description": "Vault authentication method"
+        },
+        "role": {
+          "type": "string",
+          "default": "",
+          "description": "Vault role for Kubernetes auth"
+        },
+        "token": {
+          "type": "string",
+          "default": "",
+          "description": "Vault token (use only for development)"
+        },
+        "secretPath": {
+          "type": "string",
+          "default": "",
+          "description": "Secret path in Vault"
+        },
+        "tls": {
+          "type": "object",
+          "description": "TLS configuration for Vault connection",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable TLS for Vault connection"
+            },
+            "caSecretName": {
+              "type": "string",
+              "default": "",
+              "description": "CA certificate secret name"
+            },
+            "skipVerify": {
+              "type": "boolean",
+              "default": false,
+              "description": "Skip TLS verification (not recommended for production)"
+            }
+          }
+        },
+        "pki": {
+          "type": "object",
+          "description": "Vault PKI configuration for listener TLS certificates",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable Vault PKI for listener TLS"
+            },
+            "pkiMount": {
+              "type": "string",
+              "default": "pki",
+              "description": "Vault PKI secrets engine mount path"
+            },
+            "role": {
+              "type": "string",
+              "default": "",
+              "description": "Vault PKI role name"
+            },
+            "commonName": {
+              "type": "string",
+              "default": "",
+              "description": "Common name for certificate requests"
+            },
+            "altNames": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Subject alternative names (DNS)"
+            },
+            "ttl": {
+              "type": "string",
+              "default": "24h",
+              "description": "Certificate TTL"
+            },
+            "renewBefore": {
+              "type": "string",
+              "default": "1h",
+              "description": "Duration before expiry to renew"
+            }
+          }
         }
       }
     },

@@ -1157,18 +1157,158 @@
   5. Verify new configurations are applied without restart
 - **Expected Results**: New features support hot reload correctly
 
+## Vault PKI Integration Tests
+
+### TestFunctional_VaultPKI_ListenerTLS
+- **Description**: Test Vault PKI integration for listener-level TLS
+- **Preconditions**: Vault server running with PKI enabled
+- **Steps**:
+  1. Configure listener with Vault PKI certificate
+  2. Verify certificate issuance from Vault
+  3. Test TLS handshake with issued certificate
+  4. Verify certificate expiry metrics
+  5. Test certificate renewal before expiry
+- **Expected Results**: Listener TLS works with Vault-issued certificates
+
+### TestFunctional_VaultPKI_RouteTLS
+- **Description**: Test Vault PKI integration for route-level TLS
+- **Preconditions**: Vault server running with PKI enabled
+- **Steps**:
+  1. Configure route with Vault PKI certificate
+  2. Verify certificate issuance for route
+  3. Test SNI-based certificate selection
+  4. Verify route-specific certificate metrics
+  5. Test automatic certificate renewal
+- **Expected Results**: Route TLS works with Vault-issued certificates
+
+### TestFunctional_VaultPKI_BackendMTLS
+- **Description**: Test Vault PKI integration for backend mTLS
+- **Preconditions**: Vault server running with PKI enabled, backend with mTLS
+- **Steps**:
+  1. Configure backend with Vault PKI client certificate
+  2. Verify client certificate issuance
+  3. Test mTLS connection to backend
+  4. Verify backend authentication metrics
+  5. Test client certificate renewal
+- **Expected Results**: Backend mTLS works with Vault-issued client certificates
+
+### TestFunctional_VaultPKI_CertificateRenewal
+- **Description**: Test automatic certificate renewal with Vault PKI
+- **Preconditions**: Vault server running
+- **Steps**:
+  1. Issue certificate with short TTL (1 hour)
+  2. Configure renewal before expiry (10 minutes)
+  3. Wait for renewal trigger
+  4. Verify new certificate issuance
+  5. Verify hot-swap without service interruption
+  6. Test renewal failure handling
+- **Expected Results**: Certificates renew automatically without downtime
+
+### TestFunctional_VaultPKI_MultiTenant
+- **Description**: Test Vault PKI with multi-tenant configuration
+- **Preconditions**: Vault server with multiple PKI mounts
+- **Steps**:
+  1. Configure multiple routes with different PKI mounts
+  2. Verify certificate isolation between tenants
+  3. Test SNI-based certificate selection
+  4. Verify independent renewal schedules
+  5. Test tenant-specific CA validation
+- **Expected Results**: Multi-tenant PKI isolation works correctly
+
+### TestIntegration_VaultPKI_Authentication
+- **Description**: Test Vault authentication methods for PKI
+- **Preconditions**: Vault server with auth methods configured
+- **Steps**:
+  1. Test Kubernetes authentication
+  2. Test AppRole authentication
+  3. Test token authentication
+  4. Test AWS IAM authentication
+  5. Test GCP authentication
+  6. Verify token renewal and rotation
+- **Expected Results**: All authentication methods work for PKI operations
+
+### TestIntegration_VaultPKI_FailureHandling
+- **Description**: Test Vault PKI failure scenarios
+- **Preconditions**: Vault server running
+- **Steps**:
+  1. Test Vault server unavailability
+  2. Test PKI role permission errors
+  3. Test certificate issuance failures
+  4. Test network connectivity issues
+  5. Verify graceful degradation
+  6. Test recovery after failures
+- **Expected Results**: Failures are handled gracefully with proper fallbacks
+
+### TestIntegration_VaultPKI_Metrics
+- **Description**: Test Vault PKI metrics and monitoring
+- **Preconditions**: Vault server running, Prometheus enabled
+- **Steps**:
+  1. Issue certificates and verify expiry metrics
+  2. Trigger renewals and verify renewal metrics
+  3. Cause failures and verify error metrics
+  4. Test certificate validity duration metrics
+  5. Verify Vault operation metrics
+- **Expected Results**: All PKI operations are properly monitored
+
+### TestE2E_VaultPKI_CompleteFlow
+- **Description**: Test complete Vault PKI integration end-to-end
+- **Preconditions**: Vault server, backend services, monitoring stack
+- **Steps**:
+  1. Start gateway with Vault PKI configuration
+  2. Verify listener certificate from Vault
+  3. Test route-level certificates with SNI
+  4. Test backend mTLS with Vault client certificates
+  5. Verify automatic renewal across all certificate types
+  6. Test certificate metrics and alerting
+  7. Simulate failure scenarios and recovery
+- **Expected Results**: Complete Vault PKI integration works end-to-end
+
+### TestE2E_VaultPKI_HotReload
+- **Description**: Test Vault PKI configuration hot-reload
+- **Preconditions**: Gateway running with Vault PKI
+- **Steps**:
+  1. Start gateway with initial Vault PKI config
+  2. Update PKI configuration (new role, TTL, etc.)
+  3. Verify configuration reload without restart
+  4. Test new certificates with updated config
+  5. Verify existing certificates continue working
+- **Expected Results**: Vault PKI configuration supports hot-reload
+
+### TestE2E_VaultPKI_HighAvailability
+- **Description**: Test Vault PKI with high availability setup
+- **Preconditions**: Vault HA cluster, multiple gateway instances
+- **Steps**:
+  1. Deploy multiple gateway instances with Vault PKI
+  2. Test certificate issuance across instances
+  3. Simulate Vault node failures
+  4. Verify automatic failover
+  5. Test certificate consistency across instances
+- **Expected Results**: Vault PKI works correctly in HA setup
+
+### TestE2E_VaultPKI_Security
+- **Description**: Test Vault PKI security features
+- **Preconditions**: Vault server with security policies
+- **Steps**:
+  1. Test least-privilege PKI policies
+  2. Verify certificate validation and chains
+  3. Test client certificate authentication
+  4. Verify audit logging for PKI operations
+  5. Test certificate revocation handling
+- **Expected Results**: All security features work correctly
+
 ## New Features Comprehensive Tests
 
 ### TestComprehensive_RouteLevel_AllFeatures
-- **Description**: Comprehensive test of all route-level features
-- **Preconditions**: Backend service running
+- **Description**: Comprehensive test of all route-level features including Vault PKI
+- **Preconditions**: Backend service running, Vault server available
 - **Steps**:
-  1. Configure route with all new features (RequestLimits, CORS, Security)
+  1. Configure route with all new features (RequestLimits, CORS, Security, Vault PKI)
   2. Test request limits enforcement
   3. Test CORS preflight and actual requests
   4. Test security headers injection
-  5. Test feature interaction and precedence
-  6. Test configuration validation
+  5. Test Vault PKI certificate issuance and renewal
+  6. Test feature interaction and precedence
+  7. Test configuration validation
 - **Expected Results**: All route-level features work together correctly
 
 ### TestComprehensive_BackendLevel_AllFeatures
@@ -1945,3 +2085,311 @@
   3. Test exact match takes precedence
   4. Test wildcard matches other subdomains
 - **Expected Results**: Exact match takes precedence over wildcard
+
+## Audit Stdout Feature Tests
+
+### Functional Tests
+
+#### TestFunctional_AuditConfig_StdoutOutput
+- **Description**: Test audit config with stdout output validation
+- **Preconditions**: None
+- **Steps**:
+  1. Create config with explicit stdout output
+  2. Verify stdout output is valid
+  3. Create config with empty output
+  4. Verify empty output defaults to stdout
+  5. Create config with stderr output
+  6. Verify default config uses stdout
+- **Expected Results**: Stdout is the default and valid output destination
+
+#### TestFunctional_AuditConfig_EventsMapping
+- **Description**: Test audit events config mapping
+- **Preconditions**: None
+- **Steps**:
+  1. Create config with all events enabled
+  2. Verify all ShouldAudit* methods return true
+  3. Create config with all events disabled
+  4. Verify all ShouldAudit* methods return false
+  5. Test nil events config uses defaults
+  6. Test disabled config disables all events
+- **Expected Results**: Events mapping correctly reflects configuration
+
+#### TestFunctional_AuditConfig_MiddlewareIntegration
+- **Description**: Test audit config integration with middleware
+- **Preconditions**: None
+- **Steps**:
+  1. Create config suitable for middleware use
+  2. Verify all effective values are correct
+  3. Verify skip paths work
+  4. Test default config creates valid logger
+  5. Test text format is valid
+- **Expected Results**: Config integrates correctly with middleware
+
+#### TestFunctional_AuditMiddleware_Enabled
+- **Description**: Test audit middleware with enabled config
+- **Preconditions**: None
+- **Steps**:
+  1. Create audit logger with buffer writer
+  2. Wrap handler with audit middleware
+  3. Send HTTP request
+  4. Verify request and response events are logged
+  5. Verify correct status code capture
+  6. Verify request details (method, path, query, content-type)
+- **Expected Results**: Audit middleware logs request and response events
+
+#### TestFunctional_AuditMiddleware_Disabled
+- **Description**: Test audit middleware with disabled config
+- **Preconditions**: None
+- **Steps**:
+  1. Create disabled audit config
+  2. Wrap handler with audit middleware
+  3. Send HTTP request
+  4. Verify no audit output is produced
+  5. Test with noop logger
+- **Expected Results**: Disabled audit produces no events
+
+#### TestFunctional_AuditMiddleware_SkipPaths
+- **Description**: Test audit middleware respects skip paths
+- **Preconditions**: None
+- **Steps**:
+  1. Configure skip paths (/health, /metrics, /internal/*)
+  2. Send requests to skip paths
+  3. Verify no audit output for skipped paths
+  4. Send requests to non-skip paths
+  5. Verify audit output for non-skip paths
+- **Expected Results**: Skip paths are respected
+
+#### TestFunctional_AuditMiddleware_RedactFields
+- **Description**: Test audit middleware redacts sensitive fields
+- **Preconditions**: None
+- **Steps**:
+  1. Configure redact fields (password, secret, token, authorization)
+  2. Send request with Authorization header
+  3. Verify raw token does not appear in audit output
+- **Expected Results**: Sensitive fields are redacted
+
+#### TestFunctional_AuditMiddleware_EventTypes
+- **Description**: Test audit middleware event type filtering
+- **Preconditions**: None
+- **Steps**:
+  1. Enable only request events
+  2. Verify only request events are logged
+  3. Enable only response events
+  4. Verify only response events are logged
+  5. Disable both
+  6. Verify no events are logged
+- **Expected Results**: Event type filtering works correctly
+
+#### TestFunctional_AuditMiddleware_RequestIDIntegration
+- **Description**: Test audit middleware captures request ID
+- **Preconditions**: None
+- **Steps**:
+  1. Chain RequestID middleware before Audit middleware
+  2. Send request with X-Request-ID header
+  3. Verify request_id appears in audit event metadata
+- **Expected Results**: Request ID is captured in audit events
+
+#### TestFunctional_AuditMiddleware_ResponseWriterCapture
+- **Description**: Test audit middleware captures response details
+- **Preconditions**: None
+- **Steps**:
+  1. Send request that produces response body
+  2. Verify response body size is captured
+  3. Send request without explicit WriteHeader
+  4. Verify default 200 status is captured
+- **Expected Results**: Response details are correctly captured
+
+#### TestFunctional_AuditMiddleware_HTTPMethods
+- **Description**: Test audit middleware handles all HTTP methods
+- **Preconditions**: None
+- **Steps**:
+  1. Send GET, POST, PUT, DELETE, PATCH requests
+  2. Verify each method is correctly captured in audit events
+- **Expected Results**: All HTTP methods are handled
+
+#### TestFunctional_AuditMiddleware_ResourceInfo
+- **Description**: Test audit events contain resource information
+- **Preconditions**: None
+- **Steps**:
+  1. Send request to specific path
+  2. Verify resource type is "http"
+  3. Verify resource path matches request path
+  4. Verify resource method matches request method
+- **Expected Results**: Resource information is correctly populated
+
+#### TestFunctional_AuditMiddleware_DurationTracking
+- **Description**: Test audit response event includes duration
+- **Preconditions**: None
+- **Steps**:
+  1. Send request through audit middleware
+  2. Parse response event
+  3. Verify duration is positive
+- **Expected Results**: Duration is tracked in response events
+
+### Integration Tests
+
+#### TestIntegration_Audit_WithRealBackend
+- **Description**: Test audit with real backend service
+- **Preconditions**: Backend service running on port 8801
+- **Steps**:
+  1. Configure proxy with audit middleware
+  2. Send request to real backend
+  3. Verify proxy still works correctly
+  4. Verify audit events are logged
+  5. Verify correct status code from backend
+- **Expected Results**: Audit does not interfere with proxy operation
+
+#### TestIntegration_Audit_SkipPaths_WithRealRequests
+- **Description**: Test skip paths with real backend requests
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Configure skip paths and routes
+  2. Send request to /health (skipped)
+  3. Verify no audit output
+  4. Send request to /api/v1/items (audited)
+  5. Verify audit output
+- **Expected Results**: Skip paths work with real requests
+
+#### TestIntegration_Audit_HTTPMethods_WithRealBackend
+- **Description**: Test audit with various HTTP methods to real backend
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Send GET, POST, PUT, DELETE to real backend
+  2. Verify audit events for each method
+  3. Verify correct method in audit event
+- **Expected Results**: All HTTP methods are audited correctly
+
+#### TestIntegration_Audit_NormalProxyOperation
+- **Description**: Test audit does not modify proxy behavior
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Make direct request to backend
+  2. Make request through proxy with audit
+  3. Compare response bodies
+  4. Verify response headers are preserved
+- **Expected Results**: Audit is transparent to proxy operation
+
+#### TestIntegration_Audit_DirectResponse
+- **Description**: Test audit with direct response routes
+- **Preconditions**: None
+- **Steps**:
+  1. Configure direct response route
+  2. Send request through audit middleware
+  3. Verify direct response works
+  4. Verify audit events are logged
+- **Expected Results**: Audit works with direct response routes
+
+#### TestIntegration_Audit_RouteNotFound
+- **Description**: Test audit captures 404 for unmatched routes
+- **Preconditions**: None
+- **Steps**:
+  1. Configure specific route
+  2. Send request to non-existent path
+  3. Verify 404 response
+  4. Verify audit captures 404 status
+- **Expected Results**: 404 responses are audited
+
+#### TestIntegration_Audit_TextFormat
+- **Description**: Test audit with text format output
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Configure audit with text format
+  2. Send request to real backend
+  3. Verify text format output contains event info
+- **Expected Results**: Text format audit works correctly
+
+#### TestIntegration_Audit_FullMiddlewareChain
+- **Description**: Test audit in full middleware chain
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Chain RequestID -> Recovery -> Audit -> Proxy
+  2. Send request to real backend
+  3. Verify all middleware works together
+  4. Verify request_id in audit metadata
+- **Expected Results**: Audit works in full middleware chain
+
+### E2E Tests
+
+#### TestE2E_Audit_GatewayLifecycle
+- **Description**: Test gateway lifecycle with audit enabled
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Create gateway config with audit enabled
+  2. Start gateway
+  3. Verify gateway is running
+  4. Stop gateway
+  5. Verify gateway is stopped
+  6. Test with audit disabled
+- **Expected Results**: Gateway starts and stops cleanly with audit
+
+#### TestE2E_Audit_RequestProcessing
+- **Description**: Test audit does not affect request processing
+- **Preconditions**: Gateway and backend running
+- **Steps**:
+  1. Start gateway
+  2. Send GET request
+  3. Send POST request
+  4. Send health check request
+  5. Verify all responses are correct
+- **Expected Results**: Audit is transparent to request processing
+
+#### TestE2E_Audit_ResponseTimes
+- **Description**: Test audit does not significantly affect response times
+- **Preconditions**: Gateway and backend running
+- **Steps**:
+  1. Start gateway
+  2. Send multiple requests
+  3. Measure response times
+  4. Verify all within acceptable latency
+- **Expected Results**: Response times are not significantly affected
+
+#### TestE2E_Audit_LoadBalancing
+- **Description**: Test audit works with load balancing
+- **Preconditions**: Two backend services running
+- **Steps**:
+  1. Start gateway with load balancing
+  2. Send multiple requests
+  3. Verify requests are distributed
+  4. Verify all succeed
+- **Expected Results**: Audit works with load balanced requests
+
+#### TestE2E_Audit_ConcurrentRequests
+- **Description**: Test audit handles concurrent requests
+- **Preconditions**: Gateway and backend running
+- **Steps**:
+  1. Start gateway
+  2. Send concurrent requests (10 goroutines)
+  3. Verify most requests succeed
+  4. Verify no errors from audit
+- **Expected Results**: Concurrent requests are handled correctly
+
+#### TestE2E_Audit_CRUD_Journey
+- **Description**: Test complete CRUD journey with audit
+- **Preconditions**: Gateway and backend running
+- **Steps**:
+  1. Create item through gateway
+  2. Read items through gateway
+  3. Update item through gateway
+  4. Delete item through gateway
+- **Expected Results**: Complete CRUD journey works with audit
+
+#### TestE2E_Audit_GatewayConfig
+- **Description**: Test gateway config includes audit settings
+- **Preconditions**: None
+- **Steps**:
+  1. Create gateway with audit config
+  2. Start gateway
+  3. Get config
+  4. Verify audit config is present
+- **Expected Results**: Audit config is accessible from gateway
+
+#### TestE2E_Audit_MultipleHTTPMethods
+- **Description**: Test audit with multiple HTTP methods through gateway
+- **Preconditions**: Gateway and backend running
+- **Steps**:
+  1. Start gateway
+  2. Send GET to /api/v1/items
+  3. Send GET to /health
+  4. Send GET to /backend/health
+  5. Verify all succeed
+- **Expected Results**: All HTTP methods work through gateway with audit
