@@ -74,4 +74,7 @@ const (
 
 	// ErrRequestEntityTooLarge is the error message for request body too large.
 	ErrRequestEntityTooLarge = `{"error":"request entity too large"}`
+
+	// ErrMaxSessionsExceeded is the error message for max sessions exceeded.
+	ErrMaxSessionsExceeded = `{"error":"max sessions exceeded","message":"server at capacity"}`
 )

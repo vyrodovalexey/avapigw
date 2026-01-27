@@ -2,7 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
+	crypto_x509 "crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/auth/apikey"
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
+	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -774,4 +778,478 @@ func TestAuthenticator_InvalidSignature(t *testing.T) {
 	err = json.NewDecoder(rr.Body).Decode(&response)
 	require.NoError(t, err)
 	assert.Equal(t, "invalid token", response["error"])
+}
+
+func TestAuthenticator_GenericError(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		JWT: &jwt.Config{
+			Enabled:    true,
+			Algorithms: []string{"HS256"},
+			StaticKeys: []jwt.StaticKey{
+				{KeyID: "test", Algorithm: "HS256", Key: "dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQ="},
+			},
+		},
+	}
+
+	mockValidator := &mockJWTValidator{
+		err: errors.New("some generic error"),
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithJWTValidator(mockValidator),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	middleware := auth.HTTPMiddleware()
+	handler := middleware(next)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("Authorization", "Bearer some-token")
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+	var response map[string]string
+	err = json.NewDecoder(rr.Body).Decode(&response)
+	require.NoError(t, err)
+	assert.Equal(t, "authentication failed", response["error"])
+}
+
+func TestAuthenticator_ClaimsToIdentity_WithExpiresAt(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		JWT: &jwt.Config{
+			Enabled:    true,
+			Algorithms: []string{"HS256"},
+			StaticKeys: []jwt.StaticKey{
+				{KeyID: "test", Algorithm: "HS256", Key: "dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQ="},
+			},
+		},
+	}
+
+	expiresAt := time.Now().Add(time.Hour)
+	claims := &jwt.Claims{
+		Subject:   "user123",
+		Issuer:    "test-issuer",
+		Audience:  jwt.Audience{"api"},
+		ExpiresAt: &jwt.Time{Time: expiresAt},
+	}
+
+	mockValidator := &mockJWTValidator{
+		claims: claims,
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithJWTValidator(mockValidator),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+
+	identity, err := auth.Authenticate(req)
+	require.NoError(t, err)
+
+	assert.Equal(t, "user123", identity.Subject)
+	assert.Equal(t, expiresAt.Unix(), identity.ExpiresAt.Unix())
+}
+
+func TestAuthenticator_ClaimsToIdentity_WithoutExpiresAt(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		JWT: &jwt.Config{
+			Enabled:    true,
+			Algorithms: []string{"HS256"},
+			StaticKeys: []jwt.StaticKey{
+				{KeyID: "test", Algorithm: "HS256", Key: "dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQ="},
+			},
+		},
+	}
+
+	claims := &jwt.Claims{
+		Subject:   "user123",
+		Issuer:    "test-issuer",
+		Audience:  jwt.Audience{"api"},
+		ExpiresAt: nil, // No expiration
+	}
+
+	mockValidator := &mockJWTValidator{
+		claims: claims,
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithJWTValidator(mockValidator),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+
+	identity, err := auth.Authenticate(req)
+	require.NoError(t, err)
+
+	assert.Equal(t, "user123", identity.Subject)
+	assert.True(t, identity.ExpiresAt.IsZero())
+}
+
+func TestAuthenticator_KeyInfoToIdentity_WithoutExpiresAt(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		APIKey: &apikey.Config{
+			Enabled: true,
+		},
+		Extraction: &ExtractionConfig{
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "X-API-Key"},
+			},
+		},
+	}
+
+	mockValidator := &mockAPIKeyValidator{
+		keyInfo: &apikey.KeyInfo{
+			ID:        "key-123",
+			Roles:     []string{"api-user"},
+			ExpiresAt: nil, // No expiration
+		},
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithAPIKeyValidator(mockValidator),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("X-API-Key", "valid-key")
+
+	identity, err := auth.Authenticate(req)
+	require.NoError(t, err)
+
+	assert.Equal(t, "key-123", identity.Subject)
+	assert.True(t, identity.ExpiresAt.IsZero())
+}
+
+func TestAuthenticator_JWTValidationFails_FallbackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		JWT: &jwt.Config{
+			Enabled:    true,
+			Algorithms: []string{"HS256"},
+			StaticKeys: []jwt.StaticKey{
+				{KeyID: "test", Algorithm: "HS256", Key: "dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQ="},
+			},
+		},
+		APIKey: &apikey.Config{
+			Enabled: true,
+		},
+		Extraction: &ExtractionConfig{
+			JWT: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "Authorization", Prefix: "Bearer "},
+			},
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "X-API-Key"},
+			},
+		},
+	}
+
+	// JWT validator fails with invalid token
+	mockJWT := &mockJWTValidator{
+		err: ErrInvalidToken,
+	}
+
+	// API key validator succeeds
+	mockAPIKey := &mockAPIKeyValidator{
+		keyInfo: &apikey.KeyInfo{
+			ID:    "key-123",
+			Roles: []string{"api-user"},
+		},
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithJWTValidator(mockJWT),
+		WithAPIKeyValidator(mockAPIKey),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Request with both JWT and API key
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	req.Header.Set("X-API-Key", "valid-key")
+
+	identity, err := auth.Authenticate(req)
+	require.NoError(t, err)
+	assert.Equal(t, "key-123", identity.Subject)
+	assert.Equal(t, AuthTypeAPIKey, identity.AuthType)
+}
+
+func TestAuthenticator_BothAuthMethodsFail(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		JWT: &jwt.Config{
+			Enabled:    true,
+			Algorithms: []string{"HS256"},
+			StaticKeys: []jwt.StaticKey{
+				{KeyID: "test", Algorithm: "HS256", Key: "dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQ="},
+			},
+		},
+		APIKey: &apikey.Config{
+			Enabled: true,
+		},
+		Extraction: &ExtractionConfig{
+			JWT: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "Authorization", Prefix: "Bearer "},
+			},
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "X-API-Key"},
+			},
+		},
+	}
+
+	// Both validators fail
+	mockJWT := &mockJWTValidator{
+		err: ErrInvalidToken,
+	}
+	mockAPIKey := &mockAPIKeyValidator{
+		err: ErrInvalidAPIKey,
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithJWTValidator(mockJWT),
+		WithAPIKeyValidator(mockAPIKey),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	req.Header.Set("X-API-Key", "invalid-key")
+
+	identity, err := auth.Authenticate(req)
+	assert.Error(t, err)
+	assert.Nil(t, identity)
+}
+
+// mockMTLSValidator is a mock implementation of mtls.Validator for testing.
+type mockMTLSValidator struct {
+	certInfo *mtls.CertificateInfo
+	err      error
+}
+
+func (m *mockMTLSValidator) Validate(_ context.Context, _ *crypto_x509.Certificate, _ []*crypto_x509.Certificate) (*mtls.CertificateInfo, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.certInfo, nil
+}
+
+func TestWithMTLSValidator(t *testing.T) {
+	t.Parallel()
+
+	mockValidator := &mockMTLSValidator{}
+	opt := WithMTLSValidator(mockValidator)
+
+	a := &authenticator{}
+	opt(a)
+
+	assert.Equal(t, mockValidator, a.mtlsValidator)
+}
+
+func TestAuthenticator_MTLSAuthentication(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		MTLS: &mtls.Config{
+			Enabled: true,
+			ExtractIdentity: &mtls.IdentityExtractionConfig{
+				SubjectField: "CN",
+			},
+		},
+	}
+
+	mockValidator := &mockMTLSValidator{
+		certInfo: &mtls.CertificateInfo{
+			SubjectDN:    "CN=test-client,O=Test Org",
+			IssuerDN:     "CN=Test CA,O=Test Org",
+			SerialNumber: "123456",
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+			DNSNames:     []string{"test-client.example.com"},
+			Fingerprint:  "abc123",
+			Subject: &mtls.SubjectInfo{
+				CommonName:   "test-client",
+				Organization: []string{"Test Org"},
+			},
+		},
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithMTLSValidator(mockValidator),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Create request with TLS connection and peer certificate
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*crypto_x509.Certificate{
+			{}, // Mock certificate
+		},
+	}
+
+	identity, err := auth.Authenticate(req)
+	require.NoError(t, err)
+	assert.NotNil(t, identity)
+	assert.Equal(t, AuthTypeMTLS, identity.AuthType)
+	assert.NotNil(t, identity.CertificateInfo)
+}
+
+func TestAuthenticator_MTLSAuthentication_NoCertificate(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		MTLS: &mtls.Config{
+			Enabled: true,
+			ExtractIdentity: &mtls.IdentityExtractionConfig{
+				SubjectField: "CN",
+			},
+		},
+	}
+
+	mockValidator := &mockMTLSValidator{
+		err: mtls.ErrNoCertificate,
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithMTLSValidator(mockValidator),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Request without TLS
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+
+	identity, err := auth.Authenticate(req)
+	assert.Error(t, err)
+	assert.Nil(t, identity)
+}
+
+func TestAuthenticator_MTLSAuthentication_ValidationFails(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		MTLS: &mtls.Config{
+			Enabled: true,
+			ExtractIdentity: &mtls.IdentityExtractionConfig{
+				SubjectField: "CN",
+			},
+		},
+	}
+
+	mockValidator := &mockMTLSValidator{
+		err: mtls.ErrCertificateExpired,
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithMTLSValidator(mockValidator),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Create request with TLS connection and peer certificate
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*crypto_x509.Certificate{
+			{}, // Mock certificate
+		},
+	}
+
+	identity, err := auth.Authenticate(req)
+	assert.Error(t, err)
+	assert.Nil(t, identity)
+}
+
+func TestAuthenticator_MTLSFallbackToJWT(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		MTLS: &mtls.Config{
+			Enabled: true,
+			ExtractIdentity: &mtls.IdentityExtractionConfig{
+				SubjectField: "CN",
+			},
+		},
+		JWT: &jwt.Config{
+			Enabled:    true,
+			Algorithms: []string{"HS256"},
+			StaticKeys: []jwt.StaticKey{
+				{KeyID: "test", Algorithm: "HS256", Key: "dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQ="},
+			},
+		},
+		Extraction: &ExtractionConfig{
+			JWT: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "Authorization", Prefix: "Bearer "},
+			},
+		},
+	}
+
+	// mTLS fails
+	mockMTLS := &mockMTLSValidator{
+		err: mtls.ErrCertificateExpired,
+	}
+
+	// JWT succeeds
+	mockJWT := &mockJWTValidator{
+		claims: &jwt.Claims{
+			Subject:  "user123",
+			Issuer:   "test-issuer",
+			Audience: jwt.Audience{"api"},
+		},
+	}
+
+	auth, err := NewAuthenticator(config,
+		WithMTLSValidator(mockMTLS),
+		WithJWTValidator(mockJWT),
+		WithAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Request with TLS and JWT
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.TLS = &tls.ConnectionState{
+		PeerCertificates: []*crypto_x509.Certificate{
+			{}, // Mock certificate
+		},
+	}
+	req.Header.Set("Authorization", "Bearer valid-token")
+
+	identity, err := auth.Authenticate(req)
+	require.NoError(t, err)
+	assert.NotNil(t, identity)
+	assert.Equal(t, AuthTypeJWT, identity.AuthType)
+	assert.Equal(t, "user123", identity.Subject)
 }

@@ -132,6 +132,10 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	if spec.Observability != nil {
 		v.validateObservability(spec.Observability, "spec.observability")
 	}
+
+	if spec.MaxSessions != nil {
+		v.validateMaxSessions(spec.MaxSessions, "spec.maxSessions")
+	}
 }
 
 // validateListeners validates listener configurations.
@@ -343,6 +347,14 @@ func (v *Validator) validateRouteOptions(route *Route, path string) {
 	if route.RateLimit != nil {
 		v.validateRateLimit(route.RateLimit, path+".rateLimit")
 	}
+
+	if route.MaxSessions != nil {
+		v.validateMaxSessions(route.MaxSessions, path+".maxSessions")
+	}
+
+	if route.TLS != nil {
+		v.validateRouteTLSConfig(route.TLS, path+".tls")
+	}
 }
 
 // validateRouteMatch validates a route match configuration.
@@ -442,6 +454,14 @@ func (v *Validator) validateSingleBackend(backend *Backend, path string, names m
 
 	if backend.TLS != nil {
 		v.validateBackendTLSConfig(backend.TLS, path+".tls")
+	}
+
+	if backend.MaxSessions != nil {
+		v.validateMaxSessions(backend.MaxSessions, path+".maxSessions")
+	}
+
+	if backend.RateLimit != nil {
+		v.validateRateLimit(backend.RateLimit, path+".rateLimit")
 	}
 }
 
@@ -576,6 +596,29 @@ func (v *Validator) validateRateLimit(rl *RateLimitConfig, path string) {
 		if rl.Burst < 0 {
 			v.addError(path+".burst", "burst cannot be negative")
 		}
+	}
+}
+
+// validateMaxSessions validates max sessions configuration.
+func (v *Validator) validateMaxSessions(ms *MaxSessionsConfig, path string) {
+	if !ms.Enabled {
+		return
+	}
+
+	if ms.MaxConcurrent <= 0 {
+		v.addError(path+".maxConcurrent", "maxConcurrent must be positive when enabled")
+	}
+
+	if ms.QueueSize < 0 {
+		v.addError(path+".queueSize", "queueSize cannot be negative")
+	}
+
+	if ms.QueueSize > 0 && ms.QueueTimeout.Duration() <= 0 {
+		v.addError(path+".queueTimeout", "queueTimeout must be positive when queueSize > 0")
+	}
+
+	if ms.QueueTimeout.Duration() < 0 {
+		v.addError(path+".queueTimeout", "queueTimeout cannot be negative")
 	}
 }
 
@@ -777,6 +820,11 @@ func (v *Validator) validateSingleGRPCRoute(route *GRPCRoute, path string, names
 	// Validate rate limit
 	if route.RateLimit != nil {
 		v.validateRateLimit(route.RateLimit, path+".rateLimit")
+	}
+
+	// Validate route-level TLS
+	if route.TLS != nil {
+		v.validateRouteTLSConfig(route.TLS, path+".tls")
 	}
 }
 
@@ -1061,5 +1109,118 @@ func (v *Validator) validateVaultBackendTLSConfig(cfg *VaultBackendTLSConfig, pa
 
 	if cfg.CommonName == "" {
 		v.addError(path+".commonName", "commonName is required when Vault is enabled")
+	}
+}
+
+// validateRouteTLSConfig validates route-level TLS configuration.
+func (v *Validator) validateRouteTLSConfig(cfg *RouteTLSConfig, path string) {
+	if cfg == nil {
+		return
+	}
+
+	// Validate certificate files
+	v.validateRouteTLSCertificates(cfg, path)
+
+	// Validate SNI hosts
+	v.validateRouteTLSSNIHosts(cfg, path)
+
+	// Validate TLS versions
+	v.validateRouteTLSVersions(cfg, path)
+
+	// Validate Vault configuration
+	v.validateRouteTLSVault(cfg, path)
+
+	// Validate client validation configuration
+	v.validateRouteClientValidation(cfg.ClientValidation, path+".clientValidation")
+}
+
+// validateRouteTLSCertificates validates route TLS certificate configuration.
+func (v *Validator) validateRouteTLSCertificates(cfg *RouteTLSConfig, path string) {
+	hasFiles := cfg.CertFile != "" || cfg.KeyFile != ""
+	hasVault := cfg.Vault != nil && cfg.Vault.Enabled
+
+	// If files are partially specified, both must be present
+	if hasFiles && !hasVault {
+		if cfg.CertFile == "" {
+			v.addError(path+".certFile", "certFile is required when keyFile is specified")
+		}
+		if cfg.KeyFile == "" {
+			v.addError(path+".keyFile", "keyFile is required when certFile is specified")
+		}
+	}
+
+	// Warn if neither files nor Vault is configured but SNI hosts are specified
+	if !hasFiles && !hasVault && len(cfg.SNIHosts) > 0 {
+		v.addError(path, "certificate source (certFile/keyFile or vault) is required when sniHosts are specified")
+	}
+}
+
+// validateRouteTLSSNIHosts validates route TLS SNI hosts configuration.
+func (v *Validator) validateRouteTLSSNIHosts(cfg *RouteTLSConfig, path string) {
+	for i, host := range cfg.SNIHosts {
+		if err := util.ValidateHostname(host); err != nil {
+			v.addError(fmt.Sprintf("%s.sniHosts[%d]", path, i), err.Error())
+		}
+	}
+}
+
+// validateRouteTLSVersions validates route TLS version configuration.
+func (v *Validator) validateRouteTLSVersions(cfg *RouteTLSConfig, path string) {
+	validVersions := map[string]bool{
+		"":      true,
+		"TLS10": true,
+		"TLS11": true,
+		"TLS12": true,
+		"TLS13": true,
+	}
+
+	if !validVersions[cfg.MinVersion] {
+		v.addError(path+".minVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MinVersion))
+	}
+
+	if !validVersions[cfg.MaxVersion] {
+		v.addError(path+".maxVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MaxVersion))
+	}
+
+	// Validate min <= max if both are specified
+	if cfg.MinVersion != "" && cfg.MaxVersion != "" {
+		versionOrder := map[string]int{"TLS10": 1, "TLS11": 2, "TLS12": 3, "TLS13": 4}
+		minOrder, minOk := versionOrder[cfg.MinVersion]
+		maxOrder, maxOk := versionOrder[cfg.MaxVersion]
+		if minOk && maxOk && minOrder > maxOrder {
+			v.addError(path+".minVersion",
+				fmt.Sprintf("minVersion (%s) cannot be greater than maxVersion (%s)", cfg.MinVersion, cfg.MaxVersion))
+		}
+	}
+}
+
+// validateRouteTLSVault validates route TLS Vault configuration.
+func (v *Validator) validateRouteTLSVault(cfg *RouteTLSConfig, path string) {
+	if cfg.Vault == nil || !cfg.Vault.Enabled {
+		return
+	}
+
+	if cfg.Vault.PKIMount == "" {
+		v.addError(path+".vault.pkiMount", "pkiMount is required when Vault is enabled")
+	}
+
+	if cfg.Vault.Role == "" {
+		v.addError(path+".vault.role", "role is required when Vault is enabled")
+	}
+
+	if cfg.Vault.CommonName == "" {
+		v.addError(path+".vault.commonName", "commonName is required when Vault is enabled")
+	}
+}
+
+// validateRouteClientValidation validates route client certificate validation configuration.
+func (v *Validator) validateRouteClientValidation(cfg *RouteClientValidationConfig, path string) {
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+
+	// CA file is required for client validation
+	if cfg.CAFile == "" {
+		v.addError(path+".caFile", "caFile is required when client validation is enabled")
 	}
 }

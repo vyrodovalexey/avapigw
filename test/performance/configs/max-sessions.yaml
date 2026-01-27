@@ -1,0 +1,62 @@
+# Yandex Tank Configuration: Max Sessions Performance Test
+# Purpose: Test gateway performance with max sessions limiting enabled
+# Tests: Session acquisition/release overhead, queue behavior under load
+# Duration: 10 minutes total (warmup + multiple phases + cooldown)
+#
+# Test Phases:
+# 1. Warmup (1m): Ramp from 100 to 500 RPS - below max sessions limit
+# 2. Normal load (2m): Sustain at 500 RPS - within capacity
+# 3. Ramp to capacity (1m): Increase to 1500 RPS - approaching limit
+# 4. Over capacity (3m): Sustain at 1500 RPS - expect queuing/rejections
+# 5. Recovery (2m): Ramp down to 500 RPS - verify recovery
+# 6. Cooldown (1m): Ramp down to 100 RPS
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    schedule: line(100, 500, 1m) const(500, 2m) line(500, 1500, 1m) const(1500, 3m) line(1500, 500, 2m) line(500, 100, 1m)
+
+  ammofile: /var/loadtest/ammo/maxsessions.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 15s
+
+  # Instance settings - high concurrency to test max sessions
+  instances: 2000
+  threads: 8
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/MaxSessions]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: max-sessions]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if 5xx errors exceed 10% (some 503s expected when at capacity)
+    - http(5xx,10%,30s)
+    # Stop if network errors exceed 3%
+    - net(3%,30s)
+    # Stop if response time exceeds 15000ms for 30% of requests
+    - time(15000,30%,60s)

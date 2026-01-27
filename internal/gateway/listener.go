@@ -16,13 +16,14 @@ import (
 
 // Listener represents an HTTP/HTTPS listener.
 type Listener struct {
-	config     config.Listener
-	server     *http.Server
-	handler    http.Handler
-	logger     observability.Logger
-	running    atomic.Bool
-	tlsManager *tlspkg.Manager
-	tlsMetrics tlspkg.MetricsRecorder
+	config          config.Listener
+	server          *http.Server
+	handler         http.Handler
+	logger          observability.Logger
+	running         atomic.Bool
+	tlsManager      *tlspkg.Manager
+	routeTLSManager *tlspkg.RouteTLSManager
+	tlsMetrics      tlspkg.MetricsRecorder
 }
 
 // ListenerOption is a functional option for configuring a listener.
@@ -39,6 +40,14 @@ func WithListenerLogger(logger observability.Logger) ListenerOption {
 func WithTLSMetrics(metrics tlspkg.MetricsRecorder) ListenerOption {
 	return func(l *Listener) {
 		l.tlsMetrics = metrics
+	}
+}
+
+// WithRouteTLSManager sets the route TLS manager for the listener.
+// This enables route-level TLS certificate override based on SNI.
+func WithRouteTLSManager(manager *tlspkg.RouteTLSManager) ListenerOption {
+	return func(l *Listener) {
+		l.routeTLSManager = manager
 	}
 }
 
@@ -171,11 +180,17 @@ func (l *Listener) Start(ctx context.Context) error {
 		ReadHeaderTimeout: timeouts.GetEffectiveReadHeaderTimeout(),
 		WriteTimeout:      timeouts.GetEffectiveWriteTimeout(),
 		IdleTimeout:       timeouts.GetEffectiveIdleTimeout(),
-		MaxHeaderBytes:    1 << 20, // 1MB
+		MaxHeaderBytes:    config.DefaultMaxHeaderSize,
 	}
 
 	// Configure TLS if enabled
-	if l.tlsManager != nil {
+	if l.routeTLSManager != nil {
+		// Use route TLS manager for SNI-based certificate selection
+		tlsConfig := l.routeTLSManager.GetTLSConfig()
+		if tlsConfig != nil {
+			l.server.TLSConfig = tlsConfig
+		}
+	} else if l.tlsManager != nil {
 		tlsConfig := l.tlsManager.GetTLSConfig()
 		if tlsConfig != nil {
 			l.server.TLSConfig = tlsConfig
@@ -341,6 +356,16 @@ func (l *Listener) Stop(ctx context.Context) error {
 		observability.String("name", l.config.Name),
 	)
 
+	// Close route TLS manager
+	if l.routeTLSManager != nil {
+		if err := l.routeTLSManager.Close(); err != nil {
+			l.logger.Error("failed to close route TLS manager",
+				observability.String("name", l.config.Name),
+				observability.Error(err),
+			)
+		}
+	}
+
 	// Close TLS manager
 	if l.tlsManager != nil {
 		if err := l.tlsManager.Close(); err != nil {
@@ -380,4 +405,14 @@ func (l *Listener) IsTLSEnabled() bool {
 // GetTLSManager returns the TLS manager (for testing and advanced use cases).
 func (l *Listener) GetTLSManager() *tlspkg.Manager {
 	return l.tlsManager
+}
+
+// GetRouteTLSManager returns the route TLS manager (for testing and advanced use cases).
+func (l *Listener) GetRouteTLSManager() *tlspkg.RouteTLSManager {
+	return l.routeTLSManager
+}
+
+// IsRouteTLSEnabled returns true if route-level TLS is enabled.
+func (l *Listener) IsRouteTLSEnabled() bool {
+	return l.routeTLSManager != nil && l.routeTLSManager.RouteCount() > 0
 }

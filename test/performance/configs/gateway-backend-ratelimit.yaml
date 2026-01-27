@@ -1,0 +1,233 @@
+# Gateway configuration for Backend Rate Limit Performance Testing
+# This configuration tests backend-level rate limiting under load
+# Each backend host has its own rate limiter
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-backend-ratelimit
+  labels:
+    app: avapigw
+    environment: perftest
+    feature: backend-ratelimit
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+  routes:
+    # Health check endpoint - direct response (no backend)
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"perftest-backend-ratelimit"}'
+        headers:
+          Content-Type: application/json
+
+    # Rate limited backend endpoint
+    - name: rate-limited-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: rate-limited-backend
+            port: 8801
+      timeout: 30s
+
+    # High-rate backend endpoint
+    - name: high-rate-api
+      match:
+        - uri:
+            prefix: /api/v1/fast
+          methods:
+            - GET
+      route:
+        - destination:
+            host: high-rate-backend
+            port: 8801
+      timeout: 10s
+
+    # Multi-host rate limited endpoint
+    - name: multi-host-api
+      match:
+        - uri:
+            prefix: /api/v1/balanced
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: multi-host-backend
+            port: 8801
+      timeout: 30s
+
+    # Users API - no rate limit
+    - name: users-api
+      match:
+        - uri:
+            prefix: /api/v1/users
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 30s
+
+    # Catch-all route
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    # Backend with moderate rate limit (500 RPS per host)
+    - name: rate-limited-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 500
+        burst: 1000
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 500
+        connectTimeout: 5s
+
+    # Backend with high rate limit (2000 RPS per host)
+    - name: high-rate-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 2000
+        burst: 4000
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 2000
+        maxPendingRequests: 1000
+        connectTimeout: 5s
+
+    # Multi-host backend with rate limit (300 RPS per host = 600 RPS total)
+    - name: multi-host-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 300
+        burst: 600
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 500
+        maxPendingRequests: 250
+        connectTimeout: 5s
+
+    # Unrestricted backend
+    - name: unrestricted-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 2000
+        maxPendingRequests: 1000
+        connectTimeout: 5s
+
+  # Disable global rate limiting - testing backend-level only
+  rateLimit:
+    enabled: false
+
+  # Disable circuit breaker for rate limit testing
+  circuitBreaker:
+    enabled: false
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - X-Perf-Test
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: warn
+      format: json

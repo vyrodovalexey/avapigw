@@ -692,3 +692,365 @@ func TestRetryPolicy(t *testing.T) {
 	assert.Equal(t, 10*time.Second, cfg.PerTryTimeout.Duration())
 	assert.Equal(t, "5xx,reset", cfg.RetryOn)
 }
+
+func TestMaxSessionsConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := MaxSessionsConfig{
+		Enabled:       true,
+		MaxConcurrent: 100,
+		QueueSize:     50,
+		QueueTimeout:  Duration(30 * time.Second),
+	}
+
+	assert.True(t, cfg.Enabled)
+	assert.Equal(t, 100, cfg.MaxConcurrent)
+	assert.Equal(t, 50, cfg.QueueSize)
+	assert.Equal(t, 30*time.Second, cfg.QueueTimeout.Duration())
+}
+
+func TestMaxSessionsConfig_GetEffectiveQueueTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      *MaxSessionsConfig
+		expected time.Duration
+	}{
+		{
+			name:     "nil config",
+			cfg:      nil,
+			expected: DefaultMaxSessionsQueueTimeout,
+		},
+		{
+			name: "zero timeout",
+			cfg: &MaxSessionsConfig{
+				Enabled:       true,
+				MaxConcurrent: 100,
+				QueueTimeout:  0,
+			},
+			expected: DefaultMaxSessionsQueueTimeout,
+		},
+		{
+			name: "custom timeout",
+			cfg: &MaxSessionsConfig{
+				Enabled:       true,
+				MaxConcurrent: 100,
+				QueueTimeout:  Duration(60 * time.Second),
+			},
+			expected: 60 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.cfg.GetEffectiveQueueTimeout())
+		})
+	}
+}
+
+func TestMaxSessionsConfig_YAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := &MaxSessionsConfig{
+		Enabled:       true,
+		MaxConcurrent: 100,
+		QueueSize:     50,
+		QueueTimeout:  Duration(30 * time.Second),
+	}
+
+	// Marshal to YAML
+	yamlData, err := yaml.Marshal(original)
+	require.NoError(t, err)
+
+	// Unmarshal back
+	var restored MaxSessionsConfig
+	err = yaml.Unmarshal(yamlData, &restored)
+	require.NoError(t, err)
+
+	// Verify
+	assert.Equal(t, original.Enabled, restored.Enabled)
+	assert.Equal(t, original.MaxConcurrent, restored.MaxConcurrent)
+	assert.Equal(t, original.QueueSize, restored.QueueSize)
+	assert.Equal(t, original.QueueTimeout.Duration(), restored.QueueTimeout.Duration())
+}
+
+func TestMaxSessionsConfig_JSONRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := &MaxSessionsConfig{
+		Enabled:       true,
+		MaxConcurrent: 100,
+		QueueSize:     50,
+		QueueTimeout:  Duration(30 * time.Second),
+	}
+
+	// Marshal to JSON
+	jsonData, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	// Unmarshal back
+	var restored MaxSessionsConfig
+	err = json.Unmarshal(jsonData, &restored)
+	require.NoError(t, err)
+
+	// Verify
+	assert.Equal(t, original.Enabled, restored.Enabled)
+	assert.Equal(t, original.MaxConcurrent, restored.MaxConcurrent)
+	assert.Equal(t, original.QueueSize, restored.QueueSize)
+	assert.Equal(t, original.QueueTimeout.Duration(), restored.QueueTimeout.Duration())
+}
+
+func TestBackend_WithMaxSessionsAndRateLimit(t *testing.T) {
+	t.Parallel()
+
+	cfg := Backend{
+		Name: "user-service",
+		Hosts: []BackendHost{
+			{Address: "10.0.0.1", Port: 8080, Weight: 50},
+		},
+		MaxSessions: &MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 100,
+			QueueSize:     50,
+			QueueTimeout:  Duration(30 * time.Second),
+		},
+		RateLimit: &RateLimitConfig{
+			Enabled:           true,
+			RequestsPerSecond: 1000,
+			Burst:             100,
+		},
+	}
+
+	assert.Equal(t, "user-service", cfg.Name)
+	assert.NotNil(t, cfg.MaxSessions)
+	assert.True(t, cfg.MaxSessions.Enabled)
+	assert.Equal(t, 100, cfg.MaxSessions.MaxConcurrent)
+	assert.NotNil(t, cfg.RateLimit)
+	assert.True(t, cfg.RateLimit.Enabled)
+	assert.Equal(t, 1000, cfg.RateLimit.RequestsPerSecond)
+}
+
+func TestRoute_WithMaxSessions(t *testing.T) {
+	t.Parallel()
+
+	route := Route{
+		Name: "test-route",
+		Match: []RouteMatch{
+			{URI: &URIMatch{Prefix: "/api/"}},
+		},
+		Route: []RouteDestination{
+			{Destination: Destination{Host: "backend", Port: 8080}},
+		},
+		MaxSessions: &MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 50,
+		},
+	}
+
+	assert.Equal(t, "test-route", route.Name)
+	assert.NotNil(t, route.MaxSessions)
+	assert.True(t, route.MaxSessions.Enabled)
+	assert.Equal(t, 50, route.MaxSessions.MaxConcurrent)
+}
+
+func TestGatewaySpec_WithMaxSessions(t *testing.T) {
+	t.Parallel()
+
+	spec := GatewaySpec{
+		Listeners: []Listener{
+			{Name: "http", Port: 8080, Protocol: "HTTP"},
+		},
+		MaxSessions: &MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 1000,
+			QueueSize:     100,
+			QueueTimeout:  Duration(30 * time.Second),
+		},
+	}
+
+	assert.NotNil(t, spec.MaxSessions)
+	assert.True(t, spec.MaxSessions.Enabled)
+	assert.Equal(t, 1000, spec.MaxSessions.MaxConcurrent)
+	assert.Equal(t, 100, spec.MaxSessions.QueueSize)
+}
+
+func TestRoute_HasTLSOverride(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		route    Route
+		expected bool
+	}{
+		{
+			name:     "nil TLS config",
+			route:    Route{Name: "test"},
+			expected: false,
+		},
+		{
+			name: "empty TLS config",
+			route: Route{
+				Name: "test",
+				TLS:  &RouteTLSConfig{},
+			},
+			expected: false,
+		},
+		{
+			name: "TLS with cert file only",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with key file only",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					KeyFile: "/path/to/key.pem",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with both cert and key files",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					KeyFile:  "/path/to/key.pem",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with Vault disabled",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					Vault: &VaultTLSConfig{
+						Enabled: false,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "TLS with Vault enabled",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					Vault: &VaultTLSConfig{
+						Enabled:    true,
+						PKIMount:   "pki",
+						Role:       "my-role",
+						CommonName: "example.com",
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with SNI hosts only (no cert)",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					SNIHosts: []string{"api.example.com"},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.route.HasTLSOverride())
+		})
+	}
+}
+
+func TestRoute_GetEffectiveSNIHosts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		route    Route
+		expected []string
+	}{
+		{
+			name:     "nil TLS config",
+			route:    Route{Name: "test"},
+			expected: nil,
+		},
+		{
+			name: "empty TLS config",
+			route: Route{
+				Name: "test",
+				TLS:  &RouteTLSConfig{},
+			},
+			expected: nil,
+		},
+		{
+			name: "TLS with empty SNI hosts",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{},
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "TLS with single SNI host",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{"api.example.com"},
+				},
+			},
+			expected: []string{"api.example.com"},
+		},
+		{
+			name: "TLS with multiple SNI hosts",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{"api.example.com", "www.example.com", "*.example.com"},
+				},
+			},
+			expected: []string{"api.example.com", "www.example.com", "*.example.com"},
+		},
+		{
+			name: "TLS with wildcard SNI host",
+			route: Route{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{"*.example.com"},
+				},
+			},
+			expected: []string{"*.example.com"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tt.route.GetEffectiveSNIHosts()
+			if tt.expected == nil {
+				assert.Nil(t, result)
+			} else {
+				assert.Equal(t, tt.expected, result)
+			}
+		})
+	}
+}

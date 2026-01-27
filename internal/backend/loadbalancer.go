@@ -12,6 +12,7 @@ import (
 // LoadBalancer is the interface for load balancing algorithms.
 type LoadBalancer interface {
 	Next() *Host
+	NextAvailable() *Host
 	SetHosts(hosts []*Host)
 }
 
@@ -63,6 +64,36 @@ func (b *RoundRobinBalancer) getHealthyHosts() []*Host {
 		}
 	}
 	return healthy
+}
+
+// getAvailableHosts returns only available hosts (healthy and with capacity).
+func (b *RoundRobinBalancer) getAvailableHosts() []*Host {
+	available := make([]*Host, 0, len(b.hosts))
+	for _, host := range b.hosts {
+		if host.IsAvailable() {
+			available = append(available, host)
+		}
+	}
+	return available
+}
+
+// NextAvailable returns the next available host in round-robin order.
+// It considers health status and max sessions capacity.
+func (b *RoundRobinBalancer) NextAvailable() *Host {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if len(b.hosts) == 0 {
+		return nil
+	}
+
+	available := b.getAvailableHosts()
+	if len(available) == 0 {
+		return nil
+	}
+
+	idx := b.current.Add(1) - 1
+	return available[idx%uint64(len(available))]
 }
 
 // WeightedBalancer implements weighted load balancing.
@@ -132,6 +163,40 @@ func (b *WeightedBalancer) SetHosts(hosts []*Host) {
 	b.calculateTotalWeight()
 }
 
+// NextAvailable returns the next available host based on weights.
+// It considers health status and max sessions capacity.
+func (b *WeightedBalancer) NextAvailable() *Host {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if len(b.hosts) == 0 {
+		return nil
+	}
+
+	available := make([]*Host, 0, len(b.hosts))
+	totalWeight := 0
+	for _, host := range b.hosts {
+		if host.IsAvailable() {
+			available = append(available, host)
+			totalWeight += host.Weight
+		}
+	}
+
+	if len(available) == 0 || totalWeight == 0 {
+		return nil
+	}
+
+	r := secureRandomInt(totalWeight)
+	for _, host := range available {
+		r -= host.Weight
+		if r < 0 {
+			return host
+		}
+	}
+
+	return available[len(available)-1]
+}
+
 // LeastConnBalancer implements least-connections load balancing.
 type LeastConnBalancer struct {
 	hosts []*Host
@@ -179,6 +244,34 @@ func (b *LeastConnBalancer) SetHosts(hosts []*Host) {
 	b.hosts = hosts
 }
 
+// NextAvailable returns the available host with the least connections.
+// It considers health status and max sessions capacity.
+func (b *LeastConnBalancer) NextAvailable() *Host {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if len(b.hosts) == 0 {
+		return nil
+	}
+
+	var selected *Host
+	minConns := int64(-1)
+
+	for _, host := range b.hosts {
+		if !host.IsAvailable() {
+			continue
+		}
+
+		conns := host.Connections()
+		if minConns < 0 || conns < minConns {
+			minConns = conns
+			selected = host
+		}
+	}
+
+	return selected
+}
+
 // RandomBalancer implements random load balancing.
 type RandomBalancer struct {
 	hosts []*Host
@@ -220,6 +313,30 @@ func (b *RandomBalancer) SetHosts(hosts []*Host) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.hosts = hosts
+}
+
+// NextAvailable returns a random available host.
+// It considers health status and max sessions capacity.
+func (b *RandomBalancer) NextAvailable() *Host {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if len(b.hosts) == 0 {
+		return nil
+	}
+
+	available := make([]*Host, 0, len(b.hosts))
+	for _, host := range b.hosts {
+		if host.IsAvailable() {
+			available = append(available, host)
+		}
+	}
+
+	if len(available) == 0 {
+		return nil
+	}
+
+	return available[secureRandomInt(len(available))]
 }
 
 // NewLoadBalancer creates a load balancer based on the algorithm.

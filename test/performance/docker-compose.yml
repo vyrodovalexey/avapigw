@@ -13,8 +13,6 @@
 #   docker-compose --profile websocket up k6-connection
 #   docker-compose --profile all up
 
-version: '3.8'
-
 services:
   # ===========================================================================
   # HTTP Performance Tests (Yandex Tank)

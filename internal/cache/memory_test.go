@@ -431,3 +431,121 @@ func TestMemoryCache_MultipleOperations(t *testing.T) {
 	stats := cache.Stats()
 	assert.Equal(t, int64(25), stats.Size)
 }
+
+func TestMemoryCache_Cleanup(t *testing.T) {
+	// Create cache with very short TTL
+	cfg := &config.CacheConfig{
+		Enabled:    true,
+		Type:       config.CacheTypeMemory,
+		MaxEntries: 100,
+		TTL:        config.Duration(10 * time.Millisecond),
+	}
+
+	cache, err := newMemoryCache(cfg, observability.NopLogger())
+	require.NoError(t, err)
+	defer cache.Close()
+
+	ctx := context.Background()
+
+	// Set some values
+	for i := 0; i < 5; i++ {
+		key := "cleanup-key-" + string(rune('A'+i))
+		err := cache.Set(ctx, key, []byte("value"), 10*time.Millisecond)
+		require.NoError(t, err)
+	}
+
+	// Verify values exist
+	stats := cache.Stats()
+	assert.Equal(t, int64(5), stats.Size)
+
+	// Wait for expiration
+	time.Sleep(50 * time.Millisecond)
+
+	// Manually trigger cleanup
+	cache.cleanup()
+
+	// Verify values are cleaned up
+	stats = cache.Stats()
+	assert.Equal(t, int64(0), stats.Size)
+}
+
+func TestMemoryCache_CleanupLoop(t *testing.T) {
+	// Create cache
+	cfg := &config.CacheConfig{
+		Enabled:    true,
+		Type:       config.CacheTypeMemory,
+		MaxEntries: 100,
+		TTL:        config.Duration(5 * time.Minute),
+	}
+
+	cache, err := newMemoryCache(cfg, observability.NopLogger())
+	require.NoError(t, err)
+
+	// Close should stop the cleanup loop
+	err = cache.Close()
+	assert.NoError(t, err)
+}
+
+func TestMemoryCache_CleanupWithNoExpiredEntries(t *testing.T) {
+	cache := newTestMemoryCache(t, 100, 5*time.Minute)
+	defer cache.Close()
+
+	ctx := context.Background()
+
+	// Set values with long TTL
+	for i := 0; i < 5; i++ {
+		key := "long-ttl-key-" + string(rune('A'+i))
+		err := cache.Set(ctx, key, []byte("value"), time.Hour)
+		require.NoError(t, err)
+	}
+
+	// Trigger cleanup
+	cache.cleanup()
+
+	// All values should still exist
+	stats := cache.Stats()
+	assert.Equal(t, int64(5), stats.Size)
+}
+
+func TestMemoryCache_EvictOldest(t *testing.T) {
+	cache := newTestMemoryCache(t, 3, 5*time.Minute)
+	defer cache.Close()
+
+	ctx := context.Background()
+
+	// Fill cache to capacity
+	_ = cache.Set(ctx, "key1", []byte("value1"), time.Minute)
+	_ = cache.Set(ctx, "key2", []byte("value2"), time.Minute)
+	_ = cache.Set(ctx, "key3", []byte("value3"), time.Minute)
+
+	// Verify size
+	stats := cache.Stats()
+	assert.Equal(t, int64(3), stats.Size)
+
+	// Add one more - should evict oldest
+	_ = cache.Set(ctx, "key4", []byte("value4"), time.Minute)
+
+	// Verify size is still 3
+	stats = cache.Stats()
+	assert.Equal(t, int64(3), stats.Size)
+
+	// key1 should be evicted
+	_, err := cache.Get(ctx, "key1")
+	assert.ErrorIs(t, err, ErrCacheMiss)
+}
+
+func TestMemoryCache_NegativeTTL(t *testing.T) {
+	cache := newTestMemoryCache(t, 100, 0) // No default TTL
+	defer cache.Close()
+
+	ctx := context.Background()
+
+	// Set with negative TTL (should be treated as no expiration)
+	err := cache.Set(ctx, "key", []byte("value"), -1*time.Second)
+	require.NoError(t, err)
+
+	// Value should be retrievable
+	value, err := cache.Get(ctx, "key")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("value"), value)
+}

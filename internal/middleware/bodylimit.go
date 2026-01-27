@@ -46,6 +46,19 @@ func BodyLimitFromConfig(cfg *config.RequestLimitsConfig, logger observability.L
 	return BodyLimit(maxSize, logger)
 }
 
+// BodyLimitFromRequestLimits creates body limit middleware from RequestLimitsConfig.
+// This function supports both global and route-level limits.
+// If cfg is nil, default limits are used.
+func BodyLimitFromRequestLimits(
+	cfg *config.RequestLimitsConfig,
+	logger observability.Logger,
+) func(http.Handler) http.Handler {
+	if cfg == nil {
+		cfg = config.DefaultRequestLimits()
+	}
+	return BodyLimitFromConfig(cfg, logger)
+}
+
 // limitedReadCloser wraps an io.ReadCloser and limits the number of bytes that can be read.
 type limitedReadCloser struct {
 	io.ReadCloser

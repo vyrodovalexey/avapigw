@@ -1,6 +1,6 @@
-# Contributing to Ava API Gateway
+# Contributing to AV API Gateway
 
-Welcome to the Ava API Gateway project! We're excited that you're interested in contributing to this high-performance, production-ready API Gateway built with Go and gin-gonic. This document provides guidelines and information for contributors.
+Welcome to the AV API Gateway project! We're excited that you're interested in contributing to this high-performance, production-ready API Gateway built with Go and gin-gonic. This document provides guidelines and information for contributors.
 
 ## 📋 Table of Contents
 
@@ -211,6 +211,8 @@ methods with curl and gRPC examples.
 - Wrap errors with context using `fmt.Errorf`
 - Log errors at appropriate levels
 - Return meaningful error messages
+- Use shared error types like `util.ServerError` for consistent circuit breaker tracking
+- Use `util.StatusCapturingResponseWriter` for middleware that needs to inspect response status codes
 
 Example:
 ```go
@@ -224,6 +226,28 @@ func processRequest(req *http.Request) error {
     }
     
     return nil
+}
+
+// Use shared error types for consistent behavior
+func handleBackendResponse(statusCode int) error {
+    if statusCode >= 500 {
+        return util.NewServerError(statusCode)
+    }
+    return nil
+}
+
+// Use status capturing for middleware
+func myMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        w := util.NewStatusCapturingResponseWriter(c.Writer)
+        c.Writer = w
+        c.Next()
+        
+        // Now you can inspect w.StatusCode
+        if w.StatusCode >= 500 {
+            // Handle server error
+        }
+    }
 }
 ```
 
@@ -481,6 +505,8 @@ func AuthenticateRequest(req *http.Request, config *AuthConfig) (*User, error) {
 - **Memory usage**: Avoid memory leaks and excessive allocations
 - **Concurrency**: Use proper synchronization for concurrent code
 - **Profiling**: Profile code for performance bottlenecks
+- **Resource cleanup**: Always clean up timers, goroutines, and other resources
+- **Timer management**: Use defer statements to prevent timer leaks (see config watcher implementation)
 
 Example benchmark:
 ```go
@@ -492,6 +518,46 @@ func BenchmarkRouteMatching(b *testing.B) {
     for i := 0; i < b.N; i++ {
         router.Match(req)
     }
+}
+```
+
+#### Resource Management Best Practices
+
+Always clean up resources to prevent leaks:
+
+```go
+// Timer cleanup example (from config watcher)
+func (w *Watcher) watch(ctx context.Context) {
+    defer close(w.stoppedCh)
+
+    var debounceTimer *time.Timer
+    var debounceCh <-chan time.Time
+
+    // Ensure debounce timer is cleaned up on exit to prevent goroutine leak
+    defer func() {
+        if debounceTimer != nil {
+            debounceTimer.Stop()
+        }
+    }()
+
+    // ... rest of implementation
+}
+
+// Goroutine cleanup example
+func startWorker(ctx context.Context) {
+    go func() {
+        defer func() {
+            // Clean up resources
+        }()
+        
+        for {
+            select {
+            case <-ctx.Done():
+                return // Proper cleanup on context cancellation
+            // ... other cases
+            }
+        }
+    }()
 }
 ```
 

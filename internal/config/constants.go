@@ -108,6 +108,15 @@ const (
 	DefaultWatcherDebounceDelay = 100 * time.Millisecond
 )
 
+// Default max sessions configuration constants.
+const (
+	// DefaultMaxSessionsQueueTimeout is the default timeout for waiting in the queue.
+	DefaultMaxSessionsQueueTimeout = 30 * time.Second
+
+	// DefaultMaxSessionsQueueSize is the default queue size (0 = reject immediately).
+	DefaultMaxSessionsQueueSize = 0
+)
+
 // TLS version constants.
 const (
 	// TLSVersion12 represents TLS 1.2.

@@ -447,6 +447,158 @@
               "default": 3
             }
           }
+        },
+        "maxSessions": {
+          "type": "object",
+          "description": "Global max sessions configuration for concurrent connection limiting",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable max sessions limiting"
+            },
+            "maxConcurrent": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 10000,
+              "description": "Maximum concurrent sessions allowed"
+            },
+            "queueSize": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 1000,
+              "description": "Queue size for pending requests when max is reached"
+            },
+            "queueTimeout": {
+              "type": "string",
+              "default": "30s",
+              "description": "Timeout for queued requests"
+            }
+          }
+        },
+        "routes": {
+          "type": "array",
+          "description": "Route configurations",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Route name"
+              },
+              "match": {
+                "type": "array",
+                "description": "Match conditions for the route"
+              },
+              "route": {
+                "type": "array",
+                "description": "Route destinations"
+              },
+              "timeout": {
+                "type": "string",
+                "description": "Request timeout"
+              },
+              "maxSessions": {
+                "type": "object",
+                "description": "Route-level max sessions configuration",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "maxConcurrent": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "queueSize": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "queueTimeout": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "backends": {
+          "type": "array",
+          "description": "Backend service configurations",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Backend name"
+              },
+              "hosts": {
+                "type": "array",
+                "description": "Backend hosts"
+              },
+              "healthCheck": {
+                "type": "object",
+                "description": "Health check configuration"
+              },
+              "loadBalancer": {
+                "type": "object",
+                "description": "Load balancer configuration"
+              },
+              "authentication": {
+                "type": "object",
+                "description": "Authentication configuration"
+              },
+              "circuitBreaker": {
+                "type": "object",
+                "description": "Circuit breaker configuration"
+              },
+              "maxSessions": {
+                "type": "object",
+                "description": "Backend-level max sessions configuration",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "maxConcurrent": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "queueSize": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "queueTimeout": {
+                    "type": "string"
+                  }
+                }
+              },
+              "rateLimit": {
+                "type": "object",
+                "description": "Backend-level rate limit configuration",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable rate limiting for this backend"
+                  },
+                  "requestsPerSecond": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 100,
+                    "description": "Maximum requests per second"
+                  },
+                  "burst": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 200,
+                    "description": "Burst size for rate limiting"
+                  }
+                }
+              }
+            },
+            "required": ["name"]
+          }
         }
       },
       "description": "Gateway configuration"

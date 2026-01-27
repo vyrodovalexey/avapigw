@@ -143,14 +143,15 @@ func loadAndValidateConfig(configPath string, logger observability.Logger) *conf
 
 // application holds all application components.
 type application struct {
-	gateway         *gateway.Gateway
-	backendRegistry *backend.Registry
-	healthChecker   *health.Checker
-	metrics         *observability.Metrics
-	metricsServer   *http.Server
-	tracer          *observability.Tracer
-	config          *config.GatewayConfig
-	rateLimiter     *middleware.RateLimiter
+	gateway            *gateway.Gateway
+	backendRegistry    *backend.Registry
+	healthChecker      *health.Checker
+	metrics            *observability.Metrics
+	metricsServer      *http.Server
+	tracer             *observability.Tracer
+	config             *config.GatewayConfig
+	rateLimiter        *middleware.RateLimiter
+	maxSessionsLimiter *middleware.MaxSessionsLimiter
 }
 
 // initApplication initializes all application components.
@@ -182,13 +183,14 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	}
 
 	return &application{
-		gateway:         gw,
-		backendRegistry: backendRegistry,
-		healthChecker:   healthChecker,
-		metrics:         metrics,
-		tracer:          tracer,
-		config:          cfg,
-		rateLimiter:     middlewareResult.rateLimiter,
+		gateway:            gw,
+		backendRegistry:    backendRegistry,
+		healthChecker:      healthChecker,
+		metrics:            metrics,
+		tracer:             tracer,
+		config:             cfg,
+		rateLimiter:        middlewareResult.rateLimiter,
+		maxSessionsLimiter: middlewareResult.maxSessionsLimiter,
 	}
 }
 
@@ -321,13 +323,19 @@ func waitForShutdown(app *application, watcher *config.Watcher, logger observabi
 		app.rateLimiter.Stop()
 	}
 
+	// Stop max sessions limiter
+	if app.maxSessionsLimiter != nil {
+		app.maxSessionsLimiter.Stop()
+	}
+
 	logger.Info("gateway stopped")
 }
 
 // middlewareChainResult holds the result of building the middleware chain.
 type middlewareChainResult struct {
-	handler     http.Handler
-	rateLimiter *middleware.RateLimiter
+	handler            http.Handler
+	rateLimiter        *middleware.RateLimiter
+	maxSessionsLimiter *middleware.MaxSessionsLimiter
 }
 
 // buildMiddlewareChain builds the middleware chain.
@@ -340,6 +348,7 @@ func buildMiddlewareChain(
 ) middlewareChainResult {
 	h := handler
 	var rateLimiter *middleware.RateLimiter
+	var maxSessionsLimiter *middleware.MaxSessionsLimiter
 
 	if cfg.Spec.RateLimit != nil && cfg.Spec.RateLimit.Enabled {
 		var rateLimitMiddleware func(http.Handler) http.Handler
@@ -349,6 +358,13 @@ func buildMiddlewareChain(
 
 	if cfg.Spec.CircuitBreaker != nil && cfg.Spec.CircuitBreaker.Enabled {
 		h = middleware.CircuitBreakerFromConfig(cfg.Spec.CircuitBreaker, logger)(h)
+	}
+
+	// Max sessions middleware should be applied early to limit concurrent requests
+	if cfg.Spec.MaxSessions != nil && cfg.Spec.MaxSessions.Enabled {
+		var maxSessionsMiddleware func(http.Handler) http.Handler
+		maxSessionsMiddleware, maxSessionsLimiter = middleware.MaxSessionsFromConfig(cfg.Spec.MaxSessions, logger)
+		h = maxSessionsMiddleware(h)
 	}
 
 	if cfg.Spec.CORS != nil {
@@ -362,8 +378,9 @@ func buildMiddlewareChain(
 	h = middleware.Recovery(logger)(h)
 
 	return middlewareChainResult{
-		handler:     h,
-		rateLimiter: rateLimiter,
+		handler:            h,
+		rateLimiter:        rateLimiter,
+		maxSessionsLimiter: maxSessionsLimiter,
 	}
 }
 

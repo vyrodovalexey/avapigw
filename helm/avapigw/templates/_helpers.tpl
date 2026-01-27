@@ -171,6 +171,31 @@ spec:
     timeout: {{ .Values.gateway.circuitBreaker.timeout | default "30s" }}
     halfOpenRequests: {{ .Values.gateway.circuitBreaker.halfOpenRequests | default 3 }}
 
+  {{- if .Values.gateway.maxSessions }}
+  maxSessions:
+    enabled: {{ .Values.gateway.maxSessions.enabled | default false }}
+    maxConcurrent: {{ .Values.gateway.maxSessions.maxConcurrent | default 10000 }}
+    queueSize: {{ .Values.gateway.maxSessions.queueSize | default 1000 }}
+    queueTimeout: {{ .Values.gateway.maxSessions.queueTimeout | default "30s" }}
+  {{- end }}
+
+  requestLimits:
+    maxBodySize: {{ .Values.gateway.requestLimits.maxBodySize | default 10485760 | int }}
+    maxHeaderSize: {{ .Values.gateway.requestLimits.maxHeaderSize | default 1048576 | int }}
+
+  security:
+    enabled: {{ .Values.gateway.security.enabled | default true }}
+    headers:
+      enabled: {{ .Values.gateway.security.headers.enabled | default true }}
+      xFrameOptions: {{ .Values.gateway.security.headers.xFrameOptions | default "DENY" | quote }}
+      xContentTypeOptions: {{ .Values.gateway.security.headers.xContentTypeOptions | default "nosniff" | quote }}
+      xXSSProtection: {{ .Values.gateway.security.headers.xXSSProtection | default "1; mode=block" | quote }}
+    hsts:
+      enabled: {{ .Values.gateway.security.hsts.enabled | default false }}
+      maxAge: {{ .Values.gateway.security.hsts.maxAge | default 31536000 | int }}
+      includeSubDomains: {{ .Values.gateway.security.hsts.includeSubDomains | default true }}
+      preload: {{ .Values.gateway.security.hsts.preload | default false }}
+
   cors:
     allowOrigins:
       {{- toYaml .Values.gateway.cors.allowOrigins | nindent 6 }}

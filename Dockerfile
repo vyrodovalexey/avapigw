@@ -62,8 +62,7 @@ LABEL org.opencontainers.image.title="avapigw" \
 RUN apk add --no-cache \
     ca-certificates \
     curl \
-    tzdata \
-    && rm -rf /var/cache/apk/*
+    tzdata
 
 # Create non-root user and group
 RUN addgroup -g 1000 -S gateway && \

@@ -413,6 +413,319 @@ func TestWeightedBalancer_ZeroTotalWeight(t *testing.T) {
 	assert.Nil(t, lb.Next())
 }
 
+// Tests for NextAvailable() methods
+
+func TestRoundRobinBalancer_NextAvailable(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+		NewHost("10.0.0.2", 8080, 1),
+		NewHost("10.0.0.3", 8080, 1),
+	}
+
+	// Mark all as healthy
+	for _, h := range hosts {
+		h.SetStatus(StatusHealthy)
+	}
+
+	lb := NewRoundRobinBalancer(hosts)
+
+	// Should cycle through available hosts
+	seen := make(map[string]int)
+	for i := 0; i < 9; i++ {
+		host := lb.NextAvailable()
+		assert.NotNil(t, host)
+		seen[host.Address]++
+	}
+
+	// Each host should be selected 3 times
+	assert.Equal(t, 3, seen["10.0.0.1"])
+	assert.Equal(t, 3, seen["10.0.0.2"])
+	assert.Equal(t, 3, seen["10.0.0.3"])
+}
+
+func TestRoundRobinBalancer_NextAvailable_EmptyHosts(t *testing.T) {
+	t.Parallel()
+
+	lb := NewRoundRobinBalancer([]*Host{})
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestRoundRobinBalancer_NextAvailable_NoAvailableHosts(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+	}
+	hosts[0].SetStatus(StatusUnhealthy)
+
+	lb := NewRoundRobinBalancer(hosts)
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestRoundRobinBalancer_NextAvailable_SkipsAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+		NewHost("10.0.0.2", 8080, 1),
+	}
+	hosts[0].SetStatus(StatusHealthy)
+	hosts[1].SetStatus(StatusHealthy)
+
+	// Set max sessions and fill first host
+	hosts[0].SetMaxSessions(1)
+	hosts[0].IncrementConnections()
+
+	lb := NewRoundRobinBalancer(hosts)
+
+	// Should only return second host (first is at capacity)
+	for i := 0; i < 5; i++ {
+		host := lb.NextAvailable()
+		assert.NotNil(t, host)
+		assert.Equal(t, "10.0.0.2", host.Address)
+	}
+}
+
+func TestRoundRobinBalancer_NextAvailable_AllAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+		NewHost("10.0.0.2", 8080, 1),
+	}
+	hosts[0].SetStatus(StatusHealthy)
+	hosts[1].SetStatus(StatusHealthy)
+
+	// Set max sessions and fill both hosts
+	hosts[0].SetMaxSessions(1)
+	hosts[0].IncrementConnections()
+	hosts[1].SetMaxSessions(1)
+	hosts[1].IncrementConnections()
+
+	lb := NewRoundRobinBalancer(hosts)
+
+	// Should return nil when all hosts are at capacity
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestWeightedBalancer_NextAvailable(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 80),
+		NewHost("10.0.0.2", 8080, 20),
+	}
+
+	for _, h := range hosts {
+		h.SetStatus(StatusHealthy)
+	}
+
+	lb := NewWeightedBalancer(hosts)
+
+	// Run many iterations to verify weighted distribution
+	seen := make(map[string]int)
+	iterations := 1000
+	for i := 0; i < iterations; i++ {
+		host := lb.NextAvailable()
+		assert.NotNil(t, host)
+		seen[host.Address]++
+	}
+
+	// Host with weight 80 should be selected more often
+	assert.Greater(t, seen["10.0.0.1"], seen["10.0.0.2"])
+}
+
+func TestWeightedBalancer_NextAvailable_EmptyHosts(t *testing.T) {
+	t.Parallel()
+
+	lb := NewWeightedBalancer([]*Host{})
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestWeightedBalancer_NextAvailable_NoAvailableHosts(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 50),
+	}
+	hosts[0].SetStatus(StatusUnhealthy)
+
+	lb := NewWeightedBalancer(hosts)
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestWeightedBalancer_NextAvailable_SkipsAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 100),
+		NewHost("10.0.0.2", 8080, 100),
+	}
+	hosts[0].SetStatus(StatusHealthy)
+	hosts[1].SetStatus(StatusHealthy)
+
+	// Set max sessions and fill first host
+	hosts[0].SetMaxSessions(1)
+	hosts[0].IncrementConnections()
+
+	lb := NewWeightedBalancer(hosts)
+
+	// Should only return second host
+	for i := 0; i < 10; i++ {
+		host := lb.NextAvailable()
+		assert.NotNil(t, host)
+		assert.Equal(t, "10.0.0.2", host.Address)
+	}
+}
+
+func TestWeightedBalancer_NextAvailable_ZeroWeight(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 0),
+	}
+	hosts[0].SetStatus(StatusHealthy)
+
+	lb := NewWeightedBalancer(hosts)
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestLeastConnBalancer_NextAvailable(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+		NewHost("10.0.0.2", 8080, 1),
+	}
+
+	for _, h := range hosts {
+		h.SetStatus(StatusHealthy)
+	}
+
+	// Add connections to first host
+	hosts[0].IncrementConnections()
+	hosts[0].IncrementConnections()
+
+	lb := NewLeastConnBalancer(hosts)
+
+	// Should select host with fewer connections
+	host := lb.NextAvailable()
+	assert.Equal(t, "10.0.0.2", host.Address)
+}
+
+func TestLeastConnBalancer_NextAvailable_EmptyHosts(t *testing.T) {
+	t.Parallel()
+
+	lb := NewLeastConnBalancer([]*Host{})
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestLeastConnBalancer_NextAvailable_NoAvailableHosts(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+	}
+	hosts[0].SetStatus(StatusUnhealthy)
+
+	lb := NewLeastConnBalancer(hosts)
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestLeastConnBalancer_NextAvailable_SkipsAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+		NewHost("10.0.0.2", 8080, 1),
+	}
+	hosts[0].SetStatus(StatusHealthy)
+	hosts[1].SetStatus(StatusHealthy)
+
+	// Set max sessions and fill first host
+	hosts[0].SetMaxSessions(1)
+	hosts[0].IncrementConnections()
+
+	lb := NewLeastConnBalancer(hosts)
+
+	// Should return second host (first is at capacity)
+	host := lb.NextAvailable()
+	assert.NotNil(t, host)
+	assert.Equal(t, "10.0.0.2", host.Address)
+}
+
+func TestRandomBalancer_NextAvailable(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+		NewHost("10.0.0.2", 8080, 1),
+	}
+
+	for _, h := range hosts {
+		h.SetStatus(StatusHealthy)
+	}
+
+	lb := NewRandomBalancer(hosts)
+
+	// Run many iterations to verify both hosts are selected
+	seen := make(map[string]bool)
+	for i := 0; i < 100; i++ {
+		host := lb.NextAvailable()
+		assert.NotNil(t, host)
+		seen[host.Address] = true
+	}
+
+	// Both hosts should be selected at least once
+	assert.True(t, seen["10.0.0.1"])
+	assert.True(t, seen["10.0.0.2"])
+}
+
+func TestRandomBalancer_NextAvailable_EmptyHosts(t *testing.T) {
+	t.Parallel()
+
+	lb := NewRandomBalancer([]*Host{})
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestRandomBalancer_NextAvailable_NoAvailableHosts(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+	}
+	hosts[0].SetStatus(StatusUnhealthy)
+
+	lb := NewRandomBalancer(hosts)
+	assert.Nil(t, lb.NextAvailable())
+}
+
+func TestRandomBalancer_NextAvailable_SkipsAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	hosts := []*Host{
+		NewHost("10.0.0.1", 8080, 1),
+		NewHost("10.0.0.2", 8080, 1),
+	}
+	hosts[0].SetStatus(StatusHealthy)
+	hosts[1].SetStatus(StatusHealthy)
+
+	// Set max sessions and fill first host
+	hosts[0].SetMaxSessions(1)
+	hosts[0].IncrementConnections()
+
+	lb := NewRandomBalancer(hosts)
+
+	// Should only return second host
+	for i := 0; i < 10; i++ {
+		host := lb.NextAvailable()
+		assert.NotNil(t, host)
+		assert.Equal(t, "10.0.0.2", host.Address)
+	}
+}
+
 func TestRoundRobinBalancer_UnknownStatus(t *testing.T) {
 	t.Parallel()
 

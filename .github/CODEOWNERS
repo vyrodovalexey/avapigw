@@ -12,7 +12,7 @@
 /sonar-project.properties @vyrodovalexey
 
 # Helm charts
-/charts/ @vyrodovalexey
+/helm/ @vyrodovalexey
 
 # Security-sensitive files
 /internal/auth/ @vyrodovalexey

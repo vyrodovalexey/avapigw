@@ -38,6 +38,8 @@ type GatewaySpec struct {
 	Audit          *AuditConfig          `yaml:"audit,omitempty" json:"audit,omitempty"`
 	// RequestLimits configures request size limits.
 	RequestLimits *RequestLimitsConfig `yaml:"requestLimits,omitempty" json:"requestLimits,omitempty"`
+	// MaxSessions configures maximum concurrent sessions at the gateway level.
+	MaxSessions *MaxSessionsConfig `yaml:"maxSessions,omitempty" json:"maxSessions,omitempty"`
 }
 
 // Listener represents a network listener configuration.
@@ -204,6 +206,89 @@ type Route struct {
 	Transform      *TransformConfig      `yaml:"transform,omitempty" json:"transform,omitempty"`
 	Cache          *CacheConfig          `yaml:"cache,omitempty" json:"cache,omitempty"`
 	Encoding       *EncodingConfig       `yaml:"encoding,omitempty" json:"encoding,omitempty"`
+
+	// RequestLimits configures request size limits for this route (overrides global).
+	RequestLimits *RequestLimitsConfig `yaml:"requestLimits,omitempty" json:"requestLimits,omitempty"`
+
+	// CORS configures CORS for this route (overrides global).
+	CORS *CORSConfig `yaml:"cors,omitempty" json:"cors,omitempty"`
+
+	// Security configures security headers for this route (overrides global).
+	Security *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+
+	// MaxSessions configures maximum concurrent sessions for this route (overrides global).
+	MaxSessions *MaxSessionsConfig `yaml:"maxSessions,omitempty" json:"maxSessions,omitempty"`
+
+	// TLS configures route-level TLS certificate override.
+	// This allows serving different certificates based on SNI for this route.
+	TLS *RouteTLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+}
+
+// RouteTLSConfig contains TLS configuration for a specific route.
+// This allows overriding the listener-level TLS certificate for specific routes
+// based on SNI (Server Name Indication) matching.
+type RouteTLSConfig struct {
+	// CertFile is the path to the route-specific certificate file (PEM format).
+	CertFile string `yaml:"certFile,omitempty" json:"certFile,omitempty"`
+
+	// KeyFile is the path to the route-specific private key file (PEM format).
+	KeyFile string `yaml:"keyFile,omitempty" json:"keyFile,omitempty"`
+
+	// SNIHosts is the list of SNI hostnames this certificate should be used for.
+	// Supports exact matches and wildcard patterns (e.g., "*.example.com").
+	SNIHosts []string `yaml:"sniHosts,omitempty" json:"sniHosts,omitempty"`
+
+	// MinVersion is the minimum TLS version for this route (TLS12, TLS13).
+	MinVersion string `yaml:"minVersion,omitempty" json:"minVersion,omitempty"`
+
+	// MaxVersion is the maximum TLS version for this route.
+	MaxVersion string `yaml:"maxVersion,omitempty" json:"maxVersion,omitempty"`
+
+	// CipherSuites is the list of allowed cipher suites for this route.
+	CipherSuites []string `yaml:"cipherSuites,omitempty" json:"cipherSuites,omitempty"`
+
+	// ClientValidation configures client certificate validation for this route.
+	ClientValidation *RouteClientValidationConfig `yaml:"clientValidation,omitempty" json:"clientValidation,omitempty"`
+
+	// Vault configures Vault-based certificate management for this route.
+	Vault *VaultTLSConfig `yaml:"vault,omitempty" json:"vault,omitempty"`
+}
+
+// RouteClientValidationConfig configures client certificate validation for a route.
+type RouteClientValidationConfig struct {
+	// Enabled enables client certificate validation for this route.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// CAFile is the path to the CA certificate file for client validation.
+	CAFile string `yaml:"caFile,omitempty" json:"caFile,omitempty"`
+
+	// RequireClientCert requires client certificate for this route.
+	RequireClientCert bool `yaml:"requireClientCert,omitempty" json:"requireClientCert,omitempty"`
+
+	// AllowedCNs is the list of allowed Common Names for client certificates.
+	AllowedCNs []string `yaml:"allowedCNs,omitempty" json:"allowedCNs,omitempty"`
+
+	// AllowedSANs is the list of allowed Subject Alternative Names.
+	AllowedSANs []string `yaml:"allowedSANs,omitempty" json:"allowedSANs,omitempty"`
+}
+
+// HasTLSOverride returns true if the route has TLS configuration that overrides listener TLS.
+func (r *Route) HasTLSOverride() bool {
+	if r.TLS == nil {
+		return false
+	}
+	hasFiles := r.TLS.CertFile != "" || r.TLS.KeyFile != ""
+	hasVault := r.TLS.Vault != nil && r.TLS.Vault.Enabled
+	return hasFiles || hasVault
+}
+
+// GetEffectiveSNIHosts returns the SNI hosts for this route.
+// Returns nil if no SNI hosts are configured.
+func (r *Route) GetEffectiveSNIHosts() []string {
+	if r.TLS == nil || len(r.TLS.SNIHosts) == 0 {
+		return nil
+	}
+	return r.TLS.SNIHosts
 }
 
 // RouteMatch represents matching conditions for a route.
@@ -277,6 +362,18 @@ type Backend struct {
 	HealthCheck  *HealthCheck      `yaml:"healthCheck,omitempty" json:"healthCheck,omitempty"`
 	LoadBalancer *LoadBalancer     `yaml:"loadBalancer,omitempty" json:"loadBalancer,omitempty"`
 	TLS          *BackendTLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+
+	// CircuitBreaker configures circuit breaker for this backend.
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuitBreaker,omitempty" json:"circuitBreaker,omitempty"`
+
+	// Authentication configures authentication for backend connections.
+	Authentication *BackendAuthConfig `yaml:"authentication,omitempty" json:"authentication,omitempty"`
+
+	// MaxSessions configures maximum concurrent sessions for this backend.
+	MaxSessions *MaxSessionsConfig `yaml:"maxSessions,omitempty" json:"maxSessions,omitempty"`
+
+	// RateLimit configures rate limiting for this backend.
+	RateLimit *RateLimitConfig `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 }
 
 // BackendHost represents a single backend host.
@@ -508,6 +605,29 @@ type RateLimitConfig struct {
 	RequestsPerSecond int  `yaml:"requestsPerSecond" json:"requestsPerSecond"`
 	Burst             int  `yaml:"burst" json:"burst"`
 	PerClient         bool `yaml:"perClient,omitempty" json:"perClient,omitempty"`
+}
+
+// MaxSessionsConfig configures maximum concurrent sessions.
+type MaxSessionsConfig struct {
+	// Enabled enables max sessions limiting.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// MaxConcurrent is the maximum number of concurrent sessions.
+	MaxConcurrent int `yaml:"maxConcurrent" json:"maxConcurrent"`
+
+	// QueueSize is the size of the waiting queue (0 = reject immediately).
+	QueueSize int `yaml:"queueSize,omitempty" json:"queueSize,omitempty"`
+
+	// QueueTimeout is the maximum time to wait in queue.
+	QueueTimeout Duration `yaml:"queueTimeout,omitempty" json:"queueTimeout,omitempty"`
+}
+
+// GetEffectiveQueueTimeout returns the effective queue timeout.
+func (c *MaxSessionsConfig) GetEffectiveQueueTimeout() time.Duration {
+	if c == nil || c.QueueTimeout == 0 {
+		return DefaultMaxSessionsQueueTimeout
+	}
+	return c.QueueTimeout.Duration()
 }
 
 // RequestLimitsConfig configures request size limits.
@@ -1129,4 +1249,256 @@ type AuditEventsConfig struct {
 
 	// Security enables security event auditing.
 	Security bool `yaml:"security,omitempty" json:"security,omitempty"`
+}
+
+// BackendAuthConfig configures authentication for backend connections.
+type BackendAuthConfig struct {
+	// Type specifies the authentication type (jwt, basic, mtls).
+	Type string `yaml:"type" json:"type"`
+
+	// JWT configures JWT authentication for backend.
+	JWT *BackendJWTAuthConfig `yaml:"jwt,omitempty" json:"jwt,omitempty"`
+
+	// Basic configures Basic authentication for backend.
+	Basic *BackendBasicAuthConfig `yaml:"basic,omitempty" json:"basic,omitempty"`
+
+	// MTLS configures mTLS authentication for backend.
+	MTLS *BackendMTLSAuthConfig `yaml:"mtls,omitempty" json:"mtls,omitempty"`
+}
+
+// BackendJWTAuthConfig configures JWT authentication for backend connections.
+type BackendJWTAuthConfig struct {
+	// Enabled enables JWT authentication.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// TokenSource specifies where to get the token (static, vault, oidc).
+	TokenSource string `yaml:"tokenSource" json:"tokenSource"`
+
+	// StaticToken is a static JWT token (for development only).
+	StaticToken string `yaml:"staticToken,omitempty" json:"staticToken,omitempty"`
+
+	// VaultPath is the Vault path for JWT token.
+	VaultPath string `yaml:"vaultPath,omitempty" json:"vaultPath,omitempty"`
+
+	// OIDC configures OIDC token acquisition.
+	OIDC *BackendOIDCConfig `yaml:"oidc,omitempty" json:"oidc,omitempty"`
+
+	// HeaderName is the header name for the token (default: Authorization).
+	HeaderName string `yaml:"headerName,omitempty" json:"headerName,omitempty"`
+
+	// HeaderPrefix is the prefix for the token (default: Bearer).
+	HeaderPrefix string `yaml:"headerPrefix,omitempty" json:"headerPrefix,omitempty"`
+}
+
+// BackendOIDCConfig configures OIDC token acquisition for backend auth.
+type BackendOIDCConfig struct {
+	// IssuerURL is the OIDC issuer URL.
+	IssuerURL string `yaml:"issuerUrl" json:"issuerUrl"`
+
+	// ClientID is the OIDC client ID.
+	ClientID string `yaml:"clientId" json:"clientId"`
+
+	// ClientSecret is the OIDC client secret.
+	ClientSecret string `yaml:"clientSecret,omitempty" json:"clientSecret,omitempty"`
+
+	// ClientSecretVaultPath is the Vault path for client secret.
+	ClientSecretVaultPath string `yaml:"clientSecretVaultPath,omitempty" json:"clientSecretVaultPath,omitempty"`
+
+	// Scopes are the scopes to request.
+	Scopes []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+
+	// TokenCacheTTL is the TTL for cached tokens.
+	TokenCacheTTL Duration `yaml:"tokenCacheTTL,omitempty" json:"tokenCacheTTL,omitempty"`
+}
+
+// BackendBasicAuthConfig configures Basic authentication for backend connections.
+type BackendBasicAuthConfig struct {
+	// Enabled enables Basic authentication.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Username is the username for Basic auth.
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+
+	// Password is the password for Basic auth.
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+
+	// VaultPath is the Vault path for credentials.
+	VaultPath string `yaml:"vaultPath,omitempty" json:"vaultPath,omitempty"`
+
+	// UsernameKey is the key in Vault for username (default: username).
+	UsernameKey string `yaml:"usernameKey,omitempty" json:"usernameKey,omitempty"`
+
+	// PasswordKey is the key in Vault for password (default: password).
+	PasswordKey string `yaml:"passwordKey,omitempty" json:"passwordKey,omitempty"`
+}
+
+// BackendMTLSAuthConfig configures mTLS authentication for backend connections.
+type BackendMTLSAuthConfig struct {
+	// Enabled enables mTLS authentication.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// CertFile is the path to the client certificate.
+	CertFile string `yaml:"certFile,omitempty" json:"certFile,omitempty"`
+
+	// KeyFile is the path to the client private key.
+	KeyFile string `yaml:"keyFile,omitempty" json:"keyFile,omitempty"`
+
+	// CAFile is the path to the CA certificate for server verification.
+	CAFile string `yaml:"caFile,omitempty" json:"caFile,omitempty"`
+
+	// Vault configures Vault-based certificate management.
+	Vault *VaultBackendTLSConfig `yaml:"vault,omitempty" json:"vault,omitempty"`
+}
+
+// Validate validates the backend authentication configuration.
+func (c *BackendAuthConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+
+	validTypes := map[string]bool{"": true, "jwt": true, "basic": true, "mtls": true}
+	if !validTypes[c.Type] {
+		return fmt.Errorf("invalid backend auth type: %s (must be jwt, basic, or mtls)", c.Type)
+	}
+
+	if c.JWT != nil && c.JWT.Enabled {
+		if err := c.JWT.Validate(); err != nil {
+			return fmt.Errorf("jwt auth config: %w", err)
+		}
+	}
+
+	if c.Basic != nil && c.Basic.Enabled {
+		if err := c.Basic.Validate(); err != nil {
+			return fmt.Errorf("basic auth config: %w", err)
+		}
+	}
+
+	if c.MTLS != nil && c.MTLS.Enabled {
+		if err := c.MTLS.Validate(); err != nil {
+			return fmt.Errorf("mtls auth config: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Validate validates the JWT authentication configuration.
+func (c *BackendJWTAuthConfig) Validate() error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+
+	validSources := map[string]bool{"static": true, "vault": true, "oidc": true}
+	if !validSources[c.TokenSource] {
+		return fmt.Errorf("invalid token source: %s (must be static, vault, or oidc)", c.TokenSource)
+	}
+
+	switch c.TokenSource {
+	case "static":
+		if c.StaticToken == "" {
+			return fmt.Errorf("staticToken is required for static token source")
+		}
+	case "vault":
+		if c.VaultPath == "" {
+			return fmt.Errorf("vaultPath is required for vault token source")
+		}
+	case "oidc":
+		if c.OIDC == nil {
+			return fmt.Errorf("oidc config is required for oidc token source")
+		}
+		if err := c.OIDC.Validate(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Validate validates the OIDC configuration.
+func (c *BackendOIDCConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+
+	if c.IssuerURL == "" {
+		return fmt.Errorf("issuerUrl is required")
+	}
+	if c.ClientID == "" {
+		return fmt.Errorf("clientId is required")
+	}
+	if c.ClientSecret == "" && c.ClientSecretVaultPath == "" {
+		return fmt.Errorf("either clientSecret or clientSecretVaultPath is required")
+	}
+
+	return nil
+}
+
+// Validate validates the Basic authentication configuration.
+func (c *BackendBasicAuthConfig) Validate() error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+
+	hasStatic := c.Username != "" && c.Password != ""
+	hasVault := c.VaultPath != ""
+
+	if !hasStatic && !hasVault {
+		return fmt.Errorf("either username/password or vaultPath is required")
+	}
+
+	return nil
+}
+
+// Validate validates the mTLS authentication configuration.
+func (c *BackendMTLSAuthConfig) Validate() error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+
+	hasFiles := c.CertFile != "" && c.KeyFile != ""
+	hasVault := c.Vault != nil && c.Vault.Enabled
+
+	if !hasFiles && !hasVault {
+		return fmt.Errorf("either certFile/keyFile or vault config is required")
+	}
+
+	if hasVault {
+		if err := c.Vault.Validate(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// GetEffectiveHeaderName returns the effective header name for JWT.
+func (c *BackendJWTAuthConfig) GetEffectiveHeaderName() string {
+	if c == nil || c.HeaderName == "" {
+		return "Authorization"
+	}
+	return c.HeaderName
+}
+
+// GetEffectiveHeaderPrefix returns the effective header prefix for JWT.
+func (c *BackendJWTAuthConfig) GetEffectiveHeaderPrefix() string {
+	if c == nil || c.HeaderPrefix == "" {
+		return "Bearer"
+	}
+	return c.HeaderPrefix
+}
+
+// GetEffectiveUsernameKey returns the effective username key for Vault.
+func (c *BackendBasicAuthConfig) GetEffectiveUsernameKey() string {
+	if c == nil || c.UsernameKey == "" {
+		return "username"
+	}
+	return c.UsernameKey
+}
+
+// GetEffectivePasswordKey returns the effective password key for Vault.
+func (c *BackendBasicAuthConfig) GetEffectivePasswordKey() string {
+	if c == nil || c.PasswordKey == "" {
+		return "password"
+	}
+	return c.PasswordKey
 }

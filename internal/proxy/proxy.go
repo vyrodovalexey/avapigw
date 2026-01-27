@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,13 +38,15 @@ var hopHeaders = []string{
 
 // ReverseProxy handles proxying requests to backend services.
 type ReverseProxy struct {
-	router          *router.Router
-	backendRegistry *backend.Registry
-	logger          observability.Logger
-	transport       http.RoundTripper
-	errorHandler    func(http.ResponseWriter, *http.Request, error)
-	modifyResponse  func(*http.Response) error
-	flushInterval   time.Duration
+	router                *router.Router
+	backendRegistry       *backend.Registry
+	circuitBreakerManager *backend.CircuitBreakerManager
+	globalCircuitBreaker  *backend.CircuitBreakerManager
+	logger                observability.Logger
+	transport             http.RoundTripper
+	errorHandler          func(http.ResponseWriter, *http.Request, error)
+	modifyResponse        func(*http.Response) error
+	flushInterval         time.Duration
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -81,6 +84,20 @@ func WithModifyResponse(modifier func(*http.Response) error) ProxyOption {
 func WithFlushInterval(interval time.Duration) ProxyOption {
 	return func(p *ReverseProxy) {
 		p.flushInterval = interval
+	}
+}
+
+// WithCircuitBreakerManager sets the backend circuit breaker manager.
+func WithCircuitBreakerManager(manager *backend.CircuitBreakerManager) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.circuitBreakerManager = manager
+	}
+}
+
+// WithGlobalCircuitBreaker sets the global circuit breaker manager.
+func WithGlobalCircuitBreaker(manager *backend.CircuitBreakerManager) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.globalCircuitBreaker = manager
 	}
 }
 
@@ -170,10 +187,29 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		r = p.applyRewrite(r, route.Config.Rewrite)
 	}
 
+	// Try to get backend from registry for authentication
+	var serviceBackend *backend.ServiceBackend
+	if p.backendRegistry != nil {
+		if b, ok := p.backendRegistry.Get(dest.Destination.Host); ok {
+			if sb, ok := b.(*backend.ServiceBackend); ok {
+				serviceBackend = sb
+			}
+		}
+	}
+
 	// Create reverse proxy
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			p.director(req, target, r)
+			// Apply backend authentication if available
+			if serviceBackend != nil {
+				if err := serviceBackend.ApplyAuth(req.Context(), req); err != nil {
+					p.logger.Error("failed to apply backend authentication",
+						observability.String("backend", dest.Destination.Host),
+						observability.Error(err),
+					)
+				}
+			}
 		},
 		Transport:      p.transport,
 		FlushInterval:  p.flushInterval,
@@ -188,7 +224,71 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		r = r.WithContext(ctx)
 	}
 
-	proxy.ServeHTTP(w, r)
+	// Execute with circuit breaker protection if available
+	backendName := dest.Destination.Host
+	cb := p.getCircuitBreaker(backendName)
+
+	if cb != nil {
+		p.executeWithCircuitBreaker(w, r, proxy, cb, backendName)
+	} else {
+		proxy.ServeHTTP(w, r)
+	}
+}
+
+// getCircuitBreaker returns the circuit breaker for a backend.
+// It first checks for a backend-specific circuit breaker, then falls back to global.
+func (p *ReverseProxy) getCircuitBreaker(backendName string) *backend.CircuitBreakerManager {
+	// Check for backend-specific circuit breaker
+	if p.circuitBreakerManager != nil {
+		if cb := p.circuitBreakerManager.Get(backendName); cb != nil {
+			return p.circuitBreakerManager
+		}
+	}
+
+	// Fall back to global circuit breaker
+	return p.globalCircuitBreaker
+}
+
+// executeWithCircuitBreaker executes the proxy request with circuit breaker protection.
+func (p *ReverseProxy) executeWithCircuitBreaker(
+	w http.ResponseWriter,
+	r *http.Request,
+	proxy *httputil.ReverseProxy,
+	cbManager *backend.CircuitBreakerManager,
+	backendName string,
+) {
+	// Create a response recorder to capture the response
+	recorder := util.NewStatusCapturingResponseWriter(w)
+
+	_, err := cbManager.Execute(backendName, func() (interface{}, error) {
+		proxy.ServeHTTP(recorder, r)
+
+		// Return error for 5xx responses to trigger circuit breaker
+		if recorder.StatusCode >= http.StatusInternalServerError {
+			return nil, util.NewServerError(recorder.StatusCode)
+		}
+		return nil, nil
+	})
+
+	if err != nil {
+		// Check if it's a circuit breaker error (not a server error from the backend)
+		var srvErr *util.ServerError
+		if !errors.As(err, &srvErr) {
+			p.logger.Warn("circuit breaker rejected request",
+				observability.String("backend", backendName),
+				observability.String("path", r.URL.Path),
+				observability.Error(err),
+			)
+
+			// Only write error response if we haven't written anything yet
+			if !recorder.HeaderWritten {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":"service unavailable","message":"circuit breaker open"}`)
+			}
+		}
+		// For server errors, the response was already written by the proxy
+	}
 }
 
 // director modifies the request before forwarding.

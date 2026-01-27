@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -586,4 +587,512 @@ func TestBuildMiddlewareChain_PerClientRateLimiter(t *testing.T) {
 
 	// Clean up rate limiter
 	result.rateLimiter.Stop()
+}
+
+func TestBuildMiddlewareChain_WithMaxSessions(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{
+			MaxSessions: &config.MaxSessionsConfig{
+				Enabled:       true,
+				MaxConcurrent: 100,
+			},
+		},
+	}
+
+	baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	logger := observability.NopLogger()
+	metrics := observability.NewMetrics("test")
+	tracer, err := observability.NewTracer(observability.TracerConfig{
+		ServiceName: "test",
+		Enabled:     false,
+	})
+	require.NoError(t, err)
+
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+
+	assert.NotNil(t, result.handler)
+	assert.NotNil(t, result.maxSessionsLimiter)
+
+	// Clean up max sessions limiter
+	result.maxSessionsLimiter.Stop()
+}
+
+func TestBuildMiddlewareChain_WithMaxSessionsDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{
+			MaxSessions: &config.MaxSessionsConfig{
+				Enabled: false,
+			},
+		},
+	}
+
+	baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	logger := observability.NopLogger()
+	metrics := observability.NewMetrics("test")
+	tracer, err := observability.NewTracer(observability.TracerConfig{
+		ServiceName: "test",
+		Enabled:     false,
+	})
+	require.NoError(t, err)
+
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+
+	assert.NotNil(t, result.handler)
+	assert.Nil(t, result.maxSessionsLimiter)
+}
+
+func TestInitTracer_WithCustomServiceName(t *testing.T) {
+	logger := observability.NopLogger()
+
+	cfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{
+			Observability: &config.ObservabilityConfig{
+				Tracing: &config.TracingConfig{
+					Enabled:      false,
+					ServiceName:  "custom-service",
+					SamplingRate: 0.5,
+				},
+			},
+		},
+	}
+
+	tracer := initTracer(cfg, logger)
+	assert.NotNil(t, tracer)
+
+	// Clean up
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = tracer.Shutdown(ctx)
+}
+
+func TestInitTracer_WithOTLPEndpoint(t *testing.T) {
+	logger := observability.NopLogger()
+
+	cfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{
+			Observability: &config.ObservabilityConfig{
+				Tracing: &config.TracingConfig{
+					Enabled:      false, // Keep disabled to avoid connection attempts
+					OTLPEndpoint: "localhost:4317",
+					SamplingRate: 1.0,
+				},
+			},
+		},
+	}
+
+	tracer := initTracer(cfg, logger)
+	assert.NotNil(t, tracer)
+
+	// Clean up
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = tracer.Shutdown(ctx)
+}
+
+func TestStartMetricsServerIfEnabled_Disabled(t *testing.T) {
+	app := &application{
+		config: &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Observability: nil,
+			},
+		},
+	}
+
+	logger := observability.NopLogger()
+
+	// Should not panic and should not start server
+	startMetricsServerIfEnabled(app, logger)
+	assert.Nil(t, app.metricsServer)
+}
+
+func TestStartMetricsServerIfEnabled_MetricsNil(t *testing.T) {
+	app := &application{
+		config: &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Observability: &config.ObservabilityConfig{
+					Metrics: nil,
+				},
+			},
+		},
+	}
+
+	logger := observability.NopLogger()
+
+	startMetricsServerIfEnabled(app, logger)
+	assert.Nil(t, app.metricsServer)
+}
+
+func TestStartMetricsServerIfEnabled_MetricsDisabled(t *testing.T) {
+	app := &application{
+		config: &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Observability: &config.ObservabilityConfig{
+					Metrics: &config.MetricsConfig{
+						Enabled: false,
+					},
+				},
+			},
+		},
+	}
+
+	logger := observability.NopLogger()
+
+	startMetricsServerIfEnabled(app, logger)
+	assert.Nil(t, app.metricsServer)
+}
+
+func TestStartMetricsServerIfEnabled_DefaultValues(t *testing.T) {
+	app := &application{
+		config: &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Observability: &config.ObservabilityConfig{
+					Metrics: &config.MetricsConfig{
+						Enabled: true,
+						// Path and Port are zero values
+					},
+				},
+			},
+		},
+		metrics:       observability.NewMetrics("test"),
+		healthChecker: health.NewChecker("test"),
+	}
+
+	logger := observability.NopLogger()
+
+	startMetricsServerIfEnabled(app, logger)
+	assert.NotNil(t, app.metricsServer)
+	assert.Equal(t, ":9090", app.metricsServer.Addr) // Default port
+
+	// Clean up
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = app.metricsServer.Shutdown(ctx)
+}
+
+func TestStartMetricsServerIfEnabled_CustomValues(t *testing.T) {
+	app := &application{
+		config: &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				Observability: &config.ObservabilityConfig{
+					Metrics: &config.MetricsConfig{
+						Enabled: true,
+						Path:    "/custom-metrics",
+						Port:    8888,
+					},
+				},
+			},
+		},
+		metrics:       observability.NewMetrics("test"),
+		healthChecker: health.NewChecker("test"),
+	}
+
+	logger := observability.NopLogger()
+
+	startMetricsServerIfEnabled(app, logger)
+	assert.NotNil(t, app.metricsServer)
+	assert.Equal(t, ":8888", app.metricsServer.Addr)
+
+	// Clean up
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = app.metricsServer.Shutdown(ctx)
+}
+
+func TestRunMetricsServer_ServerClosed(t *testing.T) {
+	logger := observability.NopLogger()
+	metrics := observability.NewMetrics("test")
+	healthChecker := health.NewChecker("test")
+
+	server := createMetricsServer(19999, "/metrics", metrics, healthChecker, logger)
+
+	// Start server in goroutine
+	done := make(chan struct{})
+	go func() {
+		runMetricsServer(server, logger)
+		close(done)
+	}()
+
+	// Give server time to start
+	time.Sleep(50 * time.Millisecond)
+
+	// Shutdown server
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := server.Shutdown(ctx)
+	assert.NoError(t, err)
+
+	// Wait for goroutine to finish
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop in time")
+	}
+}
+
+func TestParseFlags_Defaults(t *testing.T) {
+	// Save original args and restore after test
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	// Clear environment variables that might affect defaults
+	os.Unsetenv("GATEWAY_CONFIG_PATH")
+	os.Unsetenv("GATEWAY_LOG_LEVEL")
+	os.Unsetenv("GATEWAY_LOG_FORMAT")
+
+	// Set minimal args
+	os.Args = []string{"gateway"}
+
+	// Reset flag.CommandLine to allow re-parsing
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
+	flags := parseFlags()
+
+	assert.Equal(t, "configs/gateway.yaml", flags.configPath)
+	assert.Equal(t, "info", flags.logLevel)
+	assert.Equal(t, "json", flags.logFormat)
+	assert.False(t, flags.showVersion)
+}
+
+func TestParseFlags_WithEnvVars(t *testing.T) {
+	// Save original args and restore after test
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	// Set environment variables
+	os.Setenv("GATEWAY_CONFIG_PATH", "/custom/config.yaml")
+	os.Setenv("GATEWAY_LOG_LEVEL", "debug")
+	os.Setenv("GATEWAY_LOG_FORMAT", "console")
+	defer func() {
+		os.Unsetenv("GATEWAY_CONFIG_PATH")
+		os.Unsetenv("GATEWAY_LOG_LEVEL")
+		os.Unsetenv("GATEWAY_LOG_FORMAT")
+	}()
+
+	// Set minimal args
+	os.Args = []string{"gateway"}
+
+	// Reset flag.CommandLine to allow re-parsing
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
+	flags := parseFlags()
+
+	assert.Equal(t, "/custom/config.yaml", flags.configPath)
+	assert.Equal(t, "debug", flags.logLevel)
+	assert.Equal(t, "console", flags.logFormat)
+}
+
+func TestParseFlags_WithCommandLineArgs(t *testing.T) {
+	// Save original args and restore after test
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+
+	// Clear environment variables
+	os.Unsetenv("GATEWAY_CONFIG_PATH")
+	os.Unsetenv("GATEWAY_LOG_LEVEL")
+	os.Unsetenv("GATEWAY_LOG_FORMAT")
+
+	// Set command line args
+	os.Args = []string{
+		"gateway",
+		"-config", "/path/to/config.yaml",
+		"-log-level", "warn",
+		"-log-format", "console",
+		"-version",
+	}
+
+	// Reset flag.CommandLine to allow re-parsing
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
+	flags := parseFlags()
+
+	assert.Equal(t, "/path/to/config.yaml", flags.configPath)
+	assert.Equal(t, "warn", flags.logLevel)
+	assert.Equal(t, "console", flags.logFormat)
+	assert.True(t, flags.showVersion)
+}
+
+func TestLoadAndValidateConfig_ValidConfig(t *testing.T) {
+	// Create a temporary config file
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/gateway.yaml"
+
+	configContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: test-gateway
+spec:
+  listeners:
+    - name: http
+      address: 0.0.0.0
+      port: 8080
+      protocol: HTTP
+  routes: []
+  backends: []
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	logger := observability.NopLogger()
+
+	cfg := loadAndValidateConfig(configPath, logger)
+
+	assert.NotNil(t, cfg)
+	assert.Equal(t, "test-gateway", cfg.Metadata.Name)
+}
+
+func TestLoadAndValidateConfig_WithGRPCListeners(t *testing.T) {
+	// Create a temporary config file with gRPC listeners
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/gateway.yaml"
+
+	configContent := `
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: test-gateway
+spec:
+  listeners:
+    - name: http
+      address: 0.0.0.0
+      port: 8080
+      protocol: HTTP
+    - name: grpc
+      address: 0.0.0.0
+      port: 50051
+      protocol: GRPC
+  routes: []
+  backends: []
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	logger := observability.NopLogger()
+
+	cfg := loadAndValidateConfig(configPath, logger)
+
+	assert.NotNil(t, cfg)
+	assert.Len(t, cfg.Spec.Listeners, 2)
+}
+
+func TestInitTracer_WithAllOptions(t *testing.T) {
+	logger := observability.NopLogger()
+
+	cfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{
+			Observability: &config.ObservabilityConfig{
+				Tracing: &config.TracingConfig{
+					Enabled:      false, // Keep disabled to avoid connection attempts
+					ServiceName:  "custom-service",
+					SamplingRate: 0.5,
+					OTLPEndpoint: "localhost:4317",
+				},
+			},
+		},
+	}
+
+	tracer := initTracer(cfg, logger)
+	assert.NotNil(t, tracer)
+
+	// Clean up
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = tracer.Shutdown(ctx)
+}
+
+func TestBuildMiddlewareChain_AllMiddlewareEnabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{
+			RateLimit: &config.RateLimitConfig{
+				Enabled:           true,
+				RequestsPerSecond: 100,
+				Burst:             200,
+				PerClient:         true,
+			},
+			CircuitBreaker: &config.CircuitBreakerConfig{
+				Enabled:          true,
+				Threshold:        5,
+				Timeout:          config.Duration(30 * time.Second),
+				HalfOpenRequests: 3,
+			},
+			MaxSessions: &config.MaxSessionsConfig{
+				Enabled:       true,
+				MaxConcurrent: 100,
+			},
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"*"},
+				AllowMethods: []string{"GET", "POST"},
+			},
+		},
+	}
+
+	baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	logger := observability.NopLogger()
+	metrics := observability.NewMetrics("test")
+	tracer, err := observability.NewTracer(observability.TracerConfig{
+		ServiceName: "test",
+		Enabled:     false,
+	})
+	require.NoError(t, err)
+
+	result := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer)
+
+	assert.NotNil(t, result.handler)
+	assert.NotNil(t, result.rateLimiter)
+	assert.NotNil(t, result.maxSessionsLimiter)
+
+	// Clean up
+	result.rateLimiter.Stop()
+	result.maxSessionsLimiter.Stop()
+}
+
+func TestCreateMetricsServer_AllEndpoints(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	metrics := observability.NewMetrics("test")
+	healthChecker := health.NewChecker("test-version")
+
+	server := createMetricsServer(9091, "/custom-metrics", metrics, healthChecker, logger)
+
+	// Test all endpoints
+	endpoints := []struct {
+		path       string
+		expectCode int
+	}{
+		{"/custom-metrics", http.StatusOK},
+		{"/health", http.StatusOK},
+		{"/ready", http.StatusOK},
+		{"/live", http.StatusOK},
+	}
+
+	for _, ep := range endpoints {
+		req := httptest.NewRequest(http.MethodGet, ep.path, nil)
+		rec := httptest.NewRecorder()
+		server.Handler.ServeHTTP(rec, req)
+		assert.Equal(t, ep.expectCode, rec.Code, "endpoint %s should return %d", ep.path, ep.expectCode)
+	}
+}
+
+func TestVersionVariables(t *testing.T) {
+	// Test that version variables are accessible
+	assert.NotEmpty(t, version)
+	assert.NotEmpty(t, buildTime)
+	assert.NotEmpty(t, gitCommit)
 }

@@ -112,6 +112,18 @@ spec:
                   key: client-secret
                   {{- end }}
             {{- end }}
+            {{- if .Values.tls.enabled }}
+            - name: TLS_ENABLED
+              value: "true"
+            {{- if .Values.tls.clientCertSecret }}
+            - name: TLS_CLIENT_CERT_PATH
+              value: {{ .Values.tls.mountPath | default "/app/certs" }}/client
+            {{- end }}
+            {{- if .Values.tls.caCertSecret }}
+            - name: TLS_CA_CERT_PATH
+              value: {{ .Values.tls.mountPath | default "/app/certs" }}/ca
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -135,6 +147,28 @@ spec:
               mountPath: /app/data
             - name: logs
               mountPath: /app/logs
+            {{- if .Values.tls.enabled }}
+            {{- if .Values.tls.clientCertSecret }}
+            - name: client-certs
+              mountPath: {{ .Values.tls.mountPath | default "/app/certs" }}/client
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tls.caCertSecret }}
+            - name: ca-certs
+              mountPath: {{ .Values.tls.mountPath | default "/app/certs" }}/ca
+              readOnly: true
+            {{- end }}
+            {{- range .Values.tls.routeCerts }}
+            - name: route-certs-{{ .name }}
+              mountPath: {{ $.Values.tls.mountPath | default "/app/certs" }}/routes/{{ .name }}
+              readOnly: true
+            {{- if .caSecretName }}
+            - name: route-ca-{{ .name }}
+              mountPath: {{ $.Values.tls.mountPath | default "/app/certs" }}/routes/{{ .name }}/ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -148,6 +182,28 @@ spec:
           emptyDir: {}
         - name: logs
           emptyDir: {}
+        {{- if .Values.tls.enabled }}
+        {{- if .Values.tls.clientCertSecret }}
+        - name: client-certs
+          secret:
+            secretName: {{ .Values.tls.clientCertSecret }}
+        {{- end }}
+        {{- if .Values.tls.caCertSecret }}
+        - name: ca-certs
+          secret:
+            secretName: {{ .Values.tls.caCertSecret }}
+        {{- end }}
+        {{- range .Values.tls.routeCerts }}
+        - name: route-certs-{{ .name }}
+          secret:
+            secretName: {{ .secretName }}
+        {{- if .caSecretName }}
+        - name: route-ca-{{ .name }}
+          secret:
+            secretName: {{ .caSecretName }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
         {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

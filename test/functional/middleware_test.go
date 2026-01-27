@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -466,5 +468,141 @@ func TestFunctional_Middleware_Timeout(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+}
+
+func TestFunctional_Middleware_MaxSessions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("max sessions middleware allows requests within limit", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 10,
+			QueueSize:     0,
+		}
+
+		mw, limiter := middleware.MaxSessionsFromConfig(cfg, observability.NopLogger())
+		require.NotNil(t, limiter)
+		defer limiter.Stop()
+
+		handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		// Send requests within limit
+		for i := 0; i < 5; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code, "Request %d should succeed", i)
+		}
+	})
+
+	t.Run("max sessions middleware rejects requests exceeding limit", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 1,
+			QueueSize:     0,
+		}
+
+		mw, limiter := middleware.MaxSessionsFromConfig(cfg, observability.NopLogger())
+		require.NotNil(t, limiter)
+		defer limiter.Stop()
+
+		handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(50 * time.Millisecond)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		// Start first request that will hold the slot
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+		}()
+
+		// Give first request time to acquire slot
+		time.Sleep(10 * time.Millisecond)
+
+		// Second request should be rejected
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+		wg.Wait()
+	})
+
+	t.Run("max sessions from config - disabled", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.MaxSessionsConfig{
+			Enabled: false,
+		}
+
+		mw, limiter := middleware.MaxSessionsFromConfig(cfg, observability.NopLogger())
+		assert.Nil(t, limiter)
+
+		handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		// All requests should succeed when disabled
+		for i := 0; i < 100; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code)
+		}
+	})
+
+	t.Run("max sessions with queue", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 1,
+			QueueSize:     5,
+			QueueTimeout:  config.Duration(500 * time.Millisecond),
+		}
+
+		mw, limiter := middleware.MaxSessionsFromConfig(cfg, observability.NopLogger())
+		require.NotNil(t, limiter)
+		defer limiter.Stop()
+
+		handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(20 * time.Millisecond)
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		var wg sync.WaitGroup
+		var successCount int32
+
+		// Start 3 requests with max 1 concurrent but queue of 5
+		for i := 0; i < 3; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req := httptest.NewRequest(http.MethodGet, "/test", nil)
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				if rec.Code == http.StatusOK {
+					atomic.AddInt32(&successCount, 1)
+				}
+			}()
+		}
+
+		wg.Wait()
+
+		// All 3 should eventually succeed due to queuing
+		assert.Equal(t, int32(3), successCount)
 	})
 }

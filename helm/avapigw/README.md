@@ -152,6 +152,10 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.rateLimit.burst` | Burst size | `200` |
 | `gateway.circuitBreaker.enabled` | Enable circuit breaker | `true` |
 | `gateway.circuitBreaker.threshold` | Failure threshold | `5` |
+| `gateway.maxSessions.enabled` | Enable max sessions limiting | `false` |
+| `gateway.maxSessions.maxConcurrent` | Maximum concurrent sessions | `10000` |
+| `gateway.maxSessions.queueSize` | Queue size for pending requests | `1000` |
+| `gateway.maxSessions.queueTimeout` | Timeout for queued requests | `30s` |
 | `gateway.observability.metrics.enabled` | Enable metrics | `true` |
 | `gateway.observability.tracing.enabled` | Enable tracing | `false` |
 
@@ -245,6 +249,65 @@ ingress:
         - api.example.com
 ```
 
+### Enable Max Sessions (Global)
+
+```yaml
+gateway:
+  maxSessions:
+    enabled: true
+    maxConcurrent: 10000
+    queueSize: 1000
+    queueTimeout: 30s
+```
+
+### Backend with Rate Limiting and Max Sessions
+
+```yaml
+gateway:
+  backends:
+    - name: api-backend
+      hosts:
+        - address: backend.example.com
+          port: 8080
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+        queueSize: 50
+        queueTimeout: 10s
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+```
+
+### Route with Max Sessions
+
+```yaml
+gateway:
+  routes:
+    - name: api-route
+      match:
+        - uri:
+            prefix: /api/v1
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: backend-service
+            port: 8080
+      timeout: 30s
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+        queueSize: 50
+        queueTimeout: 10s
+```
+
 ### Production Configuration
 
 ```yaml
@@ -293,9 +356,21 @@ affinity:
 
 ## Upgrading
 
+### To 0.3.0
+
+Added improvements:
+- Enhanced timer leak prevention in configuration watcher
+- Shared error types for consistent circuit breaker behavior
+- Improved Docker image security and optimization
+- Enhanced CI health checks and reliability
+
 ### To 0.2.0
 
-No breaking changes.
+Added new features:
+- Global max sessions configuration (`gateway.maxSessions`)
+- Route-level max sessions configuration
+- Backend-level max sessions configuration
+- Backend-level rate limiting configuration
 
 ### To 0.1.0
 

@@ -1,0 +1,14 @@
+[Host: localhost]
+[User-Agent: YandexTank/Perftest]
+[Accept: application/json]
+[Connection: keep-alive]
+/api/v1/small
+/api/v1/small/1
+/api/v1/small/2
+/api/v1/large
+/api/v1/large/1
+/api/v1/large/2
+/api/v1/default
+/api/v1/default/1
+/api/v1/default/2
+/health

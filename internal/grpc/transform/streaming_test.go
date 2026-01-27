@@ -519,3 +519,91 @@ func TestStreamingTransformer_ConcurrentAccess(t *testing.T) {
 	// Should have processed all messages
 	assert.Equal(t, int64(10), transformer.GetMessageCount())
 }
+
+func TestStreamingTransformer_IncrementMessageCount(t *testing.T) {
+	transformer := NewStreamingTransformer(observability.NopLogger(), nil)
+
+	// Initial count should be 0
+	assert.Equal(t, int64(0), transformer.GetMessageCount())
+
+	// Increment and verify
+	count1 := transformer.IncrementMessageCount()
+	assert.Equal(t, int64(1), count1)
+	assert.Equal(t, int64(1), transformer.GetMessageCount())
+
+	// Increment again
+	count2 := transformer.IncrementMessageCount()
+	assert.Equal(t, int64(2), count2)
+	assert.Equal(t, int64(2), transformer.GetMessageCount())
+}
+
+func TestStreamingTransformer_IncrementMessageCount_Concurrent(t *testing.T) {
+	transformer := NewStreamingTransformer(observability.NopLogger(), nil)
+
+	// Run concurrent increments
+	done := make(chan bool)
+	for i := 0; i < 100; i++ {
+		go func() {
+			transformer.IncrementMessageCount()
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+
+	// Should have incremented 100 times
+	assert.Equal(t, int64(100), transformer.GetMessageCount())
+}
+
+func TestStreamingTransformer_TransformStreamMessage_WithBufferFull(t *testing.T) {
+	cfg := &config.StreamingTransformConfig{
+		Aggregate:  true,
+		BufferSize: 2,
+	}
+	transformer := NewStreamingTransformer(observability.NopLogger(), cfg)
+	ctx := context.Background()
+	msg := &fieldmaskpb.FieldMask{Paths: []string{"test"}}
+
+	// First message should buffer
+	_, shouldSend1, err1 := transformer.TransformStreamMessage(ctx, msg, 0, cfg)
+	require.NoError(t, err1)
+	assert.False(t, shouldSend1) // Buffered, not sent
+
+	// Second message should trigger flush (buffer full)
+	_, shouldSend2, err2 := transformer.TransformStreamMessage(ctx, msg, 1, cfg)
+	require.NoError(t, err2)
+	assert.True(t, shouldSend2) // Buffer full, should send
+}
+
+func TestStreamingTransformer_CheckMessageTimeout_TotalTimeout(t *testing.T) {
+	cfg := &config.StreamingTransformConfig{
+		TotalTimeout: config.Duration(1 * time.Millisecond),
+	}
+	transformer := NewStreamingTransformer(observability.NopLogger(), cfg)
+	ctx := context.Background()
+
+	// Wait for timeout to expire
+	time.Sleep(5 * time.Millisecond)
+
+	err := transformer.CheckMessageTimeout(ctx, cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "total timeout")
+}
+
+func TestStreamingTransformer_CheckMessageTimeout_MessageTimeout(t *testing.T) {
+	cfg := &config.StreamingTransformConfig{
+		MessageTimeout: config.Duration(1 * time.Millisecond),
+	}
+	transformer := NewStreamingTransformer(observability.NopLogger(), cfg)
+	ctx := context.Background()
+
+	// Wait for message timeout to expire
+	time.Sleep(5 * time.Millisecond)
+
+	err := transformer.CheckMessageTimeout(ctx, cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "message timeout")
+}

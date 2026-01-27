@@ -1,0 +1,64 @@
+# Yandex Tank Configuration: Backend JWT Authentication Test
+# Purpose: Measure performance impact of backend JWT authentication
+# Duration: 3 minutes total (30s warmup + 2m sustain + 30s cooldown)
+# Target: Backend with JWT authentication enabled
+# Tests: Static JWT token, OIDC token (Keycloak)
+#
+# This test measures the overhead of:
+# 1. JWT token injection into backend requests
+# 2. Token caching and refresh
+# 3. OIDC token acquisition from Keycloak
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Moderate load for auth testing
+    # Warmup: 30s ramp from 50 to 300 RPS
+    # Sustain: 2 min at 300 RPS
+    # Cooldown: 30s ramp down
+    schedule: line(50, 300, 30s) const(300, 2m) line(300, 50, 30s)
+
+  ammofile: /var/loadtest/ammo/backend-jwt.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 15s  # Higher timeout for auth operations
+
+  # Instance settings - moderate concurrency
+  instances: 300
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: backend-jwt-auth]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 10% for 30 seconds
+    - http(5xx,10%,30s)
+    # Stop if response time exceeds 5 seconds for 30 seconds
+    - time(5000,30s)
+    # Stop if net errors exceed 5%
+    - net(5%,30s)

@@ -264,6 +264,48 @@ gateway:
     # -- Number of requests to allow in half-open state
     halfOpenRequests: 3
 
+  # Max sessions configuration (global level)
+  # Controls concurrent connection limits for the gateway
+  maxSessions:
+    # -- Enable max sessions limiting
+    enabled: false
+    # -- Maximum concurrent sessions allowed
+    maxConcurrent: 10000
+    # -- Queue size for pending requests when max is reached
+    queueSize: 1000
+    # -- Timeout for queued requests
+    queueTimeout: 30s
+
+  # Default request limits (can be overridden per route)
+  requestLimits:
+    # -- Maximum request body size in bytes (default: 10MB)
+    maxBodySize: 10485760
+    # -- Maximum header size in bytes (default: 1MB)
+    maxHeaderSize: 1048576
+
+  # Security headers configuration
+  security:
+    # -- Enable security features
+    enabled: true
+    headers:
+      # -- Enable security headers middleware
+      enabled: true
+      # -- X-Frame-Options header value
+      xFrameOptions: "DENY"
+      # -- X-Content-Type-Options header value
+      xContentTypeOptions: "nosniff"
+      # -- X-XSS-Protection header value
+      xXSSProtection: "1; mode=block"
+    hsts:
+      # -- Enable HSTS
+      enabled: false
+      # -- HSTS max-age in seconds
+      maxAge: 31536000
+      # -- Include subdomains in HSTS
+      includeSubDomains: true
+      # -- Enable HSTS preload
+      preload: false
+
   # CORS configuration
   cors:
     # -- Allowed origins
@@ -331,9 +373,48 @@ gateway:
     #         host: backend-service
     #         port: 8080
     #   timeout: 30s
+    #   # Route-level max sessions (overrides global settings)
+    #   maxSessions:
+    #     enabled: true
+    #     maxConcurrent: 500
+    #     queueSize: 50
+    #     queueTimeout: 10s
+    #
+    # Example: Route with TLS override for SNI-based certificate selection
+    # - name: tenant-a-api
+    #   match:
+    #     - uri:
+    #         prefix: /api/tenant-a
+    #   route:
+    #     - destination:
+    #         host: backend-a
+    #         port: 8080
+    #   tls:
+    #     enabled: true
+    #     # Certificate paths (mounted from tls.routeCerts secrets)
+    #     certFile: /app/certs/routes/tenant-a/tls.crt
+    #     keyFile: /app/certs/routes/tenant-a/tls.key
+    #     # SNI hosts for certificate selection
+    #     sniHosts:
+    #       - tenant-a.example.com
+    #       - api.tenant-a.example.com
+    #     # TLS version constraints
+    #     minVersion: "1.2"
+    #     maxVersion: "1.3"
+    #     # Optional: Custom cipher suites
+    #     cipherSuites:
+    #       - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    #       - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    #     # Optional: Client certificate validation (mTLS)
+    #     clientValidation:
+    #       enabled: true
+    #       caFile: /app/certs/routes/tenant-a/ca.crt
+    #       verifyMode: require  # Options: require, optional, none
 
   # Backends configuration
+  # Define backend services with optional authentication, circuit breaker, maxSessions, and rateLimit
   backends: []
+    # Example: Simple backend without authentication
     # - name: backend-service
     #   hosts:
     #     - address: backend-service.default.svc.cluster.local
@@ -347,6 +428,79 @@ gateway:
     #     unhealthyThreshold: 3
     #   loadBalancer:
     #     algorithm: roundRobin
+    #
+    # Example: Backend with maxSessions and rateLimit
+    # - name: api-backend
+    #   hosts:
+    #     - address: backend.example.com
+    #       port: 8080
+    #   maxSessions:
+    #     enabled: true
+    #     maxConcurrent: 500
+    #     queueSize: 50
+    #     queueTimeout: 10s
+    #   rateLimit:
+    #     enabled: true
+    #     requestsPerSecond: 100
+    #     burst: 200
+    #   circuitBreaker:
+    #     enabled: true
+    #     threshold: 5
+    #     timeout: 30s
+    #
+    # Example: Backend with JWT authentication (OIDC)
+    # - name: authenticated-backend
+    #   hosts:
+    #     - address: backend.example.com
+    #       port: 8080
+    #   authentication:
+    #     type: jwt
+    #     jwt:
+    #       enabled: true
+    #       tokenSource: oidc
+    #       oidc:
+    #         issuerUrl: https://keycloak.example.com/realms/myrealm
+    #         clientId: gateway-client
+    #         clientSecretVaultPath: secret/data/gateway/oidc
+    #   maxSessions:
+    #     enabled: true
+    #     maxConcurrent: 1000
+    #   rateLimit:
+    #     enabled: true
+    #     requestsPerSecond: 50
+    #     burst: 100
+    #   circuitBreaker:
+    #     enabled: true
+    #     threshold: 5
+    #     timeout: 30s
+    #
+    # Example: Backend with mTLS authentication
+    # - name: mtls-backend
+    #   hosts:
+    #     - address: secure-backend.example.com
+    #       port: 8443
+    #   authentication:
+    #     type: mtls
+    #     mtls:
+    #       enabled: true
+    #       certSecretName: backend-client-cert
+    #       caSecretName: backend-ca-cert
+    #   circuitBreaker:
+    #     enabled: true
+    #     threshold: 3
+    #     timeout: 60s
+    #
+    # Example: Backend with API key authentication
+    # - name: apikey-backend
+    #   hosts:
+    #     - address: api-backend.example.com
+    #       port: 8080
+    #   authentication:
+    #     type: apiKey
+    #     apiKey:
+    #       enabled: true
+    #       headerName: X-API-Key
+    #       vaultPath: secret/data/gateway/api-keys
 
   # gRPC routes configuration
   grpcRoutes: []
@@ -386,6 +540,30 @@ redis:
       requests:
         cpu: 100m
         memory: 128Mi
+
+# TLS configuration for backend mTLS
+tls:
+  # -- Enable TLS certificate mounting
+  enabled: false
+  # -- Client certificate secret name (for mTLS to backends)
+  clientCertSecret: ""
+  # -- CA certificate secret name (for verifying backend certificates)
+  caCertSecret: ""
+  # -- Mount path for certificates
+  mountPath: /app/certs
+
+  # Route-level TLS certificates
+  # Each route can have its own TLS certificate for SNI-based certificate selection
+  # Certificates are mounted to /app/certs/routes/{name}/
+  routeCerts: []
+    # Example: Route-specific TLS certificates
+    # - name: tenant-a
+    #   # -- Kubernetes secret containing tls.crt and tls.key
+    #   secretName: tenant-a-tls
+    #   # -- Optional: CA certificate secret for client validation
+    #   caSecretName: tenant-a-ca
+    # - name: tenant-b
+    #   secretName: tenant-b-tls
 
 # Vault configuration
 vault:

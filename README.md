@@ -1,9 +1,9 @@
-# Ava API Gateway
+# AV API Gateway
 
 [![CI](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vyrodovalexey/avapigw)](https://goreportcard.com/report/github.com/vyrodovalexey/avapigw)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/go-1.25+-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.25-blue.svg)](https://golang.org/dl/)
 
 A high-performance, production-ready API Gateway built with Go and gin-gonic. Designed for cloud-native environments with comprehensive traffic management, observability, and reliability features.
 
@@ -33,6 +33,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Multiple Auth Methods** - Kubernetes, AppRole, Token, AWS, and GCP authentication for Vault
 - **Secret Injection** - Dynamic secret injection into configuration and backends
 - **Certificate Auto-Renewal** - Automatic certificate renewal with Vault PKI
+- **Backend Authentication** - JWT, Basic Auth, and mTLS authentication for backend connections
 
 ### Authentication & Authorization
 - **JWT Authentication** - Multiple algorithms (RS256, ES256, HS256, etc.) with JWK URL support
@@ -47,10 +48,11 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Audit Logging** - Comprehensive authentication and authorization logging
 
 ### Traffic Management
-- **Load Balancing** - Round-robin and weighted load balancing algorithms
+- **Load Balancing** - Round-robin, weighted, least connections, and capacity-aware load balancing algorithms
 - **Backend Health Checking** - Automatic health monitoring with configurable thresholds
-- **Rate Limiting** - Token bucket rate limiting with per-client support
-- **Circuit Breaker** - Automatic failure detection and recovery
+- **Rate Limiting** - Token bucket rate limiting with per-client support (global, route-level, and backend-level)
+- **Max Sessions** - Concurrent connection limiting with queueing support (global, route-level, and backend-level)
+- **Circuit Breaker** - Automatic failure detection and recovery (global and backend-level)
 - **Retry Policies** - Exponential backoff with configurable retry conditions
 - **Timeouts** - Request and per-try timeout configuration
 - **Traffic Mirroring** - Mirror traffic to multiple backends for testing
@@ -61,7 +63,9 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **HTTP Redirects** - Return redirect responses
 - **Direct Responses** - Return static responses without backend calls
 - **Header Manipulation** - Add, modify, or remove request/response headers
-- **CORS Support** - Comprehensive Cross-Origin Resource Sharing configuration
+- **CORS Support** - Comprehensive Cross-Origin Resource Sharing configuration (global and route-level)
+- **Request Limits** - Configurable request body and header size limits (global and route-level)
+- **Security Headers** - Automatic security header injection (global and route-level)
 
 ### Data Transformation
 - **Field Filtering** - Filter response fields using allow/deny lists
@@ -98,10 +102,12 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Access Logs** - Detailed request/response logging
 
 ### Operations
-- **Hot Configuration Reload** - Update configuration without restart
+- **Hot Configuration Reload** - Update configuration without restart with timer leak prevention
 - **Graceful Shutdown** - Clean shutdown with connection draining
-- **Docker Support** - Production-ready container images
+- **Docker Support** - Production-ready container images with security optimizations
 - **Multi-platform Builds** - Support for Linux, macOS, and Windows
+- **Shared Error Types** - Consistent error handling with ServerError and StatusCapturingResponseWriter
+- **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
 
 ## 📋 Table of Contents
 
@@ -129,7 +135,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.25+ (for building from source)
+- Go 1.25 (for building from source)
 - Docker (for containerized deployment)
 
 ### Running with Docker
@@ -360,18 +366,54 @@ spec:
             host: user-service
             port: 8080
     
-    # Header-based routing
-    - name: mobile-api
-      match:
-        - uri:
-            prefix: /api
-          headers:
-            - name: User-Agent
-              regex: "Mobile|Android|iPhone"
-      route:
-        - destination:
-            host: mobile-backend
-            port: 8080
+     # Header-based routing
+     - name: mobile-api
+       match:
+         - uri:
+             prefix: /api
+           headers:
+             - name: User-Agent
+               regex: "Mobile|Android|iPhone"
+       route:
+         - destination:
+             host: mobile-backend
+             port: 8080
+     
+     # Route with custom request limits, CORS, and security headers
+     - name: api-route-with-overrides
+       match:
+         - uri:
+             prefix: /api/v1/upload
+           methods: [POST]
+       route:
+         - destination:
+             host: upload-backend
+             port: 8080
+       # Route-level request limits (overrides global)
+       requestLimits:
+         maxBodySize: 52428800    # 50MB for file uploads
+         maxHeaderSize: 1048576   # 1MB for headers
+       # Route-level CORS (overrides global)
+       cors:
+         allowOrigins: ["https://app.example.com", "https://admin.example.com"]
+         allowMethods: ["POST", "OPTIONS"]
+         allowHeaders: ["Content-Type", "Authorization", "X-Upload-Token"]
+         maxAge: 3600
+         allowCredentials: true
+      # Route-level security headers (overrides global)
+      security:
+        enabled: true
+        headers:
+          enabled: true
+          xFrameOptions: "SAMEORIGIN"
+          customHeaders:
+            X-Upload-Policy: "strict"
+      # Route-level max sessions (overrides global)
+      maxSessions:
+        enabled: true
+        maxConcurrent: 1000
+        queueSize: 100
+        queueTimeout: 10s
 ```
 
 ### Backends Configuration
@@ -397,8 +439,106 @@ spec:
         unhealthyThreshold: 3
         headers:
           Authorization: "Bearer health-token"
-      loadBalancer:
-        algorithm: roundRobin  # or weighted
+        loadBalancer:
+          algorithm: roundRobin  # or weighted, leastConn, random
+        # Backend-level max sessions
+        maxSessions:
+          enabled: true
+          maxConcurrent: 500
+        # Backend-level rate limiting
+        rateLimit:
+          enabled: true
+          requestsPerSecond: 100
+          burst: 200
+     
+     # Backend with circuit breaker and JWT authentication
+     - name: secure-api-backend
+       hosts:
+         - address: secure-api.example.com
+           port: 443
+           weight: 1
+       # Backend-level circuit breaker
+       circuitBreaker:
+         enabled: true
+         threshold: 5
+         timeout: 30s
+         halfOpenRequests: 3
+       # Backend authentication with JWT from OIDC
+       authentication:
+         type: jwt
+         jwt:
+           enabled: true
+           tokenSource: oidc
+           oidc:
+             issuerUrl: https://keycloak.example.com/realms/myrealm
+             clientId: gateway-client
+             clientSecret: secret-key
+             scopes: ["openid", "profile"]
+           headerName: Authorization
+           headerPrefix: Bearer
+       # TLS configuration for backend
+       tls:
+         enabled: true
+         mode: SIMPLE
+         caFile: /etc/ssl/certs/ca.crt
+         serverName: secure-api.example.com
+     
+     # Backend with Basic authentication from Vault
+     - name: legacy-backend
+       hosts:
+         - address: legacy.internal.com
+           port: 8080
+           weight: 1
+       # Backend authentication with Basic auth from Vault
+       authentication:
+         type: basic
+         basic:
+           enabled: true
+           vaultPath: secret/legacy-backend
+           usernameKey: username
+           passwordKey: password
+     
+     # Backend with mTLS authentication
+     - name: mtls-backend
+       hosts:
+         - address: mtls.example.com
+           port: 443
+           weight: 1
+       # Backend authentication with mTLS
+       authentication:
+         type: mtls
+         mtls:
+           enabled: true
+           certFile: /etc/ssl/certs/client.crt
+           keyFile: /etc/ssl/private/client.key
+           caFile: /etc/ssl/certs/backend-ca.crt
+        # TLS configuration for mTLS
+        tls:
+          enabled: true
+          mode: MUTUAL
+          caFile: /etc/ssl/certs/backend-ca.crt
+          certFile: /etc/ssl/certs/client.crt
+          keyFile: /etc/ssl/private/client.key
+      
+      # Backend with max sessions and rate limiting
+      - name: high-traffic-backend
+        hosts:
+          - address: 10.0.1.20
+            port: 8080
+          - address: 10.0.1.21
+            port: 8080
+        # Backend-level max sessions
+        maxSessions:
+          enabled: true
+          maxConcurrent: 500
+        # Backend-level rate limiting
+        rateLimit:
+          enabled: true
+          requestsPerSecond: 100
+          burst: 200
+        # Capacity-aware load balancing
+        loadBalancer:
+          algorithm: leastConn
 ```
 
 ### Rate Limiting Configuration
@@ -418,6 +558,19 @@ spec:
       - X-RateLimit-Limit
       - X-RateLimit-Remaining
       - X-RateLimit-Reset
+```
+
+### Max Sessions Configuration
+
+Configure concurrent connection limiting with queueing support:
+
+```yaml
+spec:
+  maxSessions:
+    enabled: true
+    maxConcurrent: 10000     # Maximum concurrent connections
+    queueSize: 1000          # Queue size for waiting connections
+    queueTimeout: 30s        # Timeout for queued connections
 ```
 
 ### Circuit Breaker Configuration
@@ -489,6 +642,996 @@ spec:
 ### Complete Example Configuration
 
 See [configs/gateway.yaml](configs/gateway.yaml) for a complete example configuration demonstrating all features.
+
+## 📋 Configuration Levels Reference
+
+The AV API Gateway supports configuration at three levels: **Global**, **Route**, and **Backend**. This section provides a comprehensive reference for all configuration options and their applicable levels.
+
+### Configuration Level Hierarchy
+
+Configuration options follow a hierarchical inheritance model:
+
+1. **Global Level** - Applied to all routes and backends unless overridden
+2. **Route Level** - Applied to specific routes, overrides global settings
+3. **Backend Level** - Applied to specific backends, overrides global settings
+
+When the same option is configured at multiple levels, the more specific level takes precedence.
+
+### Listeners Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `listeners[].name` | ✅ | - | - | Unique listener name |
+| `listeners[].port` | ✅ | - | - | Port number to listen on |
+| `listeners[].protocol` | ✅ | - | - | Protocol (HTTP, HTTPS, GRPC) |
+| `listeners[].hosts` | ✅ | - | - | Host matching patterns |
+| `listeners[].bind` | ✅ | - | - | Bind address |
+| `listeners[].timeouts.readTimeout` | ✅ | - | - | Maximum duration for reading request |
+| `listeners[].timeouts.readHeaderTimeout` | ✅ | - | - | Maximum duration for reading headers |
+| `listeners[].timeouts.writeTimeout` | ✅ | - | - | Maximum duration for writing response |
+| `listeners[].timeouts.idleTimeout` | ✅ | - | - | Maximum idle connection duration |
+
+### Listener TLS Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `listeners[].tls.mode` | ✅ | - | - | TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE) |
+| `listeners[].tls.minVersion` | ✅ | - | - | Minimum TLS version (TLS12, TLS13) |
+| `listeners[].tls.maxVersion` | ✅ | - | - | Maximum TLS version |
+| `listeners[].tls.certFile` | ✅ | - | - | Path to server certificate |
+| `listeners[].tls.keyFile` | ✅ | - | - | Path to server private key |
+| `listeners[].tls.caFile` | ✅ | - | - | Path to CA certificate for client validation |
+| `listeners[].tls.cipherSuites` | ✅ | - | - | Allowed cipher suites |
+| `listeners[].tls.requireClientCert` | ✅ | - | - | Require client certificate |
+| `listeners[].tls.insecureSkipVerify` | ✅ | - | - | Skip certificate verification (dev only) |
+| `listeners[].tls.alpn` | ✅ | - | - | ALPN protocols for negotiation |
+| `listeners[].tls.httpsRedirect` | ✅ | - | - | Enable HTTP to HTTPS redirect |
+| `listeners[].tls.hsts.enabled` | ✅ | - | - | Enable HSTS header |
+| `listeners[].tls.hsts.maxAge` | ✅ | - | - | HSTS max-age in seconds |
+| `listeners[].tls.hsts.includeSubDomains` | ✅ | - | - | Include subdomains in HSTS |
+| `listeners[].tls.hsts.preload` | ✅ | - | - | Enable HSTS preload |
+| `listeners[].tls.vault.enabled` | ✅ | - | - | Enable Vault certificate management |
+| `listeners[].tls.vault.pkiMount` | ✅ | - | - | Vault PKI mount path |
+| `listeners[].tls.vault.role` | ✅ | - | - | Vault PKI role name |
+| `listeners[].tls.vault.commonName` | ✅ | - | - | Certificate common name |
+| `listeners[].tls.vault.altNames` | ✅ | - | - | Certificate alternative names |
+| `listeners[].tls.vault.ttl` | ✅ | - | - | Certificate TTL |
+
+### gRPC Listener Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `listeners[].grpc.maxConcurrentStreams` | ✅ | - | - | Max concurrent streams per connection |
+| `listeners[].grpc.maxRecvMsgSize` | ✅ | - | - | Max receive message size in bytes |
+| `listeners[].grpc.maxSendMsgSize` | ✅ | - | - | Max send message size in bytes |
+| `listeners[].grpc.reflection` | ✅ | - | - | Enable gRPC reflection service |
+| `listeners[].grpc.healthCheck` | ✅ | - | - | Enable gRPC health check service |
+| `listeners[].grpc.keepalive.time` | ✅ | - | - | Keepalive ping interval |
+| `listeners[].grpc.keepalive.timeout` | ✅ | - | - | Keepalive ping timeout |
+| `listeners[].grpc.keepalive.permitWithoutStream` | ✅ | - | - | Allow keepalive without active streams |
+| `listeners[].grpc.keepalive.maxConnectionIdle` | ✅ | - | - | Max connection idle time |
+| `listeners[].grpc.keepalive.maxConnectionAge` | ✅ | - | - | Max connection age |
+| `listeners[].grpc.keepalive.maxConnectionAgeGrace` | ✅ | - | - | Grace period after max age |
+| `listeners[].grpc.tls.*` | ✅ | - | - | gRPC TLS configuration (same as listener TLS) |
+
+### HTTP Routes Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `routes[].name` | - | ✅ | - | Unique route name |
+| `routes[].match[].uri.exact` | - | ✅ | - | Exact URI match |
+| `routes[].match[].uri.prefix` | - | ✅ | - | URI prefix match |
+| `routes[].match[].uri.regex` | - | ✅ | - | URI regex match |
+| `routes[].match[].methods` | - | ✅ | - | HTTP methods to match |
+| `routes[].match[].headers[].name` | - | ✅ | - | Header name to match |
+| `routes[].match[].headers[].exact` | - | ✅ | - | Exact header value match |
+| `routes[].match[].headers[].prefix` | - | ✅ | - | Header value prefix match |
+| `routes[].match[].headers[].regex` | - | ✅ | - | Header value regex match |
+| `routes[].match[].headers[].present` | - | ✅ | - | Header must be present |
+| `routes[].match[].headers[].absent` | - | ✅ | - | Header must be absent |
+| `routes[].match[].queryParams[].name` | - | ✅ | - | Query parameter name |
+| `routes[].match[].queryParams[].exact` | - | ✅ | - | Exact query parameter value |
+| `routes[].match[].queryParams[].regex` | - | ✅ | - | Query parameter regex match |
+| `routes[].match[].queryParams[].present` | - | ✅ | - | Query parameter must be present |
+| `routes[].route[].destination.host` | - | ✅ | - | Backend host |
+| `routes[].route[].destination.port` | - | ✅ | - | Backend port |
+| `routes[].route[].weight` | - | ✅ | - | Traffic weight for load balancing |
+| `routes[].timeout` | ✅ | ✅ | - | Request timeout |
+| `routes[].retries.attempts` | ✅ | ✅ | - | Max retry attempts |
+| `routes[].retries.perTryTimeout` | ✅ | ✅ | - | Timeout per retry attempt |
+| `routes[].retries.retryOn` | ✅ | ✅ | - | Conditions to retry on |
+| `routes[].redirect.uri` | - | ✅ | - | Redirect URI |
+| `routes[].redirect.code` | - | ✅ | - | Redirect HTTP status code |
+| `routes[].redirect.scheme` | - | ✅ | - | Redirect scheme (http/https) |
+| `routes[].redirect.host` | - | ✅ | - | Redirect host |
+| `routes[].redirect.port` | - | ✅ | - | Redirect port |
+| `routes[].redirect.stripQuery` | - | ✅ | - | Strip query string on redirect |
+| `routes[].rewrite.uri` | - | ✅ | - | Rewrite URI |
+| `routes[].rewrite.authority` | - | ✅ | - | Rewrite authority/host |
+| `routes[].directResponse.status` | - | ✅ | - | Direct response status code |
+| `routes[].directResponse.body` | - | ✅ | - | Direct response body |
+| `routes[].directResponse.headers` | - | ✅ | - | Direct response headers |
+| `routes[].headers.request.set` | - | ✅ | - | Set request headers |
+| `routes[].headers.request.add` | - | ✅ | - | Add request headers |
+| `routes[].headers.request.remove` | - | ✅ | - | Remove request headers |
+| `routes[].headers.response.set` | - | ✅ | - | Set response headers |
+| `routes[].headers.response.add` | - | ✅ | - | Add response headers |
+| `routes[].headers.response.remove` | - | ✅ | - | Remove response headers |
+| `routes[].mirror.destination` | - | ✅ | - | Mirror traffic destination |
+| `routes[].mirror.percentage` | - | ✅ | - | Percentage of traffic to mirror |
+| `routes[].fault.delay.fixedDelay` | - | ✅ | - | Fixed delay duration |
+| `routes[].fault.delay.percentage` | - | ✅ | - | Percentage of requests to delay |
+| `routes[].fault.abort.httpStatus` | - | ✅ | - | HTTP status for abort |
+| `routes[].fault.abort.percentage` | - | ✅ | - | Percentage of requests to abort |
+| `routes[].requestLimits.maxBodySize` | ✅ | ✅ | - | Maximum request body size in bytes |
+| `routes[].requestLimits.maxHeaderSize` | ✅ | ✅ | - | Maximum total header size in bytes |
+| `routes[].cors.allowOrigins` | ✅ | ✅ | - | Allowed origins for CORS |
+| `routes[].cors.allowMethods` | ✅ | ✅ | - | Allowed HTTP methods for CORS |
+| `routes[].cors.allowHeaders` | ✅ | ✅ | - | Allowed request headers for CORS |
+| `routes[].cors.exposeHeaders` | ✅ | ✅ | - | Headers exposed to browser |
+| `routes[].cors.maxAge` | ✅ | ✅ | - | Preflight cache duration in seconds |
+| `routes[].cors.allowCredentials` | ✅ | ✅ | - | Allow credentials in CORS requests |
+| `routes[].security.enabled` | ✅ | ✅ | - | Enable security headers |
+| `routes[].security.headers.enabled` | ✅ | ✅ | - | Enable security headers injection |
+| `routes[].security.headers.xFrameOptions` | ✅ | ✅ | - | X-Frame-Options header value |
+| `routes[].security.headers.xContentTypeOptions` | ✅ | ✅ | - | X-Content-Type-Options header value |
+| `routes[].security.headers.xXSSProtection` | ✅ | ✅ | - | X-XSS-Protection header value |
+| `routes[].security.headers.customHeaders` | ✅ | ✅ | - | Custom security headers |
+
+### gRPC Routes Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `grpcRoutes[].name` | - | ✅ | - | Unique gRPC route name |
+| `grpcRoutes[].match[].service.exact` | - | ✅ | - | Exact service name match |
+| `grpcRoutes[].match[].service.prefix` | - | ✅ | - | Service name prefix match |
+| `grpcRoutes[].match[].service.regex` | - | ✅ | - | Service name regex match |
+| `grpcRoutes[].match[].method.exact` | - | ✅ | - | Exact method name match |
+| `grpcRoutes[].match[].method.prefix` | - | ✅ | - | Method name prefix match |
+| `grpcRoutes[].match[].method.regex` | - | ✅ | - | Method name regex match |
+| `grpcRoutes[].match[].metadata[].name` | - | ✅ | - | Metadata key name |
+| `grpcRoutes[].match[].metadata[].exact` | - | ✅ | - | Exact metadata value match |
+| `grpcRoutes[].match[].metadata[].prefix` | - | ✅ | - | Metadata value prefix match |
+| `grpcRoutes[].match[].metadata[].regex` | - | ✅ | - | Metadata value regex match |
+| `grpcRoutes[].match[].metadata[].present` | - | ✅ | - | Metadata must be present |
+| `grpcRoutes[].match[].metadata[].absent` | - | ✅ | - | Metadata must be absent |
+| `grpcRoutes[].match[].authority.exact` | - | ✅ | - | Exact authority match |
+| `grpcRoutes[].match[].authority.prefix` | - | ✅ | - | Authority prefix match |
+| `grpcRoutes[].match[].authority.regex` | - | ✅ | - | Authority regex match |
+| `grpcRoutes[].match[].withoutHeaders` | - | ✅ | - | Headers that must NOT be present |
+| `grpcRoutes[].route[].destination.host` | - | ✅ | - | Backend host |
+| `grpcRoutes[].route[].destination.port` | - | ✅ | - | Backend port |
+| `grpcRoutes[].route[].weight` | - | ✅ | - | Traffic weight |
+| `grpcRoutes[].timeout` | ✅ | ✅ | - | Request timeout |
+| `grpcRoutes[].retries.attempts` | ✅ | ✅ | - | Max retry attempts |
+| `grpcRoutes[].retries.perTryTimeout` | ✅ | ✅ | - | Timeout per retry |
+| `grpcRoutes[].retries.retryOn` | ✅ | ✅ | - | gRPC status codes to retry on |
+| `grpcRoutes[].retries.backoffBaseInterval` | ✅ | ✅ | - | Base interval for exponential backoff |
+| `grpcRoutes[].retries.backoffMaxInterval` | ✅ | ✅ | - | Max interval for exponential backoff |
+| `grpcRoutes[].headers.*` | - | ✅ | - | Header manipulation (same as HTTP routes) |
+| `grpcRoutes[].mirror.*` | - | ✅ | - | Traffic mirroring (same as HTTP routes) |
+
+### HTTP Backends Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `backends[].name` | - | - | ✅ | Unique backend name |
+| `backends[].hosts[].address` | - | - | ✅ | Backend host address |
+| `backends[].hosts[].port` | - | - | ✅ | Backend port |
+| `backends[].hosts[].weight` | - | - | ✅ | Host weight for load balancing |
+| `backends[].healthCheck.path` | - | - | ✅ | Health check endpoint path |
+| `backends[].healthCheck.interval` | - | - | ✅ | Health check interval |
+| `backends[].healthCheck.timeout` | - | - | ✅ | Health check timeout |
+| `backends[].healthCheck.healthyThreshold` | - | - | ✅ | Consecutive successes to mark healthy |
+| `backends[].healthCheck.unhealthyThreshold` | - | - | ✅ | Consecutive failures to mark unhealthy |
+| `backends[].loadBalancer.algorithm` | - | - | ✅ | Load balancing algorithm (roundRobin, weighted, leastConn, random) |
+| `backends[].maxSessions.enabled` | - | - | ✅ | Enable max sessions for backend hosts |
+| `backends[].maxSessions.maxConcurrent` | - | - | ✅ | Max concurrent connections per host |
+| `backends[].rateLimit.enabled` | - | - | ✅ | Enable rate limiting for backend hosts |
+| `backends[].rateLimit.requestsPerSecond` | - | - | ✅ | Requests per second limit per host |
+| `backends[].rateLimit.burst` | - | - | ✅ | Burst size per host |
+| `backends[].tls.enabled` | - | - | ✅ | Enable TLS for backend connections |
+| `backends[].tls.mode` | - | - | ✅ | TLS mode (SIMPLE, MUTUAL) |
+| `backends[].tls.caFile` | - | - | ✅ | CA certificate for server verification |
+| `backends[].tls.certFile` | - | - | ✅ | Client certificate (for mTLS) |
+| `backends[].tls.keyFile` | - | - | ✅ | Client private key (for mTLS) |
+| `backends[].tls.serverName` | - | - | ✅ | Server name for TLS verification (SNI) |
+| `backends[].tls.insecureSkipVerify` | - | - | ✅ | Skip server certificate verification |
+| `backends[].tls.minVersion` | - | - | ✅ | Minimum TLS version |
+| `backends[].tls.maxVersion` | - | - | ✅ | Maximum TLS version |
+| `backends[].tls.cipherSuites` | - | - | ✅ | Allowed cipher suites |
+| `backends[].tls.alpn` | - | - | ✅ | ALPN protocols |
+| `backends[].tls.vault.*` | - | - | ✅ | Vault-based client certificate management |
+| `backends[].circuitBreaker.enabled` | - | - | ✅ | Enable circuit breaker for this backend |
+| `backends[].circuitBreaker.threshold` | - | - | ✅ | Failure threshold to open circuit |
+| `backends[].circuitBreaker.timeout` | - | - | ✅ | Time to wait before half-open |
+| `backends[].circuitBreaker.halfOpenRequests` | - | - | ✅ | Requests allowed in half-open state |
+| `backends[].authentication.type` | - | - | ✅ | Authentication type (jwt, basic, mtls) |
+| `backends[].authentication.jwt.enabled` | - | - | ✅ | Enable JWT authentication |
+| `backends[].authentication.jwt.tokenSource` | - | - | ✅ | Token source (static, vault, oidc) |
+| `backends[].authentication.jwt.staticToken` | - | - | ✅ | Static JWT token (dev only) |
+| `backends[].authentication.jwt.vaultPath` | - | - | ✅ | Vault path for JWT token |
+| `backends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | OIDC issuer URL |
+| `backends[].authentication.jwt.oidc.clientId` | - | - | ✅ | OIDC client ID |
+| `backends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | OIDC client secret |
+| `backends[].authentication.jwt.oidc.scopes` | - | - | ✅ | OIDC scopes to request |
+| `backends[].authentication.jwt.headerName` | - | - | ✅ | Header name for JWT token |
+| `backends[].authentication.jwt.headerPrefix` | - | - | ✅ | Header prefix for JWT token |
+| `backends[].authentication.basic.enabled` | - | - | ✅ | Enable Basic authentication |
+| `backends[].authentication.basic.username` | - | - | ✅ | Username for Basic auth |
+| `backends[].authentication.basic.password` | - | - | ✅ | Password for Basic auth |
+| `backends[].authentication.basic.vaultPath` | - | - | ✅ | Vault path for credentials |
+| `backends[].authentication.basic.usernameKey` | - | - | ✅ | Vault key for username |
+| `backends[].authentication.basic.passwordKey` | - | - | ✅ | Vault key for password |
+| `backends[].authentication.mtls.enabled` | - | - | ✅ | Enable mTLS authentication |
+| `backends[].authentication.mtls.certFile` | - | - | ✅ | Client certificate file |
+| `backends[].authentication.mtls.keyFile` | - | - | ✅ | Client private key file |
+| `backends[].authentication.mtls.caFile` | - | - | ✅ | CA certificate for server verification |
+| `backends[].authentication.mtls.vault.*` | - | - | ✅ | Vault-based certificate management |
+
+### gRPC Backends Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `grpcBackends[].name` | - | - | ✅ | Unique gRPC backend name |
+| `grpcBackends[].hosts[].address` | - | - | ✅ | Backend host address |
+| `grpcBackends[].hosts[].port` | - | - | ✅ | Backend port |
+| `grpcBackends[].hosts[].weight` | - | - | ✅ | Host weight for load balancing |
+| `grpcBackends[].healthCheck.enabled` | - | - | ✅ | Enable gRPC health checking |
+| `grpcBackends[].healthCheck.service` | - | - | ✅ | Service name to check (empty for overall) |
+| `grpcBackends[].healthCheck.interval` | - | - | ✅ | Health check interval |
+| `grpcBackends[].healthCheck.timeout` | - | - | ✅ | Health check timeout |
+| `grpcBackends[].healthCheck.healthyThreshold` | - | - | ✅ | Consecutive successes to mark healthy |
+| `grpcBackends[].healthCheck.unhealthyThreshold` | - | - | ✅ | Consecutive failures to mark unhealthy |
+| `grpcBackends[].loadBalancer.algorithm` | - | - | ✅ | Load balancing algorithm |
+| `grpcBackends[].tls.*` | - | - | ✅ | TLS configuration (same as HTTP backends) |
+| `grpcBackends[].connectionPool.maxIdleConns` | - | - | ✅ | Max idle connections per host |
+| `grpcBackends[].connectionPool.maxConnsPerHost` | - | - | ✅ | Max connections per host |
+| `grpcBackends[].connectionPool.idleConnTimeout` | - | - | ✅ | Idle connection timeout |
+
+### Rate Limiting Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `rateLimit.enabled` | ✅ | ✅ | ✅ | Enable rate limiting |
+| `rateLimit.requestsPerSecond` | ✅ | ✅ | ✅ | Requests per second limit |
+| `rateLimit.burst` | ✅ | ✅ | ✅ | Burst size (token bucket) |
+| `rateLimit.perClient` | ✅ | ✅ | - | Apply rate limit per client IP |
+
+### Max Sessions Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `maxSessions.enabled` | ✅ | ✅ | ✅ | Enable max sessions limiting |
+| `maxSessions.maxConcurrent` | ✅ | ✅ | ✅ | Maximum concurrent connections |
+| `maxSessions.queueSize` | ✅ | ✅ | ✅ | Queue size for waiting connections |
+| `maxSessions.queueTimeout` | ✅ | ✅ | ✅ | Timeout for queued connections |
+
+### Circuit Breaker Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `circuitBreaker.enabled` | ✅ | - | ✅ | Enable circuit breaker |
+| `circuitBreaker.threshold` | ✅ | - | ✅ | Failure threshold to open circuit |
+| `circuitBreaker.timeout` | ✅ | - | ✅ | Time to wait before half-open |
+| `circuitBreaker.halfOpenRequests` | ✅ | - | ✅ | Requests allowed in half-open state |
+
+### Request Limits Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `requestLimits.maxBodySize` | ✅ | ✅ | - | Maximum request body size in bytes |
+| `requestLimits.maxHeaderSize` | ✅ | ✅ | - | Maximum total header size in bytes |
+
+### CORS Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `cors.allowOrigins` | ✅ | ✅ | - | Allowed origins |
+| `cors.allowMethods` | ✅ | ✅ | - | Allowed HTTP methods |
+| `cors.allowHeaders` | ✅ | ✅ | - | Allowed request headers |
+| `cors.exposeHeaders` | ✅ | ✅ | - | Headers exposed to browser |
+| `cors.maxAge` | ✅ | ✅ | - | Preflight cache duration in seconds |
+| `cors.allowCredentials` | ✅ | ✅ | - | Allow credentials |
+
+### Observability Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `observability.metrics.enabled` | ✅ | - | - | Enable Prometheus metrics |
+| `observability.metrics.path` | ✅ | - | - | Metrics endpoint path |
+| `observability.metrics.port` | ✅ | - | - | Metrics endpoint port |
+| `observability.tracing.enabled` | ✅ | - | - | Enable distributed tracing |
+| `observability.tracing.samplingRate` | ✅ | - | - | Trace sampling rate (0.0-1.0) |
+| `observability.tracing.otlpEndpoint` | ✅ | - | - | OTLP collector endpoint |
+| `observability.tracing.serviceName` | ✅ | - | - | Service name for traces |
+| `observability.logging.level` | ✅ | - | - | Log level (debug, info, warn, error) |
+| `observability.logging.format` | ✅ | - | - | Log format (json, console) |
+| `observability.logging.output` | ✅ | - | - | Log output destination |
+
+### Authentication Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `authentication.enabled` | ✅ | ✅ | - | Enable authentication |
+| `authentication.allowAnonymous` | ✅ | ✅ | - | Allow anonymous access |
+| `authentication.skipPaths` | ✅ | - | - | Paths to skip authentication |
+| `authentication.jwt.enabled` | ✅ | ✅ | - | Enable JWT authentication |
+| `authentication.jwt.issuer` | ✅ | ✅ | - | Expected token issuer |
+| `authentication.jwt.audience` | ✅ | ✅ | - | Expected token audience |
+| `authentication.jwt.jwksUrl` | ✅ | ✅ | - | JWKS URL for key retrieval |
+| `authentication.jwt.secret` | ✅ | ✅ | - | Secret for HMAC algorithms |
+| `authentication.jwt.publicKey` | ✅ | ✅ | - | Public key for RSA/ECDSA |
+| `authentication.jwt.algorithm` | ✅ | ✅ | - | Expected signing algorithm |
+| `authentication.jwt.claimMapping.roles` | ✅ | ✅ | - | Claim containing roles |
+| `authentication.jwt.claimMapping.permissions` | ✅ | ✅ | - | Claim containing permissions |
+| `authentication.jwt.claimMapping.groups` | ✅ | ✅ | - | Claim containing groups |
+| `authentication.jwt.claimMapping.scopes` | ✅ | ✅ | - | Claim containing scopes |
+| `authentication.jwt.claimMapping.email` | ✅ | ✅ | - | Claim containing email |
+| `authentication.jwt.claimMapping.name` | ✅ | ✅ | - | Claim containing name |
+| `authentication.apiKey.enabled` | ✅ | ✅ | - | Enable API key authentication |
+| `authentication.apiKey.header` | ✅ | ✅ | - | Header name for API key |
+| `authentication.apiKey.query` | ✅ | ✅ | - | Query parameter for API key |
+| `authentication.apiKey.hashAlgorithm` | ✅ | ✅ | - | Hash algorithm for stored keys |
+| `authentication.apiKey.vaultPath` | ✅ | ✅ | - | Vault path for API keys |
+| `authentication.mtls.enabled` | ✅ | ✅ | - | Enable mTLS authentication |
+| `authentication.mtls.caFile` | ✅ | ✅ | - | CA certificate path |
+| `authentication.mtls.extractIdentity` | ✅ | ✅ | - | How to extract identity from cert |
+| `authentication.mtls.allowedCNs` | ✅ | ✅ | - | Allowed common names |
+| `authentication.mtls.allowedOUs` | ✅ | ✅ | - | Allowed organizational units |
+| `authentication.oidc.enabled` | ✅ | ✅ | - | Enable OIDC authentication |
+| `authentication.oidc.providers[].name` | ✅ | ✅ | - | Provider name |
+| `authentication.oidc.providers[].issuerUrl` | ✅ | ✅ | - | OIDC issuer URL |
+| `authentication.oidc.providers[].clientId` | ✅ | ✅ | - | OIDC client ID |
+| `authentication.oidc.providers[].clientSecret` | ✅ | ✅ | - | OIDC client secret |
+| `authentication.oidc.providers[].scopes` | ✅ | ✅ | - | Scopes to request |
+
+### Authorization Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `authorization.enabled` | ✅ | ✅ | - | Enable authorization |
+| `authorization.defaultPolicy` | ✅ | ✅ | - | Default policy (allow/deny) |
+| `authorization.skipPaths` | ✅ | - | - | Paths to skip authorization |
+| `authorization.cache.enabled` | ✅ | - | - | Enable authorization caching |
+| `authorization.cache.ttl` | ✅ | - | - | Cache TTL |
+| `authorization.cache.maxSize` | ✅ | - | - | Maximum cache entries |
+| `authorization.cache.type` | ✅ | - | - | Cache type (memory, redis) |
+| `authorization.rbac.enabled` | ✅ | ✅ | - | Enable RBAC |
+| `authorization.rbac.policies[].name` | ✅ | ✅ | - | Policy name |
+| `authorization.rbac.policies[].roles` | ✅ | ✅ | - | Roles that match policy |
+| `authorization.rbac.policies[].resources` | ✅ | ✅ | - | Resources policy applies to |
+| `authorization.rbac.policies[].actions` | ✅ | ✅ | - | Actions policy allows |
+| `authorization.rbac.policies[].effect` | ✅ | ✅ | - | Policy effect (allow/deny) |
+| `authorization.rbac.policies[].priority` | ✅ | ✅ | - | Policy priority |
+| `authorization.rbac.roleHierarchy` | ✅ | - | - | Role inheritance definitions |
+| `authorization.abac.enabled` | ✅ | ✅ | - | Enable ABAC |
+| `authorization.abac.policies[].name` | ✅ | ✅ | - | Policy name |
+| `authorization.abac.policies[].expression` | ✅ | ✅ | - | CEL expression for policy |
+| `authorization.abac.policies[].resources` | ✅ | ✅ | - | Resources policy applies to |
+| `authorization.abac.policies[].actions` | ✅ | ✅ | - | Actions policy applies to |
+| `authorization.abac.policies[].effect` | ✅ | ✅ | - | Policy effect (allow/deny) |
+| `authorization.abac.policies[].priority` | ✅ | ✅ | - | Policy priority |
+| `authorization.external.enabled` | ✅ | ✅ | - | Enable external authorization |
+| `authorization.external.opa.url` | ✅ | ✅ | - | OPA server URL |
+| `authorization.external.opa.policy` | ✅ | ✅ | - | OPA policy path |
+| `authorization.external.opa.headers` | ✅ | ✅ | - | Additional headers for OPA |
+| `authorization.external.timeout` | ✅ | ✅ | - | External authz timeout |
+| `authorization.external.failOpen` | ✅ | ✅ | - | Allow on external authz failure |
+
+### Security Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `security.enabled` | ✅ | ✅ | - | Enable security features |
+| `security.headers.enabled` | ✅ | ✅ | - | Enable security headers |
+| `security.headers.xFrameOptions` | ✅ | ✅ | - | X-Frame-Options header value |
+| `security.headers.xContentTypeOptions` | ✅ | ✅ | - | X-Content-Type-Options header |
+| `security.headers.xXSSProtection` | ✅ | ✅ | - | X-XSS-Protection header |
+| `security.headers.customHeaders` | ✅ | ✅ | - | Custom security headers |
+| `security.hsts.enabled` | ✅ | ✅ | - | Enable HSTS |
+| `security.hsts.maxAge` | ✅ | ✅ | - | HSTS max-age in seconds |
+| `security.hsts.includeSubDomains` | ✅ | ✅ | - | Include subdomains |
+| `security.hsts.preload` | ✅ | ✅ | - | Enable preload |
+| `security.csp.enabled` | ✅ | ✅ | - | Enable CSP |
+| `security.csp.policy` | ✅ | ✅ | - | CSP policy string |
+| `security.csp.reportOnly` | ✅ | ✅ | - | Report-only mode |
+| `security.csp.reportUri` | ✅ | ✅ | - | CSP violation report URI |
+| `security.referrerPolicy` | ✅ | ✅ | - | Referrer-Policy header value |
+
+### Audit Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `audit.enabled` | ✅ | - | - | Enable audit logging |
+| `audit.level` | ✅ | - | - | Minimum audit level |
+| `audit.output` | ✅ | - | - | Output destination |
+| `audit.format` | ✅ | - | - | Output format (json, text) |
+| `audit.skipPaths` | ✅ | - | - | Paths to skip auditing |
+| `audit.redactFields` | ✅ | - | - | Fields to redact from logs |
+| `audit.events.authentication` | ✅ | - | - | Audit authentication events |
+| `audit.events.authorization` | ✅ | - | - | Audit authorization events |
+| `audit.events.request` | ✅ | - | - | Audit request events |
+| `audit.events.response` | ✅ | - | - | Audit response events |
+| `audit.events.configuration` | ✅ | - | - | Audit configuration changes |
+| `audit.events.security` | ✅ | - | - | Audit security events |
+
+### Backend Authentication Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `backends[].authentication.type` | - | - | ✅ | Authentication type (jwt, basic, mtls) |
+| `backends[].authentication.jwt.enabled` | - | - | ✅ | Enable JWT authentication |
+| `backends[].authentication.jwt.tokenSource` | - | - | ✅ | Token source (static, vault, oidc) |
+| `backends[].authentication.jwt.staticToken` | - | - | ✅ | Static JWT token (development only) |
+| `backends[].authentication.jwt.vaultPath` | - | - | ✅ | Vault path for JWT token |
+| `backends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | OIDC issuer URL |
+| `backends[].authentication.jwt.oidc.clientId` | - | - | ✅ | OIDC client ID |
+| `backends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | OIDC client secret |
+| `backends[].authentication.jwt.oidc.clientSecretVaultPath` | - | - | ✅ | Vault path for OIDC client secret |
+| `backends[].authentication.jwt.oidc.scopes` | - | - | ✅ | OIDC scopes to request |
+| `backends[].authentication.jwt.oidc.tokenCacheTTL` | - | - | ✅ | TTL for cached tokens |
+| `backends[].authentication.jwt.headerName` | - | - | ✅ | Header name for JWT token (default: Authorization) |
+| `backends[].authentication.jwt.headerPrefix` | - | - | ✅ | Header prefix for JWT token (default: Bearer) |
+| `backends[].authentication.basic.enabled` | - | - | ✅ | Enable Basic authentication |
+| `backends[].authentication.basic.username` | - | - | ✅ | Username for Basic auth |
+| `backends[].authentication.basic.password` | - | - | ✅ | Password for Basic auth |
+| `backends[].authentication.basic.vaultPath` | - | - | ✅ | Vault path for credentials |
+| `backends[].authentication.basic.usernameKey` | - | - | ✅ | Vault key for username (default: username) |
+| `backends[].authentication.basic.passwordKey` | - | - | ✅ | Vault key for password (default: password) |
+| `backends[].authentication.mtls.enabled` | - | - | ✅ | Enable mTLS authentication |
+| `backends[].authentication.mtls.certFile` | - | - | ✅ | Client certificate file path |
+| `backends[].authentication.mtls.keyFile` | - | - | ✅ | Client private key file path |
+| `backends[].authentication.mtls.caFile` | - | - | ✅ | CA certificate for server verification |
+| `backends[].authentication.mtls.vault.enabled` | - | - | ✅ | Enable Vault-based certificate management |
+| `backends[].authentication.mtls.vault.pkiMount` | - | - | ✅ | Vault PKI mount path |
+| `backends[].authentication.mtls.vault.role` | - | - | ✅ | Vault PKI role name |
+| `backends[].authentication.mtls.vault.commonName` | - | - | ✅ | Certificate common name |
+| `backends[].authentication.mtls.vault.altNames` | - | - | ✅ | Certificate alternative names |
+| `backends[].authentication.mtls.vault.ttl` | - | - | ✅ | Certificate TTL |
+
+### HTTP Transform Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `routes[].transform.request.passthroughBody` | - | ✅ | - | Pass request body unchanged |
+| `routes[].transform.request.bodyTemplate` | - | ✅ | - | Go template for request body |
+| `routes[].transform.request.staticHeaders` | - | ✅ | - | Static headers to add |
+| `routes[].transform.request.dynamicHeaders` | - | ✅ | - | Dynamic headers from context |
+| `routes[].transform.request.injectFields` | - | ✅ | - | Fields to inject into body |
+| `routes[].transform.request.removeFields` | - | ✅ | - | Fields to remove from body |
+| `routes[].transform.request.defaultValues` | - | ✅ | - | Default values for missing fields |
+| `routes[].transform.request.validateBeforeTransform` | - | ✅ | - | Validate before transformation |
+| `routes[].transform.response.allowFields` | - | ✅ | - | Fields to include (whitelist) |
+| `routes[].transform.response.denyFields` | - | ✅ | - | Fields to exclude (blacklist) |
+| `routes[].transform.response.fieldMappings` | - | ✅ | - | Field rename mappings |
+| `routes[].transform.response.groupFields` | - | ✅ | - | Group fields into objects |
+| `routes[].transform.response.flattenFields` | - | ✅ | - | Flatten nested objects |
+| `routes[].transform.response.arrayOperations` | - | ✅ | - | Array manipulation operations |
+| `routes[].transform.response.template` | - | ✅ | - | Go template for response |
+| `routes[].transform.response.mergeStrategy` | - | ✅ | - | Merge strategy (deep, shallow, replace) |
+
+### gRPC Transform Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `grpcRoutes[].transform.request.injectFieldMask` | - | ✅ | - | FieldMask to inject |
+| `grpcRoutes[].transform.request.staticMetadata` | - | ✅ | - | Static metadata to add |
+| `grpcRoutes[].transform.request.dynamicMetadata` | - | ✅ | - | Dynamic metadata from context |
+| `grpcRoutes[].transform.request.injectFields` | - | ✅ | - | Fields to inject |
+| `grpcRoutes[].transform.request.removeFields` | - | ✅ | - | Fields to remove |
+| `grpcRoutes[].transform.request.defaultValues` | - | ✅ | - | Default values |
+| `grpcRoutes[].transform.request.validateBeforeTransform` | - | ✅ | - | Validate before transformation |
+| `grpcRoutes[].transform.request.injectDeadline` | - | ✅ | - | Deadline to inject |
+| `grpcRoutes[].transform.request.authorityOverride` | - | ✅ | - | Override :authority header |
+| `grpcRoutes[].transform.response.fieldMask` | - | ✅ | - | FieldMask for filtering |
+| `grpcRoutes[].transform.response.fieldMappings` | - | ✅ | - | Field rename mappings |
+| `grpcRoutes[].transform.response.repeatedFieldOps` | - | ✅ | - | Operations on repeated fields |
+| `grpcRoutes[].transform.response.mapFieldOps` | - | ✅ | - | Operations on map fields |
+| `grpcRoutes[].transform.response.preserveUnknownFields` | - | ✅ | - | Preserve unknown fields |
+| `grpcRoutes[].transform.response.trailerMetadata` | - | ✅ | - | Metadata for response trailers |
+| `grpcRoutes[].transform.response.streaming.perMessageTransform` | - | ✅ | - | Transform each message |
+| `grpcRoutes[].transform.response.streaming.aggregate` | - | ✅ | - | Aggregate messages |
+| `grpcRoutes[].transform.response.streaming.filterCondition` | - | ✅ | - | CEL filter for messages |
+| `grpcRoutes[].transform.response.streaming.bufferSize` | - | ✅ | - | Message buffer size |
+| `grpcRoutes[].transform.response.streaming.rateLimit` | - | ✅ | - | Max messages per second |
+| `grpcRoutes[].transform.response.streaming.messageTimeout` | - | ✅ | - | Per-message timeout |
+| `grpcRoutes[].transform.response.streaming.totalTimeout` | - | ✅ | - | Total streaming timeout |
+
+### Cache Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `routes[].cache.enabled` | - | ✅ | - | Enable caching |
+| `routes[].cache.type` | - | ✅ | - | Cache type (memory, redis) |
+| `routes[].cache.ttl` | - | ✅ | - | Cache TTL |
+| `routes[].cache.maxEntries` | - | ✅ | - | Max entries (memory cache) |
+| `routes[].cache.honorCacheControl` | - | ✅ | - | Honor Cache-Control headers |
+| `routes[].cache.staleWhileRevalidate` | - | ✅ | - | Stale-while-revalidate duration |
+| `routes[].cache.negativeCacheTTL` | - | ✅ | - | TTL for error responses |
+| `routes[].cache.redis.url` | - | ✅ | - | Redis connection URL |
+| `routes[].cache.redis.poolSize` | - | ✅ | - | Redis connection pool size |
+| `routes[].cache.redis.connectTimeout` | - | ✅ | - | Redis connect timeout |
+| `routes[].cache.redis.readTimeout` | - | ✅ | - | Redis read timeout |
+| `routes[].cache.redis.writeTimeout` | - | ✅ | - | Redis write timeout |
+| `routes[].cache.redis.keyPrefix` | - | ✅ | - | Redis key prefix |
+| `routes[].cache.redis.tls.*` | - | ✅ | - | Redis TLS configuration |
+| `routes[].cache.redis.retry.maxRetries` | - | ✅ | - | Max connection retries |
+| `routes[].cache.redis.retry.initialBackoff` | - | ✅ | - | Initial retry backoff |
+| `routes[].cache.redis.retry.maxBackoff` | - | ✅ | - | Max retry backoff |
+| `routes[].cache.keyConfig.includeMethod` | - | ✅ | - | Include method in cache key |
+| `routes[].cache.keyConfig.includePath` | - | ✅ | - | Include path in cache key |
+| `routes[].cache.keyConfig.includeQueryParams` | - | ✅ | - | Query params to include |
+| `routes[].cache.keyConfig.includeHeaders` | - | ✅ | - | Headers to include |
+| `routes[].cache.keyConfig.includeBodyHash` | - | ✅ | - | Include body hash |
+| `routes[].cache.keyConfig.keyTemplate` | - | ✅ | - | Custom key template |
+| `grpcRoutes[].cache.*` | - | ✅ | - | Same as HTTP routes cache |
+
+### Encoding Configuration
+
+| Option | Global | Route | Backend | Description |
+|--------|:------:|:-----:|:-------:|-------------|
+| `routes[].encoding.requestEncoding` | - | ✅ | - | Request encoding (json, xml, yaml, protobuf) |
+| `routes[].encoding.responseEncoding` | - | ✅ | - | Response encoding |
+| `routes[].encoding.enableContentNegotiation` | - | ✅ | - | Enable content negotiation |
+| `routes[].encoding.supportedContentTypes` | - | ✅ | - | Supported content types |
+| `routes[].encoding.passthrough` | - | ✅ | - | Pass content unchanged |
+| `routes[].encoding.json.emitDefaults` | - | ✅ | - | Include default values |
+| `routes[].encoding.json.useProtoNames` | - | ✅ | - | Use proto field names |
+| `routes[].encoding.json.enumAsIntegers` | - | ✅ | - | Encode enums as integers |
+| `routes[].encoding.json.int64AsStrings` | - | ✅ | - | Encode int64 as strings |
+| `routes[].encoding.json.prettyPrint` | - | ✅ | - | Pretty print JSON |
+| `routes[].encoding.protobuf.useJSONEncoding` | - | ✅ | - | Use JSON for protobuf |
+| `routes[].encoding.protobuf.descriptorSource` | - | ✅ | - | Descriptor source (reflection, file) |
+| `routes[].encoding.protobuf.descriptorFile` | - | ✅ | - | Path to descriptor file |
+| `routes[].encoding.compression.enabled` | - | ✅ | - | Enable compression |
+| `routes[].encoding.compression.algorithms` | - | ✅ | - | Compression algorithms |
+| `routes[].encoding.compression.minSize` | - | ✅ | - | Min size to compress |
+| `routes[].encoding.compression.level` | - | ✅ | - | Compression level |
+| `grpcRoutes[].encoding.*` | - | ✅ | - | Same as HTTP routes encoding |
+
+### Configuration Level Examples
+
+#### Global Level Configuration
+
+```yaml
+spec:
+  # Global rate limiting - applies to all routes
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+  
+  # Global max sessions - applies to all routes
+  maxSessions:
+    enabled: true
+    maxConcurrent: 10000
+    queueSize: 1000
+    queueTimeout: 30s
+  
+  # Global circuit breaker
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+  
+  # Global authentication
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: "https://auth.example.com"
+  
+  # Global request limits
+  requestLimits:
+    maxBodySize: 10485760    # 10MB
+    maxHeaderSize: 1048576   # 1MB
+  
+  # Global CORS configuration
+  cors:
+    allowOrigins: ["*"]
+    allowMethods: ["GET", "POST", "PUT", "DELETE"]
+    allowHeaders: ["Content-Type", "Authorization"]
+  
+  # Global security headers
+  security:
+    enabled: true
+    headers:
+      enabled: true
+      xFrameOptions: "DENY"
+      xContentTypeOptions: "nosniff"
+```
+
+#### Route Level Override
+
+```yaml
+spec:
+  routes:
+    - name: high-traffic-api
+      match:
+        - uri:
+            prefix: /api/v1/public
+      route:
+        - destination:
+            host: backend
+            port: 8080
+      # Route-level rate limit overrides global
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 1000  # Higher limit for this route
+        burst: 2000
+      # Route-level authentication override
+      authentication:
+        enabled: false  # Disable auth for public API
+    
+    - name: upload-api
+      match:
+        - uri:
+            prefix: /api/v1/upload
+      route:
+        - destination:
+            host: upload-backend
+            port: 8080
+      # Route-level request limits override global
+      requestLimits:
+        maxBodySize: 104857600   # 100MB for file uploads
+        maxHeaderSize: 2097152   # 2MB for headers
+      # Route-level CORS override global
+      cors:
+        allowOrigins: ["https://app.example.com"]
+        allowMethods: ["POST", "OPTIONS"]
+        allowCredentials: true
+      # Route-level security headers override global
+      security:
+        enabled: true
+        headers:
+          enabled: true
+          xFrameOptions: "SAMEORIGIN"
+          customHeaders:
+            X-Upload-Policy: "strict"
+```
+
+#### Backend Level Configuration
+
+```yaml
+spec:
+  backends:
+    - name: secure-backend
+      hosts:
+        - address: secure.example.com
+          port: 443
+      # Backend-specific TLS
+      tls:
+        enabled: true
+        mode: MUTUAL
+        caFile: /etc/ssl/certs/backend-ca.crt
+        certFile: /etc/ssl/certs/client.crt
+        keyFile: /etc/ssl/private/client.key
+      # Backend-specific health check
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 2s
+      # Backend-specific circuit breaker
+      circuitBreaker:
+        enabled: true
+        threshold: 3
+        timeout: 15s
+        halfOpenRequests: 2
+      # Backend authentication with JWT from OIDC
+      authentication:
+        type: jwt
+        jwt:
+          enabled: true
+          tokenSource: oidc
+          oidc:
+            issuerUrl: https://auth.example.com/realms/backend
+            clientId: gateway-backend-client
+            clientSecret: backend-secret
+            scopes: ["backend-access"]
+          headerName: Authorization
+          headerPrefix: Bearer
+    
+    - name: legacy-backend
+      hosts:
+        - address: legacy.internal.com
+          port: 8080
+      # Backend authentication with Basic auth from Vault
+      authentication:
+        type: basic
+        basic:
+          enabled: true
+          vaultPath: secret/legacy-backend
+          usernameKey: username
+          passwordKey: password
+    
+    - name: mtls-backend
+      hosts:
+        - address: mtls.example.com
+          port: 443
+      # Backend authentication with mTLS using Vault PKI
+      authentication:
+        type: mtls
+        mtls:
+          enabled: true
+          vault:
+            enabled: true
+            pkiMount: pki
+            role: backend-client
+            commonName: gateway.example.com
+    
+    - name: capacity-aware-backend
+      hosts:
+        - address: 10.0.1.30
+          port: 8080
+        - address: 10.0.1.31
+          port: 8080
+      # Backend-level max sessions
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      # Backend-level rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+      # Capacity-aware load balancing
+      loadBalancer:
+        algorithm: leastConn
+      # Health check
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 5s
+            ttl: 24h
+      # TLS configuration for mTLS
+      tls:
+        enabled: true
+        mode: MUTUAL
+        vault:
+          enabled: true
+          pkiMount: pki
+          role: backend-client
+          commonName: gateway.example.com
+```
+
+## 🚦 Traffic Management
+
+The AV API Gateway provides comprehensive traffic management capabilities including rate limiting, max sessions control, circuit breaking, and intelligent load balancing.
+
+### Max Sessions Control
+
+Max sessions control limits the number of concurrent connections to prevent resource exhaustion and ensure fair resource allocation. It can be configured at global, route, and backend levels.
+
+#### Global Max Sessions
+
+Configure global max sessions that apply to all routes:
+
+```yaml
+spec:
+  maxSessions:
+    enabled: true
+    maxConcurrent: 10000     # Maximum concurrent connections
+    queueSize: 1000          # Queue size for waiting connections
+    queueTimeout: 30s        # Timeout for queued connections
+```
+
+#### Route-Level Max Sessions
+
+Override global settings for specific routes:
+
+```yaml
+spec:
+  routes:
+    - name: high-traffic-api
+      match:
+        - uri:
+            prefix: /api/v1/public
+      maxSessions:
+        enabled: true
+        maxConcurrent: 1000    # Lower limit for this route
+        queueSize: 100
+        queueTimeout: 10s
+      route:
+        - destination:
+            host: backend
+            port: 8080
+```
+
+#### Backend-Level Max Sessions
+
+Control concurrent connections to backend hosts:
+
+```yaml
+spec:
+  backends:
+    - name: api-backend
+      hosts:
+        - address: 10.0.1.10
+          port: 8080
+        - address: 10.0.1.11
+          port: 8080
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500     # Per host limit
+      loadBalancer:
+        algorithm: leastConn   # Capacity-aware load balancing
+```
+
+### Backend Rate Limiting
+
+Backend rate limiting controls the rate of requests sent to individual backend hosts, preventing backend overload and ensuring fair distribution of load.
+
+#### Backend Rate Limit Configuration
+
+```yaml
+spec:
+  backends:
+    - name: rate-limited-backend
+      hosts:
+        - address: 10.0.1.20
+          port: 8080
+        - address: 10.0.1.21
+          port: 8080
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100   # Requests per second per host
+        burst: 200               # Burst capacity per host
+      loadBalancer:
+        algorithm: roundRobin
+```
+
+### Load Balancer Integration
+
+The load balancer integrates with max sessions and rate limiting to make intelligent routing decisions:
+
+#### Capacity-Aware Load Balancing
+
+```yaml
+spec:
+  backends:
+    - name: smart-backend
+      hosts:
+        - address: host1.example.com
+          port: 8080
+          weight: 1
+        - address: host2.example.com
+          port: 8080
+          weight: 2
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+      loadBalancer:
+        algorithm: leastConn     # Considers both load and capacity
+```
+
+#### Load Balancing Algorithms
+
+| Algorithm | Description | Use Case |
+|-----------|-------------|----------|
+| `roundRobin` | Distributes requests evenly across hosts | Uniform backend capacity |
+| `weighted` | Distributes based on host weights | Different backend capacities |
+| `leastConn` | Routes to host with fewest active connections | Capacity-aware routing |
+| `random` | Random selection with optional weights | Simple load distribution |
+
+### Behavior When Limits Are Exceeded
+
+#### Max Sessions Exceeded
+
+When max sessions limit is reached:
+
+1. **Queue Available**: New connections are queued up to `queueSize`
+2. **Queue Full**: New connections are rejected with HTTP 503 (Service Unavailable)
+3. **Queue Timeout**: Queued connections timeout after `queueTimeout`
+
+#### Rate Limit Exceeded
+
+When rate limit is exceeded:
+
+1. **Backend Level**: Load balancer tries next available host
+2. **Global/Route Level**: Request is rejected with HTTP 429 (Too Many Requests)
+3. **Recovery**: Limits reset based on token bucket algorithm
+
+#### Circuit Breaker Integration
+
+Max sessions and rate limiting work with circuit breakers:
+
+```yaml
+spec:
+  backends:
+    - name: resilient-backend
+      hosts:
+        - address: backend.example.com
+          port: 8080
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+        halfOpenRequests: 3
+```
+
+### Monitoring and Metrics
+
+Traffic management features expose comprehensive metrics:
+
+```
+# Max sessions metrics
+gateway_max_sessions_active{level, name}
+gateway_max_sessions_queued{level, name}
+gateway_max_sessions_rejected_total{level, name}
+gateway_max_sessions_queue_timeout_total{level, name}
+
+# Backend rate limit metrics
+gateway_backend_rate_limit_requests_total{backend, host, status}
+gateway_backend_rate_limit_tokens_available{backend, host}
+
+# Load balancer metrics
+gateway_load_balancer_requests_total{backend, host, algorithm}
+gateway_load_balancer_host_capacity{backend, host}
+gateway_load_balancer_host_active_connections{backend, host}
+```
+
+### Configuration Inheritance
+
+Configuration follows a hierarchical inheritance model:
+
+1. **Global** → **Route** → **Backend**
+2. More specific levels override general levels
+3. Disabled at any level stops inheritance
+
+Example inheritance:
+
+```yaml
+spec:
+  # Global: 10000 max sessions
+  maxSessions:
+    enabled: true
+    maxConcurrent: 10000
+  
+  routes:
+    - name: api-route
+      # Route: Inherits global (10000)
+      route:
+        - destination:
+            host: backend1
+    
+    - name: upload-route
+      # Route: Overrides global (1000)
+      maxSessions:
+        enabled: true
+        maxConcurrent: 1000
+      route:
+        - destination:
+            host: backend2
+  
+  backends:
+    - name: backend1
+      # Backend: Inherits from route (10000)
+      hosts:
+        - address: host1.example.com
+          port: 8080
+    
+    - name: backend2
+      # Backend: Overrides route (500)
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      hosts:
+        - address: host2.example.com
+          port: 8080
+```
 
 ## 🔐 TLS & Transport Security
 
@@ -3751,12 +4894,14 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 - [OpenTelemetry](https://opentelemetry.io/) - Observability framework
 - [Go](https://golang.org/) - Programming language
 
-## 📞 Support
+## 📞 Contact
 
 - 📖 [Documentation](https://github.com/vyrodovalexey/avapigw/wiki)
 - 🐛 [Issue Tracker](https://github.com/vyrodovalexey/avapigw/issues)
 - 💬 [Discussions](https://github.com/vyrodovalexey/avapigw/discussions)
-- 📧 [Email Support](mailto:vyrodov.alexey@gmail.com)
+- 📧 [Email](mailto:vyrodov.alexey@gmail.com)
+- 📧 [LinkedIN] (https://www.linkedin.com/in/
+alexey-vyrodov-16b97659)
 
 ---
 

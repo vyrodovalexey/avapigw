@@ -19,15 +19,16 @@ import (
 
 // GRPCListener represents a gRPC listener.
 type GRPCListener struct {
-	config     config.Listener
-	server     *grpcserver.Server
-	router     *grpcrouter.Router
-	proxy      *grpcproxy.Proxy
-	metrics    *grpcmiddleware.GRPCMetrics
-	logger     observability.Logger
-	running    atomic.Bool
-	tlsManager *tlspkg.Manager
-	tlsMetrics tlspkg.MetricsRecorder
+	config          config.Listener
+	server          *grpcserver.Server
+	router          *grpcrouter.Router
+	proxy           *grpcproxy.Proxy
+	metrics         *grpcmiddleware.GRPCMetrics
+	logger          observability.Logger
+	running         atomic.Bool
+	tlsManager      *tlspkg.Manager
+	routeTLSManager *tlspkg.RouteTLSManager
+	tlsMetrics      tlspkg.MetricsRecorder
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -65,6 +66,14 @@ func WithGRPCTLSManager(manager *tlspkg.Manager) GRPCListenerOption {
 func WithGRPCTLSMetrics(metrics tlspkg.MetricsRecorder) GRPCListenerOption {
 	return func(l *GRPCListener) {
 		l.tlsMetrics = metrics
+	}
+}
+
+// WithGRPCRouteTLSManager sets the route TLS manager for the gRPC listener.
+// This enables route-level TLS certificate override based on SNI.
+func WithGRPCRouteTLSManager(manager *tlspkg.RouteTLSManager) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.routeTLSManager = manager
 	}
 }
 
@@ -130,6 +139,11 @@ func NewGRPCListener(
 
 // buildTLSOptions builds TLS-related server options.
 func (l *GRPCListener) buildTLSOptions(grpcCfg *config.GRPCListenerConfig) ([]grpcserver.Option, error) {
+	// Check if route TLS manager is provided (takes precedence)
+	if l.routeTLSManager != nil {
+		return l.buildTLSOptionsFromRouteTLSManager(), nil
+	}
+
 	// Check if TLS manager is provided externally
 	if l.tlsManager != nil {
 		return l.buildTLSOptionsFromManager(), nil
@@ -141,6 +155,20 @@ func (l *GRPCListener) buildTLSOptions(grpcCfg *config.GRPCListenerConfig) ([]gr
 	}
 
 	return l.buildTLSOptionsFromConfig(grpcCfg.TLS)
+}
+
+// buildTLSOptionsFromRouteTLSManager builds TLS options using the route TLS manager.
+func (l *GRPCListener) buildTLSOptionsFromRouteTLSManager() []grpcserver.Option {
+	opts := []grpcserver.Option{grpcserver.WithTLSConfig(l.routeTLSManager.GetTLSConfig())}
+	if l.tlsMetrics != nil {
+		opts = append(opts, grpcserver.WithTLSMetrics(l.tlsMetrics))
+	}
+
+	l.logger.Info("gRPC listener using route TLS manager",
+		observability.String("name", l.config.Name),
+		observability.Int("routes", l.routeTLSManager.RouteCount()),
+	)
+	return opts
 }
 
 // buildTLSOptionsFromManager builds TLS options using the externally provided TLS manager.
@@ -402,6 +430,16 @@ func (l *GRPCListener) Stop(ctx context.Context) error {
 		)
 	}
 
+	// Close route TLS manager if we have one
+	if l.routeTLSManager != nil {
+		if err := l.routeTLSManager.Close(); err != nil {
+			l.logger.Error("failed to close route TLS manager",
+				observability.String("name", l.config.Name),
+				observability.Error(err),
+			)
+		}
+	}
+
 	// Close TLS manager if we created it
 	if l.tlsManager != nil {
 		if err := l.tlsManager.Close(); err != nil {
@@ -449,6 +487,16 @@ func (l *GRPCListener) LoadRoutes(routes []config.GRPCRoute) error {
 // TLSManager returns the TLS manager if configured.
 func (l *GRPCListener) TLSManager() *tlspkg.Manager {
 	return l.tlsManager
+}
+
+// RouteTLSManager returns the route TLS manager if configured.
+func (l *GRPCListener) RouteTLSManager() *tlspkg.RouteTLSManager {
+	return l.routeTLSManager
+}
+
+// IsRouteTLSEnabled returns true if route-level TLS is enabled.
+func (l *GRPCListener) IsRouteTLSEnabled() bool {
+	return l.routeTLSManager != nil && l.routeTLSManager.RouteCount() > 0
 }
 
 // IsTLSEnabled returns true if TLS is enabled for this listener.

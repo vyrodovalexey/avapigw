@@ -629,3 +629,278 @@ func TestRegistry_LoadFromConfig_DuplicateError(t *testing.T) {
 	err := registry.LoadFromConfig(backends)
 	assert.Error(t, err)
 }
+
+func TestHost_MaxSessions(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost("10.0.0.1", 8080, 1)
+
+	// Initially max sessions is disabled
+	assert.False(t, host.IsMaxSessionsEnabled())
+	assert.Equal(t, 0, host.MaxSessions())
+	assert.True(t, host.HasCapacity())
+
+	// Enable max sessions
+	host.SetMaxSessions(2)
+	assert.True(t, host.IsMaxSessionsEnabled())
+	assert.Equal(t, 2, host.MaxSessions())
+	assert.True(t, host.HasCapacity())
+
+	// Add connections
+	host.IncrementConnections()
+	assert.True(t, host.HasCapacity())
+
+	host.IncrementConnections()
+	assert.False(t, host.HasCapacity())
+
+	// Release one
+	host.DecrementConnections()
+	assert.True(t, host.HasCapacity())
+}
+
+func TestHost_RateLimiter(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost("10.0.0.1", 8080, 1)
+
+	// Initially rate limiting is disabled
+	assert.False(t, host.IsRateLimitEnabled())
+	assert.True(t, host.AllowRequest())
+
+	// Enable rate limiting with 2 RPS and burst of 2
+	host.SetRateLimiter(2, 2)
+	assert.True(t, host.IsRateLimitEnabled())
+
+	// First two requests should be allowed (burst)
+	assert.True(t, host.AllowRequest())
+	assert.True(t, host.AllowRequest())
+
+	// Third request should be denied (burst exhausted)
+	assert.False(t, host.AllowRequest())
+
+	// Wait for token replenishment
+	time.Sleep(600 * time.Millisecond)
+	assert.True(t, host.AllowRequest())
+}
+
+func TestHost_IsAvailable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		status      Status
+		maxSessions int
+		connections int64
+		expected    bool
+	}{
+		{
+			name:        "healthy host without limits",
+			status:      StatusHealthy,
+			maxSessions: 0,
+			connections: 0,
+			expected:    true,
+		},
+		{
+			name:        "unknown host without limits",
+			status:      StatusUnknown,
+			maxSessions: 0,
+			connections: 0,
+			expected:    true,
+		},
+		{
+			name:        "unhealthy host",
+			status:      StatusUnhealthy,
+			maxSessions: 0,
+			connections: 0,
+			expected:    false,
+		},
+		{
+			name:        "healthy host with capacity",
+			status:      StatusHealthy,
+			maxSessions: 10,
+			connections: 5,
+			expected:    true,
+		},
+		{
+			name:        "healthy host at capacity",
+			status:      StatusHealthy,
+			maxSessions: 10,
+			connections: 10,
+			expected:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			host := NewHost("10.0.0.1", 8080, 1)
+			host.SetStatus(tt.status)
+			if tt.maxSessions > 0 {
+				host.SetMaxSessions(tt.maxSessions)
+			}
+			for i := int64(0); i < tt.connections; i++ {
+				host.IncrementConnections()
+			}
+			assert.Equal(t, tt.expected, host.IsAvailable())
+		})
+	}
+}
+
+func TestHostRateLimiter(t *testing.T) {
+	t.Parallel()
+
+	rl := NewHostRateLimiter(10, 5)
+
+	// Should allow burst requests
+	for i := 0; i < 5; i++ {
+		assert.True(t, rl.Allow(), "request %d should be allowed", i)
+	}
+
+	// Next request should be denied
+	assert.False(t, rl.Allow())
+
+	// Wait for token replenishment
+	time.Sleep(200 * time.Millisecond)
+	assert.True(t, rl.Allow())
+}
+
+func TestNewBackend_WithMaxSessions(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Backend{
+		Name: "test-backend",
+		Hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 8080},
+			{Address: "10.0.0.2", Port: 8080},
+		},
+		MaxSessions: &config.MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 100,
+		},
+	}
+
+	backend, err := NewBackend(cfg)
+	require.NoError(t, err)
+
+	// All hosts should have max sessions configured
+	for _, host := range backend.hosts {
+		assert.True(t, host.IsMaxSessionsEnabled())
+		assert.Equal(t, 100, host.MaxSessions())
+	}
+}
+
+func TestNewBackend_WithRateLimit(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Backend{
+		Name: "test-backend",
+		Hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 8080},
+		},
+		RateLimit: &config.RateLimitConfig{
+			Enabled:           true,
+			RequestsPerSecond: 100,
+			Burst:             50,
+		},
+	}
+
+	backend, err := NewBackend(cfg)
+	require.NoError(t, err)
+
+	// Host should have rate limiting configured
+	assert.True(t, backend.hosts[0].IsRateLimitEnabled())
+}
+
+func TestServiceBackend_GetAvailableHost(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Backend{
+		Name: "test-backend",
+		Hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 8080},
+			{Address: "10.0.0.2", Port: 8080},
+		},
+		MaxSessions: &config.MaxSessionsConfig{
+			Enabled:       true,
+			MaxConcurrent: 1,
+		},
+	}
+
+	backend, err := NewBackend(cfg)
+	require.NoError(t, err)
+
+	// Mark hosts as healthy
+	for _, host := range backend.hosts {
+		host.SetStatus(StatusHealthy)
+	}
+
+	// First request should succeed
+	host1, err := backend.GetAvailableHost()
+	require.NoError(t, err)
+	assert.NotNil(t, host1)
+
+	// Second request should succeed (different host)
+	host2, err := backend.GetAvailableHost()
+	require.NoError(t, err)
+	assert.NotNil(t, host2)
+
+	// Third request should fail (both hosts at capacity)
+	_, err = backend.GetAvailableHost()
+	assert.Error(t, err)
+
+	// Release one host
+	backend.ReleaseHost(host1)
+
+	// Now should succeed again
+	host3, err := backend.GetAvailableHost()
+	require.NoError(t, err)
+	assert.NotNil(t, host3)
+}
+
+func TestServiceBackend_GetHost_RateLimited(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Backend{
+		Name: "test-backend",
+		Hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 8080},
+		},
+		RateLimit: &config.RateLimitConfig{
+			Enabled:           true,
+			RequestsPerSecond: 1,
+			Burst:             1,
+		},
+	}
+
+	backend, err := NewBackend(cfg)
+	require.NoError(t, err)
+
+	// Mark host as healthy
+	backend.hosts[0].SetStatus(StatusHealthy)
+
+	// First request should succeed
+	host, err := backend.GetHost()
+	require.NoError(t, err)
+	backend.ReleaseHost(host)
+
+	// Second request should be rate limited
+	_, err = backend.GetHost()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "rate limited")
+}
+
+func TestHost_TLSURL(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost("10.0.0.1", 8443, 1)
+	assert.Equal(t, "https://10.0.0.1:8443", host.TLSURL())
+}
+
+func TestHost_URLWithScheme(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost("10.0.0.1", 8080, 1)
+
+	assert.Equal(t, "http://10.0.0.1:8080", host.URLWithScheme(false))
+	assert.Equal(t, "https://10.0.0.1:8080", host.URLWithScheme(true))
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 func TestNewCircuitBreaker(t *testing.T) {
@@ -191,18 +192,15 @@ func TestCircuitBreakerMiddleware_OpenState(t *testing.T) {
 	}
 }
 
-func TestCircuitBreakerWriter_WriteHeader(t *testing.T) {
+func TestStatusCapturingResponseWriter_WriteHeader(t *testing.T) {
 	t.Parallel()
 
 	rec := httptest.NewRecorder()
-	cbw := &circuitBreakerWriter{
-		ResponseWriter: rec,
-		status:         http.StatusOK,
-	}
+	cbw := util.NewStatusCapturingResponseWriter(rec)
 
 	cbw.WriteHeader(http.StatusCreated)
 
-	assert.Equal(t, http.StatusCreated, cbw.status)
+	assert.Equal(t, http.StatusCreated, cbw.StatusCode)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 }
 

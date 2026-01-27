@@ -2,9 +2,18 @@ package gateway
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -836,4 +845,222 @@ func TestListener_Stop_WithTLSManager(t *testing.T) {
 	// Stop should close the TLS manager
 	err = listener.Stop(ctx)
 	require.NoError(t, err)
+}
+
+func TestListener_WithRouteTLSManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     0,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Create a route TLS manager
+	routeTLSManager := tlspkg.NewRouteTLSManager()
+	defer routeTLSManager.Close()
+
+	// Create listener with route TLS manager option
+	listener, err := NewListener(cfg, handler, WithRouteTLSManager(routeTLSManager))
+	require.NoError(t, err)
+
+	// Verify the route TLS manager is set
+	assert.Equal(t, routeTLSManager, listener.GetRouteTLSManager())
+}
+
+func TestListener_GetRouteTLSManager_Nil(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     0,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Create listener without route TLS manager
+	listener, err := NewListener(cfg, handler)
+	require.NoError(t, err)
+
+	// Verify the route TLS manager is nil
+	assert.Nil(t, listener.GetRouteTLSManager())
+}
+
+func TestListener_IsRouteTLSEnabled_NoManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     0,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Create listener without route TLS manager
+	listener, err := NewListener(cfg, handler)
+	require.NoError(t, err)
+
+	// Should return false when no route TLS manager
+	assert.False(t, listener.IsRouteTLSEnabled())
+}
+
+func TestListener_IsRouteTLSEnabled_EmptyManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     0,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Create a route TLS manager with no routes
+	routeTLSManager := tlspkg.NewRouteTLSManager()
+	defer routeTLSManager.Close()
+
+	// Create listener with empty route TLS manager
+	listener, err := NewListener(cfg, handler, WithRouteTLSManager(routeTLSManager))
+	require.NoError(t, err)
+
+	// Should return false when route TLS manager has no routes
+	assert.False(t, listener.IsRouteTLSEnabled())
+}
+
+func TestListener_IsRouteTLSEnabled_WithRoutes(t *testing.T) {
+	t.Parallel()
+
+	// Create test certificates using the helper
+	certs, err := createListenerTestCertificates(t)
+	require.NoError(t, err)
+	defer certs.cleanup()
+
+	cfg := config.Listener{
+		Name:     "test-listener",
+		Port:     0,
+		Protocol: config.ProtocolHTTP,
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Create a route TLS manager with a route
+	routeTLSManager := tlspkg.NewRouteTLSManager()
+	defer routeTLSManager.Close()
+
+	// Add a route
+	routeCfg := &tlspkg.RouteTLSConfig{
+		CertFile: certs.certFile,
+		KeyFile:  certs.keyFile,
+		SNIHosts: []string{"api.example.com"},
+	}
+	err = routeTLSManager.AddRoute("test-route", routeCfg)
+	require.NoError(t, err)
+
+	// Create listener with route TLS manager that has routes
+	listener, err := NewListener(cfg, handler, WithRouteTLSManager(routeTLSManager))
+	require.NoError(t, err)
+
+	// Should return true when route TLS manager has routes
+	assert.True(t, listener.IsRouteTLSEnabled())
+}
+
+// listenerTestCertificates holds test certificate data for listener tests.
+type listenerTestCertificates struct {
+	certFile string
+	keyFile  string
+	tempDir  string
+}
+
+// cleanup removes temporary test files.
+func (tc *listenerTestCertificates) cleanup() {
+	if tc.tempDir != "" {
+		os.RemoveAll(tc.tempDir)
+	}
+}
+
+// createListenerTestCertificates creates test certificates for listener tests.
+func createListenerTestCertificates(t *testing.T) (*listenerTestCertificates, error) {
+	t.Helper()
+
+	tempDir, err := os.MkdirTemp("", "listener-tls-test-*")
+	if err != nil {
+		return nil, err
+	}
+
+	// Generate a self-signed certificate using crypto/ecdsa
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		return nil, err
+	}
+
+	// Create certificate template
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		os.RemoveAll(tempDir)
+		return nil, err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName:   "api.example.com",
+			Organization: []string{"Test Org"},
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"api.example.com", "localhost"},
+		BasicConstraintsValid: true,
+	}
+
+	// Self-sign the certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		return nil, err
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	keyDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		return nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	certFile := filepath.Join(tempDir, "server.crt")
+	keyFile := filepath.Join(tempDir, "server.key")
+
+	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+		os.RemoveAll(tempDir)
+		return nil, err
+	}
+
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		os.RemoveAll(tempDir)
+		return nil, err
+	}
+
+	return &listenerTestCertificates{
+		certFile: certFile,
+		keyFile:  keyFile,
+		tempDir:  tempDir,
+	}, nil
 }

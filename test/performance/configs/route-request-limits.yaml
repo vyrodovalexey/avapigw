@@ -1,0 +1,59 @@
+# Yandex Tank Configuration: Route-Level Request Limits Test
+# Purpose: Measure performance impact of route-level request limits
+# Duration: 3 minutes total (30s warmup + 2m sustain + 30s cooldown)
+# Target: Routes with different body size limits
+# Tests: Small body limit (1MB), Large body limit (50MB), Default limit (10MB)
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Short test for smoke testing
+    # Warmup: 30s ramp from 50 to 500 RPS
+    # Sustain: 2 min at 500 RPS
+    # Cooldown: 30s ramp down
+    schedule: line(50, 500, 30s) const(500, 2m) line(500, 50, 30s)
+
+  ammofile: /var/loadtest/ammo/route-limits.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings - moderate concurrency
+  instances: 500
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: route-request-limits]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 10% for 30 seconds
+    - http(5xx,10%,30s)
+    # Stop if response time exceeds 5 seconds for 30 seconds
+    - time(5000,30s)
+    # Stop if net errors exceed 5%
+    - net(5%,30s)

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -313,4 +314,64 @@ func (w *headerRemovingResponseWriter) Write(b []byte) (int, error) {
 // Unwrap returns the underlying ResponseWriter.
 func (w *headerRemovingResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// SecurityHeadersFromConfig creates security headers middleware from SecurityConfig.
+// This function supports both global and route-level security configurations.
+// If cfg is nil or not enabled, returns nil.
+func SecurityHeadersFromConfig(cfg *config.SecurityConfig) func(http.Handler) http.Handler {
+	if cfg == nil || !cfg.Enabled {
+		return nil
+	}
+
+	// Convert config.SecurityConfig to security.Config
+	securityCfg := convertSecurityConfig(cfg)
+
+	middleware := NewHeadersMiddleware(securityCfg)
+	return middleware.Handler()
+}
+
+// convertSecurityConfig converts config.SecurityConfig to security.Config.
+func convertSecurityConfig(cfg *config.SecurityConfig) *Config {
+	if cfg == nil {
+		return nil
+	}
+
+	securityCfg := &Config{
+		Enabled:        cfg.Enabled,
+		ReferrerPolicy: cfg.ReferrerPolicy,
+	}
+
+	// Convert headers config
+	if cfg.Headers != nil {
+		securityCfg.Headers = &HeadersConfig{
+			Enabled:             cfg.Headers.Enabled,
+			XFrameOptions:       cfg.Headers.XFrameOptions,
+			XContentTypeOptions: cfg.Headers.XContentTypeOptions,
+			XXSSProtection:      cfg.Headers.XXSSProtection,
+			CustomHeaders:       cfg.Headers.CustomHeaders,
+		}
+	}
+
+	// Convert HSTS config
+	if cfg.HSTS != nil {
+		securityCfg.HSTS = &HSTSConfig{
+			Enabled:           cfg.HSTS.Enabled,
+			MaxAge:            cfg.HSTS.MaxAge,
+			IncludeSubDomains: cfg.HSTS.IncludeSubDomains,
+			Preload:           cfg.HSTS.Preload,
+		}
+	}
+
+	// Convert CSP config
+	if cfg.CSP != nil {
+		securityCfg.CSP = &CSPConfig{
+			Enabled:    cfg.CSP.Enabled,
+			Policy:     cfg.CSP.Policy,
+			ReportOnly: cfg.CSP.ReportOnly,
+			ReportURI:  cfg.CSP.ReportURI,
+		}
+	}
+
+	return securityCfg
 }

@@ -1049,3 +1049,364 @@ func TestReverseProxy_SelectDestination_WithZeroWeight(t *testing.T) {
 	result := proxy.selectDestination(destinations)
 	assert.NotNil(t, result)
 }
+
+func TestWithCircuitBreakerManager(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	cbManager := backend.NewCircuitBreakerManager(logger)
+
+	proxy := NewReverseProxy(r, registry, WithCircuitBreakerManager(cbManager))
+
+	assert.Equal(t, cbManager, proxy.circuitBreakerManager)
+}
+
+func TestWithGlobalCircuitBreaker(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	cbManager := backend.NewCircuitBreakerManager(logger)
+
+	proxy := NewReverseProxy(r, registry, WithGlobalCircuitBreaker(cbManager))
+
+	assert.Equal(t, cbManager, proxy.globalCircuitBreaker)
+}
+
+func TestReverseProxy_GetCircuitBreaker_NoManagers(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	proxy := NewReverseProxy(r, registry)
+
+	cb := proxy.getCircuitBreaker("test-backend")
+	assert.Nil(t, cb)
+}
+
+func TestReverseProxy_GetCircuitBreaker_WithGlobalOnly(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	cbManager := backend.NewCircuitBreakerManager(logger)
+
+	proxy := NewReverseProxy(r, registry, WithGlobalCircuitBreaker(cbManager))
+
+	cb := proxy.getCircuitBreaker("test-backend")
+	assert.Equal(t, cbManager, cb)
+}
+
+func TestReverseProxy_GetCircuitBreaker_WithBackendSpecific(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	backendCBManager := backend.NewCircuitBreakerManager(logger)
+	globalCBManager := backend.NewCircuitBreakerManager(logger)
+
+	// Create a backend with circuit breaker config
+	backendCfg := &config.Backend{
+		Name: "test-backend",
+		CircuitBreaker: &config.CircuitBreakerConfig{
+			Enabled:   true,
+			Threshold: 5,
+			Timeout:   config.Duration(30 * time.Second),
+		},
+	}
+	backendCBManager.GetOrCreate(backendCfg)
+
+	proxy := NewReverseProxy(r, registry,
+		WithCircuitBreakerManager(backendCBManager),
+		WithGlobalCircuitBreaker(globalCBManager),
+	)
+
+	cb := proxy.getCircuitBreaker("test-backend")
+	assert.Equal(t, backendCBManager, cb)
+}
+
+func TestReverseProxy_GetCircuitBreaker_FallbackToGlobal(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	backendCBManager := backend.NewCircuitBreakerManager(logger)
+	globalCBManager := backend.NewCircuitBreakerManager(logger)
+
+	// Backend manager has no circuit breaker for "other-backend"
+	proxy := NewReverseProxy(r, registry,
+		WithCircuitBreakerManager(backendCBManager),
+		WithGlobalCircuitBreaker(globalCBManager),
+	)
+
+	cb := proxy.getCircuitBreaker("other-backend")
+	assert.Equal(t, globalCBManager, cb)
+}
+
+func TestReverseProxy_ExecuteWithCircuitBreaker_Success(t *testing.T) {
+	t.Parallel()
+
+	// Create a backend server that returns 200
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("success"))
+	}))
+	defer backendServer.Close()
+
+	backendURL, err := url.Parse(backendServer.URL)
+	require.NoError(t, err)
+
+	port := 80
+	if backendURL.Port() != "" {
+		fmt.Sscanf(backendURL.Port(), "%d", &port)
+	}
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	cbManager := backend.NewCircuitBreakerManager(logger)
+	backendCfg := &config.Backend{
+		Name: "test-backend",
+		CircuitBreaker: &config.CircuitBreakerConfig{
+			Enabled:   true,
+			Threshold: 5,
+			Timeout:   config.Duration(30 * time.Second),
+		},
+	}
+	cbManager.GetOrCreate(backendCfg)
+
+	route := config.Route{
+		Name: "cb-route",
+		Match: []config.RouteMatch{
+			{
+				URI: &config.URIMatch{
+					Prefix: "/cb-test",
+				},
+			},
+		},
+		Route: []config.RouteDestination{
+			{
+				Destination: config.Destination{
+					Host: backendURL.Hostname(),
+					Port: port,
+				},
+			},
+		},
+	}
+	err = r.AddRoute(route)
+	require.NoError(t, err)
+
+	proxy := NewReverseProxy(r, registry, WithGlobalCircuitBreaker(cbManager))
+
+	req := httptest.NewRequest(http.MethodGet, "/cb-test", nil)
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestReverseProxy_ExecuteWithCircuitBreaker_ServerError(t *testing.T) {
+	t.Parallel()
+
+	// Create a backend server that returns 500
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("error"))
+	}))
+	defer backendServer.Close()
+
+	backendURL, err := url.Parse(backendServer.URL)
+	require.NoError(t, err)
+
+	port := 80
+	if backendURL.Port() != "" {
+		fmt.Sscanf(backendURL.Port(), "%d", &port)
+	}
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	cbManager := backend.NewCircuitBreakerManager(logger)
+	backendCfg := &config.Backend{
+		Name: "test-backend",
+		CircuitBreaker: &config.CircuitBreakerConfig{
+			Enabled:   true,
+			Threshold: 5,
+			Timeout:   config.Duration(30 * time.Second),
+		},
+	}
+	cbManager.GetOrCreate(backendCfg)
+
+	route := config.Route{
+		Name: "cb-error-route",
+		Match: []config.RouteMatch{
+			{
+				URI: &config.URIMatch{
+					Prefix: "/cb-error",
+				},
+			},
+		},
+		Route: []config.RouteDestination{
+			{
+				Destination: config.Destination{
+					Host: backendURL.Hostname(),
+					Port: port,
+				},
+			},
+		},
+	}
+	err = r.AddRoute(route)
+	require.NoError(t, err)
+
+	proxy := NewReverseProxy(r, registry, WithGlobalCircuitBreaker(cbManager))
+
+	req := httptest.NewRequest(http.MethodGet, "/cb-error", nil)
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	// Should still return 500 from backend
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestSecureRandomInt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		maxVal int
+	}{
+		{"zero max", 0},
+		{"negative max", -1},
+		{"small max", 10},
+		{"large max", 1000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := secureRandomInt(tt.maxVal)
+
+			if tt.maxVal <= 0 {
+				assert.Equal(t, 0, result)
+			} else {
+				assert.GreaterOrEqual(t, result, 0)
+				assert.Less(t, result, tt.maxVal)
+			}
+		})
+	}
+}
+
+func TestSecureRandomInt_Distribution(t *testing.T) {
+	t.Parallel()
+
+	// Test that secureRandomInt produces a reasonable distribution
+	maxVal := 10
+	counts := make(map[int]int)
+
+	for i := 0; i < 1000; i++ {
+		result := secureRandomInt(maxVal)
+		counts[result]++
+	}
+
+	// Each value should appear at least once in 1000 iterations
+	for i := 0; i < maxVal; i++ {
+		assert.Greater(t, counts[i], 0, "value %d should appear at least once", i)
+	}
+}
+
+func TestReverseProxy_SelectDestination_WeightedDistribution(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	proxy := NewReverseProxy(r, registry)
+
+	destinations := []config.RouteDestination{
+		{
+			Destination: config.Destination{Host: "host1", Port: 8080},
+			Weight:      80,
+		},
+		{
+			Destination: config.Destination{Host: "host2", Port: 8080},
+			Weight:      20,
+		},
+	}
+
+	counts := make(map[string]int)
+	for i := 0; i < 1000; i++ {
+		result := proxy.selectDestination(destinations)
+		require.NotNil(t, result)
+		counts[result.Destination.Host]++
+	}
+
+	// host1 should be selected more often than host2
+	assert.Greater(t, counts["host1"], counts["host2"])
+}
+
+func TestReverseProxy_ProxyErrors(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	tests := []struct {
+		name         string
+		routeName    string
+		destinations []config.RouteDestination
+		expectError  bool
+	}{
+		{
+			name:         "no destination error",
+			routeName:    "no-dest",
+			destinations: []config.RouteDestination{},
+			expectError:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			route := config.Route{
+				Name: tt.routeName,
+				Match: []config.RouteMatch{
+					{
+						URI: &config.URIMatch{
+							Prefix: "/" + tt.routeName,
+						},
+					},
+				},
+				Route: tt.destinations,
+			}
+			err := r.AddRoute(route)
+			require.NoError(t, err)
+
+			proxy := NewReverseProxy(r, registry)
+
+			req := httptest.NewRequest(http.MethodGet, "/"+tt.routeName+"/test", nil)
+			rec := httptest.NewRecorder()
+
+			proxy.ServeHTTP(rec, req)
+
+			if tt.expectError {
+				assert.Equal(t, http.StatusBadGateway, rec.Code)
+			}
+		})
+	}
+}

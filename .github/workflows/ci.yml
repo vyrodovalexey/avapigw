@@ -260,7 +260,6 @@ jobs:
           - 8091:9000
 
 
-
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -574,7 +573,7 @@ jobs:
             "-Dsonar.sources=."
             "-Dsonar.exclusions=**/vendor/**,**/test/**,**/*_test.go,**/mocks/**,**/testdata/**,**/bin/**,**/coverage/**,**/helm/**"
             "-Dsonar.tests=."
-            "-Dsonar.test.inclusions=**/*_test.go,**/test/**"
+            "-Dsonar.test.inclusions=**/*_test.go"
 
   build:
     name: Build

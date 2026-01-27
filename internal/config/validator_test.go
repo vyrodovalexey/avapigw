@@ -1215,3 +1215,581 @@ func TestValidator_Validate_RetryPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestValidator_Validate_MaxSessions(t *testing.T) {
+	t.Parallel()
+
+	baseConfig := func(ms *MaxSessionsConfig) *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test"},
+			Spec: GatewaySpec{
+				Listeners:   []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+				MaxSessions: ms,
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		ms        *MaxSessionsConfig
+		wantErr   bool
+		errFields []string
+	}{
+		{
+			name:    "valid max sessions",
+			ms:      &MaxSessionsConfig{Enabled: true, MaxConcurrent: 100},
+			wantErr: false,
+		},
+		{
+			name:    "disabled max sessions",
+			ms:      &MaxSessionsConfig{Enabled: false},
+			wantErr: false,
+		},
+		{
+			name:    "valid with queue",
+			ms:      &MaxSessionsConfig{Enabled: true, MaxConcurrent: 100, QueueSize: 50, QueueTimeout: Duration(30 * time.Second)},
+			wantErr: false,
+		},
+		{
+			name:      "zero max concurrent when enabled",
+			ms:        &MaxSessionsConfig{Enabled: true, MaxConcurrent: 0},
+			wantErr:   true,
+			errFields: []string{"maxConcurrent"},
+		},
+		{
+			name:      "negative max concurrent when enabled",
+			ms:        &MaxSessionsConfig{Enabled: true, MaxConcurrent: -1},
+			wantErr:   true,
+			errFields: []string{"maxConcurrent"},
+		},
+		{
+			name:      "negative queue size",
+			ms:        &MaxSessionsConfig{Enabled: true, MaxConcurrent: 100, QueueSize: -1},
+			wantErr:   true,
+			errFields: []string{"queueSize"},
+		},
+		{
+			name:      "queue size without timeout",
+			ms:        &MaxSessionsConfig{Enabled: true, MaxConcurrent: 100, QueueSize: 10, QueueTimeout: 0},
+			wantErr:   true,
+			errFields: []string{"queueTimeout"},
+		},
+		{
+			name:      "negative queue timeout",
+			ms:        &MaxSessionsConfig{Enabled: true, MaxConcurrent: 100, QueueTimeout: Duration(-1 * time.Second)},
+			wantErr:   true,
+			errFields: []string{"queueTimeout"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateConfig(baseConfig(tt.ms))
+			if tt.wantErr {
+				assert.Error(t, err)
+				for _, field := range tt.errFields {
+					assert.Contains(t, err.Error(), field)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidator_Validate_RouteMaxSessions(t *testing.T) {
+	t.Parallel()
+
+	baseConfig := func(ms *MaxSessionsConfig) *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test"},
+			Spec: GatewaySpec{
+				Listeners: []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+				Routes: []Route{
+					{
+						Name:        "test-route",
+						Match:       []RouteMatch{{URI: &URIMatch{Prefix: "/"}}},
+						Route:       []RouteDestination{{Destination: Destination{Host: "backend", Port: 8080}}},
+						MaxSessions: ms,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		ms      *MaxSessionsConfig
+		wantErr bool
+	}{
+		{
+			name:    "valid route max sessions",
+			ms:      &MaxSessionsConfig{Enabled: true, MaxConcurrent: 50},
+			wantErr: false,
+		},
+		{
+			name:    "invalid route max sessions",
+			ms:      &MaxSessionsConfig{Enabled: true, MaxConcurrent: 0},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateConfig(baseConfig(tt.ms))
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidator_Validate_BackendMaxSessionsAndRateLimit(t *testing.T) {
+	t.Parallel()
+
+	baseConfig := func(ms *MaxSessionsConfig, rl *RateLimitConfig) *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test"},
+			Spec: GatewaySpec{
+				Listeners: []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+				Backends: []Backend{
+					{
+						Name:        "test-backend",
+						Hosts:       []BackendHost{{Address: "10.0.0.1", Port: 8080}},
+						MaxSessions: ms,
+						RateLimit:   rl,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		ms      *MaxSessionsConfig
+		rl      *RateLimitConfig
+		wantErr bool
+	}{
+		{
+			name:    "valid backend max sessions",
+			ms:      &MaxSessionsConfig{Enabled: true, MaxConcurrent: 100},
+			rl:      nil,
+			wantErr: false,
+		},
+		{
+			name:    "valid backend rate limit",
+			ms:      nil,
+			rl:      &RateLimitConfig{Enabled: true, RequestsPerSecond: 100, Burst: 50},
+			wantErr: false,
+		},
+		{
+			name:    "valid both",
+			ms:      &MaxSessionsConfig{Enabled: true, MaxConcurrent: 100},
+			rl:      &RateLimitConfig{Enabled: true, RequestsPerSecond: 100, Burst: 50},
+			wantErr: false,
+		},
+		{
+			name:    "invalid backend max sessions",
+			ms:      &MaxSessionsConfig{Enabled: true, MaxConcurrent: 0},
+			rl:      nil,
+			wantErr: true,
+		},
+		{
+			name:    "invalid backend rate limit",
+			ms:      nil,
+			rl:      &RateLimitConfig{Enabled: true, RequestsPerSecond: 0},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateConfig(baseConfig(tt.ms, tt.rl))
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateRouteTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	baseConfig := func(routeTLS *RouteTLSConfig) *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test-gateway"},
+			Spec: GatewaySpec{
+				Listeners: []Listener{
+					{
+						Name:     "https",
+						Port:     8443,
+						Protocol: "HTTPS",
+						TLS: &ListenerTLSConfig{
+							Mode:     "SIMPLE",
+							CertFile: "/path/to/cert.pem",
+							KeyFile:  "/path/to/key.pem",
+						},
+					},
+				},
+				Routes: []Route{
+					{
+						Name: "test-route",
+						Match: []RouteMatch{
+							{URI: &URIMatch{Prefix: "/api"}},
+						},
+						Route: []RouteDestination{
+							{Destination: Destination{Host: "backend", Port: 8080}},
+						},
+						TLS: routeTLS,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		tls     *RouteTLSConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "nil TLS config",
+			tls:     nil,
+			wantErr: false,
+		},
+		{
+			name: "valid TLS with cert and key files",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				SNIHosts: []string{"api.example.com"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing key file",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				SNIHosts: []string{"api.example.com"},
+			},
+			wantErr: true,
+			errMsg:  "keyFile is required",
+		},
+		{
+			name: "missing cert file",
+			tls: &RouteTLSConfig{
+				KeyFile:  "/path/to/key.pem",
+				SNIHosts: []string{"api.example.com"},
+			},
+			wantErr: true,
+			errMsg:  "certFile is required",
+		},
+		{
+			name: "SNI hosts without certificate source",
+			tls: &RouteTLSConfig{
+				SNIHosts: []string{"api.example.com"},
+			},
+			wantErr: true,
+			errMsg:  "certificate source",
+		},
+		{
+			name: "invalid SNI host",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				SNIHosts: []string{"invalid..hostname"},
+			},
+			wantErr: true,
+			errMsg:  "sniHosts",
+		},
+		{
+			name: "valid wildcard SNI host",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				SNIHosts: []string{"*.example.com"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid min TLS version",
+			tls: &RouteTLSConfig{
+				CertFile:   "/path/to/cert.pem",
+				KeyFile:    "/path/to/key.pem",
+				MinVersion: "INVALID",
+			},
+			wantErr: true,
+			errMsg:  "invalid TLS version",
+		},
+		{
+			name: "invalid max TLS version",
+			tls: &RouteTLSConfig{
+				CertFile:   "/path/to/cert.pem",
+				KeyFile:    "/path/to/key.pem",
+				MaxVersion: "INVALID",
+			},
+			wantErr: true,
+			errMsg:  "invalid TLS version",
+		},
+		{
+			name: "min version greater than max version",
+			tls: &RouteTLSConfig{
+				CertFile:   "/path/to/cert.pem",
+				KeyFile:    "/path/to/key.pem",
+				MinVersion: "TLS13",
+				MaxVersion: "TLS12",
+			},
+			wantErr: true,
+			errMsg:  "minVersion",
+		},
+		{
+			name: "valid TLS versions",
+			tls: &RouteTLSConfig{
+				CertFile:   "/path/to/cert.pem",
+				KeyFile:    "/path/to/key.pem",
+				MinVersion: "TLS12",
+				MaxVersion: "TLS13",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid Vault config",
+			tls: &RouteTLSConfig{
+				SNIHosts: []string{"api.example.com"},
+				Vault: &VaultTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					Role:       "my-role",
+					CommonName: "api.example.com",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Vault missing pkiMount",
+			tls: &RouteTLSConfig{
+				SNIHosts: []string{"api.example.com"},
+				Vault: &VaultTLSConfig{
+					Enabled:    true,
+					Role:       "my-role",
+					CommonName: "api.example.com",
+				},
+			},
+			wantErr: true,
+			errMsg:  "pkiMount is required",
+		},
+		{
+			name: "Vault missing role",
+			tls: &RouteTLSConfig{
+				SNIHosts: []string{"api.example.com"},
+				Vault: &VaultTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					CommonName: "api.example.com",
+				},
+			},
+			wantErr: true,
+			errMsg:  "role is required",
+		},
+		{
+			name: "Vault missing commonName",
+			tls: &RouteTLSConfig{
+				SNIHosts: []string{"api.example.com"},
+				Vault: &VaultTLSConfig{
+					Enabled:  true,
+					PKIMount: "pki",
+					Role:     "my-role",
+				},
+			},
+			wantErr: true,
+			errMsg:  "commonName is required",
+		},
+		{
+			name: "Vault disabled - no validation",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				Vault: &VaultTLSConfig{
+					Enabled: false,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "client validation enabled without CA file",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				ClientValidation: &RouteClientValidationConfig{
+					Enabled: true,
+				},
+			},
+			wantErr: true,
+			errMsg:  "caFile is required",
+		},
+		{
+			name: "valid client validation config",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				ClientValidation: &RouteClientValidationConfig{
+					Enabled: true,
+					CAFile:  "/path/to/ca.pem",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "client validation disabled - no validation",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				ClientValidation: &RouteClientValidationConfig{
+					Enabled: false,
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateConfig(baseConfig(tt.tls))
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateGRPCRouteTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	baseConfig := func(routeTLS *RouteTLSConfig) *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test-gateway"},
+			Spec: GatewaySpec{
+				Listeners: []Listener{
+					{
+						Name:     "grpc",
+						Port:     9443,
+						Protocol: "GRPC",
+						TLS: &ListenerTLSConfig{
+							Mode:     "SIMPLE",
+							CertFile: "/path/to/cert.pem",
+							KeyFile:  "/path/to/key.pem",
+						},
+						GRPC: &GRPCListenerConfig{
+							MaxConcurrentStreams: 100,
+						},
+					},
+				},
+				GRPCRoutes: []GRPCRoute{
+					{
+						Name: "test-grpc-route",
+						Match: []GRPCRouteMatch{
+							{Service: &StringMatch{Prefix: "test."}},
+						},
+						Route: []RouteDestination{
+							{Destination: Destination{Host: "backend", Port: 9090}},
+						},
+						TLS: routeTLS,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		tls     *RouteTLSConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "nil TLS config",
+			tls:     nil,
+			wantErr: false,
+		},
+		{
+			name: "valid TLS with cert and key files",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+				SNIHosts: []string{"grpc.example.com"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing key file",
+			tls: &RouteTLSConfig{
+				CertFile: "/path/to/cert.pem",
+				SNIHosts: []string{"grpc.example.com"},
+			},
+			wantErr: true,
+			errMsg:  "keyFile is required",
+		},
+		{
+			name: "invalid min TLS version",
+			tls: &RouteTLSConfig{
+				CertFile:   "/path/to/cert.pem",
+				KeyFile:    "/path/to/key.pem",
+				MinVersion: "INVALID",
+			},
+			wantErr: true,
+			errMsg:  "invalid TLS version",
+		},
+		{
+			name: "valid Vault config for gRPC route",
+			tls: &RouteTLSConfig{
+				SNIHosts: []string{"grpc.example.com"},
+				Vault: &VaultTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					Role:       "grpc-role",
+					CommonName: "grpc.example.com",
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateConfig(baseConfig(tt.tls))
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}

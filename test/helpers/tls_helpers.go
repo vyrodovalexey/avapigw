@@ -507,3 +507,86 @@ func GenerateMismatchedCertAndKey() (certPEM, keyPEM []byte, err error) {
 
 	return cert1, key2, nil
 }
+
+// GenerateTestCertificatesWithDNS generates test certificates with custom DNS names.
+func GenerateTestCertificatesWithDNS(dnsNames []string) (*TestCertificates, error) {
+	tc := &TestCertificates{}
+
+	// Generate CA
+	if err := tc.generateCA(); err != nil {
+		return nil, fmt.Errorf("failed to generate CA: %w", err)
+	}
+
+	// Generate server certificate with custom DNS names
+	if err := tc.generateServerCertWithDNS(dnsNames); err != nil {
+		return nil, fmt.Errorf("failed to generate server certificate: %w", err)
+	}
+
+	// Generate client certificate
+	if err := tc.generateClientCert(); err != nil {
+		return nil, fmt.Errorf("failed to generate client certificate: %w", err)
+	}
+
+	return tc, nil
+}
+
+// generateServerCertWithDNS generates a server certificate with custom DNS names.
+func (tc *TestCertificates) generateServerCertWithDNS(dnsNames []string) error {
+	// Generate server private key
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate server key: %w", err)
+	}
+	tc.ServerKey = serverKey
+
+	// Create server certificate template
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	commonName := "localhost"
+	if len(dnsNames) > 0 {
+		commonName = dnsNames[0]
+	}
+
+	serverTemplate := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"Test Server"},
+			CommonName:   commonName,
+		},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().Add(365 * 24 * time.Hour),
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		DNSNames:    dnsNames,
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+
+	// Sign with CA
+	serverCertDER, err := x509.CreateCertificate(rand.Reader, serverTemplate, tc.CACert, &serverKey.PublicKey, tc.CAKey)
+	if err != nil {
+		return fmt.Errorf("failed to create server certificate: %w", err)
+	}
+
+	// Parse the certificate
+	serverCert, err := x509.ParseCertificate(serverCertDER)
+	if err != nil {
+		return fmt.Errorf("failed to parse server certificate: %w", err)
+	}
+	tc.ServerCert = serverCert
+
+	// Encode to PEM
+	tc.ServerCertPEM = pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: serverCertDER,
+	})
+
+	tc.ServerKeyPEM = pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(serverKey),
+	})
+
+	return nil
+}

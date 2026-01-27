@@ -716,3 +716,89 @@ func TestGRPCListener_TLSMode_WithManager(t *testing.T) {
 	// Should return the manager's mode
 	assert.Equal(t, string(tlspkg.TLSModeInsecure), listener.TLSMode())
 }
+
+func TestGRPCListener_WithRouteTLSManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a route TLS manager
+	routeTLSManager := tlspkg.NewRouteTLSManager()
+	defer routeTLSManager.Close()
+
+	// Create listener with route TLS manager option
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCRouteTLSManager(routeTLSManager),
+	)
+	require.NoError(t, err)
+
+	// Verify the route TLS manager is set
+	assert.Equal(t, routeTLSManager, listener.RouteTLSManager())
+}
+
+func TestGRPCListener_RouteTLSManager_Nil(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create listener without route TLS manager
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Verify the route TLS manager is nil
+	assert.Nil(t, listener.RouteTLSManager())
+}
+
+func TestGRPCListener_IsRouteTLSEnabled_NoManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create listener without route TLS manager
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Should return false when no route TLS manager
+	assert.False(t, listener.IsRouteTLSEnabled())
+}
+
+func TestGRPCListener_IsRouteTLSEnabled_EmptyManager(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a route TLS manager with no routes
+	routeTLSManager := tlspkg.NewRouteTLSManager()
+	defer routeTLSManager.Close()
+
+	// Create listener with empty route TLS manager
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCRouteTLSManager(routeTLSManager),
+	)
+	require.NoError(t, err)
+
+	// Should return false when route TLS manager has no routes
+	assert.False(t, listener.IsRouteTLSEnabled())
+}

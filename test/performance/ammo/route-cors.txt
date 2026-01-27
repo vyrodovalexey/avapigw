@@ -1,0 +1,42 @@
+GET /api/v1/cors HTTP/1.1
+Host: localhost
+User-Agent: YandexTank/Perftest-CORS
+Accept: application/json
+Connection: keep-alive
+Origin: https://example.com
+X-Perf-Test: route-cors
+
+GET /api/v1/cors/1 HTTP/1.1
+Host: localhost
+User-Agent: YandexTank/Perftest-CORS
+Accept: application/json
+Connection: keep-alive
+Origin: https://app.example.com
+X-Perf-Test: route-cors
+
+OPTIONS /api/v1/cors HTTP/1.1
+Host: localhost
+User-Agent: YandexTank/Perftest-CORS
+Accept: application/json
+Connection: keep-alive
+Origin: https://example.com
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: Content-Type, X-Custom-Header
+X-Perf-Test: route-cors-preflight
+
+GET /api/v1/custom HTTP/1.1
+Host: localhost
+User-Agent: YandexTank/Perftest-CORS
+Accept: application/json
+Connection: keep-alive
+Origin: https://custom.example.com
+X-Perf-Test: route-cors
+
+GET /api/v1/default HTTP/1.1
+Host: localhost
+User-Agent: YandexTank/Perftest-CORS
+Accept: application/json
+Connection: keep-alive
+Origin: https://any-origin.com
+X-Perf-Test: route-cors
+

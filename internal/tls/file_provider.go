@@ -31,9 +31,10 @@ type FileProvider struct {
 	stopCh    chan struct{}
 	stoppedCh chan struct{}
 
-	mu      sync.RWMutex
-	closed  bool
-	started bool
+	mu              sync.RWMutex
+	closed          bool
+	started         bool
+	watchLoopActive bool // tracks if watchLoop goroutine was actually started
 
 	// Debounce settings
 	debounceDelay time.Duration
@@ -151,6 +152,7 @@ func (p *FileProvider) Start(ctx context.Context) error {
 		}
 	}
 
+	p.watchLoopActive = true
 	go p.watchLoop(ctx)
 
 	// Send initial loaded event
@@ -209,7 +211,8 @@ func (p *FileProvider) Close() error {
 
 	close(p.stopCh)
 
-	if p.started {
+	// Only wait for stoppedCh if the watch loop was actually started
+	if p.watchLoopActive {
 		<-p.stoppedCh
 	}
 

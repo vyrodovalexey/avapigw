@@ -212,8 +212,16 @@ func (w *Watcher) handleFileEvent(
 	)
 
 	// Reset debounce timer
+	// Properly drain the timer channel after Stop() to prevent goroutine leak.
+	// Stop() returns false if the timer has already expired or been stopped,
+	// in which case we need to drain the channel to avoid blocking.
 	if debounceTimer != nil {
-		debounceTimer.Stop()
+		if !debounceTimer.Stop() {
+			select {
+			case <-debounceTimer.C:
+			default:
+			}
+		}
 	}
 	debounceTimer = time.NewTimer(w.debounceDelay)
 	return debounceTimer, debounceTimer.C

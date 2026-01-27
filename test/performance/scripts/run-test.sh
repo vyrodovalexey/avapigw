@@ -3,15 +3,29 @@
 # Usage: ./run-test.sh [test-name] [options]
 #
 # Test names:
-#   http-throughput     - HTTP GET throughput test (default)
-#   http-tls-throughput - HTTPS GET throughput test with TLS
-#   http-auth-throughput - HTTP GET throughput test with JWT auth
-#   http-post           - HTTP POST with payload test
-#   load-balancing      - Load balancing verification
-#   rate-limiting       - Rate limiting stress test
-#   circuit-breaker     - Circuit breaker test
-#   mixed-workload      - Mixed HTTP workload test
-#   all                 - Run all tests sequentially
+#   Basic Tests:
+#     http-throughput       - HTTP GET throughput test (default)
+#     http-tls-throughput   - HTTPS GET throughput test with TLS
+#     http-auth-throughput  - HTTP GET throughput test with JWT auth
+#     http-post             - HTTP POST with payload test
+#
+#   Load Tests:
+#     load-balancing        - Load balancing verification
+#     rate-limiting         - Rate limiting stress test
+#     circuit-breaker       - Circuit breaker test
+#     mixed-workload        - Mixed HTTP workload test
+#
+#   Feature Tests (New):
+#     smoke-test            - Quick 30s smoke test to verify setup
+#     route-request-limits  - Route-level request limits testing
+#     route-cors            - Route-level CORS configuration testing
+#
+#   Backend Tests (New):
+#     backend-circuit-breaker - Backend circuit breaker behavior
+#     backend-jwt-auth        - Backend JWT authentication overhead
+#     backend-basic-auth      - Backend Basic authentication overhead
+#
+#   all                   - Run all tests sequentially
 #
 # Options:
 #   --dry-run         - Validate configuration without running
@@ -20,6 +34,7 @@
 #   --no-gateway      - Don't start gateway (assume it's already running)
 #   --verbose         - Enable verbose output
 #   --secure          - Use secure gateway config with TLS/auth
+#   --features        - Use features gateway config (for new feature tests)
 #   --token=<token>   - JWT token for auth tests (or will fetch from Keycloak)
 
 set -e
@@ -45,6 +60,7 @@ VERBOSE=false
 DURATION_OVERRIDE=""
 RPS_OVERRIDE=""
 USE_SECURE_CONFIG=false
+USE_FEATURES_CONFIG=false
 JWT_TOKEN=""
 
 # Keycloak configuration
@@ -79,6 +95,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --secure)
             USE_SECURE_CONFIG=true
+            shift
+            ;;
+        --features)
+            USE_FEATURES_CONFIG=true
             shift
             ;;
         --token=*)
@@ -229,6 +249,8 @@ start_gateway() {
     local config_file="gateway-perftest.yaml"
     if [ "$USE_SECURE_CONFIG" = true ]; then
         config_file="gateway-perftest-secure.yaml"
+    elif [ "$USE_FEATURES_CONFIG" = true ]; then
+        config_file="gateway-perftest-features.yaml"
     fi
     
     # Check if gateway is already running
@@ -313,9 +335,60 @@ get_test_config() {
             CONFIG_FILE="mixed-workload.yaml"
             AMMO_FILE="mixed.txt"
             ;;
+        # New feature tests
+        smoke-test)
+            CONFIG_FILE="smoke-test.yaml"
+            AMMO_FILE="http-get.txt"
+            ;;
+        route-request-limits)
+            CONFIG_FILE="route-request-limits.yaml"
+            AMMO_FILE="route-limits.txt"
+            USE_FEATURES_CONFIG=true
+            ;;
+        route-cors)
+            CONFIG_FILE="route-cors.yaml"
+            AMMO_FILE="route-cors.txt"
+            USE_FEATURES_CONFIG=true
+            ;;
+        backend-circuit-breaker)
+            CONFIG_FILE="backend-circuit-breaker.yaml"
+            AMMO_FILE="backend-cb.txt"
+            USE_FEATURES_CONFIG=true
+            ;;
+        backend-jwt-auth)
+            CONFIG_FILE="backend-jwt-auth.yaml"
+            AMMO_FILE="backend-jwt.txt"
+            USE_FEATURES_CONFIG=true
+            ;;
+        backend-basic-auth)
+            CONFIG_FILE="backend-basic-auth.yaml"
+            AMMO_FILE="backend-basic.txt"
+            USE_FEATURES_CONFIG=true
+            ;;
+        max-sessions)
+            CONFIG_FILE="max-sessions.yaml"
+            AMMO_FILE="maxsessions.txt"
+            ;;
+        smoke-max-sessions)
+            CONFIG_FILE="smoke-max-sessions.yaml"
+            AMMO_FILE="maxsessions.txt"
+            ;;
+        capacity-aware-lb)
+            CONFIG_FILE="capacity-aware-lb.yaml"
+            AMMO_FILE="capacity-lb.txt"
+            ;;
+        backend-ratelimit)
+            CONFIG_FILE="backend-ratelimit.yaml"
+            AMMO_FILE="backend-ratelimit.txt"
+            ;;
         *)
             log_error "Unknown test: $test_name"
-            echo "Available tests: http-throughput, http-tls-throughput, http-auth-throughput, http-post, load-balancing, rate-limiting, circuit-breaker, mixed-workload"
+            echo "Available tests:"
+            echo "  Basic: http-throughput, http-tls-throughput, http-auth-throughput, http-post"
+            echo "  Load: load-balancing, rate-limiting, circuit-breaker, mixed-workload"
+            echo "  Features: smoke-test, route-request-limits, route-cors"
+            echo "  Backend: backend-circuit-breaker, backend-jwt-auth, backend-basic-auth"
+            echo "  Advanced: max-sessions, smoke-max-sessions, capacity-aware-lb, backend-ratelimit"
             exit 1
             ;;
     esac
@@ -373,8 +446,8 @@ run_test() {
         cp "$PERF_DIR/ammo/$AMMO_FILE" "$results_dir/ammo/$AMMO_FILE"
     fi
     
-    # Update config to use local ammo path
-    sed -i.bak "s|/var/loadtest/ammo/|/var/loadtest/ammo/|g" "$results_dir/load.yaml"
+    # Update config to use local ammo path (ammo is mounted at /var/loadtest/ammo/)
+    # No path rewrite needed - ammo is mounted at the expected location
     
     # Build Docker command
     local docker_cmd="docker run --rm"

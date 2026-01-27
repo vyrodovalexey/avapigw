@@ -1,0 +1,341 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: route-config-test-gateway
+  labels:
+    app: avapigw
+    environment: test
+spec:
+  listeners:
+    - name: http
+      port: 18100
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+  routes:
+    # Route with custom RequestLimits (smaller than global)
+    - name: small-body-limit-route
+      match:
+        - uri:
+            prefix: /api/v1/small
+          methods:
+            - POST
+            - PUT
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      requestLimits:
+        maxBodySize: 1048576  # 1MB (smaller than global 10MB)
+        maxHeaderSize: 524288  # 512KB
+
+    # Route with custom RequestLimits (larger than global)
+    - name: large-body-limit-route
+      match:
+        - uri:
+            prefix: /api/v1/large
+          methods:
+            - POST
+            - PUT
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      requestLimits:
+        maxBodySize: 52428800  # 50MB (larger than global 10MB)
+        maxHeaderSize: 2097152  # 2MB
+
+    # Route with custom CORS configuration
+    - name: custom-cors-route
+      match:
+        - uri:
+            prefix: /api/v1/cors
+          methods:
+            - GET
+            - POST
+            - OPTIONS
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      cors:
+        allowOrigins:
+          - "https://example.com"
+          - "https://app.example.com"
+        allowMethods:
+          - GET
+          - POST
+        allowHeaders:
+          - Content-Type
+          - X-Custom-Header
+        exposeHeaders:
+          - X-Response-ID
+        maxAge: 3600
+        allowCredentials: true
+
+    # Route with custom Security headers
+    - name: secure-route
+      match:
+        - uri:
+            prefix: /api/v1/secure
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      security:
+        enabled: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        headers:
+          enabled: true
+          xFrameOptions: "DENY"
+          xContentTypeOptions: "nosniff"
+          xXSSProtection: "1; mode=block"
+          customHeaders:
+            X-Custom-Security: "enabled"
+
+    # Route inheriting global configuration
+    - name: default-route
+      match:
+        - uri:
+            prefix: /api/v1/default
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+    # Route with all custom configurations
+    - name: full-custom-route
+      match:
+        - uri:
+            prefix: /api/v1/custom
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+            - OPTIONS
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      requestLimits:
+        maxBodySize: 5242880  # 5MB
+        maxHeaderSize: 1048576  # 1MB
+      cors:
+        allowOrigins:
+          - "https://custom.example.com"
+        allowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        allowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Request-ID
+        exposeHeaders:
+          - X-Request-ID
+          - X-Response-Time
+        maxAge: 7200
+        allowCredentials: false
+      security:
+        enabled: true
+        referrerPolicy: "no-referrer"
+        headers:
+          enabled: true
+          xFrameOptions: "SAMEORIGIN"
+          xContentTypeOptions: "nosniff"
+
+  backends:
+    # Backend with circuit breaker enabled
+    - name: backend-with-cb
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+        halfOpenRequests: 3
+
+    # Backend with different circuit breaker config
+    - name: backend-with-aggressive-cb
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      circuitBreaker:
+        enabled: true
+        threshold: 3
+        timeout: 10s
+        halfOpenRequests: 1
+
+    # Backend with JWT authentication (static token)
+    - name: backend-with-jwt-static
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      authentication:
+        type: jwt
+        jwt:
+          enabled: true
+          tokenSource: static
+          staticToken: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkJhY2tlbmQgU2VydmljZSIsImlhdCI6MTUxNjIzOTAyMn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+          headerName: "Authorization"
+          headerPrefix: "Bearer"
+
+    # Backend with Basic authentication (static credentials)
+    - name: backend-with-basic-static
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      authentication:
+        type: basic
+        basic:
+          enabled: true
+          username: "backend-user"
+          password: "backend-pass"
+
+    # Backend with JWT authentication (OIDC)
+    - name: backend-with-jwt-oidc
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      authentication:
+        type: jwt
+        jwt:
+          enabled: true
+          tokenSource: oidc
+          oidc:
+            issuerUrl: "http://127.0.0.1:8090/realms/gateway-test"
+            clientId: "backend-service"
+            clientSecret: "backend-service-secret"
+            scopes:
+              - openid
+            tokenCacheTTL: 5m
+
+    # Backend with Basic authentication (Vault)
+    - name: backend-with-basic-vault
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      authentication:
+        type: basic
+        basic:
+          enabled: true
+          vaultPath: "backend-auth/basic-creds"
+          usernameKey: "username"
+          passwordKey: "password"
+
+    # Backend with mTLS authentication (Vault PKI)
+    - name: backend-with-mtls-vault
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      authentication:
+        type: mtls
+        mtls:
+          enabled: true
+          vault:
+            enabled: true
+            pkiMount: "pki"
+            role: "test-role"
+            commonName: "backend-client.local"
+            ttl: "1h"
+
+    # Backend with custom auth header
+    - name: backend-with-custom-header
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      authentication:
+        type: jwt
+        jwt:
+          enabled: true
+          tokenSource: static
+          staticToken: "custom-token-value"
+          headerName: "X-Backend-Auth"
+          headerPrefix: "Token"
+
+  # Global request limits (can be overridden by routes)
+  requestLimits:
+    maxBodySize: 10485760  # 10MB
+    maxHeaderSize: 1048576  # 1MB
+
+  # Global CORS configuration (can be overridden by routes)
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 86400
+    allowCredentials: false
+
+  # Global security configuration (can be overridden by routes)
+  security:
+    enabled: true
+    referrerPolicy: "strict-origin"
+    headers:
+      enabled: true
+      xFrameOptions: "SAMEORIGIN"
+      xContentTypeOptions: "nosniff"
+      xXSSProtection: "1; mode=block"
+
+  # Global circuit breaker (for routes without backend-specific CB)
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+    timeout: 60s
+    halfOpenRequests: 5
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+    logging:
+      level: debug
+      format: json

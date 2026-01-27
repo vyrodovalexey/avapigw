@@ -330,6 +330,35 @@ type GRPCRoute struct {
 
 	// Encoding contains encoding configuration.
 	Encoding *EncodingConfig `yaml:"encoding,omitempty" json:"encoding,omitempty"`
+
+	// CORS configures CORS for this gRPC route (overrides global).
+	CORS *CORSConfig `yaml:"cors,omitempty" json:"cors,omitempty"`
+
+	// Security configures security headers for this gRPC route (overrides global).
+	Security *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+
+	// TLS configures route-level TLS certificate override for this gRPC route.
+	// This allows serving different certificates based on SNI for this route.
+	TLS *RouteTLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+}
+
+// HasTLSOverride returns true if the gRPC route has TLS configuration that overrides listener TLS.
+func (r *GRPCRoute) HasTLSOverride() bool {
+	if r.TLS == nil {
+		return false
+	}
+	hasFiles := r.TLS.CertFile != "" || r.TLS.KeyFile != ""
+	hasVault := r.TLS.Vault != nil && r.TLS.Vault.Enabled
+	return hasFiles || hasVault
+}
+
+// GetEffectiveSNIHosts returns the SNI hosts for this gRPC route.
+// Returns nil if no SNI hosts are configured.
+func (r *GRPCRoute) GetEffectiveSNIHosts() []string {
+	if r.TLS == nil || len(r.TLS.SNIHosts) == 0 {
+		return nil
+	}
+	return r.TLS.SNIHosts
 }
 
 // GRPCRouteMatch represents matching conditions for a gRPC route.
@@ -454,6 +483,12 @@ type GRPCBackend struct {
 
 	// ConnectionPool contains connection pool configuration.
 	ConnectionPool *GRPCConnectionPoolConfig `yaml:"connectionPool,omitempty" json:"connectionPool,omitempty"`
+
+	// CircuitBreaker configures circuit breaker for this gRPC backend.
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuitBreaker,omitempty" json:"circuitBreaker,omitempty"`
+
+	// Authentication configures authentication for gRPC backend connections.
+	Authentication *BackendAuthConfig `yaml:"authentication,omitempty" json:"authentication,omitempty"`
 }
 
 // GRPCHealthCheckConfig contains gRPC health check configuration.

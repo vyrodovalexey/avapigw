@@ -1000,3 +1000,182 @@ func TestTLSConfig_YAMLRoundTrip(t *testing.T) {
 	assert.Equal(t, original.AllowedCNs, restored.AllowedCNs)
 	assert.Equal(t, original.AllowedSANs, restored.AllowedSANs)
 }
+
+func TestGRPCRoute_HasTLSOverride(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		route    GRPCRoute
+		expected bool
+	}{
+		{
+			name:     "nil TLS config",
+			route:    GRPCRoute{Name: "test"},
+			expected: false,
+		},
+		{
+			name: "empty TLS config",
+			route: GRPCRoute{
+				Name: "test",
+				TLS:  &RouteTLSConfig{},
+			},
+			expected: false,
+		},
+		{
+			name: "TLS with cert file only",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with key file only",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					KeyFile: "/path/to/key.pem",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with both cert and key files",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					KeyFile:  "/path/to/key.pem",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with Vault disabled",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					Vault: &VaultTLSConfig{
+						Enabled: false,
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "TLS with Vault enabled",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					Vault: &VaultTLSConfig{
+						Enabled:    true,
+						PKIMount:   "pki",
+						Role:       "my-role",
+						CommonName: "example.com",
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "TLS with SNI hosts only (no cert)",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					SNIHosts: []string{"api.example.com"},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, tt.route.HasTLSOverride())
+		})
+	}
+}
+
+func TestGRPCRoute_GetEffectiveSNIHosts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		route    GRPCRoute
+		expected []string
+	}{
+		{
+			name:     "nil TLS config",
+			route:    GRPCRoute{Name: "test"},
+			expected: nil,
+		},
+		{
+			name: "empty TLS config",
+			route: GRPCRoute{
+				Name: "test",
+				TLS:  &RouteTLSConfig{},
+			},
+			expected: nil,
+		},
+		{
+			name: "TLS with empty SNI hosts",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{},
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "TLS with single SNI host",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{"grpc.example.com"},
+				},
+			},
+			expected: []string{"grpc.example.com"},
+		},
+		{
+			name: "TLS with multiple SNI hosts",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{"grpc.example.com", "api.example.com", "*.example.com"},
+				},
+			},
+			expected: []string{"grpc.example.com", "api.example.com", "*.example.com"},
+		},
+		{
+			name: "TLS with wildcard SNI host",
+			route: GRPCRoute{
+				Name: "test",
+				TLS: &RouteTLSConfig{
+					CertFile: "/path/to/cert.pem",
+					SNIHosts: []string{"*.example.com"},
+				},
+			},
+			expected: []string{"*.example.com"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tt.route.GetEffectiveSNIHosts()
+			if tt.expected == nil {
+				assert.Nil(t, result)
+			} else {
+				assert.Equal(t, tt.expected, result)
+			}
+		})
+	}
+}

@@ -12,8 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc"
+
+	"github.com/vyrodovalexey/avapigw/internal/backend/auth"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // Default configuration constants for backend services.
@@ -33,6 +37,53 @@ const (
 	// StatusUnhealthy indicates the backend is unhealthy.
 	StatusUnhealthy
 )
+
+// HostRateLimiter provides rate limiting for a backend host.
+type HostRateLimiter struct {
+	rps       int
+	burst     int
+	tokens    atomic.Int64
+	lastCheck atomic.Int64
+	mu        sync.Mutex
+}
+
+// NewHostRateLimiter creates a new host rate limiter.
+func NewHostRateLimiter(rps, burst int) *HostRateLimiter {
+	rl := &HostRateLimiter{
+		rps:   rps,
+		burst: burst,
+	}
+	rl.tokens.Store(int64(burst))
+	rl.lastCheck.Store(time.Now().UnixNano())
+	return rl
+}
+
+// Allow checks if a request is allowed based on rate limiting.
+func (rl *HostRateLimiter) Allow() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now().UnixNano()
+	last := rl.lastCheck.Load()
+	elapsed := time.Duration(now - last)
+
+	// Calculate tokens to add based on elapsed time
+	tokensToAdd := int64(float64(rl.rps) * elapsed.Seconds())
+	currentTokens := rl.tokens.Load() + tokensToAdd
+
+	// Cap at burst limit
+	if currentTokens > int64(rl.burst) {
+		currentTokens = int64(rl.burst)
+	}
+
+	if currentTokens < 1 {
+		return false
+	}
+
+	rl.tokens.Store(currentTokens - 1)
+	rl.lastCheck.Store(now)
+	return true
+}
 
 // String returns the string representation of the status.
 func (s Status) String() string {
@@ -60,12 +111,16 @@ type Backend interface {
 
 // Host represents a single backend host.
 type Host struct {
-	Address     string
-	Port        int
-	Weight      int
-	status      atomic.Int32
-	connections atomic.Int64
-	lastUsed    atomic.Int64
+	Address       string
+	Port          int
+	Weight        int
+	status        atomic.Int32
+	connections   atomic.Int64
+	lastUsed      atomic.Int64
+	maxSessions   int
+	maxSessionsOn bool
+	rateLimiter   *HostRateLimiter
+	rateLimiterOn bool
 }
 
 // NewHost creates a new host.
@@ -128,19 +183,87 @@ func (h *Host) LastUsed() time.Time {
 	return time.Unix(0, h.lastUsed.Load())
 }
 
+// SetMaxSessions configures max sessions for this host.
+func (h *Host) SetMaxSessions(maxSessions int) {
+	h.maxSessions = maxSessions
+	h.maxSessionsOn = maxSessions > 0
+}
+
+// SetRateLimiter configures rate limiting for this host.
+func (h *Host) SetRateLimiter(rps, burst int) {
+	if rps > 0 {
+		h.rateLimiter = NewHostRateLimiter(rps, burst)
+		h.rateLimiterOn = true
+	}
+}
+
+// IsAvailable checks if the host can accept new connections.
+// It considers health status, max sessions, and rate limiting.
+func (h *Host) IsAvailable() bool {
+	// Check health status
+	status := h.Status()
+	if status != StatusHealthy && status != StatusUnknown {
+		return false
+	}
+
+	// Check max sessions
+	if h.maxSessionsOn && h.connections.Load() >= int64(h.maxSessions) {
+		return false
+	}
+
+	return true
+}
+
+// AllowRequest checks if a request is allowed based on rate limiting.
+// Returns true if rate limiting is disabled or if the request is allowed.
+func (h *Host) AllowRequest() bool {
+	if !h.rateLimiterOn || h.rateLimiter == nil {
+		return true
+	}
+	return h.rateLimiter.Allow()
+}
+
+// HasCapacity checks if the host has capacity for new connections.
+// This is a lighter check than IsAvailable, only checking max sessions.
+func (h *Host) HasCapacity() bool {
+	if !h.maxSessionsOn {
+		return true
+	}
+	return h.connections.Load() < int64(h.maxSessions)
+}
+
+// MaxSessions returns the max sessions limit for this host.
+func (h *Host) MaxSessions() int {
+	return h.maxSessions
+}
+
+// IsMaxSessionsEnabled returns true if max sessions limiting is enabled.
+func (h *Host) IsMaxSessionsEnabled() bool {
+	return h.maxSessionsOn
+}
+
+// IsRateLimitEnabled returns true if rate limiting is enabled.
+func (h *Host) IsRateLimitEnabled() bool {
+	return h.rateLimiterOn
+}
+
 // ServiceBackend is the default backend implementation.
 type ServiceBackend struct {
-	name         string
-	config       config.Backend
-	hosts        []*Host
-	loadBalancer LoadBalancer
-	healthCheck  *HealthChecker
-	pool         *ConnectionPool
-	tlsBuilder   *TLSConfigBuilder
-	tlsConfig    *tls.Config
-	logger       observability.Logger
-	status       atomic.Int32
-	mu           sync.RWMutex
+	name           string
+	config         config.Backend
+	hosts          []*Host
+	loadBalancer   LoadBalancer
+	healthCheck    *HealthChecker
+	pool           *ConnectionPool
+	tlsBuilder     *TLSConfigBuilder
+	tlsConfig      *tls.Config
+	authProvider   auth.Provider
+	vaultClient    vault.Client
+	logger         observability.Logger
+	status         atomic.Int32
+	mu             sync.RWMutex
+	maxSessionsCfg *config.MaxSessionsConfig
+	rateLimitCfg   *config.RateLimitConfig
 }
 
 // BackendOption is a functional option for configuring a backend.
@@ -167,72 +290,183 @@ func WithConnectionPool(pool *ConnectionPool) BackendOption {
 	}
 }
 
+// WithAuthProvider sets the authentication provider for the backend.
+func WithAuthProvider(provider auth.Provider) BackendOption {
+	return func(b *ServiceBackend) {
+		b.authProvider = provider
+	}
+}
+
+// WithVaultClient sets the Vault client for creating auth providers.
+func WithVaultClient(client vault.Client) BackendOption {
+	return func(b *ServiceBackend) {
+		// Store vault client for later use in auth provider creation
+		b.vaultClient = client
+	}
+}
+
 // NewBackend creates a new backend from configuration.
 func NewBackend(cfg config.Backend, opts ...BackendOption) (*ServiceBackend, error) {
-	if cfg.Name == "" {
-		return nil, fmt.Errorf("backend name is required")
-	}
-
-	if len(cfg.Hosts) == 0 {
-		return nil, fmt.Errorf("at least one host is required")
+	if err := validateBackendConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	b := &ServiceBackend{
-		name:   cfg.Name,
-		config: cfg,
-		hosts:  make([]*Host, 0, len(cfg.Hosts)),
-		logger: observability.NopLogger(),
+		name:           cfg.Name,
+		config:         cfg,
+		hosts:          make([]*Host, 0, len(cfg.Hosts)),
+		logger:         observability.NopLogger(),
+		maxSessionsCfg: cfg.MaxSessions,
+		rateLimitCfg:   cfg.RateLimit,
 	}
 
 	for _, opt := range opts {
 		opt(b)
 	}
 
-	// Create hosts
-	for _, hostCfg := range cfg.Hosts {
+	b.initHosts(cfg.Hosts)
+	b.initLoadBalancer(cfg.LoadBalancer)
+
+	if err := b.initTLS(cfg); err != nil {
+		return nil, err
+	}
+
+	b.initConnectionPool()
+
+	if err := b.initAuthProvider(cfg); err != nil {
+		return nil, err
+	}
+
+	b.status.Store(int32(StatusUnknown))
+
+	b.logBackendConfig()
+
+	return b, nil
+}
+
+// logBackendConfig logs the backend configuration.
+func (b *ServiceBackend) logBackendConfig() {
+	if b.maxSessionsCfg != nil && b.maxSessionsCfg.Enabled {
+		b.logger.Info("max sessions enabled for backend",
+			observability.String("backend", b.name),
+			observability.Int("maxConcurrent", b.maxSessionsCfg.MaxConcurrent),
+			observability.Int("queueSize", b.maxSessionsCfg.QueueSize),
+		)
+	}
+
+	if b.rateLimitCfg != nil && b.rateLimitCfg.Enabled {
+		b.logger.Info("rate limiting enabled for backend",
+			observability.String("backend", b.name),
+			observability.Int("requestsPerSecond", b.rateLimitCfg.RequestsPerSecond),
+			observability.Int("burst", b.rateLimitCfg.Burst),
+		)
+	}
+}
+
+// validateBackendConfig validates the backend configuration.
+func validateBackendConfig(cfg config.Backend) error {
+	if cfg.Name == "" {
+		return fmt.Errorf("backend name is required")
+	}
+	if len(cfg.Hosts) == 0 {
+		return fmt.Errorf("at least one host is required")
+	}
+	return nil
+}
+
+// initHosts initializes the backend hosts.
+func (b *ServiceBackend) initHosts(hostConfigs []config.BackendHost) {
+	for _, hostCfg := range hostConfigs {
 		weight := hostCfg.Weight
 		if weight == 0 {
 			weight = DefaultHostWeight
 		}
 		host := NewHost(hostCfg.Address, hostCfg.Port, weight)
+
+		// Configure max sessions if enabled at backend level
+		if b.maxSessionsCfg != nil && b.maxSessionsCfg.Enabled {
+			host.SetMaxSessions(b.maxSessionsCfg.MaxConcurrent)
+		}
+
+		// Configure rate limiting if enabled at backend level
+		if b.rateLimitCfg != nil && b.rateLimitCfg.Enabled {
+			burst := b.rateLimitCfg.Burst
+			if burst == 0 {
+				burst = b.rateLimitCfg.RequestsPerSecond
+			}
+			host.SetRateLimiter(b.rateLimitCfg.RequestsPerSecond, burst)
+		}
+
 		b.hosts = append(b.hosts, host)
 	}
+}
 
-	// Create load balancer if not provided
-	if b.loadBalancer == nil {
-		algorithm := config.LoadBalancerRoundRobin
-		if cfg.LoadBalancer != nil && cfg.LoadBalancer.Algorithm != "" {
-			algorithm = cfg.LoadBalancer.Algorithm
-		}
-		b.loadBalancer = NewLoadBalancer(algorithm, b.hosts)
+// initLoadBalancer initializes the load balancer.
+func (b *ServiceBackend) initLoadBalancer(lbCfg *config.LoadBalancer) {
+	if b.loadBalancer != nil {
+		return
 	}
 
-	// Build TLS configuration if enabled
-	if cfg.TLS != nil && cfg.TLS.Enabled {
-		b.tlsBuilder = NewTLSConfigBuilder(cfg.TLS, WithTLSLogger(b.logger))
-		tlsConfig, err := b.tlsBuilder.Build()
-		if err != nil {
-			return nil, fmt.Errorf("failed to build TLS config for backend %s: %w", cfg.Name, err)
-		}
-		b.tlsConfig = tlsConfig
+	algorithm := config.LoadBalancerRoundRobin
+	if lbCfg != nil && lbCfg.Algorithm != "" {
+		algorithm = lbCfg.Algorithm
+	}
+	b.loadBalancer = NewLoadBalancer(algorithm, b.hosts)
+}
 
-		b.logger.Info("TLS enabled for backend",
-			observability.String("backend", cfg.Name),
-			observability.String("mode", cfg.TLS.GetEffectiveMode()),
-			observability.Bool("insecureSkipVerify", cfg.TLS.InsecureSkipVerify),
-		)
+// initTLS initializes TLS configuration.
+func (b *ServiceBackend) initTLS(cfg config.Backend) error {
+	if cfg.TLS == nil || !cfg.TLS.Enabled {
+		return nil
 	}
 
-	// Create connection pool if not provided
-	if b.pool == nil {
-		poolCfg := DefaultPoolConfig()
-		poolCfg.TLSConfig = b.tlsConfig
-		b.pool = NewConnectionPool(poolCfg)
+	b.tlsBuilder = NewTLSConfigBuilder(cfg.TLS, WithTLSLogger(b.logger))
+	tlsConfig, err := b.tlsBuilder.Build()
+	if err != nil {
+		return fmt.Errorf("failed to build TLS config for backend %s: %w", cfg.Name, err)
+	}
+	b.tlsConfig = tlsConfig
+
+	b.logger.Info("TLS enabled for backend",
+		observability.String("backend", cfg.Name),
+		observability.String("mode", cfg.TLS.GetEffectiveMode()),
+		observability.Bool("insecureSkipVerify", cfg.TLS.InsecureSkipVerify),
+	)
+
+	return nil
+}
+
+// initConnectionPool initializes the connection pool.
+func (b *ServiceBackend) initConnectionPool() {
+	if b.pool != nil {
+		return
 	}
 
-	b.status.Store(int32(StatusUnknown))
+	poolCfg := DefaultPoolConfig()
+	poolCfg.TLSConfig = b.tlsConfig
+	b.pool = NewConnectionPool(poolCfg)
+}
 
-	return b, nil
+// initAuthProvider initializes the authentication provider.
+func (b *ServiceBackend) initAuthProvider(cfg config.Backend) error {
+	if b.authProvider != nil || cfg.Authentication == nil {
+		return nil
+	}
+
+	authOpts := []auth.ProviderOption{
+		auth.WithLogger(b.logger),
+	}
+	if b.vaultClient != nil {
+		authOpts = append(authOpts, auth.WithVaultClient(b.vaultClient))
+	}
+
+	provider, err := auth.NewProvider(cfg.Name, cfg.Authentication, authOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to create auth provider for backend %s: %w", cfg.Name, err)
+	}
+	b.authProvider = provider
+
+	return nil
 }
 
 // Name returns the backend name.
@@ -241,6 +475,7 @@ func (b *ServiceBackend) Name() string {
 }
 
 // GetHost returns a host using the load balancer.
+// It considers health status, max sessions, and rate limiting.
 func (b *ServiceBackend) GetHost() (*Host, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -250,8 +485,50 @@ func (b *ServiceBackend) GetHost() (*Host, error) {
 		return nil, fmt.Errorf("no healthy hosts available for backend %s", b.name)
 	}
 
+	// Check rate limiting
+	if !host.AllowRequest() {
+		b.logger.Debug("host rate limited",
+			observability.String("backend", b.name),
+			observability.String("host", host.Address),
+			observability.Int("port", host.Port),
+		)
+		return nil, fmt.Errorf("host rate limited for backend %s", b.name)
+	}
+
 	host.IncrementConnections()
 	return host, nil
+}
+
+// GetAvailableHost returns an available host considering all constraints.
+// This method tries to find a host that is healthy, has capacity, and allows the request.
+func (b *ServiceBackend) GetAvailableHost() (*Host, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	// Try to get a host from the load balancer that is available
+	for i := 0; i < len(b.hosts); i++ {
+		host := b.loadBalancer.Next()
+		if host == nil {
+			break
+		}
+
+		if !host.IsAvailable() {
+			continue
+		}
+
+		if !host.AllowRequest() {
+			b.logger.Debug("host rate limited, trying next",
+				observability.String("backend", b.name),
+				observability.String("host", host.Address),
+			)
+			continue
+		}
+
+		host.IncrementConnections()
+		return host, nil
+	}
+
+	return nil, fmt.Errorf("no available hosts for backend %s", b.name)
 }
 
 // ReleaseHost releases a host back to the pool.
@@ -289,13 +566,23 @@ func (b *ServiceBackend) Start(ctx context.Context) error {
 }
 
 // Stop stops the backend.
-func (b *ServiceBackend) Stop(ctx context.Context) error {
+func (b *ServiceBackend) Stop(_ context.Context) error {
 	b.logger.Info("stopping backend",
 		observability.String("name", b.name),
 	)
 
 	if b.healthCheck != nil {
 		b.healthCheck.Stop()
+	}
+
+	// Close auth provider
+	if b.authProvider != nil {
+		if err := b.authProvider.Close(); err != nil {
+			b.logger.Error("failed to close auth provider",
+				observability.String("backend", b.name),
+				observability.Error(err),
+			)
+		}
 	}
 
 	b.status.Store(int32(StatusUnknown))
@@ -381,6 +668,43 @@ func (b *ServiceBackend) RefreshTLSConfig() error {
 	)
 
 	return nil
+}
+
+// AuthProvider returns the authentication provider for this backend.
+func (b *ServiceBackend) AuthProvider() auth.Provider {
+	return b.authProvider
+}
+
+// ApplyAuth applies authentication to an HTTP request.
+func (b *ServiceBackend) ApplyAuth(ctx context.Context, req *http.Request) error {
+	if b.authProvider == nil {
+		return nil
+	}
+	return b.authProvider.ApplyHTTP(ctx, req)
+}
+
+// GetGRPCDialOptions returns gRPC dial options including authentication.
+func (b *ServiceBackend) GetGRPCDialOptions(ctx context.Context) ([]grpc.DialOption, error) {
+	var opts []grpc.DialOption
+
+	// Add auth options if provider is configured
+	if b.authProvider != nil {
+		authOpts, err := b.authProvider.ApplyGRPC(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get auth dial options: %w", err)
+		}
+		opts = append(opts, authOpts...)
+	}
+
+	return opts, nil
+}
+
+// RefreshAuth refreshes the authentication credentials.
+func (b *ServiceBackend) RefreshAuth(ctx context.Context) error {
+	if b.authProvider == nil {
+		return nil
+	}
+	return b.authProvider.Refresh(ctx)
 }
 
 // Registry manages multiple backends.
