@@ -788,6 +788,14 @@ func (r *Registry) StartAll(ctx context.Context) error {
 	defer r.mu.RUnlock()
 
 	for name, backend := range r.backends {
+		// Check for context cancellation before starting each backend
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context canceled while starting backends: %w", ctx.Err())
+		default:
+			// Context is still valid, proceed with starting the backend
+		}
+
 		if err := backend.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start backend %s: %w", name, err)
 		}
@@ -803,6 +811,19 @@ func (r *Registry) StopAll(ctx context.Context) error {
 
 	var lastErr error
 	for name, backend := range r.backends {
+		// Check for context cancellation before stopping each backend
+		// Note: We continue stopping backends even if context is canceled
+		// to ensure proper cleanup, but we log the cancellation
+		select {
+		case <-ctx.Done():
+			r.logger.Warn("context canceled while stopping backends, continuing cleanup",
+				observability.String("backend", name),
+				observability.Error(ctx.Err()),
+			)
+		default:
+			// Context is still valid
+		}
+
 		if err := backend.Stop(ctx); err != nil {
 			r.logger.Error("failed to stop backend",
 				observability.String("name", name),
@@ -832,42 +853,77 @@ func (r *Registry) LoadFromConfig(backends []config.Backend) error {
 }
 
 // ReloadFromConfig replaces all backends with new configuration.
-// Existing backends are stopped before being replaced.
+// Uses copy-on-write to minimize the critical section: the new map
+// is built outside the lock, then swapped atomically. Old backends
+// are stopped after the swap so that the lock is not held during
+// potentially slow I/O.
 func (r *Registry) ReloadFromConfig(
 	ctx context.Context,
 	backends []config.Backend,
 ) error {
-	r.mu.Lock()
-
-	// Stop and remove existing backends
-	for name, b := range r.backends {
-		if err := b.Stop(ctx); err != nil {
-			r.logger.Error("failed to stop backend during reload",
-				observability.String("name", name),
-				observability.Error(err),
-			)
-		}
-		delete(r.backends, name)
+	// Check for context cancellation before starting the reload
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("context canceled before reload: %w", ctx.Err())
+	default:
+		// Context is still valid, proceed with reload
 	}
 
-	r.mu.Unlock()
-
-	// Load new backends
+	// 1. Build new backends map outside the lock.
+	newMap := make(map[string]Backend, len(backends))
 	for _, cfg := range backends {
+		// Check for context cancellation during backend creation
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context canceled while creating backends: %w", ctx.Err())
+		default:
+			// Context is still valid
+		}
+
 		b, err := NewBackend(cfg, WithBackendLogger(r.logger))
 		if err != nil {
 			return fmt.Errorf(
 				"failed to create backend %s: %w", cfg.Name, err,
 			)
 		}
+		newMap[cfg.Name] = b
+	}
 
-		if err := r.Register(b); err != nil {
-			return err
+	// 2. Lock, swap the map atomically, unlock.
+	r.mu.Lock()
+	oldMap := r.backends
+	r.backends = newMap
+	r.mu.Unlock()
+
+	// 3. Stop old backends outside the lock.
+	// Note: We continue stopping backends even if context is canceled
+	// to ensure proper cleanup
+	for name, b := range oldMap {
+		if err := b.Stop(ctx); err != nil {
+			r.logger.Error("failed to stop backend during reload",
+				observability.String("name", name),
+				observability.Error(err),
+			)
+		}
+	}
+
+	// 4. Start new backends.
+	for name, b := range newMap {
+		// Check for context cancellation before starting each backend
+		select {
+		case <-ctx.Done():
+			r.logger.Warn("context canceled while starting new backends",
+				observability.String("backend", name),
+				observability.Error(ctx.Err()),
+			)
+			return fmt.Errorf("context canceled while starting backends: %w", ctx.Err())
+		default:
+			// Context is still valid
 		}
 
 		if err := b.Start(ctx); err != nil {
 			return fmt.Errorf(
-				"failed to start backend %s: %w", cfg.Name, err,
+				"failed to start backend %s: %w", name, err,
 			)
 		}
 	}

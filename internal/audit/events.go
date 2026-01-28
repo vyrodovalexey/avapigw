@@ -2,6 +2,8 @@ package audit
 
 import (
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // EventType represents the type of audit event.
@@ -317,10 +319,9 @@ func (e *Event) WithLevel(level Level) *Event {
 	return e
 }
 
-// generateEventID generates a unique event ID.
+// generateEventID generates a unique event ID using UUID v4.
 func generateEventID() string {
-	// Use timestamp + random suffix for uniqueness
-	return time.Now().UTC().Format("20060102150405.000000000")
+	return uuid.New().String()
 }
 
 // AuthenticationEvent creates an authentication audit event.

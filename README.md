@@ -21,7 +21,9 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **gRPC Routing** - Service and method-based routing with metadata matching
 - **gRPC Health Service** - Built-in grpc.health.v1.Health implementation
 - **gRPC Reflection** - Optional gRPC reflection service for service discovery
+- **gRPC TLS via Vault PKI** - Automated gRPC listener TLS certificates from Vault PKI with optional gRPC-specific overrides
 - **Streaming Support** - HTTP Flusher interface support for SSE, WebSocket, and streaming responses
+- **WebSocket Proxy** - Full WebSocket proxying with connection management, message routing, and load balancing
 
 ### Security & TLS
 - **Comprehensive TLS Support** - TLS 1.2/1.3 with multiple modes (SIMPLE, MUTUAL, OPTIONAL_MUTUAL)
@@ -50,6 +52,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Policy Caching** - Configurable TTL for authorization decisions
 - **Security Headers** - HSTS, CSP, X-Frame-Options, and more
 - **Audit Logging** - Comprehensive authentication and authorization logging with stdout as default output
+- **gRPC Audit Support** - Built-in audit interceptor for gRPC requests and responses with trace context integration
 
 ### Traffic Management
 - **Load Balancing** - Round-robin, weighted, least connections, and capacity-aware load balancing algorithms
@@ -109,6 +112,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Hot Configuration Reload** - Update configuration without restart with atomic config updates and timer leak prevention
 - **Graceful Shutdown** - Clean shutdown with connection draining
 - **Docker Support** - Production-ready container images with security optimizations
+- **Kubernetes & Helm** - Production-ready Helm charts with local K8s deployment support via values-local.yaml
 - **Multi-platform Builds** - Support for Linux, macOS, and Windows
 - **Shared Error Types** - Consistent error handling with ServerError and StatusCapturingResponseWriter
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
@@ -143,6 +147,8 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ### Prerequisites
 - Go 1.25 (for building from source)
 - Docker (for containerized deployment)
+- HashiCorp Vault (optional, for TLS certificate management)
+- Keycloak (optional, for OIDC authentication)
 
 ### Running with Docker
 
@@ -150,8 +156,14 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 # Pull the latest image
 docker pull ghcr.io/vyrodovalexey/avapigw:latest
 
-# Run with default configuration
+# Run with default configuration (HTTP + gRPC + metrics)
 docker run -p 8080:8080 -p 9000:9000 -p 9090:9090 ghcr.io/vyrodovalexey/avapigw:latest
+
+# Run with TLS support (HTTPS + gRPC TLS + metrics)
+docker run -p 8080:8080 -p 8443:8443 -p 9000:9000 -p 9443:9443 -p 9090:9090 \
+  -v $(pwd)/configs:/app/configs:ro \
+  -v $(pwd)/certs:/app/certs:ro \
+  ghcr.io/vyrodovalexey/avapigw:latest
 
 # Run with custom configuration
 docker run -p 8080:8080 -p 9000:9000 -p 9090:9090 \
@@ -176,7 +188,7 @@ make run
 make run-debug
 ```
 
-The gateway will start on port 8080 (HTTP traffic) and 9090 (metrics/health). gRPC traffic on port 9000 is optional and can be enabled in the configuration.
+The gateway will start on port 8080 (HTTP traffic) and 9090 (metrics/health). gRPC traffic on port 9000 is optional and can be enabled in the configuration. When TLS is enabled, HTTPS traffic uses port 8443 and gRPC TLS traffic uses port 9443.
 
 ### Test the Gateway
 
@@ -195,6 +207,12 @@ grpcurl -plaintext localhost:9000 list
 
 # Check gRPC health
 grpcurl -plaintext localhost:9000 grpc.health.v1.Health/Check
+
+# Test gRPC TLS endpoint (if TLS is enabled)
+grpcurl -insecure localhost:9443 list
+
+# Test HTTPS endpoint (if TLS is enabled)
+curl -k https://localhost:8443/health
 ```
 
 ## 📦 Installation
@@ -693,7 +711,19 @@ spec:
       - cookie
 ```
 
-The audit middleware is automatically integrated into the HTTP middleware chain when enabled, providing comprehensive logging of security-related events with configurable output destinations and field redaction for sensitive data.
+The audit middleware is automatically integrated into both HTTP and gRPC middleware chains when enabled, providing comprehensive logging of security-related events with configurable output destinations and field redaction for sensitive data.
+
+#### gRPC Audit Integration
+
+When audit logging is enabled, the gateway automatically includes audit interceptors in the gRPC middleware chain:
+
+- **UnaryAuditInterceptor** - Logs unary gRPC request and response events
+- **StreamAuditInterceptor** - Logs streaming gRPC request and response events  
+- **Trace Context Integration** - Includes trace ID and span ID in audit logs for correlation
+- **Method Extraction** - Captures gRPC service and method names for detailed logging
+- **Client Address** - Records client IP address from gRPC connection metadata
+
+The gRPC audit interceptor is positioned in the middleware chain as: Recovery → RequestID → Logging → Metrics → Tracing → **Audit** → RateLimit → CircuitBreaker
 
 ### Complete Example Configuration
 
@@ -717,6 +747,9 @@ The gateway supports hot configuration reload, allowing you to update configurat
 - **Circuit Breaker** - Does NOT support runtime reconfiguration (requires restart)
   - Circuit breaker state and configuration changes require a full gateway restart
   - This is a documented limitation due to the stateful nature of circuit breaker instances
+- **gRPC Routes and Backends** - Do NOT support hot-reload (requires restart)
+  - gRPC routes and backends require a full gateway restart to apply changes
+  - This is a documented limitation due to the stateful nature of gRPC connections and routing
 
 #### How It Works
 1. **Atomic Updates** - Configuration uses `atomic.Pointer` for lock-free concurrent access
@@ -746,6 +779,167 @@ curl http://localhost:9090/metrics | grep config_reload
 # Check audit logs for configuration changes
 tail -f /var/log/gateway/audit.log | grep configuration
 ```
+
+### Configuration Validation and Warnings
+
+The gateway provides enhanced configuration validation with deprecation warnings for security best practices:
+
+#### TLS Deprecation Warnings
+
+The gateway automatically detects deprecated TLS versions and issues warnings during startup:
+
+- **TLS 1.0** - Deprecated per RFC 8996, generates validation warning
+- **TLS 1.1** - Deprecated per RFC 8996, generates validation warning  
+- **TLS 1.2** - Recommended minimum version (no warnings)
+- **TLS 1.3** - Latest and most secure version (no warnings)
+
+Example warning output:
+```
+WARN: TLS version TLS10 is deprecated (RFC 8996), use TLS12 or TLS13
+WARN: TLS version TLS11 is deprecated (RFC 8996), use TLS12 or TLS13
+```
+
+#### ValidateConfigWithWarnings API
+
+The `ValidateConfigWithWarnings()` function is automatically called during configuration loading to surface deprecation warnings:
+
+```go
+warnings, err := config.ValidateConfigWithWarnings(gatewayConfig)
+if err != nil {
+    // Handle validation errors
+}
+for _, warning := range warnings {
+    log.Warn("Configuration warning", "path", warning.Path, "message", warning.Message)
+}
+```
+
+This enhanced validation helps maintain security compliance and guides migration to modern TLS configurations.
+
+## 🔒 TLS & Transport Security
+
+The AV API Gateway provides comprehensive TLS support for secure communication across all protocols.
+
+### TLS Configuration Levels
+
+The gateway supports TLS configuration at three levels:
+
+1. **Listener-level TLS** - Gateway's own TLS certificates for incoming connections
+2. **Route-level TLS** - Per-route certificates for SNI-based multi-tenant scenarios  
+3. **Backend TLS** - Client certificates for secure backend connections
+
+### Basic TLS Configuration
+
+```yaml
+spec:
+  listeners:
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hosts: ["*"]
+      tls:
+        mode: SIMPLE
+        minVersion: "1.2"
+        certFile: /app/certs/tls.crt
+        keyFile: /app/certs/tls.key
+        hsts:
+          enabled: true
+          maxAge: 31536000
+          includeSubDomains: true
+
+    - name: grpc-tls
+      port: 9443
+      protocol: GRPC
+      hosts: ["*"]
+      grpc:
+        maxConcurrentStreams: 100
+        reflection: true
+        healthCheck: true
+        tls:
+          enabled: true
+          mode: SIMPLE
+          minVersion: "1.3"
+          certFile: /app/certs/grpc/tls.crt
+          keyFile: /app/certs/grpc/tls.key
+```
+
+### Vault PKI Integration
+
+For automated certificate management, the gateway integrates with HashiCorp Vault's PKI secrets engine:
+
+```yaml
+spec:
+  vault:
+    address: "https://vault.example.com:8200"
+    authMethod: kubernetes
+    role: gateway-role
+
+  listeners:
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        vault:
+          enabled: true
+          pkiMount: pki
+          role: gateway-server
+          commonName: gateway.example.com
+          altNames:
+            - api.example.com
+            - "*.api.example.com"
+          ttl: 24h
+          renewBefore: 1h
+
+    - name: grpc-tls
+      port: 9443
+      protocol: GRPC
+      grpc:
+        tls:
+          enabled: true
+          vault:
+            enabled: true
+            pkiMount: pki-grpc
+            role: grpc-server
+            commonName: grpc.example.com
+            ttl: 24h
+```
+
+### TLS Features
+
+- **Multiple TLS Modes**: SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE
+- **Modern TLS Versions**: TLS 1.2 and 1.3 support with deprecation warnings for older versions
+- **Cipher Suite Control**: Configurable cipher suites for security compliance
+- **ALPN Support**: Application-Layer Protocol Negotiation for HTTP/2 and gRPC
+- **HSTS Support**: HTTP Strict Transport Security with configurable policies
+- **Certificate Auto-Renewal**: Automatic certificate renewal with Vault PKI
+- **SNI Certificate Management**: Per-route certificates for multi-tenant deployments
+- **Hot Certificate Reload**: Certificate updates without service restart
+
+### Mutual TLS (mTLS)
+
+Configure client certificate authentication:
+
+```yaml
+spec:
+  listeners:
+    - name: mtls
+      port: 8443
+      protocol: HTTPS
+      tls:
+        mode: MUTUAL
+        certFile: /app/certs/server.crt
+        keyFile: /app/certs/server.key
+        caFile: /app/certs/client-ca.crt
+        requireClientCert: true
+        clientValidation:
+          enabled: true
+          allowedCNs:
+            - "client.example.com"
+          allowedSANs:
+            - "*.client.example.com"
+```
+
+For detailed TLS configuration, see [Vault PKI Integration Guide](docs/vault-pki-integration.md).
 
 ## 📋 Configuration Levels Reference
 
@@ -4292,6 +4486,97 @@ Kubernetes-compatible health endpoints:
 - `/ready` - Readiness probe
 - `/live` - Liveness probe
 
+## 📊 Performance Testing
+
+The gateway includes comprehensive performance testing infrastructure supporting multiple protocols and testing tools.
+
+### Quick Performance Test
+
+```bash
+# Start backend services
+docker-compose up -d
+
+# Run HTTP throughput test (5 minutes)
+make perf-test-http
+
+# Run gRPC unary test (5 minutes)
+make perf-test-grpc-unary
+
+# Run WebSocket connection test (4 minutes)
+make perf-test-websocket-connection
+
+# Generate performance charts
+make perf-generate-charts
+```
+
+### Performance Test Types
+
+| Protocol | Test Type | Tool | Duration | Purpose |
+|----------|-----------|------|----------|---------|
+| **HTTP** | Throughput | Yandex Tank | 5 min | Baseline HTTP performance |
+| **HTTP** | TLS | Yandex Tank | 5 min | HTTPS performance impact |
+| **HTTP** | Auth | Yandex Tank | 5 min | JWT authentication overhead |
+| **gRPC** | Unary | ghz | 5 min | gRPC call throughput |
+| **gRPC** | Streaming | ghz | 4 min | gRPC streaming performance |
+| **gRPC** | TLS | ghz | 5 min | gRPC TLS performance |
+| **WebSocket** | Connection | k6 | 4 min | WebSocket handshake performance |
+| **WebSocket** | Message | k6 | 4 min | WebSocket message throughput |
+| **K8s** | HTTP | Yandex Tank | 5 min | Kubernetes deployment performance |
+| **K8s** | gRPC | ghz | 5 min | Kubernetes gRPC performance |
+
+### TLS and Authentication Performance
+
+Test the performance impact of security features:
+
+```bash
+# HTTPS performance test
+./test/performance/scripts/run-test.sh http-tls-throughput
+
+# HTTP with JWT authentication
+./test/performance/scripts/run-test.sh http-auth-throughput
+
+# gRPC with TLS
+./test/performance/scripts/run-grpc-test.sh grpc-tls-unary
+
+# gRPC with JWT authentication
+./test/performance/scripts/run-grpc-test.sh grpc-auth-unary
+
+# WebSocket with TLS (WSS)
+./test/performance/scripts/run-websocket-test.sh websocket-tls-message
+```
+
+### Kubernetes Performance Testing
+
+Test performance in Kubernetes environment using the `avapigw-test` namespace:
+
+```bash
+# Setup Vault for K8s testing
+./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test
+
+# Deploy gateway to K8s
+helm upgrade --install avapigw helm/avapigw/ \
+  -f helm/avapigw/values-local.yaml \
+  -n avapigw-test --create-namespace
+
+# Run K8s performance tests
+make perf-test-k8s-http
+make perf-test-k8s-grpc
+
+# Run all K8s tests
+make perf-test-k8s
+```
+
+### Performance Results
+
+Recent performance test results on local development machine:
+
+| Protocol | Max RPS | Avg Latency | P95 Latency | P99 Latency | Error Rate |
+|----------|---------|-------------|-------------|-------------|------------|
+| HTTP | 2,000 | 1.0 ms | 5.5 ms | 460 ms | 0.00% |
+| gRPC Unary | 16,443 | 4.55 ms | 8.39 ms | 12.88 ms | 0.00% |
+
+For detailed performance testing documentation, see [Performance Testing Guide](test/performance/README.md).
+
 ## 🛠️ Development
 
 ### Building from Source
@@ -4320,10 +4605,10 @@ make test-unit
 # Functional tests
 make test-functional
 
-# Integration tests (requires Redis)
+# Integration tests (requires Redis and backends, includes WebSocket tests)
 make test-integration
 
-# E2E tests (requires Redis and backends)
+# E2E tests (requires Redis and backends, includes WebSocket tests)
 make test-e2e
 
 # All tests
@@ -4539,6 +4824,70 @@ helm install my-gateway ./helm/avapigw -f my-values.yaml
 helm install my-gateway ./helm/avapigw --namespace gateway --create-namespace
 ```
 
+#### Vault TLS with Kubernetes Auth Deployment
+
+For secure deployments with Vault PKI TLS certificates and Kubernetes authentication:
+
+**Prerequisites:**
+- Vault running with PKI engine enabled
+- PKI role configured (e.g., `test-role`)
+- Root CA generated
+- Kubernetes auth method enabled and configured
+- `avapigw` policy created
+- `avapigw` K8s auth role bound to the service account
+
+**Setup Steps:**
+
+```bash
+# 1. Start infrastructure (Vault, backends)
+docker-compose -f test/docker-compose/docker-compose.yml up -d
+
+# 2. Configure Vault K8s auth
+./test/performance/scripts/setup-vault-k8s.sh
+
+# 3. Build and load Docker image
+docker build -t avapigw:test .
+
+# 4. Deploy with Vault TLS enabled
+helm upgrade --install avapigw helm/avapigw/ -f helm/avapigw/values-local.yaml
+
+# 5. Verify deployment
+kubectl get pods
+kubectl get svc avapigw
+
+# 6. Test HTTPS (self-signed cert, use -k)
+HTTPS_PORT=$(kubectl get svc avapigw -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}')
+curl -k https://127.0.0.1:$HTTPS_PORT/health
+```
+
+**Environment Variables for Vault:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VAULT_ADDR` | Vault server address | (required) |
+| `VAULT_AUTH_METHOD` | Auth method: token, kubernetes, approle | `token` |
+| `VAULT_TOKEN` | Vault token (token auth only) | - |
+| `VAULT_K8S_ROLE` | Vault K8s auth role | - |
+| `VAULT_K8S_MOUNT_PATH` | K8s auth mount path | `kubernetes` |
+| `VAULT_K8S_TOKEN_PATH` | SA token path | `/var/run/secrets/kubernetes.io/serviceaccount/token` |
+
+**Ports:**
+
+| Port | Protocol | Description |
+|------|----------|-------------|
+| 8080 | HTTP | Plain HTTP traffic |
+| 8443 | HTTPS | TLS-encrypted HTTP traffic (Vault PKI or static certs) |
+| 9000 | gRPC | gRPC traffic |
+| 9090 | HTTP | Metrics and health endpoints |
+
+**Vault Prerequisites:**
+- Vault running with PKI engine enabled
+- PKI role configured (e.g., `test-role`)
+- Root CA generated
+- Kubernetes auth method enabled and configured
+- `avapigw` policy created
+- `avapigw` K8s auth role bound to the service account
+
 #### Configuration Options
 
 | Parameter | Description | Default |
@@ -4549,6 +4898,7 @@ helm install my-gateway ./helm/avapigw --namespace gateway --create-namespace
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `service.type` | Service type | `ClusterIP` |
 | `service.httpPort` | HTTP port | `8080` |
+| `service.httpsPort` | HTTPS port | `8443` |
 | `service.grpcPort` | gRPC port | `9000` |
 | `service.metricsPort` | Metrics port | `9090` |
 | `redis.enabled` | Enable Redis subchart | `false` |
@@ -5004,6 +5354,24 @@ make perf-test-mixed
 - **Load Profile**: Complex multi-phase load with GET and POST requests
 - **Purpose**: Realistic production-like load testing
 
+#### Kubernetes Performance Tests
+Tests the gateway deployed in Kubernetes with NodePort service routing to docker-compose backends.
+
+```bash
+# Run all K8s performance tests
+make perf-test-k8s
+
+# Run K8s HTTP performance test
+make perf-test-k8s-http
+
+# Run K8s gRPC performance test
+make perf-test-k8s-grpc
+```
+
+- **Deployment**: Uses `helm/avapigw/values-local.yaml` for local Docker Desktop K8s
+- **Routing**: NodePort service routes to `host.docker.internal` backends
+- **Purpose**: Validate performance in Kubernetes environment
+
 ### Make Targets
 
 | Target | Description |
@@ -5016,6 +5384,9 @@ make perf-test-mixed
 | `make perf-test-rate-limiting` | Run rate limiting stress test |
 | `make perf-test-circuit-breaker` | Run circuit breaker test |
 | `make perf-test-all` | Run all performance tests sequentially |
+| `make perf-test-k8s` | Run all K8s performance tests |
+| `make perf-test-k8s-http` | Run K8s HTTP performance test |
+| `make perf-test-k8s-grpc` | Run K8s gRPC performance test |
 | `make perf-generate-ammo` | Generate ammo files for tests |
 | `make perf-analyze` | Analyze latest test results |
 | `make perf-start-gateway` | Start gateway for performance testing |

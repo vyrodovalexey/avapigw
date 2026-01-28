@@ -340,31 +340,38 @@ func TestIsSensitiveHeader(t *testing.T) {
 func TestExtractClientIP(t *testing.T) {
 	t.Parallel()
 
+	// extractClientIP now delegates to the secure middleware.GetClientIP
+	// which uses the global ClientIPExtractor. Without trusted proxies
+	// configured, only RemoteAddr is used (X-Forwarded-For / X-Real-IP
+	// headers are ignored to prevent IP spoofing).
 	tests := []struct {
 		name       string
 		setupReq   func(*http.Request)
 		expectedIP string
 	}{
 		{
-			name: "X-Forwarded-For single IP",
+			name: "X-Forwarded-For ignored without trusted proxies",
 			setupReq: func(r *http.Request) {
 				r.Header.Set("X-Forwarded-For", "192.168.1.1")
+				r.RemoteAddr = "10.0.0.5:12345"
 			},
-			expectedIP: "192.168.1.1",
+			expectedIP: "10.0.0.5",
 		},
 		{
-			name: "X-Forwarded-For multiple IPs",
+			name: "X-Forwarded-For multiple IPs ignored without trusted proxies",
 			setupReq: func(r *http.Request) {
 				r.Header.Set("X-Forwarded-For", "192.168.1.1, 10.0.0.1, 172.16.0.1")
+				r.RemoteAddr = "10.0.0.5:12345"
 			},
-			expectedIP: "192.168.1.1",
+			expectedIP: "10.0.0.5",
 		},
 		{
-			name: "X-Real-IP",
+			name: "X-Real-IP ignored without trusted proxies",
 			setupReq: func(r *http.Request) {
 				r.Header.Set("X-Real-IP", "10.0.0.1")
+				r.RemoteAddr = "10.0.0.5:12345"
 			},
-			expectedIP: "10.0.0.1",
+			expectedIP: "10.0.0.5",
 		},
 		{
 			name: "RemoteAddr with port",
@@ -381,13 +388,13 @@ func TestExtractClientIP(t *testing.T) {
 			expectedIP: "192.168.1.100",
 		},
 		{
-			name: "X-Forwarded-For takes precedence",
+			name: "Headers ignored - only RemoteAddr used",
 			setupReq: func(r *http.Request) {
 				r.Header.Set("X-Forwarded-For", "192.168.1.1")
 				r.Header.Set("X-Real-IP", "10.0.0.1")
 				r.RemoteAddr = "172.16.0.1:12345"
 			},
-			expectedIP: "192.168.1.1",
+			expectedIP: "172.16.0.1",
 		},
 	}
 

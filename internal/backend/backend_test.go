@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -981,6 +982,124 @@ func TestRegistry_ReloadFromConfig_Empty(t *testing.T) {
 
 	all := reg.GetAll()
 	assert.Empty(t, all)
+}
+
+func TestRegistry_ReloadFromConfig_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := NewRegistry(logger)
+	ctx := context.Background()
+
+	// Load initial backends
+	initial := []config.Backend{
+		{
+			Name: "backend-a",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 8080},
+			},
+		},
+	}
+	err := reg.LoadFromConfig(initial)
+	require.NoError(t, err)
+
+	// Start all backends
+	err = reg.StartAll(ctx)
+	require.NoError(t, err)
+
+	// Concurrently read from registry while reloading
+	var wg sync.WaitGroup
+	const numReaders = 50
+	const numReloads = 5
+
+	// Start readers
+	for i := 0; i < numReaders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				// These should not panic or return empty results during reload
+				all := reg.GetAll()
+				_ = all
+				_, _ = reg.Get("backend-a")
+				_, _ = reg.Get("backend-b")
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+
+	// Start reloaders
+	for i := 0; i < numReloads; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			time.Sleep(time.Duration(idx) * 5 * time.Millisecond)
+			updated := []config.Backend{
+				{
+					Name: "backend-b",
+					Hosts: []config.BackendHost{
+						{Address: "10.0.0.2", Port: 9090},
+					},
+				},
+			}
+			_ = reg.ReloadFromConfig(ctx, updated)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// After all reloads, registry should be in a consistent state
+	all := reg.GetAll()
+	assert.NotEmpty(t, all)
+}
+
+func TestRegistry_ReloadFromConfig_OldBackendsStopped(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := NewRegistry(logger)
+	ctx := context.Background()
+
+	// Load initial backends
+	initial := []config.Backend{
+		{
+			Name: "backend-old",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 8080},
+			},
+		},
+	}
+	err := reg.LoadFromConfig(initial)
+	require.NoError(t, err)
+
+	// Start all backends
+	err = reg.StartAll(ctx)
+	require.NoError(t, err)
+
+	// Get old backend and verify it's healthy
+	oldBackend, exists := reg.Get("backend-old")
+	assert.True(t, exists)
+	assert.Equal(t, StatusHealthy, oldBackend.Status())
+
+	// Reload with new backends
+	updated := []config.Backend{
+		{
+			Name: "backend-new",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.2", Port: 9090},
+			},
+		},
+	}
+	err = reg.ReloadFromConfig(ctx, updated)
+	require.NoError(t, err)
+
+	// Old backend should have been stopped (status unknown)
+	assert.Equal(t, StatusUnknown, oldBackend.Status())
+
+	// New backend should exist and be started
+	newBackend, exists := reg.Get("backend-new")
+	assert.True(t, exists)
+	assert.Equal(t, StatusHealthy, newBackend.Status())
 }
 
 func TestRegistry_ReloadFromConfig_InvalidBackend(t *testing.T) {

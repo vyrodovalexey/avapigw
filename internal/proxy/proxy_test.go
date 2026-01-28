@@ -759,8 +759,15 @@ func TestReverseProxy_Director_RemovesHopHeaders(t *testing.T) {
 
 	proxy.director(req, target, originalReq)
 
-	// Verify hop headers are removed
+	// Verify hop headers are removed, except Upgrade and Connection
+	// which are preserved for WebSocket support (httputil.ReverseProxy
+	// handles them after Director returns, checking for protocol upgrades first).
 	for _, h := range hopHeaders {
+		if h == "Upgrade" || h == "Connection" {
+			assert.NotEmpty(t, req.Header.Get(h),
+				"hop header %s should be preserved for WebSocket support", h)
+			continue
+		}
 		assert.Empty(t, req.Header.Get(h), "hop header %s should be removed", h)
 	}
 }
@@ -1356,6 +1363,83 @@ func TestReverseProxy_SelectDestination_WeightedDistribution(t *testing.T) {
 
 	// host1 should be selected more often than host2
 	assert.Greater(t, counts["host1"], counts["host2"])
+}
+
+func TestReverseProxy_ProxyRequest_TLSSchemeSelection(t *testing.T) {
+	t.Parallel()
+
+	// Create a backend server (using TLS)
+	backendServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Scheme", r.URL.Scheme)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("tls ok"))
+	}))
+	defer backendServer.Close()
+
+	backendURL, err := url.Parse(backendServer.URL)
+	require.NoError(t, err)
+
+	port := 443
+	if backendURL.Port() != "" {
+		fmt.Sscanf(backendURL.Port(), "%d", &port)
+	}
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	// Create a backend with TLS enabled
+	backendCfg := config.Backend{
+		Name: backendURL.Hostname(),
+		Hosts: []config.BackendHost{
+			{Address: backendURL.Hostname(), Port: port},
+		},
+		TLS: &config.BackendTLSConfig{
+			Enabled:            true,
+			InsecureSkipVerify: true,
+		},
+	}
+	b, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+	err = registry.Register(b)
+	require.NoError(t, err)
+
+	// Add a route pointing to the TLS backend
+	route := config.Route{
+		Name: "tls-route",
+		Match: []config.RouteMatch{
+			{
+				URI: &config.URIMatch{
+					Prefix: "/tls-test",
+				},
+			},
+		},
+		Route: []config.RouteDestination{
+			{
+				Destination: config.Destination{
+					Host: backendURL.Hostname(),
+					Port: port,
+				},
+			},
+		},
+	}
+	err = r.AddRoute(route)
+	require.NoError(t, err)
+
+	// Use the TLS client from the test server
+	proxy := NewReverseProxy(r, registry,
+		WithProxyLogger(logger),
+		WithTransport(backendServer.Client().Transport),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/tls-test/path", nil)
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	// The proxy should have used https:// scheme
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "tls ok")
 }
 
 func TestReverseProxy_ProxyErrors(t *testing.T) {

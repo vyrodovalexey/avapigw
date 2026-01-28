@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -194,33 +195,11 @@ func isSensitiveHeader(name string) bool {
 	return sensitiveHeaders[name]
 }
 
-// extractClientIP extracts the client IP from the request.
+// extractClientIP extracts the client IP from the request using the
+// secure global ClientIPExtractor which validates trusted proxies
+// before trusting X-Forwarded-For headers.
 func extractClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header
-	if xff := r.Header.Get(HeaderXForwardedFor); xff != "" {
-		// Take the first IP in the list
-		for i := 0; i < len(xff); i++ {
-			if xff[i] == ',' {
-				return xff[:i]
-			}
-		}
-		return xff
-	}
-
-	// Check X-Real-IP header
-	if xri := r.Header.Get(HeaderXRealIP); xri != "" {
-		return xri
-	}
-
-	// Fall back to RemoteAddr
-	// Remove port if present
-	addr := r.RemoteAddr
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
-	}
-	return addr
+	return middleware.GetClientIP(r)
 }
 
 // Ensure httpAuthorizer implements HTTPAuthorizer.

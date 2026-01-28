@@ -156,8 +156,8 @@ setup_pki() {
         \"crl_distribution_points\": \"$VAULT_ADDR/v1/pki/crl\"
     }"
     
-    # Create a role for issuing certificates
-    log_info "Creating certificate role..."
+    # Create a role for issuing certificates (perftest role)
+    log_info "Creating certificate role 'perftest'..."
     vault_api POST "pki/roles/perftest" '{
         "allowed_domains": ["localhost", "avapigw.local", "perftest.local"],
         "allow_subdomains": true,
@@ -168,7 +168,25 @@ setup_pki() {
         "key_bits": 2048
     }'
     
-    log_success "PKI secrets engine configured"
+    # Create test-role for avapigw-test namespace (K8s testing)
+    # This role allows certificates for localhost, *.local, *.test, avapigw.local
+    # and IP SANs for 127.0.0.1
+    log_info "Creating certificate role 'test-role' for avapigw-test namespace..."
+    vault_api POST "pki/roles/test-role" '{
+        "allowed_domains": ["localhost", "local", "test", "avapigw.local", "avapigw-test.local"],
+        "allow_subdomains": true,
+        "allow_localhost": true,
+        "allow_ip_sans": true,
+        "allowed_uri_sans": ["spiffe://*"],
+        "max_ttl": "720h",
+        "key_type": "rsa",
+        "key_bits": 2048,
+        "require_cn": false,
+        "allow_any_name": false,
+        "enforce_hostnames": false
+    }'
+    
+    log_success "PKI secrets engine configured with roles: perftest, test-role"
 }
 
 # Generate test certificates

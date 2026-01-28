@@ -1,0 +1,69 @@
+# gRPC Performance Test Configuration: TLS Throughput Test
+# Purpose: Measure maximum throughput for gRPC calls over TLS (Vault PKI)
+# Duration: 5 minutes total
+# Target: 2000+ RPS
+# Tool: ghz (https://ghz.sh)
+#
+# This test is designed for gRPC TLS with Vault PKI certificates.
+# The gateway should be configured with vault.pki.enabled=true and
+# vault.pki.grpc.enabled=true (or inherited from vault.pki).
+
+# Test metadata
+name: grpc-tls-throughput
+description: gRPC TLS throughput test with Vault PKI certificates
+
+# Target configuration
+target:
+  host: "127.0.0.1"
+  port: 9443  # gRPC TLS port (grpcs)
+  
+# Call configuration
+call:
+  service: "api.v1.TestService"
+  method: "Echo"
+  reflection: true
+
+# Request data
+data:
+  message: "gRPC TLS throughput test with Vault PKI"
+  timestamp: "2024-01-01T00:00:00Z"
+
+# Load configuration
+load:
+  total: 600000
+  concurrency: 100
+  rps: 2000
+  duration: "5m"
+
+# Connection configuration
+connection:
+  timeout: "15s"
+  keepalive:
+    time: "30s"
+    timeout: "10s"
+  
+  # TLS is enabled (not insecure)
+  insecure: false
+  
+  # Skip TLS verification for self-signed Vault PKI certs
+  # In production with proper CA chain, set to false
+  skipVerify: true
+  
+  # Optional: Specify CA certificate from Vault PKI
+  # cacert: "/path/to/vault-pki-ca.crt"
+  
+  connections: 20
+
+# Metadata (headers)
+metadata:
+  "x-perf-test": "grpc-tls-throughput"
+  "x-request-id": "{{.RequestNumber}}"
+
+# Output configuration
+output:
+  format: "json"
+
+# Advanced options
+options:
+  binary: false
+  skipTLSVerify: true

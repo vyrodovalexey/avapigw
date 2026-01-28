@@ -2,12 +2,13 @@ version: '3.6'
 
 services:
   vault:
-    image: vault:1.13.3
+    image: hashicorp/vault:1.17
     container_name: vault
     volumes:
       - vault_data:/vault/file
-    environment: 
+    environment:
       VAULT_DEV_ROOT_TOKEN_ID: myroot
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
     cap_add:
       - IPC_LOCK
     ports:
@@ -64,10 +65,12 @@ services:
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: password
 
-      KC_HOSTNAME: 127.0.0.1
       KC_HTTP_PORT: 8090
       KC_HOSTNAME_STRICT: false
       KC_HOSTNAME_STRICT_HTTPS: false
+      KC_HTTP_ENABLED: true
+      KC_FEATURES: token-exchange,admin-fine-grained-authz
+      KC_SPI_REALM_DEFAULT_SSL_REQUIRED: none
 
       KC_LOG_LEVEL: info
       KC_METRICS_ENABLED: true

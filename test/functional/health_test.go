@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/vyrodovalexey/avapigw/internal/health"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 func TestFunctional_Health_Endpoints(t *testing.T) {
@@ -21,7 +22,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("health endpoint returns healthy status", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 		handler := checker.HealthHandler()
 
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -44,7 +45,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("readiness endpoint returns ready status", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 		handler := checker.ReadinessHandler()
 
 		req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -63,7 +64,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("liveness endpoint returns ok", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 		handler := checker.LivenessHandler()
 
 		req := httptest.NewRequest(http.MethodGet, "/live", nil)
@@ -77,7 +78,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("readiness with registered checks - all healthy", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 
 		// Register healthy checks
 		checker.RegisterCheck("database", func() health.Check {
@@ -108,7 +109,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("readiness with unhealthy check", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 
 		// Register one healthy and one unhealthy check
 		checker.RegisterCheck("database", func() health.Check {
@@ -137,7 +138,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("readiness with degraded check", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 
 		// Register one healthy and one degraded check
 		checker.RegisterCheck("database", func() health.Check {
@@ -165,7 +166,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("unregister check", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 
 		checker.RegisterCheck("database", func() health.Check {
 			return health.Check{Status: health.StatusHealthy}
@@ -186,7 +187,7 @@ func TestFunctional_Health_Endpoints(t *testing.T) {
 	t.Run("health handler wrapper", func(t *testing.T) {
 		t.Parallel()
 
-		checker := health.NewChecker("1.0.0")
+		checker := health.NewChecker("1.0.0", observability.NopLogger())
 		handler := health.NewHandler(checker)
 
 		// Test Health

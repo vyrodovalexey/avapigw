@@ -8,6 +8,7 @@ require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/google/cel-go v0.26.1
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/vault/api v1.22.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/prometheus/client_golang v1.19.1

@@ -46,16 +46,37 @@ func (e ValidationErrors) HasErrors() bool {
 	return len(e) > 0
 }
 
+// ValidationWarning represents a configuration validation warning.
+type ValidationWarning struct {
+	Path    string
+	Message string
+}
+
+// ValidationWarnings is a collection of validation warnings.
+type ValidationWarnings []ValidationWarning
+
 // Validator validates gateway configuration.
 type Validator struct {
-	errors ValidationErrors
+	errors   ValidationErrors
+	warnings ValidationWarnings
 }
 
 // NewValidator creates a new configuration validator.
 func NewValidator() *Validator {
 	return &Validator{
-		errors: make(ValidationErrors, 0),
+		errors:   make(ValidationErrors, 0),
+		warnings: make(ValidationWarnings, 0),
 	}
+}
+
+// Warnings returns any validation warnings collected during validation.
+func (v *Validator) Warnings() ValidationWarnings {
+	return v.warnings
+}
+
+// addWarning adds a validation warning.
+func (v *Validator) addWarning(path, message string) {
+	v.warnings = append(v.warnings, ValidationWarning{Path: path, Message: message})
 }
 
 // ValidateConfig validates a gateway configuration.
@@ -64,9 +85,17 @@ func ValidateConfig(config *GatewayConfig) error {
 	return v.Validate(config)
 }
 
+// ValidateConfigWithWarnings validates a gateway configuration and returns warnings.
+func ValidateConfigWithWarnings(config *GatewayConfig) (ValidationWarnings, error) {
+	v := NewValidator()
+	err := v.Validate(config)
+	return v.Warnings(), err
+}
+
 // Validate validates the configuration and returns any errors.
 func (v *Validator) Validate(config *GatewayConfig) error {
 	v.errors = make(ValidationErrors, 0)
+	v.warnings = make(ValidationWarnings, 0)
 
 	if config == nil {
 		v.addError("", "configuration is nil")
@@ -751,10 +780,13 @@ func (v *Validator) validateGRPCKeepaliveConfig(cfg *GRPCKeepaliveConfig, path s
 // validateTLSConfig validates TLS configuration.
 func (v *Validator) validateTLSConfig(cfg *TLSConfig, path string) {
 	if cfg.Enabled {
-		if cfg.CertFile == "" {
+		// When Vault is enabled, certificates are obtained from Vault PKI
+		// and certFile/keyFile are not required.
+		vaultEnabled := cfg.Vault != nil && cfg.Vault.Enabled
+		if cfg.CertFile == "" && !vaultEnabled {
 			v.addError(path+".certFile", "certFile is required when TLS is enabled")
 		}
-		if cfg.KeyFile == "" {
+		if cfg.KeyFile == "" && !vaultEnabled {
 			v.addError(path+".keyFile", "keyFile is required when TLS is enabled")
 		}
 	}
@@ -1085,11 +1117,24 @@ func (v *Validator) validateBackendTLSVersions(cfg *BackendTLSConfig, path strin
 	validVersions := map[string]bool{
 		"TLS10": true, "TLS11": true, "TLS12": true, "TLS13": true,
 	}
-	if cfg.MinVersion != "" && !validVersions[cfg.MinVersion] {
-		v.addError(path+".minVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MinVersion))
+	deprecatedVersions := map[string]bool{
+		"TLS10": true, "TLS11": true,
 	}
-	if cfg.MaxVersion != "" && !validVersions[cfg.MaxVersion] {
-		v.addError(path+".maxVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MaxVersion))
+	if cfg.MinVersion != "" {
+		if !validVersions[cfg.MinVersion] {
+			v.addError(path+".minVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MinVersion))
+		} else if deprecatedVersions[cfg.MinVersion] {
+			v.addWarning(path+".minVersion",
+				fmt.Sprintf("TLS version %s is deprecated (RFC 8996), use TLS12 or TLS13", cfg.MinVersion))
+		}
+	}
+	if cfg.MaxVersion != "" {
+		if !validVersions[cfg.MaxVersion] {
+			v.addError(path+".maxVersion", fmt.Sprintf("invalid TLS version: %s", cfg.MaxVersion))
+		} else if deprecatedVersions[cfg.MaxVersion] {
+			v.addWarning(path+".maxVersion",
+				fmt.Sprintf("TLS version %s is deprecated (RFC 8996), use TLS12 or TLS13", cfg.MaxVersion))
+		}
 	}
 }
 

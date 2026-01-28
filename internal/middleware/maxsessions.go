@@ -15,7 +15,7 @@ import (
 
 // MaxSessionsLimiter provides maximum concurrent sessions limiting.
 type MaxSessionsLimiter struct {
-	maxConcurrent int64
+	maxConcurrent atomic.Int64
 	current       atomic.Int64
 	queueSize     int
 	queueTimeout  time.Duration
@@ -43,12 +43,12 @@ func NewMaxSessionsLimiter(
 	opts ...MaxSessionsOption,
 ) *MaxSessionsLimiter {
 	msl := &MaxSessionsLimiter{
-		maxConcurrent: int64(maxConcurrent),
-		queueSize:     queueSize,
-		queueTimeout:  queueTimeout,
-		logger:        observability.NopLogger(),
-		stopCh:        make(chan struct{}),
+		queueSize:    queueSize,
+		queueTimeout: queueTimeout,
+		logger:       observability.NopLogger(),
+		stopCh:       make(chan struct{}),
 	}
+	msl.maxConcurrent.Store(int64(maxConcurrent))
 
 	// Initialize queue if queueSize > 0
 	if queueSize > 0 {
@@ -91,7 +91,7 @@ func (msl *MaxSessionsLimiter) Acquire(ctx context.Context) bool {
 func (msl *MaxSessionsLimiter) tryAcquire() bool {
 	for {
 		current := msl.current.Load()
-		if current >= msl.maxConcurrent {
+		if current >= msl.maxConcurrent.Load() {
 			return false
 		}
 		if msl.current.CompareAndSwap(current, current+1) {
@@ -139,7 +139,7 @@ func (msl *MaxSessionsLimiter) Current() int64 {
 
 // MaxConcurrent returns the maximum concurrent sessions limit.
 func (msl *MaxSessionsLimiter) MaxConcurrent() int64 {
-	return msl.maxConcurrent
+	return msl.maxConcurrent.Load()
 }
 
 // QueueLength returns the current queue length.
@@ -164,7 +164,7 @@ func (msl *MaxSessionsLimiter) UpdateConfig(
 	msl.mu.Lock()
 	defer msl.mu.Unlock()
 
-	msl.maxConcurrent = int64(cfg.MaxConcurrent)
+	msl.maxConcurrent.Store(int64(cfg.MaxConcurrent))
 	msl.queueTimeout = cfg.GetEffectiveQueueTimeout()
 
 	msl.logger.Info("max sessions configuration updated",

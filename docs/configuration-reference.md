@@ -522,23 +522,6 @@ gateway:
 ### Environment-Specific Configuration
 
 ```yaml
-# Development environment
-vault:
-  enabled: true
-  address: "http://vault.dev.local:8200"
-  authMethod: token
-  token: "dev-token"
-  tls:
-    enabled: false
-  pki:
-    enabled: true
-    pkiMount: "pki-dev"
-    role: "dev-server"
-    commonName: "gateway.dev.local"
-    ttl: "1h"
-    renewBefore: "10m"
-
----
 # Production environment
 vault:
   enabled: true
@@ -562,6 +545,12 @@ vault:
     autoRenew: true
     maxRetries: 5
     retryDelay: "1m"
+    grpc:
+      enabled: true
+      pkiMount: "pki-grpc-prod"
+      role: "grpc-server-prod"
+      commonName: "grpc.prod.example.com"
+      ttl: "12h"
 ```
 
 ## Validation Rules
@@ -573,6 +562,32 @@ vault:
 - `ipSans`: Each entry must be a valid IP address
 - `ttl`: Must be a valid duration string (e.g., "24h", "30m")
 - `renewBefore`: Must be less than `ttl`
+
+### TLS Version Validation
+
+The gateway validates TLS versions and issues warnings for deprecated versions:
+
+- **TLS 1.0** - Deprecated per RFC 8996, generates validation warning
+- **TLS 1.1** - Deprecated per RFC 8996, generates validation warning
+- **TLS 1.2** - Recommended minimum version (no warnings)
+- **TLS 1.3** - Latest and most secure version (no warnings)
+
+Example validation warning:
+```
+TLS version TLS10 is deprecated (RFC 8996), use TLS12 or TLS13
+```
+
+Use the `ValidateConfigWithWarnings()` API to retrieve these warnings:
+
+```go
+warnings, err := config.ValidateConfigWithWarnings(gatewayConfig)
+if err != nil {
+    // Handle validation errors
+}
+for _, warning := range warnings {
+    log.Warn("Configuration warning", "path", warning.Path, "message", warning.Message)
+}
+```
 
 ### PKI Role Requirements
 

@@ -1,0 +1,133 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: websocket-test-gateway
+  labels:
+    app: avapigw
+    environment: test
+spec:
+  listeners:
+    - name: http
+      port: 18090
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"websocket-test"}'
+        headers:
+          Content-Type: application/json
+
+    - name: websocket-route
+      match:
+        - uri:
+            prefix: /ws
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 0s
+
+    - name: websocket-lb-route
+      match:
+        - uri:
+            prefix: /ws-lb
+          methods:
+            - GET
+      rewrite:
+        uri: /ws
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 0s
+
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    - name: backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+    - name: backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  rateLimit:
+    enabled: false
+
+  circuitBreaker:
+    enabled: false
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - Upgrade
+      - Connection
+      - Sec-WebSocket-Key
+      - Sec-WebSocket-Version
+      - Sec-WebSocket-Protocol
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: false
+    logging:
+      level: debug
+      format: json

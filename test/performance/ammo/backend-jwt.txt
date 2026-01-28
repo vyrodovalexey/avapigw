@@ -3,11 +3,10 @@
 [Accept: application/json]
 [Connection: keep-alive]
 /api/v1/jwt-static/items
-/api/v1/jwt-static/items/1
-/api/v1/jwt-static/items/2
+/api/v1/jwt-static/items
 /api/v1/jwt-oidc/items
-/api/v1/jwt-oidc/items/1
-/api/v1/jwt-oidc/items/2
+/api/v1/jwt-oidc/items
 /api/v1/jwt-custom/items
-/api/v1/jwt-custom/items/1
+/api/v1/jwt-custom/items
+/api/v1/items
 /health

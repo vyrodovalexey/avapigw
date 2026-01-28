@@ -8,7 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	grpcrouter "github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -599,3 +601,147 @@ func TestGRPCListener_MultipleRoutes(t *testing.T) {
 	err = listener.LoadRoutes(routes)
 	assert.NoError(t, err)
 }
+
+// ============================================================
+// MUST-FIX-02: WithGRPCAuditLogger, WithGRPCRateLimiter, WithGRPCCircuitBreaker
+// ============================================================
+
+func TestWithGRPCAuditLogger(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	auditLogger := &noopAuditLogger{}
+	listener, err := NewGRPCListener(cfg, WithGRPCAuditLogger(auditLogger))
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Equal(t, auditLogger, listener.auditLogger)
+}
+
+func TestWithGRPCRateLimiter(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	limiter := grpcmiddleware.NewGRPCRateLimiter(100, 10, false)
+	listener, err := NewGRPCListener(cfg, WithGRPCRateLimiter(limiter))
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Equal(t, limiter, listener.rateLimiter)
+}
+
+func TestWithGRPCCircuitBreaker(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	cb := grpcmiddleware.NewGRPCCircuitBreaker("test", 5, 30*time.Second)
+	listener, err := NewGRPCListener(cfg, WithGRPCCircuitBreaker(cb))
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Equal(t, cb, listener.circuitBreaker)
+}
+
+func TestBuildInterceptors_WithAudit(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	auditLogger := &noopAuditLogger{}
+	listener, err := NewGRPCListener(cfg, WithGRPCAuditLogger(auditLogger))
+	require.NoError(t, err)
+
+	// buildInterceptors is called during NewGRPCListener, so we verify
+	// the listener was created successfully with audit logger set.
+	assert.NotNil(t, listener)
+	assert.Equal(t, auditLogger, listener.auditLogger)
+}
+
+func TestBuildInterceptors_WithRateLimiter(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	limiter := grpcmiddleware.NewGRPCRateLimiter(100, 10, false)
+	listener, err := NewGRPCListener(cfg, WithGRPCRateLimiter(limiter))
+	require.NoError(t, err)
+
+	assert.NotNil(t, listener)
+	assert.Equal(t, limiter, listener.rateLimiter)
+}
+
+func TestBuildInterceptors_WithCircuitBreaker(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	cb := grpcmiddleware.NewGRPCCircuitBreaker("test", 5, 30*time.Second)
+	listener, err := NewGRPCListener(cfg, WithGRPCCircuitBreaker(cb))
+	require.NoError(t, err)
+
+	assert.NotNil(t, listener)
+	assert.Equal(t, cb, listener.circuitBreaker)
+}
+
+func TestBuildInterceptors_AllOptional(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	auditLogger := &noopAuditLogger{}
+	limiter := grpcmiddleware.NewGRPCRateLimiter(100, 10, false)
+	cb := grpcmiddleware.NewGRPCCircuitBreaker("test", 5, 30*time.Second)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCAuditLogger(auditLogger),
+		WithGRPCRateLimiter(limiter),
+		WithGRPCCircuitBreaker(cb),
+	)
+	require.NoError(t, err)
+
+	assert.NotNil(t, listener)
+	assert.Equal(t, auditLogger, listener.auditLogger)
+	assert.Equal(t, limiter, listener.rateLimiter)
+	assert.Equal(t, cb, listener.circuitBreaker)
+}
+
+// noopAuditLogger is a minimal audit.Logger for testing.
+type noopAuditLogger struct{}
+
+func (l *noopAuditLogger) LogEvent(_ context.Context, _ *audit.Event) {}
+func (l *noopAuditLogger) LogAuthentication(_ context.Context, _ audit.Action, _ audit.Outcome, _ *audit.Subject) {
+}
+func (l *noopAuditLogger) LogAuthorization(_ context.Context, _ audit.Outcome, _ *audit.Subject, _ *audit.Resource) {
+}
+func (l *noopAuditLogger) LogSecurity(_ context.Context, _ audit.Action, _ audit.Outcome, _ *audit.Subject, _ map[string]interface{}) {
+}
+func (l *noopAuditLogger) Close() error { return nil }

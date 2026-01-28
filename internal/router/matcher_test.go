@@ -1,8 +1,10 @@
 package router
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -796,4 +798,224 @@ func TestWildcardToRegex(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestRegexMatcher_CacheEviction tests the LRU cache eviction for regex patterns.
+func TestRegexMatcher_CacheEviction(t *testing.T) {
+	// Note: This test is not parallel because it modifies global cache state
+	// We need to test the eviction behavior
+
+	// Clear the cache first
+	regexCacheMu.Lock()
+	regexCache = make(map[string]*regexCacheEntry)
+	regexAccessCounter = 0
+	regexCacheMu.Unlock()
+
+	// Create patterns up to the cache limit
+	patterns := make([]string, regexCacheMaxSize+10)
+	for i := 0; i < len(patterns); i++ {
+		patterns[i] = "^/api/v" + string(rune('A'+i%26)) + string(rune('a'+i%26)) + string(rune('0'+i%10)) + "/.*"
+	}
+
+	// Add patterns to fill the cache
+	for _, pattern := range patterns {
+		_, err := NewRegexMatcher(pattern)
+		require.NoError(t, err)
+	}
+
+	// Verify cache size is bounded
+	regexCacheMu.RLock()
+	cacheSize := len(regexCache)
+	regexCacheMu.RUnlock()
+
+	assert.LessOrEqual(t, cacheSize, regexCacheMaxSize)
+}
+
+// TestRegexMatcher_CacheHit tests that cache hits update access order.
+func TestRegexMatcher_CacheHit(t *testing.T) {
+	// Note: This test is not parallel because it modifies global cache state
+
+	// Clear the cache first
+	regexCacheMu.Lock()
+	regexCache = make(map[string]*regexCacheEntry)
+	regexAccessCounter = 0
+	regexCacheMu.Unlock()
+
+	pattern := "^/test/cache/hit/.*"
+
+	// First access - cache miss
+	matcher1, err := NewRegexMatcher(pattern)
+	require.NoError(t, err)
+	require.NotNil(t, matcher1)
+
+	// Get initial access order
+	regexCacheMu.RLock()
+	entry1, exists := regexCache[pattern]
+	require.True(t, exists)
+	initialOrder := entry1.accessOrder
+	regexCacheMu.RUnlock()
+
+	// Second access - cache hit
+	matcher2, err := NewRegexMatcher(pattern)
+	require.NoError(t, err)
+	require.NotNil(t, matcher2)
+
+	// Verify access order was updated
+	regexCacheMu.RLock()
+	entry2, exists := regexCache[pattern]
+	require.True(t, exists)
+	updatedOrder := entry2.accessOrder
+	regexCacheMu.RUnlock()
+
+	assert.Greater(t, updatedOrder, initialOrder)
+}
+
+// TestRegexMatcher_LRUEviction tests that LRU entries are evicted first.
+func TestRegexMatcher_LRUEviction(t *testing.T) {
+	// Note: This test is not parallel because it modifies global cache state
+
+	// Clear the cache first
+	regexCacheMu.Lock()
+	regexCache = make(map[string]*regexCacheEntry)
+	regexAccessCounter = 0
+	regexCacheMu.Unlock()
+
+	// Add a pattern that will be the oldest
+	oldPattern := "^/lru/eviction/old/pattern/unique/.*"
+	_, err := NewRegexMatcher(oldPattern)
+	require.NoError(t, err)
+
+	// Fill the cache with newer patterns to trigger eviction
+	// Use fmt.Sprintf to ensure unique patterns
+	for i := 0; i < regexCacheMaxSize; i++ {
+		pattern := fmt.Sprintf("^/lru/eviction/new/pattern/%d/.*", i)
+		_, err := NewRegexMatcher(pattern)
+		require.NoError(t, err)
+	}
+
+	// The old pattern should have been evicted since we added regexCacheMaxSize new patterns
+	regexCacheMu.RLock()
+	_, exists := regexCache[oldPattern]
+	cacheSize := len(regexCache)
+	regexCacheMu.RUnlock()
+
+	// Cache should be at max size
+	assert.LessOrEqual(t, cacheSize, regexCacheMaxSize)
+	// Old pattern should have been evicted
+	assert.False(t, exists, "oldest pattern should have been evicted")
+}
+
+// TestRegexMatcher_ConcurrentAccess tests concurrent access to the regex cache.
+func TestRegexMatcher_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	var wg sync.WaitGroup
+	patterns := []string{
+		"^/concurrent/test/1/.*",
+		"^/concurrent/test/2/.*",
+		"^/concurrent/test/3/.*",
+		"^/concurrent/test/4/.*",
+		"^/concurrent/test/5/.*",
+	}
+
+	// Concurrent access to same patterns
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			pattern := patterns[n%len(patterns)]
+			matcher, err := NewRegexMatcher(pattern)
+			assert.NoError(t, err)
+			assert.NotNil(t, matcher)
+
+			// Use the matcher
+			matched, _ := matcher.Match("/concurrent/test/" + string(rune('0'+n%10)) + "/path")
+			_ = matched
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+// TestEvictLRURegexEntry_EmptyCache tests eviction on empty cache.
+func TestEvictLRURegexEntry_EmptyCache(t *testing.T) {
+	// Note: This test is not parallel because it modifies global cache state
+
+	// Clear the cache
+	regexCacheMu.Lock()
+	regexCache = make(map[string]*regexCacheEntry)
+	regexAccessCounter = 0
+
+	// Call evict on empty cache - should not panic
+	evictLRURegexEntry()
+
+	cacheSize := len(regexCache)
+	regexCacheMu.Unlock()
+
+	assert.Equal(t, 0, cacheSize)
+}
+
+// TestEvictLRURegexEntry_SingleEntry tests eviction with single entry.
+func TestEvictLRURegexEntry_SingleEntry(t *testing.T) {
+	// Note: This test is not parallel because it modifies global cache state
+
+	// Clear the cache
+	regexCacheMu.Lock()
+	regexCache = make(map[string]*regexCacheEntry)
+	regexAccessCounter = 0
+	regexCacheMu.Unlock()
+
+	// Add single entry
+	pattern := "^/single/entry/.*"
+	_, err := NewRegexMatcher(pattern)
+	require.NoError(t, err)
+
+	// Verify entry exists
+	regexCacheMu.RLock()
+	_, exists := regexCache[pattern]
+	regexCacheMu.RUnlock()
+	assert.True(t, exists)
+
+	// Evict
+	regexCacheMu.Lock()
+	evictLRURegexEntry()
+	cacheSize := len(regexCache)
+	regexCacheMu.Unlock()
+
+	assert.Equal(t, 0, cacheSize)
+}
+
+// TestEvictLRURegexEntry_MultipleEntries tests eviction selects oldest entry.
+func TestEvictLRURegexEntry_MultipleEntries(t *testing.T) {
+	// Note: This test is not parallel because it modifies global cache state
+
+	// Clear the cache
+	regexCacheMu.Lock()
+	regexCache = make(map[string]*regexCacheEntry)
+	regexAccessCounter = 0
+	regexCacheMu.Unlock()
+
+	// Add entries in order
+	patterns := []string{
+		"^/first/pattern/.*",
+		"^/second/pattern/.*",
+		"^/third/pattern/.*",
+	}
+
+	for _, pattern := range patterns {
+		_, err := NewRegexMatcher(pattern)
+		require.NoError(t, err)
+	}
+
+	// Evict - should remove the first (oldest) pattern
+	regexCacheMu.Lock()
+	evictLRURegexEntry()
+	_, firstExists := regexCache[patterns[0]]
+	_, secondExists := regexCache[patterns[1]]
+	_, thirdExists := regexCache[patterns[2]]
+	regexCacheMu.Unlock()
+
+	assert.False(t, firstExists, "first pattern should have been evicted")
+	assert.True(t, secondExists, "second pattern should still exist")
+	assert.True(t, thirdExists, "third pattern should still exist")
 }

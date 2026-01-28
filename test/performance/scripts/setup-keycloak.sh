@@ -127,6 +127,52 @@ check_keycloak() {
     return 1
 }
 
+# Disable SSL requirement for realms (needed for Keycloak 26.x in dev mode)
+disable_ssl_requirement() {
+    log_info "Disabling SSL requirement for master realm (Keycloak 26.x compatibility)..."
+    
+    # Try to get token first - if it works, SSL is already disabled
+    local response
+    response=$(curl -s -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "username=$ADMIN_USER" \
+        -d "password=$ADMIN_PASS" \
+        -d "grant_type=password" \
+        -d "client_id=admin-cli")
+    
+    if echo "$response" | grep -q "access_token"; then
+        log_info "SSL requirement already disabled or not enforced"
+        return 0
+    fi
+    
+    # If HTTPS required error, use kcadm inside the container to disable it
+    if echo "$response" | grep -q "HTTPS required"; then
+        log_info "HTTPS required detected, disabling via kcadm..."
+        
+        local container_name="keycloak_web"
+        if ! docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+            log_error "Keycloak container '$container_name' not found"
+            return 1
+        fi
+        
+        # Use kcadm inside the container to disable SSL
+        docker exec "$container_name" /opt/keycloak/bin/kcadm.sh config credentials \
+            --server http://localhost:8090 --realm master --user "$ADMIN_USER" --password "$ADMIN_PASS" 2>/dev/null
+        
+        docker exec "$container_name" /opt/keycloak/bin/kcadm.sh update realms/master \
+            -s sslRequired=NONE 2>/dev/null
+        
+        if [[ $? -eq 0 ]]; then
+            log_success "SSL requirement disabled for master realm"
+        else
+            log_error "Failed to disable SSL requirement"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
 # Get admin access token
 get_admin_token() {
     log_info "Obtaining admin access token..."
@@ -190,7 +236,7 @@ create_realm() {
         "enabled": true,
         "displayName": "Gateway Performance Test",
         "displayNameHtml": "<b>Gateway Performance Test</b>",
-        "sslRequired": "none",
+        "sslRequired": "NONE",
         "registrationAllowed": false,
         "loginWithEmailAllowed": true,
         "duplicateEmailsAllowed": false,
@@ -310,11 +356,15 @@ create_client() {
 create_users() {
     log_info "Creating test users..."
     
+    # Users for performance testing and gateway-test realm
+    # Format: username:password:firstname:lastname:email
     local users=(
         "perftest-user-1:perftest123:Perf:Test1:perftest1@example.com"
         "perftest-user-2:perftest123:Perf:Test2:perftest2@example.com"
         "perftest-admin:adminpass123:Admin:User:admin@example.com"
         "perftest-readonly:readonly123:ReadOnly:User:readonly@example.com"
+        "testuser:testpass123:Test:User:testuser@example.com"
+        "adminuser:adminpass123:Admin:User:adminuser@example.com"
     )
     
     for user_data in "${users[@]}"; do
@@ -636,6 +686,11 @@ main() {
     if ! check_keycloak; then
         log_error "Cannot connect to Keycloak. Please ensure Keycloak is running."
         exit 1
+    fi
+    
+    # Disable SSL requirement (Keycloak 26.x compatibility)
+    if ! disable_ssl_requirement; then
+        log_warn "Could not disable SSL requirement, trying to continue..."
     fi
     
     # Get admin token

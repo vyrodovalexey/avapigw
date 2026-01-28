@@ -426,6 +426,8 @@ func (s *Server) buildTLSOptions() ([]grpc.ServerOption, error) {
 	}
 
 	// No TLS configured
+	s.logger.Info("no TLS configured for gRPC server, running in plaintext",
+		observability.String("address", s.address))
 	return nil, nil
 }
 

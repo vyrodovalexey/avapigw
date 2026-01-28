@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 // failingMarshalResponseWriter simulates a response writer where json.Marshal
@@ -18,7 +20,7 @@ import (
 func TestChecker_HealthHandler_ContentTypeHeader(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.HealthHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -83,7 +85,7 @@ func TestChecker_ReadinessHandler_ContentTypeAndStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			checker := NewChecker("1.0.0")
+			checker := NewChecker("1.0.0", observability.NopLogger())
 			for name, fn := range tt.checks {
 				checker.RegisterCheck(name, fn)
 			}
@@ -110,7 +112,7 @@ func TestChecker_ReadinessHandler_ContentTypeAndStatus(t *testing.T) {
 func TestChecker_ReadinessHandler_WriteError_Unhealthy(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	checker.RegisterCheck("failing", func() Check {
 		return Check{Status: StatusUnhealthy, Message: "down"}
 	})
@@ -130,7 +132,7 @@ func TestChecker_ReadinessHandler_WriteError_Unhealthy(t *testing.T) {
 func TestHandler_AllEndpoints_Integration(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("3.0.0")
+	checker := NewChecker("3.0.0", observability.NopLogger())
 	checker.RegisterCheck("cache", func() Check {
 		return Check{Status: StatusHealthy, Message: "connected"}
 	})

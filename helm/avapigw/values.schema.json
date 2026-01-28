@@ -166,12 +166,26 @@
           "default": 8080,
           "description": "HTTP port for REST API traffic"
         },
+        "httpsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8443,
+          "description": "HTTPS port for TLS-encrypted REST API traffic"
+        },
         "grpcPort": {
           "type": "integer",
           "minimum": 1,
           "maximum": 65535,
           "default": 9000,
           "description": "gRPC port for gRPC traffic"
+        },
+        "grpcTlsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9443,
+          "description": "gRPC TLS port for TLS-encrypted gRPC traffic"
         },
         "metricsPort": {
           "type": "integer",
@@ -715,6 +729,11 @@
           "default": "",
           "description": "Vault role for Kubernetes auth"
         },
+        "kubernetesMountPath": {
+          "type": "string",
+          "default": "kubernetes",
+          "description": "Vault Kubernetes auth mount path"
+        },
         "token": {
           "type": "string",
           "default": "",
@@ -787,6 +806,45 @@
               "type": "string",
               "default": "1h",
               "description": "Duration before expiry to renew"
+            },
+            "grpc": {
+              "type": "object",
+              "description": "gRPC listener PKI overrides. Falls back to main vault.pki settings when not set.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Enable Vault PKI for gRPC listener TLS (defaults to vault.pki.enabled)"
+                },
+                "pkiMount": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Vault PKI secrets engine mount path for gRPC (defaults to vault.pki.pkiMount)"
+                },
+                "role": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Vault PKI role name for gRPC (defaults to vault.pki.role)"
+                },
+                "commonName": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Common name for gRPC certificate requests (defaults to vault.pki.commonName)"
+                },
+                "altNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [],
+                  "description": "Subject alternative names for gRPC (defaults to vault.pki.altNames)"
+                },
+                "ttl": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Certificate TTL for gRPC (defaults to vault.pki.ttl)"
+                }
+              }
             }
           }
         }

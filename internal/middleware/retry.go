@@ -146,7 +146,14 @@ func executeWithRetry(
 				attempt, cfg.BackoffBase, cfg.BackoffMax,
 				retry.DefaultJitterFactor,
 			)
-			time.Sleep(backoff)
+			select {
+			case <-time.After(backoff):
+				// Continue with retry
+			case <-r.Context().Done():
+				// Client disconnected, stop retrying
+				writeRetryExhaustedResponse(w, r, cfg.Attempts, lastStatus, logger)
+				return
+			}
 		}
 	}
 
@@ -248,6 +255,10 @@ func matchRetryCondition(status int, condition string) bool {
 		return status >= 500 && status < 600
 	case "retriable-4xx":
 		return status == 408 || status == 429
+	case "reset":
+		return status == http.StatusBadGateway
+	case "connect-failure":
+		return status == http.StatusBadGateway || status == http.StatusServiceUnavailable
 	default:
 		return false
 	}

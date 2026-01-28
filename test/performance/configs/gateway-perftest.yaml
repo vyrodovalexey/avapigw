@@ -52,19 +52,6 @@ spec:
         headers:
           Content-Type: application/json
 
-    # Simple GET endpoint for throughput testing
-    - name: simple-get
-      match:
-        - uri:
-            exact: /api/v1/simple
-          methods:
-            - GET
-      route:
-        - destination:
-            host: 127.0.0.1
-            port: 8801
-      timeout: 10s
-
     # Items API with load balancing (50/50 split)
     - name: items-api-balanced
       match:
@@ -89,63 +76,6 @@ spec:
         attempts: 3
         perTryTimeout: 10s
         retryOn: "5xx,reset,connect-failure"
-
-    # Users API - single backend
-    - name: users-api
-      match:
-        - uri:
-            prefix: /api/v1/users
-          methods:
-            - GET
-            - POST
-            - PUT
-            - DELETE
-      route:
-        - destination:
-            host: 127.0.0.1
-            port: 8801
-      timeout: 30s
-
-    # Orders API - single backend
-    - name: orders-api
-      match:
-        - uri:
-            prefix: /api/v1/orders
-          methods:
-            - GET
-            - POST
-      route:
-        - destination:
-            host: 127.0.0.1
-            port: 8802
-      timeout: 30s
-
-    # Echo endpoint for POST testing
-    - name: echo-api
-      match:
-        - uri:
-            prefix: /api/v1/echo
-          methods:
-            - POST
-      route:
-        - destination:
-            host: 127.0.0.1
-            port: 8801
-      timeout: 10s
-
-    # Rate limited endpoint for rate limiting tests
-    - name: rate-limited-api
-      match:
-        - uri:
-            prefix: /api/v1/limited
-          methods:
-            - GET
-            - POST
-      route:
-        - destination:
-            host: 127.0.0.1
-            port: 8801
-      timeout: 10s
 
     # Backend health check
     - name: backend-health

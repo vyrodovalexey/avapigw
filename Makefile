@@ -61,8 +61,10 @@ COVERAGE_MERGED := $(COVERAGE_DIR)/merged.out
         run dev clean deps tools generate proto-generate \
         perf-test perf-test-http perf-test-post perf-test-mixed perf-test-all \
         perf-test-grpc-unary perf-test-grpc-streaming perf-test-websocket \
+        perf-test-k8s perf-test-k8s-http perf-test-k8s-grpc \
         perf-generate-ammo perf-generate-charts perf-analyze \
         perf-start-gateway perf-stop-gateway perf-setup-infra \
+        perf-setup-vault-k8s perf-verify-vault-k8s \
         ci help version
 
 # ==============================================================================
@@ -500,6 +502,25 @@ perf-test-websocket-concurrent: build
 	@$(PERF_SCRIPTS)/run-websocket-test.sh concurrent
 
 # ==============================================================================
+# K8s Performance test targets
+# ==============================================================================
+
+## perf-test-k8s: Run all K8s performance tests (HTTP, gRPC if available)
+perf-test-k8s:
+	@echo "==> Running all K8s performance tests..."
+	@$(PERF_SCRIPTS)/run-k8s-test.sh all
+
+## perf-test-k8s-http: Run HTTP K8s performance test via Yandex Tank
+perf-test-k8s-http:
+	@echo "==> Running K8s HTTP performance test..."
+	@$(PERF_SCRIPTS)/run-k8s-test.sh http
+
+## perf-test-k8s-grpc: Run gRPC K8s performance test via ghz
+perf-test-k8s-grpc:
+	@echo "==> Running K8s gRPC performance test..."
+	@$(PERF_SCRIPTS)/run-k8s-test.sh grpc
+
+# ==============================================================================
 # Performance test utilities
 # ==============================================================================
 
@@ -526,6 +547,16 @@ perf-setup-infra:
 perf-setup-vault:
 	@echo "==> Setting up Vault..."
 	@$(PERF_SCRIPTS)/setup-vault.sh
+
+## perf-setup-vault-k8s: Setup Vault Kubernetes auth for K8s deployment
+perf-setup-vault-k8s:
+	@echo "==> Setting up Vault Kubernetes auth..."
+	@$(PERF_SCRIPTS)/setup-vault-k8s.sh
+
+## perf-verify-vault-k8s: Verify Vault Kubernetes auth setup
+perf-verify-vault-k8s:
+	@echo "==> Verifying Vault Kubernetes auth..."
+	@$(PERF_SCRIPTS)/setup-vault-k8s.sh --verify
 
 ## perf-setup-keycloak: Setup Keycloak for performance testing
 perf-setup-keycloak:
@@ -638,6 +669,11 @@ help:
 	@echo "  perf-test-websocket-message    Run message throughput test"
 	@echo "  perf-test-websocket-concurrent Run concurrent connections test"
 	@echo ""
+	@echo "Performance test targets (K8s):"
+	@echo "  perf-test-k8s          Run all K8s performance tests"
+	@echo "  perf-test-k8s-http     Run HTTP K8s test (Yandex Tank)"
+	@echo "  perf-test-k8s-grpc     Run gRPC K8s test (ghz)"
+	@echo ""
 	@echo "Performance test utilities:"
 	@echo "  perf-generate-ammo     Generate ammo files"
 	@echo "  perf-generate-charts   Generate charts from results"
@@ -645,6 +681,8 @@ help:
 	@echo "  perf-start-gateway     Start gateway for perf testing"
 	@echo "  perf-stop-gateway      Stop perf test gateway"
 	@echo "  perf-setup-infra       Setup Vault and Keycloak"
+	@echo "  perf-setup-vault-k8s   Setup Vault K8s auth for K8s deployment"
+	@echo "  perf-verify-vault-k8s  Verify Vault K8s auth setup"
 	@echo "  perf-verify-infra      Verify infrastructure setup"
 	@echo "  perf-clean             Clean test results"
 	@echo ""

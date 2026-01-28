@@ -83,7 +83,9 @@ The following table lists the configurable parameters of the avapigw chart and t
 |-----------|-------------|---------|
 | `service.type` | Service type | `ClusterIP` |
 | `service.httpPort` | HTTP port | `8080` |
+| `service.httpsPort` | HTTPS port | `8443` |
 | `service.grpcPort` | gRPC port | `9000` |
+| `service.grpcTlsPort` | gRPC TLS port | `9443` |
 | `service.metricsPort` | Metrics port | `9090` |
 | `service.annotations` | Service annotations | `{}` |
 
@@ -147,6 +149,9 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.listeners.http.port` | HTTP listener port | `8080` |
 | `gateway.listeners.grpc.enabled` | Enable gRPC listener | `false` |
 | `gateway.listeners.grpc.port` | gRPC listener port | `9000` |
+| `gateway.listeners.grpc.tls.enabled` | Enable TLS for gRPC listener | `false` |
+| `gateway.listeners.grpc.tls.port` | gRPC TLS listener port | `9443` |
+| `gateway.listeners.grpc.tls.mode` | gRPC TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE) | `SIMPLE` |
 | `gateway.rateLimit.enabled` | Enable rate limiting | `true` |
 | `gateway.rateLimit.requestsPerSecond` | Requests per second | `100` |
 | `gateway.rateLimit.burst` | Burst size | `200` |
@@ -194,6 +199,18 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `vault.address` | Vault address | `""` |
 | `vault.authMethod` | Auth method | `kubernetes` |
 | `vault.role` | Vault role | `""` |
+| `vault.pki.enabled` | Enable Vault PKI for listener TLS | `false` |
+| `vault.pki.pkiMount` | Vault PKI mount path | `pki` |
+| `vault.pki.role` | Vault PKI role name | `gateway-server` |
+| `vault.pki.commonName` | Certificate common name | `gateway.example.com` |
+| `vault.pki.altNames` | Certificate alternative names | `[]` |
+| `vault.pki.ttl` | Certificate TTL | `24h` |
+| `vault.pki.renewBefore` | Renew before expiry | `1h` |
+| `vault.pki.grpc.enabled` | Enable Vault PKI for gRPC listener TLS | `false` |
+| `vault.pki.grpc.pkiMount` | gRPC-specific PKI mount path | `""` (uses main pkiMount) |
+| `vault.pki.grpc.role` | gRPC-specific PKI role | `""` (uses main role) |
+| `vault.pki.grpc.commonName` | gRPC certificate common name | `""` (uses main commonName) |
+| `vault.pki.grpc.ttl` | gRPC certificate TTL | `""` (uses main ttl) |
 
 ### Keycloak Integration
 
@@ -221,6 +238,47 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `networkPolicy.egress` | Egress rules | `[]` |
 
 ## Examples
+
+### Enable gRPC with TLS
+
+```yaml
+gateway:
+  listeners:
+    grpc:
+      enabled: true
+      port: 9000
+      tls:
+        enabled: true
+        port: 9443
+        mode: SIMPLE
+        # Use static certificates
+        certFile: /app/certs/grpc/tls.crt
+        keyFile: /app/certs/grpc/tls.key
+        minVersion: "1.2"
+
+# Or use Vault PKI for gRPC TLS
+vault:
+  enabled: true
+  address: "https://vault.example.com:8200"
+  authMethod: kubernetes
+  role: gateway-role
+  pki:
+    enabled: true
+    pkiMount: pki
+    role: gateway-server
+    commonName: gateway.example.com
+    altNames:
+      - grpc.example.com
+      - "*.grpc.example.com"
+    ttl: 24h
+    renewBefore: 1h
+    grpc:
+      enabled: true
+      pkiMount: pki-grpc
+      role: grpc-server
+      commonName: grpc.example.com
+      ttl: 12h
+```
 
 ### Enable Redis
 
@@ -350,6 +408,104 @@ gateway:
         queueTimeout: 10s
 ```
 
+### Local Kubernetes Deployment
+
+Deploy to local Kubernetes (Docker Desktop) with TLS and performance testing support:
+
+```yaml
+# values-local.yaml
+namespace: avapigw-test
+
+replicaCount: 1
+
+image:
+  repository: avapigw
+  pullPolicy: Never
+  tag: "test"
+
+service:
+  type: NodePort
+  httpPort: 8080
+  httpsPort: 8443
+  grpcPort: 9000
+  grpcTlsPort: 9443
+  metricsPort: 9090
+
+gateway:
+  logLevel: info
+  environment: local-k8s
+  
+  listeners:
+    http:
+      enabled: true
+      port: 8080
+    grpc:
+      enabled: true
+      port: 9000
+      tls:
+        enabled: true
+        port: 9443
+
+  routes:
+    - name: items-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+          weight: 50
+        - destination:
+            host: host.docker.internal
+            port: 8802
+          weight: 50
+
+  grpcRoutes:
+    - name: test-service-route
+      match:
+        - service:
+            exact: api.v1.TestService
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8803
+
+vault:
+  enabled: true
+  address: "http://host.docker.internal:8200"
+  authMethod: kubernetes
+  role: avapigw
+  pki:
+    enabled: true
+    pkiMount: "pki"
+    role: "test-role"
+    commonName: "avapigw.local"
+    altNames:
+      - "localhost"
+      - "*.avapigw.local"
+    ttl: "24h"
+    grpc:
+      enabled: true
+```
+
+Deploy with:
+```bash
+# Build local image
+make docker-build
+
+# Setup Vault for K8s
+./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test
+
+# Deploy to K8s
+helm upgrade --install avapigw helm/avapigw/ \
+  -f helm/avapigw/values-local.yaml \
+  -n avapigw-test --create-namespace
+
+# Run performance tests
+make perf-test-k8s
+```
+
 ### Production Configuration
 
 ```yaml
@@ -405,6 +561,13 @@ Added new features and improvements:
 - **Config reload race fix** - Gateway config now uses atomic.Pointer for lock-free concurrent access
 - **Hot-reload completion** - Rate limiter, max sessions, router, and backends now properly reload on config change
 - **Circuit breaker limitation** - Circuit breaker does NOT support runtime reconfiguration (documented limitation)
+- **gRPC hot-reload limitation** - gRPC routes and backends do NOT support hot-reload (documented limitation)
+- **TLS deprecation warnings** - ValidateConfigWithWarnings() API now warns about TLS 1.0/1.1 usage
+- **gRPC plaintext warning** - Gateway logs warning when gRPC listener runs without TLS
+- **WebSocket proxy fixes** - Fixed hop-by-hop header handling for WebSocket connections
+- **gRPC PKI default change** - gRPC PKI enabled default changed to false for security
+- **Vault TLS improvements** - Enhanced TLS manager fallback error handling
+- **Helm deployment fixes** - Fixed port exposure for TLS, gRPC PKI ternary logic, service port mismatch
 - **Audit trace context** - Audit events now include TraceID and SpanID when tracing is enabled
 - **Metrics cardinality fix** - Prometheus metrics now use "route" label instead of "path" to prevent cardinality explosion
 - **Retry deduplication** - internal/retry package is now the single source of truth for exponential backoff

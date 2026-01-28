@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"sync/atomic"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -158,7 +159,7 @@ type VaultProviderFactory func(config *VaultTLSConfig, logger observability.Logg
 // NopProvider is a certificate provider that returns no certificates.
 // It is useful for testing or when TLS is disabled.
 type NopProvider struct {
-	closed bool
+	closed atomic.Bool
 }
 
 // NewNopProvider creates a new NopProvider.
@@ -168,7 +169,7 @@ func NewNopProvider() *NopProvider {
 
 // GetCertificate returns ErrCertificateNotFound.
 func (p *NopProvider) GetCertificate(_ context.Context, _ *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if p.closed {
+	if p.closed.Load() {
 		return nil, ErrProviderClosed
 	}
 	return nil, ErrCertificateNotFound
@@ -176,7 +177,7 @@ func (p *NopProvider) GetCertificate(_ context.Context, _ *tls.ClientHelloInfo) 
 
 // GetClientCA returns nil.
 func (p *NopProvider) GetClientCA(_ context.Context) (*x509.CertPool, error) {
-	if p.closed {
+	if p.closed.Load() {
 		return nil, ErrProviderClosed
 	}
 	return nil, nil
@@ -191,7 +192,7 @@ func (p *NopProvider) Watch(_ context.Context) <-chan CertificateEvent {
 
 // Close marks the provider as closed.
 func (p *NopProvider) Close() error {
-	p.closed = true
+	p.closed.Store(true)
 	return nil
 }
 

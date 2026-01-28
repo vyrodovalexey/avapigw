@@ -105,7 +105,11 @@ spec:
   listeners:
     {{- if .Values.gateway.listeners.http.enabled }}
     - name: http
+      {{- if or (and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled) (and .Values.gateway.listeners.http.tls .Values.gateway.listeners.http.tls.enabled) }}
+      port: {{ .Values.service.httpsPort | default 8443 }}
+      {{- else }}
       port: {{ .Values.gateway.listeners.http.port | default 8080 }}
+      {{- end }}
       {{- if and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled }}
       protocol: HTTPS
       tls:
@@ -121,6 +125,34 @@ spec:
           {{- if .Values.vault.pki.ttl }}
           ttl: {{ .Values.vault.pki.ttl | quote }}
           {{- end }}
+      {{- else if and .Values.gateway.listeners.http.tls .Values.gateway.listeners.http.tls.enabled }}
+      protocol: HTTPS
+      tls:
+        {{- if .Values.gateway.listeners.http.tls.certFile }}
+        certFile: {{ .Values.gateway.listeners.http.tls.certFile | quote }}
+        {{- end }}
+        {{- if .Values.gateway.listeners.http.tls.keyFile }}
+        keyFile: {{ .Values.gateway.listeners.http.tls.keyFile | quote }}
+        {{- end }}
+        {{- if .Values.gateway.listeners.http.tls.caFile }}
+        caFile: {{ .Values.gateway.listeners.http.tls.caFile | quote }}
+        {{- end }}
+        {{- if .Values.gateway.listeners.http.tls.mode }}
+        mode: {{ .Values.gateway.listeners.http.tls.mode | quote }}
+        {{- end }}
+        {{- if .Values.gateway.listeners.http.tls.minVersion }}
+        minVersion: {{ .Values.gateway.listeners.http.tls.minVersion | quote }}
+        {{- end }}
+        {{- if .Values.gateway.listeners.http.tls.maxVersion }}
+        maxVersion: {{ .Values.gateway.listeners.http.tls.maxVersion | quote }}
+        {{- end }}
+        {{- if .Values.gateway.listeners.http.tls.cipherSuites }}
+        cipherSuites:
+          {{- toYaml .Values.gateway.listeners.http.tls.cipherSuites | nindent 10 }}
+        {{- end }}
+        {{- if .Values.gateway.listeners.http.tls.requireClientCert }}
+        requireClientCert: {{ .Values.gateway.listeners.http.tls.requireClientCert }}
+        {{- end }}
       {{- else }}
       protocol: HTTP
       {{- end }}
@@ -130,17 +162,79 @@ spec:
     {{- end }}
     {{- if .Values.gateway.listeners.grpc.enabled }}
     - name: grpc
+      {{- $grpcTlsActive := false }}
+      {{- if and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled }}
+        {{- $grpcPki := .Values.vault.pki.grpc | default dict }}
+        {{- $grpcTlsActive = ternary (index $grpcPki "enabled") .Values.vault.pki.enabled (and (hasKey $grpcPki "enabled") (kindIs "bool" (index $grpcPki "enabled"))) }}
+      {{- else if and .Values.gateway.listeners.grpc.tls .Values.gateway.listeners.grpc.tls.enabled }}
+        {{- $grpcTlsActive = true }}
+      {{- end }}
+      {{- if $grpcTlsActive }}
+      port: {{ .Values.service.grpcTlsPort | default 9443 }}
+      {{- else }}
       port: {{ .Values.gateway.listeners.grpc.port | default 9000 }}
+      {{- end }}
       protocol: GRPC
       hosts:
         {{- toYaml .Values.gateway.listeners.grpc.hosts | nindent 8 }}
       bind: {{ .Values.gateway.listeners.grpc.bind | default "0.0.0.0" }}
       grpc:
-        maxConcurrentStreams: {{ .Values.gateway.listeners.grpc.maxConcurrentStreams | default 100 }}
-        maxRecvMsgSize: {{ .Values.gateway.listeners.grpc.maxRecvMsgSize | default 4194304 }}
-        maxSendMsgSize: {{ .Values.gateway.listeners.grpc.maxSendMsgSize | default 4194304 }}
+        maxConcurrentStreams: {{ .Values.gateway.listeners.grpc.maxConcurrentStreams | default 100 | int }}
+        maxRecvMsgSize: {{ .Values.gateway.listeners.grpc.maxRecvMsgSize | default 4194304 | int }}
+        maxSendMsgSize: {{ .Values.gateway.listeners.grpc.maxSendMsgSize | default 4194304 | int }}
         reflection: {{ .Values.gateway.listeners.grpc.reflection | default true }}
         healthCheck: {{ .Values.gateway.listeners.grpc.healthCheck | default true }}
+        {{- if and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled }}
+        {{- $grpcPki := .Values.vault.pki.grpc | default dict }}
+        {{- $grpcPkiEnabled := ternary (index $grpcPki "enabled") .Values.vault.pki.enabled (and (hasKey $grpcPki "enabled") (kindIs "bool" (index $grpcPki "enabled"))) }}
+        {{- if $grpcPkiEnabled }}
+        tls:
+          enabled: true
+          mode: SIMPLE
+          vault:
+            enabled: true
+            pkiMount: {{ ($grpcPki.pkiMount | default .Values.vault.pki.pkiMount) | default "pki" | quote }}
+            role: {{ ($grpcPki.role | default .Values.vault.pki.role) | quote }}
+            commonName: {{ ($grpcPki.commonName | default .Values.vault.pki.commonName) | quote }}
+            {{- $altNames := $grpcPki.altNames | default .Values.vault.pki.altNames }}
+            {{- if $altNames }}
+            altNames:
+              {{- toYaml $altNames | nindent 14 }}
+            {{- end }}
+            {{- $ttl := $grpcPki.ttl | default .Values.vault.pki.ttl }}
+            {{- if $ttl }}
+            ttl: {{ $ttl | quote }}
+            {{- end }}
+        {{- end }}
+        {{- else if and .Values.gateway.listeners.grpc.tls .Values.gateway.listeners.grpc.tls.enabled }}
+        tls:
+          enabled: {{ .Values.gateway.listeners.grpc.tls.enabled }}
+          {{- if .Values.gateway.listeners.grpc.tls.mode }}
+          mode: {{ .Values.gateway.listeners.grpc.tls.mode | quote }}
+          {{- end }}
+          {{- if .Values.gateway.listeners.grpc.tls.certFile }}
+          certFile: {{ .Values.gateway.listeners.grpc.tls.certFile | quote }}
+          {{- end }}
+          {{- if .Values.gateway.listeners.grpc.tls.keyFile }}
+          keyFile: {{ .Values.gateway.listeners.grpc.tls.keyFile | quote }}
+          {{- end }}
+          {{- if .Values.gateway.listeners.grpc.tls.caFile }}
+          caFile: {{ .Values.gateway.listeners.grpc.tls.caFile | quote }}
+          {{- end }}
+          {{- if .Values.gateway.listeners.grpc.tls.minVersion }}
+          minVersion: {{ .Values.gateway.listeners.grpc.tls.minVersion | quote }}
+          {{- end }}
+          {{- if .Values.gateway.listeners.grpc.tls.maxVersion }}
+          maxVersion: {{ .Values.gateway.listeners.grpc.tls.maxVersion | quote }}
+          {{- end }}
+          {{- if .Values.gateway.listeners.grpc.tls.cipherSuites }}
+          cipherSuites:
+            {{- toYaml .Values.gateway.listeners.grpc.tls.cipherSuites | nindent 12 }}
+          {{- end }}
+          {{- if .Values.gateway.listeners.grpc.tls.requireClientCert }}
+          requireClientCert: {{ .Values.gateway.listeners.grpc.tls.requireClientCert }}
+          {{- end }}
+        {{- end }}
     {{- end }}
 
   {{- if .Values.gateway.routes }}
@@ -265,6 +359,10 @@ spec:
       format: {{ .Values.gateway.observability.logging.format | default "json" }}
 
   {{- if and .Values.vault .Values.vault.enabled }}
+  # NOTE: The vault section below is for reference/documentation only.
+  # The Go gateway reads Vault configuration exclusively from environment
+  # variables (VAULT_ADDR, VAULT_TOKEN, VAULT_AUTH_METHOD, etc.) set in
+  # the deployment spec above. Changes here will NOT affect Vault behavior.
   vault:
     enabled: true
     address: {{ .Values.vault.address | quote }}

@@ -174,8 +174,24 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		return
 	}
 
+	// Try to get backend from registry for authentication and TLS config
+	var serviceBackend *backend.ServiceBackend
+	if p.backendRegistry != nil {
+		if b, ok := p.backendRegistry.Get(dest.Destination.Host); ok {
+			if sb, ok := b.(*backend.ServiceBackend); ok {
+				serviceBackend = sb
+			}
+		}
+	}
+
+	// Determine URL scheme based on backend TLS configuration
+	scheme := "http"
+	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
+		scheme = "https"
+	}
+
 	// Get backend host
-	targetURL := "http://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
+	targetURL := scheme + "://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
 	target, err := url.Parse(targetURL)
 	if err != nil {
 		p.errorHandler(w, r, NewInvalidTargetError(route.Name, targetURL, err))
@@ -185,16 +201,6 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 	// Apply URL rewriting
 	if route.Config.Rewrite != nil {
 		r = p.applyRewrite(r, route.Config.Rewrite)
-	}
-
-	// Try to get backend from registry for authentication
-	var serviceBackend *backend.ServiceBackend
-	if p.backendRegistry != nil {
-		if b, ok := p.backendRegistry.Get(dest.Destination.Host); ok {
-			if sb, ok := b.(*backend.ServiceBackend); ok {
-				serviceBackend = sb
-			}
-		}
 	}
 
 	// Create reverse proxy
@@ -306,8 +312,16 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 		req.URL.RawQuery = originalReq.URL.RawQuery
 	}
 
-	// Remove hop-by-hop headers
+	// Remove hop-by-hop headers, but preserve Upgrade and Connection
+	// headers so that httputil.ReverseProxy can detect WebSocket
+	// upgrade requests and handle protocol switching (101 Switching Protocols).
+	// ReverseProxy.ServeHTTP checks upgradeType(outreq.Header) AFTER Director
+	// returns, then strips hop-by-hop headers itself and re-adds Upgrade/Connection
+	// if an upgrade was detected.
 	for _, h := range hopHeaders {
+		if h == "Upgrade" || h == "Connection" {
+			continue
+		}
 		req.Header.Del(h)
 	}
 

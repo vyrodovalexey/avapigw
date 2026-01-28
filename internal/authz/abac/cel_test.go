@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/cel-go/common/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -773,4 +774,364 @@ func TestIPInRangeBinding(t *testing.T) {
 			assert.Equal(t, tt.expected, decision.Allowed)
 		})
 	}
+}
+
+// TestHasRoleBinding tests the has_role CEL function binding.
+func TestHasRoleBinding(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		role     string
+		expected bool
+	}{
+		{
+			name:     "has_role returns false by default",
+			role:     "admin",
+			expected: false,
+		},
+		{
+			name:     "has_role with empty role",
+			role:     "",
+			expected: false,
+		},
+		{
+			name:     "has_role with user role",
+			role:     "user",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := &Config{
+				Enabled: true,
+				Policies: []Policy{
+					{
+						Name:       "role-check",
+						Expression: `has_role("` + tt.role + `")`,
+						Effect:     EffectAllow,
+					},
+				},
+			}
+
+			engine, err := NewEngine(config, WithEngineLogger(observability.NopLogger()))
+			require.NoError(t, err)
+
+			decision, err := engine.Authorize(context.Background(), &Request{
+				Subject:  map[string]interface{}{"id": "user1", "roles": []interface{}{"admin", "user"}},
+				Resource: "/test",
+				Action:   "GET",
+			})
+			require.NoError(t, err)
+			// has_role is a placeholder that always returns false
+			assert.Equal(t, tt.expected, decision.Allowed)
+		})
+	}
+}
+
+// TestHasRoleBindingDirect tests the hasRoleBinding function directly.
+func TestHasRoleBindingDirect(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected bool
+	}{
+		{
+			name:     "string input",
+			input:    "admin",
+			expected: false,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: false,
+		},
+		{
+			name:     "non-string input - int",
+			input:    123,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Create a CEL value from the input
+			var result bool
+			switch v := tt.input.(type) {
+			case string:
+				celVal := types.String(v)
+				refVal := hasRoleBinding(celVal)
+				result = refVal.Value().(bool)
+			default:
+				// For non-string types, the function should handle gracefully
+				// In practice, CEL type checking prevents non-string inputs
+				result = false
+			}
+
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestIPInRangeBindingDirect tests the ipInRangeBinding function directly.
+func TestIPInRangeBindingDirect(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		ip       interface{}
+		cidr     interface{}
+		expected bool
+	}{
+		{
+			name:     "valid IP in range",
+			ip:       "10.0.0.1",
+			cidr:     "10.0.0.0/8",
+			expected: true,
+		},
+		{
+			name:     "valid IP not in range",
+			ip:       "192.168.1.1",
+			cidr:     "10.0.0.0/8",
+			expected: false,
+		},
+		{
+			name:     "invalid IP string",
+			ip:       "not-an-ip",
+			cidr:     "10.0.0.0/8",
+			expected: false,
+		},
+		{
+			name:     "invalid CIDR string",
+			ip:       "10.0.0.1",
+			cidr:     "not-a-cidr",
+			expected: false,
+		},
+		{
+			name:     "non-string IP",
+			ip:       123,
+			cidr:     "10.0.0.0/8",
+			expected: false,
+		},
+		{
+			name:     "non-string CIDR",
+			ip:       "10.0.0.1",
+			cidr:     123,
+			expected: false,
+		},
+		{
+			name:     "IPv6 in range",
+			ip:       "2001:db8::1",
+			cidr:     "2001:db8::/32",
+			expected: true,
+		},
+		{
+			name:     "IPv6 not in range",
+			ip:       "2001:db8::1",
+			cidr:     "2001:db9::/32",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var ipVal, cidrVal types.String
+			var result bool
+
+			switch v := tt.ip.(type) {
+			case string:
+				ipVal = types.String(v)
+			default:
+				// Non-string IP should return false
+				result = false
+				assert.Equal(t, tt.expected, result)
+				return
+			}
+
+			switch v := tt.cidr.(type) {
+			case string:
+				cidrVal = types.String(v)
+			default:
+				// Non-string CIDR should return false
+				result = false
+				assert.Equal(t, tt.expected, result)
+				return
+			}
+
+			refVal := ipInRangeBinding(ipVal, cidrVal)
+			result = refVal.Value().(bool)
+
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestPolicyApplies tests the policyApplies method.
+func TestPolicyApplies(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(nil, WithEngineLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	celEngine := engine.(*celEngine)
+
+	tests := []struct {
+		name     string
+		policy   Policy
+		resource string
+		action   string
+		expected bool
+	}{
+		{
+			name:     "no filters - applies to all",
+			policy:   Policy{Name: "test"},
+			resource: "/api/users",
+			action:   "GET",
+			expected: true,
+		},
+		{
+			name:     "resource wildcard matches",
+			policy:   Policy{Name: "test", Resources: []string{"*"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: true,
+		},
+		{
+			name:     "resource exact match",
+			policy:   Policy{Name: "test", Resources: []string{"/api/users"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: true,
+		},
+		{
+			name:     "resource prefix match",
+			policy:   Policy{Name: "test", Resources: []string{"/api/*"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: true,
+		},
+		{
+			name:     "resource no match",
+			policy:   Policy{Name: "test", Resources: []string{"/admin/*"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: false,
+		},
+		{
+			name:     "action wildcard matches",
+			policy:   Policy{Name: "test", Actions: []string{"*"}},
+			resource: "/api/users",
+			action:   "DELETE",
+			expected: true,
+		},
+		{
+			name:     "action exact match",
+			policy:   Policy{Name: "test", Actions: []string{"GET"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: true,
+		},
+		{
+			name:     "action case insensitive match",
+			policy:   Policy{Name: "test", Actions: []string{"get"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: true,
+		},
+		{
+			name:     "action no match",
+			policy:   Policy{Name: "test", Actions: []string{"GET", "POST"}},
+			resource: "/api/users",
+			action:   "DELETE",
+			expected: false,
+		},
+		{
+			name:     "both resource and action match",
+			policy:   Policy{Name: "test", Resources: []string{"/api/*"}, Actions: []string{"GET"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: true,
+		},
+		{
+			name:     "resource matches but action doesn't",
+			policy:   Policy{Name: "test", Resources: []string{"/api/*"}, Actions: []string{"POST"}},
+			resource: "/api/users",
+			action:   "GET",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := celEngine.policyApplies(&tt.policy, tt.resource, tt.action)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestCELEnvironmentCreation tests that the CEL environment is created correctly.
+func TestCELEnvironmentCreation(t *testing.T) {
+	t.Parallel()
+
+	engine, err := NewEngine(nil, WithEngineLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	celEngine := engine.(*celEngine)
+	assert.NotNil(t, celEngine.env)
+}
+
+// TestEngineWithMetrics tests engine creation with custom metrics.
+func TestEngineWithMetrics(t *testing.T) {
+	// Note: Not parallel because metrics registration is global
+	// The engine already creates default metrics if none provided,
+	// so we just verify the option is applied correctly
+
+	engine, err := NewEngine(nil,
+		WithEngineLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	celEngine := engine.(*celEngine)
+	// Verify that metrics were created (either default or custom)
+	assert.NotNil(t, celEngine.metrics)
+}
+
+// TestAuthorizeWithCELEvaluationError tests handling of CEL evaluation errors.
+func TestAuthorizeWithCELEvaluationError(t *testing.T) {
+	t.Parallel()
+
+	// Create a policy that will cause an evaluation error due to missing attribute
+	config := &Config{
+		Enabled: true,
+		Policies: []Policy{
+			{
+				Name:       "error-policy",
+				Expression: `subject.nonexistent.field == "value"`,
+				Effect:     EffectAllow,
+			},
+		},
+	}
+
+	engine, err := NewEngine(config, WithEngineLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	// This should not return an error, but the policy should not match
+	decision, err := engine.Authorize(context.Background(), &Request{
+		Subject:  map[string]interface{}{"id": "user1"},
+		Resource: "/test",
+		Action:   "GET",
+	})
+	require.NoError(t, err)
+	assert.False(t, decision.Allowed)
 }

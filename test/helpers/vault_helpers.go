@@ -316,9 +316,10 @@ func (s *VaultTestSetup) IssueCertificate(commonName string, ttl string) (map[st
 }
 
 // GetCA returns the CA certificate from PKI for testing.
+// Uses the pki/cert/ca endpoint which returns JSON (unlike pki/ca/pem which returns raw PEM).
 func (s *VaultTestSetup) GetCA() (string, error) {
 	ctx := context.Background()
-	path := fmt.Sprintf("%s/ca/pem", s.PKIMount)
+	path := fmt.Sprintf("%s/cert/ca", s.PKIMount)
 
 	secret, err := s.Client.Logical().ReadWithContext(ctx, path)
 	if err != nil {

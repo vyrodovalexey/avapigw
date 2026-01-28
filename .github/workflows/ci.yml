@@ -172,7 +172,7 @@ jobs:
           --health-start-period 10s
       # Vault for secrets management and PKI
       vault:
-        image: vault:1.13.3
+        image: hashicorp/vault:1.17
         ports:
           - 8200:8200
         env:
@@ -205,7 +205,7 @@ jobs:
           --health-start-period 10s
       # gRPC backends (health check via TCP port since grpcurl not available in container)
       grpc-backend1:
-        image: ghcr.io/vyrodovalexey/grpc-example:latest
+        image: ghcr.io/vyrodovalexey/grpc-example:21f4570
         ports:
           - 8803:8080
         env:
@@ -214,7 +214,7 @@ jobs:
           SHUTDOWN_TIMEOUT: 60s
 
       grpc-backend2:
-        image: ghcr.io/vyrodovalexey/grpc-example:latest
+        image: ghcr.io/vyrodovalexey/grpc-example:21f4570
         ports:
           - 8804:8080
         env:
@@ -466,7 +466,7 @@ jobs:
           
           echo "Keycloak setup complete!"
 
-      - name: Run integration tests
+      - name: Run integration tests (includes WebSocket integration tests)
         env:
           TEST_REDIS_URL: redis://default:password@127.0.0.1:6379
           TEST_VAULT_ADDR: http://127.0.0.1:8200
@@ -483,7 +483,7 @@ jobs:
           mkdir -p coverage
           go test -race -coverprofile=coverage/integration.out -covermode=atomic -tags=integration -v -timeout 10m ./test/integration/...
 
-      - name: Run e2e tests
+      - name: Run e2e tests (includes WebSocket e2e tests)
         env:
           TEST_REDIS_URL: redis://default:password@127.0.0.1:6379
           TEST_VAULT_ADDR: http://127.0.0.1:8200
@@ -917,6 +917,17 @@ jobs:
         run: |
           echo "==> Installing Prometheus Operator CRDs for ServiceMonitor support..."
           kubectl apply -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.71.0/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
+
+      - name: Helm template with Vault PKI and gRPC TLS
+        run: |
+          echo "==> Validating Helm templates with Vault PKI + gRPC TLS enabled..."
+          helm template test helm/avapigw/ \
+            --set vault.enabled=true \
+            --set vault.pki.enabled=true \
+            --set vault.pki.role=test \
+            --set vault.pki.commonName=test.local \
+            --set gateway.listeners.grpc.enabled=true > /dev/null
+          echo "Vault PKI + gRPC TLS template validation successful!"
 
       - name: Helm dry-run with all features
         run: |

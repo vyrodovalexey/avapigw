@@ -316,6 +316,11 @@ get_test_config() {
             AMMO_FILE="http-get.txt"
             USE_SECURE_CONFIG=true
             ;;
+        https-throughput)
+            CONFIG_FILE="https-throughput.yaml"
+            AMMO_FILE="https-get.txt"
+            USE_SECURE_CONFIG=true
+            ;;
         http-auth-throughput)
             CONFIG_FILE="http-auth-throughput.yaml"
             AMMO_FILE="http-auth.txt"

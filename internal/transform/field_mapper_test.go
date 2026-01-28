@@ -785,3 +785,579 @@ func TestFieldMapper_DoesNotModifyOriginal(t *testing.T) {
 	assert.Contains(t, result, "new_name")
 	assert.NotContains(t, result, "old_name")
 }
+
+// TestTraverseArray tests the traverseArray function for array traversal.
+func TestTraverseArray(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		arr       []interface{}
+		part      pathPart
+		expected  interface{}
+		expectErr bool
+	}{
+		{
+			name:     "valid index access",
+			arr:      []interface{}{"a", "b", "c"},
+			part:     pathPart{Name: "arr", IsArray: true, Index: 0},
+			expected: "a",
+		},
+		{
+			name:     "access middle element",
+			arr:      []interface{}{"a", "b", "c"},
+			part:     pathPart{Name: "arr", IsArray: true, Index: 1},
+			expected: "b",
+		},
+		{
+			name:     "access last element",
+			arr:      []interface{}{"a", "b", "c"},
+			part:     pathPart{Name: "arr", IsArray: true, Index: 2},
+			expected: "c",
+		},
+		{
+			name:     "access nested object in array",
+			arr:      []interface{}{map[string]interface{}{"id": 1}, map[string]interface{}{"id": 2}},
+			part:     pathPart{Name: "arr", IsArray: true, Index: 0},
+			expected: map[string]interface{}{"id": 1},
+		},
+		{
+			name:      "index out of bounds",
+			arr:       []interface{}{"a", "b"},
+			part:      pathPart{Name: "arr", IsArray: true, Index: 5},
+			expectErr: true,
+		},
+		{
+			name:      "negative index",
+			arr:       []interface{}{"a", "b"},
+			part:      pathPart{Name: "arr", IsArray: true, Index: -1},
+			expectErr: true,
+		},
+		{
+			name:      "non-array path part",
+			arr:       []interface{}{"a", "b"},
+			part:      pathPart{Name: "arr", IsArray: false, Index: 0},
+			expectErr: true,
+		},
+		{
+			name:      "empty array with valid index",
+			arr:       []interface{}{},
+			part:      pathPart{Name: "arr", IsArray: true, Index: 0},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := traverseArray(tt.arr, tt.part)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestNavigateArrayValue tests the navigateArrayValue function.
+func TestNavigateArrayValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		current   map[string]interface{}
+		part      pathPart
+		arr       []interface{}
+		expectErr bool
+	}{
+		{
+			name:    "navigate to existing map in array",
+			current: map[string]interface{}{"items": []interface{}{map[string]interface{}{"id": 1}}},
+			part:    pathPart{Name: "items", IsArray: true, Index: 0},
+			arr:     []interface{}{map[string]interface{}{"id": 1}},
+		},
+		{
+			name:    "extend array and create map",
+			current: map[string]interface{}{"items": []interface{}{}},
+			part:    pathPart{Name: "items", IsArray: true, Index: 2},
+			arr:     []interface{}{},
+		},
+		{
+			name:    "replace non-map element with map",
+			current: map[string]interface{}{"items": []interface{}{"string", "value"}},
+			part:    pathPart{Name: "items", IsArray: true, Index: 0},
+			arr:     []interface{}{"string", "value"},
+		},
+		{
+			name:      "non-array path part",
+			current:   map[string]interface{}{"items": []interface{}{}},
+			part:      pathPart{Name: "items", IsArray: false, Index: 0},
+			arr:       []interface{}{},
+			expectErr: true,
+		},
+		{
+			name:      "negative index",
+			current:   map[string]interface{}{"items": []interface{}{}},
+			part:      pathPart{Name: "items", IsArray: true, Index: -1},
+			arr:       []interface{}{},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := navigateArrayValue(tt.current, tt.part, tt.arr)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.NotNil(t, result)
+			// Result should be a map
+			assert.IsType(t, map[string]interface{}{}, result)
+		})
+	}
+}
+
+// TestTraversePath tests the traversePath function with different value types.
+func TestTraversePath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		current   interface{}
+		part      pathPart
+		expected  interface{}
+		expectErr bool
+	}{
+		{
+			name:     "traverse map",
+			current:  map[string]interface{}{"name": "test"},
+			part:     pathPart{Name: "name"},
+			expected: "test",
+		},
+		{
+			name:     "traverse array",
+			current:  []interface{}{"a", "b", "c"},
+			part:     pathPart{Name: "arr", IsArray: true, Index: 1},
+			expected: "b",
+		},
+		{
+			name:      "traverse invalid type",
+			current:   "string value",
+			part:      pathPart{Name: "field"},
+			expectErr: true,
+		},
+		{
+			name:      "traverse nil",
+			current:   nil,
+			part:      pathPart{Name: "field"},
+			expectErr: true,
+		},
+		{
+			name:      "traverse int",
+			current:   42,
+			part:      pathPart{Name: "field"},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := traversePath(tt.current, tt.part)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestTraverseMap tests the traverseMap function.
+func TestTraverseMap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		m         map[string]interface{}
+		part      pathPart
+		expected  interface{}
+		expectErr bool
+	}{
+		{
+			name:     "simple field access",
+			m:        map[string]interface{}{"name": "test"},
+			part:     pathPart{Name: "name"},
+			expected: "test",
+		},
+		{
+			name:     "nested object access",
+			m:        map[string]interface{}{"user": map[string]interface{}{"id": 1}},
+			part:     pathPart{Name: "user"},
+			expected: map[string]interface{}{"id": 1},
+		},
+		{
+			name:     "array field with index",
+			m:        map[string]interface{}{"items": []interface{}{"a", "b", "c"}},
+			part:     pathPart{Name: "items", IsArray: true, Index: 1},
+			expected: "b",
+		},
+		{
+			name:      "field not found",
+			m:         map[string]interface{}{"name": "test"},
+			part:      pathPart{Name: "email"},
+			expectErr: true,
+		},
+		{
+			name:      "array index on non-array",
+			m:         map[string]interface{}{"name": "test"},
+			part:      pathPart{Name: "name", IsArray: true, Index: 0},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := traverseMap(tt.m, tt.part)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestGetArrayElement tests the getArrayElement function.
+func TestGetArrayElement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		val       interface{}
+		part      pathPart
+		expected  interface{}
+		expectErr bool
+	}{
+		{
+			name:     "valid array access",
+			val:      []interface{}{"a", "b", "c"},
+			part:     pathPart{Name: "arr", IsArray: true, Index: 0},
+			expected: "a",
+		},
+		{
+			name:     "access object in array",
+			val:      []interface{}{map[string]interface{}{"id": 1}},
+			part:     pathPart{Name: "arr", IsArray: true, Index: 0},
+			expected: map[string]interface{}{"id": 1},
+		},
+		{
+			name:      "non-array value",
+			val:       "not an array",
+			part:      pathPart{Name: "arr", IsArray: true, Index: 0},
+			expectErr: true,
+		},
+		{
+			name:      "index out of bounds",
+			val:       []interface{}{"a"},
+			part:      pathPart{Name: "arr", IsArray: true, Index: 5},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := getArrayElement(tt.val, tt.part)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestNavigateOrCreate tests the navigateOrCreate function.
+func TestNavigateOrCreate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		current   map[string]interface{}
+		part      pathPart
+		nextPart  pathPart
+		expectErr bool
+	}{
+		{
+			name:     "navigate to existing map",
+			current:  map[string]interface{}{"user": map[string]interface{}{"name": "test"}},
+			part:     pathPart{Name: "user"},
+			nextPart: pathPart{Name: "email"},
+		},
+		{
+			name:     "create new map",
+			current:  map[string]interface{}{},
+			part:     pathPart{Name: "user"},
+			nextPart: pathPart{Name: "name"},
+		},
+		{
+			name:     "navigate to existing array element",
+			current:  map[string]interface{}{"items": []interface{}{map[string]interface{}{"id": 1}}},
+			part:     pathPart{Name: "items", IsArray: true, Index: 0},
+			nextPart: pathPart{Name: "name"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := navigateOrCreate(tt.current, tt.part, tt.nextPart)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.NotNil(t, result)
+		})
+	}
+}
+
+// TestSetFinalValue tests the setFinalValue function.
+func TestSetFinalValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		current   map[string]interface{}
+		part      pathPart
+		value     interface{}
+		expected  map[string]interface{}
+		expectErr bool
+	}{
+		{
+			name:     "set simple value",
+			current:  map[string]interface{}{},
+			part:     pathPart{Name: "name"},
+			value:    "test",
+			expected: map[string]interface{}{"name": "test"},
+		},
+		{
+			name:     "set array value",
+			current:  map[string]interface{}{},
+			part:     pathPart{Name: "items", IsArray: true, Index: 0},
+			value:    "first",
+			expected: map[string]interface{}{"items": []interface{}{"first"}},
+		},
+		{
+			name:     "set array value at higher index",
+			current:  map[string]interface{}{},
+			part:     pathPart{Name: "items", IsArray: true, Index: 2},
+			value:    "third",
+			expected: map[string]interface{}{"items": []interface{}{nil, nil, "third"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := setFinalValue(tt.current, tt.part, tt.value)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, tt.current)
+		})
+	}
+}
+
+// TestNavigateForDelete tests the navigateForDelete function.
+func TestNavigateForDelete(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		current  map[string]interface{}
+		part     pathPart
+		expected bool
+	}{
+		{
+			name:     "navigate to existing map",
+			current:  map[string]interface{}{"user": map[string]interface{}{"name": "test"}},
+			part:     pathPart{Name: "user"},
+			expected: true,
+		},
+		{
+			name:     "navigate to array element",
+			current:  map[string]interface{}{"items": []interface{}{map[string]interface{}{"id": 1}}},
+			part:     pathPart{Name: "items", IsArray: true, Index: 0},
+			expected: true,
+		},
+		{
+			name:     "field not found",
+			current:  map[string]interface{}{"name": "test"},
+			part:     pathPart{Name: "email"},
+			expected: false,
+		},
+		{
+			name:     "non-map value",
+			current:  map[string]interface{}{"name": "test"},
+			part:     pathPart{Name: "name"},
+			expected: false,
+		},
+		{
+			name:     "array index out of bounds",
+			current:  map[string]interface{}{"items": []interface{}{map[string]interface{}{"id": 1}}},
+			part:     pathPart{Name: "items", IsArray: true, Index: 5},
+			expected: false,
+		},
+		{
+			name:     "array element is not a map",
+			current:  map[string]interface{}{"items": []interface{}{"string"}},
+			part:     pathPart{Name: "items", IsArray: true, Index: 0},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, ok := navigateForDelete(tt.current, tt.part)
+
+			assert.Equal(t, tt.expected, ok)
+			if tt.expected {
+				assert.NotNil(t, result)
+			}
+		})
+	}
+}
+
+// TestCreateIntermediateValue tests the createIntermediateValue function.
+func TestCreateIntermediateValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		nextPart pathPart
+		isArray  bool
+	}{
+		{
+			name:     "create map for non-array next part",
+			nextPart: pathPart{Name: "field"},
+			isArray:  false,
+		},
+		{
+			name:     "create array for array next part",
+			nextPart: pathPart{Name: "items", IsArray: true, Index: 2},
+			isArray:  true,
+		},
+		{
+			name:     "create map for negative index",
+			nextPart: pathPart{Name: "items", IsArray: true, Index: -1},
+			isArray:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := createIntermediateValue(tt.nextPart)
+
+			if tt.isArray {
+				arr, ok := result.([]interface{})
+				assert.True(t, ok)
+				assert.NotNil(t, arr)
+			} else {
+				m, ok := result.(map[string]interface{})
+				assert.True(t, ok)
+				assert.NotNil(t, m)
+			}
+		})
+	}
+}
+
+// TestDeepCopySlice tests the deepCopySlice function.
+func TestDeepCopySlice(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		src  []interface{}
+	}{
+		{
+			name: "nil slice",
+			src:  nil,
+		},
+		{
+			name: "empty slice",
+			src:  []interface{}{},
+		},
+		{
+			name: "simple slice",
+			src:  []interface{}{"a", "b", "c"},
+		},
+		{
+			name: "slice with maps",
+			src:  []interface{}{map[string]interface{}{"id": 1}, map[string]interface{}{"id": 2}},
+		},
+		{
+			name: "nested slices",
+			src:  []interface{}{[]interface{}{"a", "b"}, []interface{}{"c", "d"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := deepCopySlice(tt.src)
+
+			if tt.src == nil {
+				assert.Nil(t, result)
+				return
+			}
+
+			assert.Equal(t, tt.src, result)
+
+			// Verify it's a deep copy
+			if len(tt.src) > 0 {
+				// Modify original
+				tt.src = append(tt.src, "modified")
+				assert.NotEqual(t, len(tt.src), len(result))
+			}
+		})
+	}
+}

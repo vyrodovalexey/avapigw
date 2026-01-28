@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
@@ -30,6 +31,9 @@ type GRPCListener struct {
 	routeTLSManager      *tlspkg.RouteTLSManager
 	tlsMetrics           tlspkg.MetricsRecorder
 	vaultProviderFactory tlspkg.VaultProviderFactory
+	auditLogger          audit.Logger
+	rateLimiter          *grpcmiddleware.GRPCRateLimiter
+	circuitBreaker       *grpcmiddleware.GRPCCircuitBreaker
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -83,6 +87,27 @@ func WithGRPCRouteTLSManager(manager *tlspkg.RouteTLSManager) GRPCListenerOption
 func WithGRPCVaultProviderFactory(factory tlspkg.VaultProviderFactory) GRPCListenerOption {
 	return func(l *GRPCListener) {
 		l.vaultProviderFactory = factory
+	}
+}
+
+// WithGRPCAuditLogger sets the audit logger for the gRPC listener.
+func WithGRPCAuditLogger(logger audit.Logger) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.auditLogger = logger
+	}
+}
+
+// WithGRPCRateLimiter sets the rate limiter for the gRPC listener.
+func WithGRPCRateLimiter(limiter *grpcmiddleware.GRPCRateLimiter) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.rateLimiter = limiter
+	}
+}
+
+// WithGRPCCircuitBreaker sets the circuit breaker for the gRPC listener.
+func WithGRPCCircuitBreaker(cb *grpcmiddleware.GRPCCircuitBreaker) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.circuitBreaker = cb
 	}
 }
 
@@ -201,17 +226,12 @@ func (l *GRPCListener) buildTLSOptionsFromConfig(tlsCfg *config.TLSConfig) ([]gr
 		return nil, fmt.Errorf("invalid TLS configuration: %w", err)
 	}
 
-	// Check if insecure mode
+	// Check if insecure mode (covers both !Enabled and Mode==INSECURE)
 	if tlsCfg.IsInsecure() {
 		l.logger.Warn("gRPC listener running in INSECURE mode",
 			observability.String("name", l.config.Name),
 		)
 		return []grpcserver.Option{grpcserver.WithInsecure()}, nil
-	}
-
-	// Configure TLS from config
-	if !tlsCfg.Enabled {
-		return nil, nil
 	}
 
 	return l.configureTLSFromConfig(tlsCfg)
@@ -224,7 +244,11 @@ func (l *GRPCListener) configureTLSFromConfig(tlsCfg *config.TLSConfig) ([]grpcs
 	// Create TLS manager from config
 	manager, err := l.createTLSManagerFromConfig(tlsCfg)
 	if err != nil {
-		opts = l.handleTLSManagerCreationError(tlsCfg, err)
+		fallbackOpts, fallbackErr := l.handleTLSManagerCreationError(tlsCfg, err)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		opts = fallbackOpts
 	} else {
 		l.tlsManager = manager
 		opts = append(opts, grpcserver.WithTLSManager(manager))
@@ -253,20 +277,30 @@ func (l *GRPCListener) configureTLSFromConfig(tlsCfg *config.TLSConfig) ([]grpcs
 }
 
 // handleTLSManagerCreationError handles TLS manager creation failure by falling back to file-based TLS.
+// Returns an error if no fallback cert/key files are available.
 func (l *GRPCListener) handleTLSManagerCreationError(
 	tlsCfg *config.TLSConfig,
 	err error,
-) []grpcserver.Option {
-	l.logger.Warn("failed to create TLS manager, falling back to file-based TLS",
+) ([]grpcserver.Option, error) {
+	// Record metric for TLS manager creation failure
+	if l.tlsMetrics != nil {
+		l.tlsMetrics.RecordHandshakeError("tls_manager_creation_failed")
+	}
+
+	if tlsCfg.CertFile != "" && tlsCfg.KeyFile != "" {
+		l.logger.Warn("failed to create TLS manager, falling back to file-based TLS",
+			observability.String("name", l.config.Name),
+			observability.String("certFile", tlsCfg.CertFile),
+			observability.Error(err),
+		)
+		return []grpcserver.Option{grpcserver.WithTLSCredentials(tlsCfg.CertFile, tlsCfg.KeyFile)}, nil
+	}
+
+	l.logger.Error("failed to create TLS manager and no fallback cert/key files available",
 		observability.String("name", l.config.Name),
 		observability.Error(err),
 	)
-
-	var opts []grpcserver.Option
-	if tlsCfg.CertFile != "" && tlsCfg.KeyFile != "" {
-		opts = append(opts, grpcserver.WithTLSCredentials(tlsCfg.CertFile, tlsCfg.KeyFile))
-	}
-	return opts
+	return nil, fmt.Errorf("TLS manager creation failed and no fallback cert/key files configured: %w", err)
 }
 
 // createTLSManagerFromConfig creates a TLS manager from TLSConfig.
@@ -320,6 +354,11 @@ func (l *GRPCListener) createTLSManagerFromConfig(cfg *config.TLSConfig) (*tlspk
 }
 
 // buildInterceptors builds the interceptor chains.
+// The execution order (outermost executes first):
+// Recovery → RequestID → Logging → Metrics → Tracing → Audit → RateLimit → CircuitBreaker
+//
+// Tracing runs before Audit so that trace context (TraceID/SpanID)
+// is available in the request context when audit events are created.
 func (l *GRPCListener) buildInterceptors() ([]grpc.UnaryServerInterceptor, []grpc.StreamServerInterceptor) {
 	var unaryInterceptors []grpc.UnaryServerInterceptor
 	var streamInterceptors []grpc.StreamServerInterceptor
@@ -346,6 +385,26 @@ func (l *GRPCListener) buildInterceptors() ([]grpc.UnaryServerInterceptor, []grp
 	tracingCfg := grpcmiddleware.DefaultTracingConfig("avapigw")
 	unaryInterceptors = append(unaryInterceptors, grpcmiddleware.UnaryTracingInterceptor(tracingCfg))
 	streamInterceptors = append(streamInterceptors, grpcmiddleware.StreamTracingInterceptor(tracingCfg))
+
+	// Audit interceptor (after Tracing so trace context is available)
+	if l.auditLogger != nil {
+		unaryInterceptors = append(unaryInterceptors, grpcmiddleware.UnaryAuditInterceptor(l.auditLogger))
+		streamInterceptors = append(streamInterceptors, grpcmiddleware.StreamAuditInterceptor(l.auditLogger))
+	}
+
+	// Rate limit interceptor (after Audit)
+	if l.rateLimiter != nil {
+		unaryInterceptors = append(unaryInterceptors, grpcmiddleware.UnaryRateLimitInterceptor(l.rateLimiter))
+		streamInterceptors = append(streamInterceptors, grpcmiddleware.StreamRateLimitInterceptor(l.rateLimiter))
+	}
+
+	// Circuit breaker interceptor (after Rate limit)
+	if l.circuitBreaker != nil {
+		unaryInterceptors = append(unaryInterceptors,
+			grpcmiddleware.UnaryCircuitBreakerInterceptor(l.circuitBreaker))
+		streamInterceptors = append(streamInterceptors,
+			grpcmiddleware.StreamCircuitBreakerInterceptor(l.circuitBreaker))
+	}
 
 	return unaryInterceptors, streamInterceptors
 }

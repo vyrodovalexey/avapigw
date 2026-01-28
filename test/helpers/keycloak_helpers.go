@@ -103,13 +103,20 @@ func GetKeycloakTestConfig() KeycloakTestConfig {
 // IsKeycloakAvailable checks if Keycloak is available.
 func IsKeycloakAvailable() bool {
 	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Try the primary health endpoint first
 	resp, err := client.Get(GetKeycloakAddr() + "/health/ready")
-	if err != nil {
-		// Try alternative health endpoint
-		resp, err = client.Get(GetKeycloakAddr() + "/realms/master")
-		if err != nil {
-			return false
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return true
 		}
+	}
+
+	// Fallback: try the realm endpoint (works on all Keycloak versions)
+	resp, err = client.Get(GetKeycloakAddr() + "/realms/master")
+	if err != nil {
+		return false
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
@@ -120,6 +127,27 @@ func SkipIfKeycloakUnavailable(t *testing.T) {
 	if !IsKeycloakAvailable() {
 		t.Skip("Keycloak not available at", GetKeycloakAddr(), "- skipping test")
 	}
+}
+
+// keycloakAdminTransport is an http.RoundTripper that adds X-Forwarded-Proto: https
+// to admin and master realm requests. Keycloak 24+ enforces HTTPS on the master
+// realm by default, even in dev mode. This header tells Keycloak the request was
+// forwarded from an HTTPS proxy, satisfying the SSL requirement.
+// Non-admin requests (e.g., token requests on test realms with sslRequired=none)
+// are sent without the header to avoid issuer URL mismatch in tokens.
+type keycloakAdminTransport struct {
+	base http.RoundTripper
+}
+
+func (t *keycloakAdminTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	path := req.URL.Path
+	needsForwarded := strings.Contains(path, "/admin/") ||
+		strings.Contains(path, "/realms/master/")
+	if needsForwarded {
+		req = req.Clone(req.Context())
+		req.Header.Set("X-Forwarded-Proto", "https")
+	}
+	return t.base.RoundTrip(req)
 }
 
 // KeycloakClient provides methods to interact with Keycloak for testing.
@@ -135,6 +163,9 @@ func NewKeycloakClient(baseURL string) *KeycloakClient {
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			Transport: &keycloakAdminTransport{
+				base: http.DefaultTransport,
+			},
 		},
 	}
 }
@@ -182,8 +213,9 @@ func (c *KeycloakClient) CreateRealm(ctx context.Context, realmName string) erro
 	realmURL := fmt.Sprintf("%s/admin/realms", c.baseURL)
 
 	realmData := map[string]interface{}{
-		"realm":   realmName,
-		"enabled": true,
+		"realm":       realmName,
+		"enabled":     true,
+		"sslRequired": "none",
 	}
 
 	body, err := json.Marshal(realmData)
@@ -510,9 +542,14 @@ func SetupKeycloakForTesting(t *testing.T) *KeycloakTestSetup {
 
 	for _, user := range testUsers {
 		userConfig := map[string]interface{}{
-			"username":    user.Username,
-			"enabled":     true,
-			"credentials": []map[string]interface{}{{"type": "password", "value": user.Password, "temporary": false}},
+			"username":        user.Username,
+			"enabled":         true,
+			"emailVerified":   true,
+			"email":           user.Username + "@test.local",
+			"firstName":       user.Username,
+			"lastName":        "TestUser",
+			"requiredActions": []string{},
+			"credentials":     []map[string]interface{}{{"type": "password", "value": user.Password, "temporary": false}},
 		}
 		if err := client.CreateUser(ctx, cfg.Realm, userConfig); err != nil {
 			t.Logf("Warning: Failed to create user %s (may already exist): %v", user.Username, err)

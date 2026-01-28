@@ -511,6 +511,23 @@ ERROR: failed to load route certificate: open /app/certs/routes/tenant-a/tls.crt
 3. Ensure certificate paths match in route configuration
 4. Verify secret contains `tls.crt` and `tls.key` keys
 
+#### TLS Version Deprecation Warnings
+**Problem**: Warnings about deprecated TLS versions
+```
+WARN: TLS version TLS10 is deprecated (RFC 8996), use TLS12 or TLS13
+WARN: TLS version TLS11 is deprecated (RFC 8996), use TLS12 or TLS13
+```
+
+**Solutions**:
+1. Update TLS configuration to use TLS 1.2 or higher:
+   ```yaml
+   tls:
+     minVersion: "1.2"  # Use TLS 1.2 minimum
+     maxVersion: "1.3"  # Prefer TLS 1.3
+   ```
+2. Use the `ValidateConfigWithWarnings()` API to detect these issues early
+3. Plan migration away from legacy TLS versions for security compliance
+
 #### SNI Mismatch
 **Problem**: Wrong certificate served for hostname
 ```

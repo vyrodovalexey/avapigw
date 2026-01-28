@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -758,6 +759,100 @@ func TestLogger_LogEvent_NilMetadata(t *testing.T) {
 
 	// Should not panic with nil metadata
 	assert.NotEmpty(t, buf.String())
+
+	_ = logger.Close()
+}
+
+func TestExtractTraceID_WithValidSpanContext(t *testing.T) {
+	t.Parallel()
+
+	// Create a valid SpanContext with a known TraceID and SpanID
+	traceID := trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
+	spanID := trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	})
+
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	// Test extractTraceID
+	gotTraceID := extractTraceID(ctx)
+	assert.NotEmpty(t, gotTraceID)
+	assert.Equal(t, traceID.String(), gotTraceID)
+
+	// Test extractSpanID
+	gotSpanID := extractSpanID(ctx)
+	assert.NotEmpty(t, gotSpanID)
+	assert.Equal(t, spanID.String(), gotSpanID)
+}
+
+func TestExtractTraceID_EmptyContext(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	gotTraceID := extractTraceID(ctx)
+	assert.Empty(t, gotTraceID)
+
+	gotSpanID := extractSpanID(ctx)
+	assert.Empty(t, gotSpanID)
+}
+
+func TestExtractTraceID_InvalidSpanContext(t *testing.T) {
+	t.Parallel()
+
+	// SpanContext with zero TraceID and SpanID
+	sc := trace.NewSpanContext(trace.SpanContextConfig{})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	gotTraceID := extractTraceID(ctx)
+	assert.Empty(t, gotTraceID, "zero TraceID should return empty string")
+
+	gotSpanID := extractSpanID(ctx)
+	assert.Empty(t, gotSpanID, "zero SpanID should return empty string")
+}
+
+func TestLogEvent_InjectsTraceContext(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	config := &Config{
+		Enabled: true,
+		Format:  "json",
+		Events: &EventsConfig{
+			Authentication: true,
+		},
+	}
+
+	logger, err := NewLogger(config, WithLoggerWriter(&buf), WithLoggerMetrics(newNoopMetrics()))
+	require.NoError(t, err)
+
+	// Create a context with OTel span context
+	traceID := trace.TraceID{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11,
+		0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99}
+	spanID := trace.SpanID{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	// Create event without TraceID/SpanID - they should be injected from context
+	event := NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	logger.LogEvent(ctx, event)
+
+	var output map[string]interface{}
+	err = json.Unmarshal(buf.Bytes(), &output)
+	require.NoError(t, err)
+
+	assert.Equal(t, traceID.String(), output["trace_id"])
+	assert.Equal(t, spanID.String(), output["span_id"])
 
 	_ = logger.Close()
 }

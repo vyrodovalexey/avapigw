@@ -540,6 +540,48 @@ func TestMaxSessionsLimiter_AcquireAfterStop(t *testing.T) {
 	}
 }
 
+func TestMaxSessionsLimiter_ConcurrentUpdateConfig(t *testing.T) {
+	maxConcurrent := 10
+	msl := NewMaxSessionsLimiter(maxConcurrent, 0, 0, WithMaxSessionsLogger(observability.NopLogger()))
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+
+	// Start goroutines that acquire and release
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if msl.Acquire(ctx) {
+					time.Sleep(time.Millisecond)
+					msl.Release()
+				}
+			}
+		}()
+	}
+
+	// Concurrently update config
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			time.Sleep(time.Duration(idx) * time.Millisecond)
+			msl.UpdateConfig(&config.MaxSessionsConfig{
+				Enabled:       true,
+				MaxConcurrent: 5 + idx,
+			})
+		}(i)
+	}
+
+	wg.Wait()
+
+	// After all goroutines complete, current should be 0
+	if msl.Current() != 0 {
+		t.Errorf("expected current 0 after all releases, got %d", msl.Current())
+	}
+}
+
 func TestMaxSessionsLimiter_ConcurrentAcquireRelease(t *testing.T) {
 	maxConcurrent := 10
 	msl := NewMaxSessionsLimiter(maxConcurrent, 0, 0)

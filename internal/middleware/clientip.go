@@ -134,3 +134,10 @@ func SetGlobalIPExtractor(e *ClientIPExtractor) {
 		globalExtractor = e
 	}
 }
+
+// GetClientIP returns the real client IP for the given request using the
+// global ClientIPExtractor. It is safe for use by other packages that
+// need secure client IP extraction without direct access to the extractor.
+func GetClientIP(r *http.Request) string {
+	return globalExtractor.Extract(r)
+}

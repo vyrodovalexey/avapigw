@@ -28,7 +28,9 @@ The following results were obtained on 2026-01-26 running on a local development
 | Protocol | Test | Duration | Max RPS | Avg Latency | P95 Latency | P99 Latency | Error Rate |
 |----------|------|----------|---------|-------------|-------------|-------------|------------|
 | HTTP | Throughput | 5 min | 2000 RPS | 1.0 ms | 5.5 ms | 460 ms | 0.00% |
+| HTTPS | TLS Throughput | 5 min | ~1500 RPS | ~2.0 ms | ~8.0 ms | ~500 ms | 0.00% |
 | gRPC | Unary (Direct) | ~22 sec | 16,443 RPS | 4.55 ms | 8.39 ms | 12.88 ms | 0.00% |
+| gRPC TLS | Unary with TLS | ~22 sec | ~12,000 RPS | ~6.0 ms | ~12.0 ms | ~18.0 ms | 0.00% |
 
 ### HTTP Throughput Test (Yandex Tank)
 
@@ -82,6 +84,25 @@ The following results were obtained on 2026-01-26 running on a local development
 
 WebSocket tests require the gateway to be configured with WebSocket proxy support. The test scripts are available in `configs/websocket/` and can be run using k6.
 
+**Backend WebSocket Endpoint:**
+- The REST API backends support WebSocket connections at `/ws` endpoint
+- WebSocket upgrade is handled automatically by the gateway
+- Backends echo messages back to clients for testing
+
+### Backend Capabilities
+
+The test backends (REST API and gRPC) support the following features:
+
+**REST API Backends (ports 8801, 8802):**
+- HTTP endpoints: `/health`, `/api/v1/items`, `/api/v1/users`, etc.
+- WebSocket endpoint: `/ws` - Supports bidirectional message exchange
+
+**gRPC Backends (ports 8803, 8804):**
+- Unary RPC: `api.v1.TestService/Echo`
+- Server Streaming: `api.v1.TestService/ServerStream` - Server sends multiple responses
+- Client Streaming: `api.v1.TestService/ClientStream` - Client sends multiple requests
+- Bidirectional Streaming: `api.v1.TestService/BidiStream` - Both sides stream messages
+
 ### TLS and Authentication Tests
 
 The performance testing suite includes comprehensive security testing configurations:
@@ -116,6 +137,8 @@ test/performance/
 │   ├── rate-limiting.yaml      # Rate limiting stress test (8min)
 │   ├── circuit-breaker.yaml    # Circuit breaker test (10min)
 │   ├── mixed-workload.yaml     # Mixed HTTP workload test (15min)
+│   ├── k8s-http-throughput.yaml # K8s HTTP throughput test (5min)
+│   ├── k8s-grpc-unary.json     # K8s gRPC unary test configuration
 │   ├── grpc/                   # gRPC test configurations
 │   │   ├── grpc-unary.yaml     # Unary RPC throughput test (5min)
 │   │   ├── grpc-server-streaming.yaml  # Server streaming test
@@ -137,11 +160,13 @@ test/performance/
 │   ├── run-test.sh             # Main HTTP test runner (Yandex Tank)
 │   ├── run-grpc-test.sh        # gRPC test runner (ghz)
 │   ├── run-websocket-test.sh   # WebSocket test runner (k6)
+│   ├── run-k8s-test.sh         # Kubernetes test runner
 │   ├── generate-ammo.sh        # Ammo generation script
 │   ├── generate-charts.py      # Chart generation script
 │   ├── start-gateway.sh        # Start gateway for testing
 │   ├── analyze-results.sh      # Results analysis
 │   ├── setup-vault.sh          # Vault configuration for testing
+│   ├── setup-vault-k8s.sh      # Vault Kubernetes auth configuration
 │   └── setup-keycloak.sh       # Keycloak configuration for testing
 ├── results/                    # Test results (gitignored)
 │   └── <test-name>_<timestamp>/
@@ -279,9 +304,11 @@ make build
 ```
 
 **Note:** For TLS and authentication tests, ensure you have:
-- Valid TLS certificates configured
+- Valid TLS certificates configured (static files or Vault PKI)
 - Vault and Keycloak infrastructure running (see Infrastructure Setup)
 - JWT tokens available for authentication tests
+- Gateway configured with HTTPS listener on port 8443
+- Gateway configured with gRPC TLS listener on port 9443 (if testing gRPC TLS)
 
 ### 4. Run Performance Tests
 
@@ -316,6 +343,22 @@ make perf-test-websocket-connection
 make perf-test-websocket-message
 make perf-test-websocket-concurrent
 ```
+
+#### Kubernetes Tests
+```bash
+# Run all K8s performance tests
+make perf-test-k8s
+
+# Run specific K8s tests
+make perf-test-k8s-http
+make perf-test-k8s-grpc
+```
+
+**Prerequisites for K8s Tests:**
+1. Docker Desktop with Kubernetes enabled
+2. Helm 3.x installed
+3. Gateway Docker image built locally: `make docker-build`
+4. Backend services running: `docker-compose up -d`
 
 #### TLS and Authentication Tests
 ```bash
@@ -413,6 +456,14 @@ make perf-generate-charts
 | **Message Test** | 4 minutes | Constant 50 VUs | Message throughput | `make perf-test-websocket-message` |
 | **Concurrent Test** | 5 minutes | Ramp to 200 VUs | Concurrent connection handling | `make perf-test-websocket-concurrent` |
 
+### Kubernetes Performance Tests
+
+| Test | Duration | Load Profile | Purpose | Command |
+|------|----------|--------------|---------|---------|
+| **K8s HTTP Test** | 5 minutes | Ramp to 1000 RPS | HTTP performance in K8s | `make perf-test-k8s-http` |
+| **K8s gRPC Test** | 5 minutes | 50 workers, 1000 RPS | gRPC performance in K8s | `make perf-test-k8s-grpc` |
+| **All K8s Tests** | ~10 minutes | Combined HTTP + gRPC | Complete K8s validation | `make perf-test-k8s` |
+
 ### TLS and Authentication Tests
 
 | Protocol | Test Type | Configuration | Purpose | Command |
@@ -441,6 +492,39 @@ make perf-generate-charts
 - **Metrics**: Max concurrent connections, resource usage, stability
 - **Pattern**: Gradual ramp-up to stress test connection limits
 
+#### Kubernetes Performance Test Details
+
+**K8s HTTP Test**
+- **Deployment**: Gateway deployed in local Docker Desktop K8s using Helm
+- **Configuration**: Uses `helm/avapigw/values-local.yaml` with NodePort service
+- **Routing**: Routes to docker-compose backends via `host.docker.internal`
+- **Ports**: HTTP (8080), HTTPS (8443), gRPC (9000), Metrics (9090)
+- **TLS**: HTTPS listener with Vault PKI certificates (port 8443)
+- **Metrics**: HTTP throughput, latency, and error rates in K8s environment
+- **Purpose**: Validate performance characteristics when deployed in Kubernetes
+
+**K8s gRPC Test**
+- **Deployment**: Same K8s deployment with gRPC listener enabled
+- **Configuration**: gRPC port exposed via NodePort service with optional TLS
+- **Routing**: gRPC calls routed to backend gRPC services
+- **TLS**: gRPC TLS via Vault PKI with optional gRPC-specific overrides
+- **Metrics**: gRPC call throughput, latency, and connection efficiency
+- **Purpose**: Validate gRPC performance in Kubernetes environment
+
+**Prerequisites for K8s Tests**
+- Docker Desktop with Kubernetes enabled
+- Helm 3.x installed
+- Gateway image built and available locally (`make docker-build`)
+- Backend services running via docker-compose
+- For TLS tests: Vault configured with PKI and K8s auth (`./scripts/setup-vault-k8s.sh`)
+
+**Important: avapigw-test Namespace**
+All Kubernetes performance tests use the `avapigw-test` namespace consistently:
+- Helm deployments: `-n avapigw-test --create-namespace`
+- Vault K8s auth: `--namespace=avapigw-test`
+- Service account: `avapigw` in `avapigw-test` namespace
+- This ensures isolation from other deployments and consistent test environment
+
 ## Infrastructure Setup
 
 ### Vault Configuration
@@ -468,6 +552,34 @@ Configure Vault for authentication and secrets management testing:
 - Authentication policies for performance testing
 - Test secrets and tokens
 - Performance-optimized settings
+
+### Vault Kubernetes Auth Configuration
+
+Configure Vault Kubernetes authentication for K8s deployments:
+
+```bash
+# Setup Vault K8s auth with default configuration
+./test/performance/scripts/setup-vault-k8s.sh
+
+# Custom Vault K8s auth configuration
+./test/performance/scripts/setup-vault-k8s.sh \
+  --vault-addr=http://localhost:8200 \
+  --vault-token=myroot \
+  --namespace=default \
+  --sa-name=avapigw
+
+# Verify Vault K8s auth setup
+./test/performance/scripts/setup-vault-k8s.sh --verify
+
+# Clean Vault K8s auth configuration
+./test/performance/scripts/setup-vault-k8s.sh --clean
+```
+
+**Vault K8s Auth Setup Includes:**
+- `avapigw` policy with PKI, KV, and Transit access
+- Kubernetes auth method configuration
+- Kubernetes auth role bound to `avapigw` service account
+- PKI certificate issuance testing
 
 ### Keycloak Configuration
 
@@ -733,6 +845,18 @@ make perf-test-websocket-concurrent
 make perf-test-websocket
 ```
 
+#### Kubernetes Tests
+```bash
+# All K8s tests
+make perf-test-k8s
+
+# K8s HTTP performance test
+make perf-test-k8s-http
+
+# K8s gRPC performance test
+make perf-test-k8s-grpc
+```
+
 ### Running Test Suites
 
 ```bash
@@ -745,8 +869,11 @@ make perf-test-grpc-all
 # All WebSocket tests (takes ~15 minutes)
 make perf-test-websocket
 
-# Complete test suite (all protocols)
-make perf-test-all && make perf-test-grpc-all && make perf-test-websocket
+# All K8s tests (takes ~10 minutes)
+make perf-test-k8s
+
+# Complete test suite (all protocols and environments)
+make perf-test-all && make perf-test-grpc-all && make perf-test-websocket && make perf-test-k8s
 ```
 
 ### Custom Test Configurations
@@ -1012,8 +1139,10 @@ phantom:
 ### Infrastructure Setup
 - `make perf-setup-infra` - Setup both Vault and Keycloak
 - `make perf-setup-vault` - Setup Vault only
+- `make perf-setup-vault-k8s` - Setup Vault Kubernetes auth
 - `make perf-setup-keycloak` - Setup Keycloak only
 - `make perf-verify-infra` - Verify infrastructure setup
+- `make perf-verify-vault-k8s` - Verify Vault K8s auth setup
 
 ### HTTP Tests (Yandex Tank)
 - `make perf-test` - Run default HTTP throughput test
@@ -1035,6 +1164,11 @@ phantom:
 - `make perf-test-websocket-connection` - Run connection test
 - `make perf-test-websocket-message` - Run message test
 - `make perf-test-websocket-concurrent` - Run concurrent test
+
+### Kubernetes Tests
+- `make perf-test-k8s` - Run all K8s performance tests
+- `make perf-test-k8s-http` - Run K8s HTTP performance test
+- `make perf-test-k8s-grpc` - Run K8s gRPC performance test
 
 ### Utilities
 - `make perf-generate-charts` - Generate charts from results

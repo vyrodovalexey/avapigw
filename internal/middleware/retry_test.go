@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -444,6 +445,139 @@ func TestRetryResponseWriter(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 4, n)
 	assert.Equal(t, "test", rw.body.String())
+}
+
+func TestRetry_ContextCancelledDuringBackoff(t *testing.T) {
+	t.Parallel()
+
+	cfg := RetryConfig{
+		Attempts:    3,
+		RetryOn:     []string{"5xx"},
+		BackoffBase: 5 * time.Second, // Long backoff to ensure context cancels first
+		BackoffMax:  10 * time.Second,
+	}
+	logger := observability.NopLogger()
+	middleware := Retry(cfg, logger)
+
+	callCount := 0
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	// Create a request with a context that will be cancelled quickly
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/test", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	// Cancel the context after a short delay (during backoff)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	handler.ServeHTTP(rec, req)
+
+	// Should have been called once (first attempt), then context cancelled during backoff
+	assert.Equal(t, 1, callCount, "should only be called once before context cancellation")
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+func TestMatchRetryCondition_Reset(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   int
+		expected bool
+	}{
+		{
+			name:     "reset matches 502",
+			status:   http.StatusBadGateway,
+			expected: true,
+		},
+		{
+			name:     "reset does not match 503",
+			status:   http.StatusServiceUnavailable,
+			expected: false,
+		},
+		{
+			name:     "reset does not match 500",
+			status:   http.StatusInternalServerError,
+			expected: false,
+		},
+		{
+			name:     "reset does not match 200",
+			status:   http.StatusOK,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := matchRetryCondition(tt.status, "reset")
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestMatchRetryCondition_ConnectFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   int
+		expected bool
+	}{
+		{
+			name:     "connect-failure matches 502",
+			status:   http.StatusBadGateway,
+			expected: true,
+		},
+		{
+			name:     "connect-failure matches 503",
+			status:   http.StatusServiceUnavailable,
+			expected: true,
+		},
+		{
+			name:     "connect-failure does not match 500",
+			status:   http.StatusInternalServerError,
+			expected: false,
+		},
+		{
+			name:     "connect-failure does not match 200",
+			status:   http.StatusOK,
+			expected: false,
+		},
+		{
+			name:     "connect-failure does not match 404",
+			status:   http.StatusNotFound,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := matchRetryCondition(tt.status, "connect-failure")
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestRetryResponseWriter_Flush(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	rw := &retryResponseWriter{
+		ResponseWriter: rec,
+		body:           &bytes.Buffer{},
+		status:         http.StatusOK,
+	}
+
+	// Flush should be a no-op and not panic
+	rw.Flush()
 }
 
 func TestRetryFromConfig(t *testing.T) {

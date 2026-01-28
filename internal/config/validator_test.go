@@ -1684,6 +1684,578 @@ func TestValidateRouteTLSConfig(t *testing.T) {
 	}
 }
 
+// ============================================================
+// MUST-04: Warnings() and addWarning() tests
+// ============================================================
+
+func TestValidator_Warnings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		addWarnings    []ValidationWarning
+		expectedLen    int
+		expectedFirst  *ValidationWarning
+		expectedSecond *ValidationWarning
+	}{
+		{
+			name:        "new validator has empty warnings",
+			addWarnings: nil,
+			expectedLen: 0,
+		},
+		{
+			name: "single warning",
+			addWarnings: []ValidationWarning{
+				{Path: "spec.backends[0].tls.minVersion", Message: "TLS10 is deprecated"},
+			},
+			expectedLen:   1,
+			expectedFirst: &ValidationWarning{Path: "spec.backends[0].tls.minVersion", Message: "TLS10 is deprecated"},
+		},
+		{
+			name: "multiple warnings accumulate",
+			addWarnings: []ValidationWarning{
+				{Path: "spec.backends[0].tls.minVersion", Message: "TLS10 is deprecated"},
+				{Path: "spec.backends[1].tls.maxVersion", Message: "TLS11 is deprecated"},
+			},
+			expectedLen:    2,
+			expectedFirst:  &ValidationWarning{Path: "spec.backends[0].tls.minVersion", Message: "TLS10 is deprecated"},
+			expectedSecond: &ValidationWarning{Path: "spec.backends[1].tls.maxVersion", Message: "TLS11 is deprecated"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			v := NewValidator()
+			assert.Empty(t, v.Warnings())
+
+			for _, w := range tt.addWarnings {
+				v.addWarning(w.Path, w.Message)
+			}
+
+			warnings := v.Warnings()
+			require.Len(t, warnings, tt.expectedLen)
+
+			if tt.expectedFirst != nil {
+				assert.Equal(t, tt.expectedFirst.Path, warnings[0].Path)
+				assert.Equal(t, tt.expectedFirst.Message, warnings[0].Message)
+			}
+			if tt.expectedSecond != nil {
+				assert.Equal(t, tt.expectedSecond.Path, warnings[1].Path)
+				assert.Equal(t, tt.expectedSecond.Message, warnings[1].Message)
+			}
+		})
+	}
+}
+
+// ============================================================
+// MUST-01: Backend TLS Validator Functions tests
+// ============================================================
+
+func TestValidator_ValidateBackendTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	baseConfig := func(tls *BackendTLSConfig) *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test"},
+			Spec: GatewaySpec{
+				Listeners: []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+				Backends: []Backend{
+					{
+						Name:  "backend-with-tls",
+						Hosts: []BackendHost{{Address: "10.0.0.1", Port: 8080}},
+						TLS:   tls,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		tls     *BackendTLSConfig
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "nil TLS config - no errors",
+			tls:     nil,
+			wantErr: false,
+		},
+		{
+			name:    "valid SIMPLE mode",
+			tls:     &BackendTLSConfig{Mode: TLSModeSimple},
+			wantErr: false,
+		},
+		{
+			name: "valid MUTUAL mode with cert and key",
+			tls: &BackendTLSConfig{
+				Mode:     TLSModeMutual,
+				CertFile: "/path/to/cert.pem",
+				KeyFile:  "/path/to/key.pem",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "valid INSECURE mode",
+			tls:     &BackendTLSConfig{Mode: TLSModeInsecure},
+			wantErr: false,
+		},
+		{
+			name:    "invalid mode string",
+			tls:     &BackendTLSConfig{Mode: "INVALID_MODE"},
+			wantErr: true,
+			errMsg:  "invalid TLS mode",
+		},
+		{
+			name:    "MUTUAL mode without cert/key and without Vault",
+			tls:     &BackendTLSConfig{Mode: TLSModeMutual},
+			wantErr: true,
+			errMsg:  "certFile is required for MUTUAL TLS mode",
+		},
+		{
+			name: "MUTUAL mode without key file",
+			tls: &BackendTLSConfig{
+				Mode:     TLSModeMutual,
+				CertFile: "/path/to/cert.pem",
+			},
+			wantErr: true,
+			errMsg:  "keyFile is required for MUTUAL TLS mode",
+		},
+		{
+			name: "MUTUAL mode with Vault enabled - no cert/key required",
+			tls: &BackendTLSConfig{
+				Mode: TLSModeMutual,
+				Vault: &VaultBackendTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					Role:       "my-role",
+					CommonName: "backend.example.com",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid minVersion",
+			tls: &BackendTLSConfig{
+				MinVersion: "TLS99",
+			},
+			wantErr: true,
+			errMsg:  "invalid TLS version: TLS99",
+		},
+		{
+			name: "invalid maxVersion",
+			tls: &BackendTLSConfig{
+				MaxVersion: "TLS99",
+			},
+			wantErr: true,
+			errMsg:  "invalid TLS version: TLS99",
+		},
+		{
+			name: "valid TLS12 minVersion - no warning",
+			tls: &BackendTLSConfig{
+				MinVersion: "TLS12",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid TLS13 minVersion - no warning",
+			tls: &BackendTLSConfig{
+				MinVersion: "TLS13",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid TLS12 maxVersion - no warning",
+			tls: &BackendTLSConfig{
+				MaxVersion: "TLS12",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid TLS13 maxVersion - no warning",
+			tls: &BackendTLSConfig{
+				MaxVersion: "TLS13",
+			},
+			wantErr: false,
+		},
+		{
+			name: "Vault enabled missing pkiMount",
+			tls: &BackendTLSConfig{
+				Vault: &VaultBackendTLSConfig{
+					Enabled:    true,
+					Role:       "my-role",
+					CommonName: "backend.example.com",
+				},
+			},
+			wantErr: true,
+			errMsg:  "pkiMount is required",
+		},
+		{
+			name: "Vault enabled missing role",
+			tls: &BackendTLSConfig{
+				Vault: &VaultBackendTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					CommonName: "backend.example.com",
+				},
+			},
+			wantErr: true,
+			errMsg:  "role is required",
+		},
+		{
+			name: "Vault enabled missing commonName",
+			tls: &BackendTLSConfig{
+				Vault: &VaultBackendTLSConfig{
+					Enabled:  true,
+					PKIMount: "pki",
+					Role:     "my-role",
+				},
+			},
+			wantErr: true,
+			errMsg:  "commonName is required",
+		},
+		{
+			name: "valid Vault config",
+			tls: &BackendTLSConfig{
+				Vault: &VaultBackendTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					Role:       "my-role",
+					CommonName: "backend.example.com",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "Vault disabled - no validation",
+			tls: &BackendTLSConfig{
+				Vault: &VaultBackendTLSConfig{
+					Enabled: false,
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "empty mode - valid",
+			tls:     &BackendTLSConfig{Mode: ""},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateConfig(baseConfig(tt.tls))
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidator_ValidateBackendTLSVersions_DeprecationWarnings(t *testing.T) {
+	t.Parallel()
+
+	baseConfig := func(tls *BackendTLSConfig) *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test"},
+			Spec: GatewaySpec{
+				Listeners: []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+				Backends: []Backend{
+					{
+						Name:  "backend-with-tls",
+						Hosts: []BackendHost{{Address: "10.0.0.1", Port: 8080}},
+						TLS:   tls,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name           string
+		tls            *BackendTLSConfig
+		expectedWarns  int
+		warnContains   string
+		noWarnExpected bool
+	}{
+		{
+			name:          "TLS10 minVersion generates deprecation warning",
+			tls:           &BackendTLSConfig{MinVersion: "TLS10"},
+			expectedWarns: 1,
+			warnContains:  "deprecated",
+		},
+		{
+			name:          "TLS11 minVersion generates deprecation warning",
+			tls:           &BackendTLSConfig{MinVersion: "TLS11"},
+			expectedWarns: 1,
+			warnContains:  "deprecated",
+		},
+		{
+			name:          "TLS10 maxVersion generates deprecation warning",
+			tls:           &BackendTLSConfig{MaxVersion: "TLS10"},
+			expectedWarns: 1,
+			warnContains:  "deprecated",
+		},
+		{
+			name:          "TLS11 maxVersion generates deprecation warning",
+			tls:           &BackendTLSConfig{MaxVersion: "TLS11"},
+			expectedWarns: 1,
+			warnContains:  "deprecated",
+		},
+		{
+			name:           "TLS12 minVersion - no deprecation warning",
+			tls:            &BackendTLSConfig{MinVersion: "TLS12"},
+			noWarnExpected: true,
+		},
+		{
+			name:           "TLS13 minVersion - no deprecation warning",
+			tls:            &BackendTLSConfig{MinVersion: "TLS13"},
+			noWarnExpected: true,
+		},
+		{
+			name:           "TLS12 maxVersion - no deprecation warning",
+			tls:            &BackendTLSConfig{MaxVersion: "TLS12"},
+			noWarnExpected: true,
+		},
+		{
+			name:           "TLS13 maxVersion - no deprecation warning",
+			tls:            &BackendTLSConfig{MaxVersion: "TLS13"},
+			noWarnExpected: true,
+		},
+		{
+			name:          "both TLS10 min and TLS11 max - two warnings",
+			tls:           &BackendTLSConfig{MinVersion: "TLS10", MaxVersion: "TLS11"},
+			expectedWarns: 2,
+			warnContains:  "deprecated",
+		},
+		{
+			name:           "no version set - no warnings",
+			tls:            &BackendTLSConfig{},
+			noWarnExpected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			warnings, err := ValidateConfigWithWarnings(baseConfig(tt.tls))
+			assert.NoError(t, err)
+
+			if tt.noWarnExpected {
+				assert.Empty(t, warnings)
+			} else {
+				require.Len(t, warnings, tt.expectedWarns)
+				if tt.warnContains != "" {
+					assert.Contains(t, warnings[0].Message, tt.warnContains)
+				}
+			}
+		})
+	}
+}
+
+// ============================================================
+// MUST-02: ValidateConfigWithWarnings() tests
+// ============================================================
+
+func TestValidateConfigWithWarnings(t *testing.T) {
+	t.Parallel()
+
+	validConfig := func() *GatewayConfig {
+		return &GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   Metadata{Name: "test"},
+			Spec: GatewaySpec{
+				Listeners: []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+			},
+		}
+	}
+
+	validConfigWithBackendTLS := func(minVersion, maxVersion string) *GatewayConfig {
+		cfg := validConfig()
+		tls := &BackendTLSConfig{}
+		if minVersion != "" {
+			tls.MinVersion = minVersion
+		}
+		if maxVersion != "" {
+			tls.MaxVersion = maxVersion
+		}
+		cfg.Spec.Backends = []Backend{
+			{
+				Name:  "backend1",
+				Hosts: []BackendHost{{Address: "10.0.0.1", Port: 8080}},
+				TLS:   tls,
+			},
+		}
+		return cfg
+	}
+
+	tests := []struct {
+		name         string
+		config       *GatewayConfig
+		wantErr      bool
+		wantWarnings int
+		warnContains string
+	}{
+		{
+			name:         "valid config no warnings",
+			config:       validConfig(),
+			wantErr:      false,
+			wantWarnings: 0,
+		},
+		{
+			name:         "nil config returns error",
+			config:       nil,
+			wantErr:      true,
+			wantWarnings: 0,
+		},
+		{
+			name:         "config with TLS10 backend returns deprecation warning",
+			config:       validConfigWithBackendTLS("TLS10", ""),
+			wantErr:      false,
+			wantWarnings: 1,
+			warnContains: "deprecated",
+		},
+		{
+			name:         "config with TLS11 backend returns deprecation warning",
+			config:       validConfigWithBackendTLS("TLS11", ""),
+			wantErr:      false,
+			wantWarnings: 1,
+			warnContains: "deprecated",
+		},
+		{
+			name:         "config with TLS12 backend returns no deprecation warning",
+			config:       validConfigWithBackendTLS("TLS12", ""),
+			wantErr:      false,
+			wantWarnings: 0,
+		},
+		{
+			name:         "config with TLS13 backend returns no deprecation warning",
+			config:       validConfigWithBackendTLS("TLS13", ""),
+			wantErr:      false,
+			wantWarnings: 0,
+		},
+		{
+			name:         "config with TLS10 min and TLS11 max returns two warnings",
+			config:       validConfigWithBackendTLS("TLS10", "TLS11"),
+			wantErr:      false,
+			wantWarnings: 2,
+			warnContains: "deprecated",
+		},
+		{
+			name: "config with multiple backends with deprecated TLS",
+			config: func() *GatewayConfig {
+				cfg := validConfig()
+				cfg.Spec.Backends = []Backend{
+					{
+						Name:  "backend1",
+						Hosts: []BackendHost{{Address: "10.0.0.1", Port: 8080}},
+						TLS:   &BackendTLSConfig{MinVersion: "TLS10"},
+					},
+					{
+						Name:  "backend2",
+						Hosts: []BackendHost{{Address: "10.0.0.2", Port: 8080}},
+						TLS:   &BackendTLSConfig{MinVersion: "TLS11"},
+					},
+				}
+				return cfg
+			}(),
+			wantErr:      false,
+			wantWarnings: 2,
+			warnContains: "deprecated",
+		},
+		{
+			name: "invalid config returns errors and warnings may be present",
+			config: &GatewayConfig{
+				APIVersion: "gateway.avapigw.io/v1",
+				Kind:       "Gateway",
+				Metadata:   Metadata{Name: "test"},
+				Spec: GatewaySpec{
+					Listeners: []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+					Backends: []Backend{
+						{
+							Name:  "backend1",
+							Hosts: []BackendHost{{Address: "10.0.0.1", Port: 8080}},
+							TLS: &BackendTLSConfig{
+								Mode:       "INVALID_MODE",
+								MinVersion: "TLS10",
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			// Warnings may or may not be present depending on validation order
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			warnings, err := ValidateConfigWithWarnings(tt.config)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			if tt.wantWarnings > 0 {
+				require.Len(t, warnings, tt.wantWarnings)
+				if tt.warnContains != "" {
+					assert.Contains(t, warnings[0].Message, tt.warnContains)
+				}
+			} else if !tt.wantErr {
+				assert.Empty(t, warnings)
+			}
+		})
+	}
+}
+
+func TestValidateConfigWithWarnings_WarningFields(t *testing.T) {
+	t.Parallel()
+
+	cfg := &GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   Metadata{Name: "test"},
+		Spec: GatewaySpec{
+			Listeners: []Listener{{Name: "http", Port: 8080, Protocol: "HTTP"}},
+			Backends: []Backend{
+				{
+					Name:  "backend1",
+					Hosts: []BackendHost{{Address: "10.0.0.1", Port: 8080}},
+					TLS:   &BackendTLSConfig{MinVersion: "TLS10"},
+				},
+			},
+		},
+	}
+
+	warnings, err := ValidateConfigWithWarnings(cfg)
+	assert.NoError(t, err)
+	require.Len(t, warnings, 1)
+
+	// Verify warning has correct Path and Message
+	assert.Equal(t, "spec.backends[0].tls.minVersion", warnings[0].Path)
+	assert.Contains(t, warnings[0].Message, "TLS10")
+	assert.Contains(t, warnings[0].Message, "deprecated")
+	assert.Contains(t, warnings[0].Message, "RFC 8996")
+}
+
 func TestValidateGRPCRouteTLSConfig(t *testing.T) {
 	t.Parallel()
 

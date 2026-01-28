@@ -121,7 +121,65 @@ spec:
           enabled: true
           maxAge: 31536000
           includeSubDomains: true
+
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      hosts: ["*"]
+      grpc:
+        maxConcurrentStreams: 100
+        reflection: true
+        healthCheck: true
+      tls:
+        mode: SIMPLE
+        minVersion: "1.2"
+        vault:
+          enabled: true
+          pkiMount: pki
+          role: gateway-server
+          commonName: grpc.example.com
+          altNames:
+            - grpc-api.example.com
+          ttl: 24h
 ```
+
+### gRPC TLS with Vault PKI
+
+The gateway supports dedicated gRPC TLS configuration with optional Vault PKI overrides:
+
+```yaml
+spec:
+  listeners:
+    - name: grpc-secure
+      port: 9443  # Dedicated TLS port for gRPC
+      protocol: GRPC
+      hosts: ["*"]
+      grpc:
+        maxConcurrentStreams: 100
+        reflection: true
+        healthCheck: true
+        # gRPC-specific TLS configuration
+        tls:
+          enabled: true
+          mode: SIMPLE
+          minVersion: "1.3"  # Enforce TLS 1.3 for gRPC
+          vault:
+            enabled: true
+            pkiMount: pki-grpc
+            role: grpc-server
+            commonName: grpc.secure.example.com
+            altNames:
+              - "*.grpc.example.com"
+            ttl: 12h
+            renewBefore: 30m
+```
+
+**Important Notes:**
+- gRPC TLS configuration does NOT support hot-reload
+- Changes to gRPC TLS settings require a full gateway restart
+- This is a documented limitation due to the stateful nature of gRPC connections
+- gRPC TLS uses a dedicated port (default: 9443) separate from plaintext gRPC (9000)
+- The gateway logs a warning when gRPC listener runs without TLS in production
 
 ### Route-Level TLS with Vault PKI
 
@@ -548,6 +606,21 @@ ERROR: no certificate found for SNI hostname: tenant-a.example.com
 - Ensure route-level TLS configuration is correct
 - Test certificate issuance manually
 
+#### 5. gRPC TLS Configuration Issues
+
+**Symptoms:**
+```
+ERROR: gRPC TLS listener failed to start
+WARN: gRPC listener running without TLS in production
+```
+
+**Solutions:**
+- Verify gRPC TLS port (9443) is not in use by other services
+- Check gRPC TLS certificate configuration in Vault PKI
+- Ensure gRPC TLS is enabled in listener configuration
+- Restart gateway after gRPC TLS configuration changes (hot-reload not supported)
+- For production, always enable TLS for gRPC listeners
+
 ### Debugging Commands
 
 ```bash
@@ -565,6 +638,13 @@ openssl x509 -in certificate.pem -text -noout
 # Test SNI with specific hostname
 openssl s_client -connect gateway.example.com:8443 \
     -servername tenant-a.example.com
+
+# Test gRPC TLS connection
+grpcurl -insecure localhost:9443 list
+grpcurl -insecure localhost:9443 grpc.health.v1.Health/Check
+
+# Check gRPC TLS certificate
+openssl s_client -connect localhost:9443 -servername grpc.example.com
 
 # Check gateway certificate metrics
 curl http://localhost:9090/metrics | grep gateway_tls_certificate

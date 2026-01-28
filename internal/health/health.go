@@ -3,12 +3,13 @@ package health
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 // Status represents the health status.
@@ -57,17 +58,25 @@ type Checker struct {
 	startTime time.Time
 	checks    map[string]CheckFunc
 	mu        sync.RWMutex
+	logger    observability.Logger
 }
 
 // CheckFunc is a function that performs a health check.
 type CheckFunc func() Check
 
+// jsonMarshalFunc is the function used to marshal JSON responses.
+// It defaults to json.Marshal but can be overridden in tests.
+var jsonMarshalFunc = json.Marshal
+
 // NewChecker creates a new health checker.
-func NewChecker(version string) *Checker {
+// The logger parameter provides structured logging; pass
+// observability.NopLogger() when no logging is needed.
+func NewChecker(version string, logger observability.Logger) *Checker {
 	return &Checker{
 		version:   version,
 		startTime: time.Now(),
 		checks:    make(map[string]CheckFunc),
+		logger:    logger,
 	}
 }
 
@@ -140,9 +149,9 @@ func (c *Checker) HealthHandler() http.HandlerFunc {
 		response := c.Health()
 
 		// Pre-encode the response to catch errors before writing headers
-		data, err := json.Marshal(response)
+		data, err := jsonMarshalFunc(response)
 		if err != nil {
-			log.Printf("health: failed to encode response: %v", err)
+			c.logger.Error("health: failed to encode response", observability.Error(err))
 			http.Error(w, "failed to encode response", http.StatusInternalServerError)
 			return
 		}
@@ -152,7 +161,7 @@ func (c *Checker) HealthHandler() http.HandlerFunc {
 
 		if _, err := w.Write(data); err != nil {
 			// Headers already sent, can only log the error
-			log.Printf("health: failed to write response: %v", err)
+			c.logger.Error("health: failed to write response", observability.Error(err))
 		}
 	}
 }
@@ -163,9 +172,9 @@ func (c *Checker) ReadinessHandler() http.HandlerFunc {
 		response := c.Readiness()
 
 		// Pre-encode the response to catch errors before writing headers
-		data, err := json.Marshal(response)
+		data, err := jsonMarshalFunc(response)
 		if err != nil {
-			log.Printf("readiness: failed to encode response: %v", err)
+			c.logger.Error("readiness: failed to encode response", observability.Error(err))
 			http.Error(w, "failed to encode response", http.StatusInternalServerError)
 			return
 		}
@@ -180,7 +189,7 @@ func (c *Checker) ReadinessHandler() http.HandlerFunc {
 
 		if _, err := w.Write(data); err != nil {
 			// Headers already sent, can only log the error
-			log.Printf("readiness: failed to write response: %v", err)
+			c.logger.Error("readiness: failed to write response", observability.Error(err))
 		}
 	}
 }

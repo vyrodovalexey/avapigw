@@ -2,13 +2,7 @@
 {"name":"Test Item 1","description":"Performance test item","price":99.99,"quantity":10,"category":"test"}
 121 /api/v1/items
 {"name":"Test Item 2","description":"Another performance test item","price":149.99,"quantity":5,"category":"electronics"}
-99 /api/v1/echo
-{"message":"Hello from performance test","timestamp":"2024-01-01T00:00:00Z","data":{"key":"value"}}
-127 /api/v1/users
-{"username":"perftest_user_1","email":"perftest1@example.com","firstName":"Perf","lastName":"Test","role":"user","active":true}
-130 /api/v1/users
-{"username":"perftest_user_2","email":"perftest2@example.com","firstName":"Load","lastName":"Tester","role":"admin","active":true}
-89 /api/v1/orders
-{"userId":1,"items":[{"itemId":1,"quantity":2},{"itemId":2,"quantity":1}],"total":349.97}
-108 /api/v1/orders
-{"userId":2,"items":[{"itemId":3,"quantity":5},{"itemId":1,"quantity":3}],"total":799.92,"status":"pending"}
+107 /api/v1/items
+{"name":"Test Item 3","description":"Load test item","price":29.99,"quantity":100,"category":"performance"}
+115 /api/v1/items
+{"name":"Test Item 4","description":"Stress test item for gateway","price":199.99,"quantity":3,"category":"stress"}

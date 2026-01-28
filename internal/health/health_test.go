@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 func TestStatus_Constants(t *testing.T) {
@@ -22,7 +24,7 @@ func TestStatus_Constants(t *testing.T) {
 func TestNewChecker(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	assert.NotNil(t, checker)
 	assert.Equal(t, "1.0.0", checker.version)
@@ -33,7 +35,7 @@ func TestNewChecker(t *testing.T) {
 func TestChecker_RegisterCheck(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusHealthy}
@@ -49,7 +51,7 @@ func TestChecker_RegisterCheck(t *testing.T) {
 func TestChecker_UnregisterCheck(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusHealthy}
@@ -67,7 +69,7 @@ func TestChecker_UnregisterCheck(t *testing.T) {
 func TestChecker_Health(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	response := checker.Health()
 
@@ -80,7 +82,7 @@ func TestChecker_Health(t *testing.T) {
 func TestChecker_Readiness_NoChecks(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	response := checker.Readiness()
 
@@ -92,7 +94,7 @@ func TestChecker_Readiness_NoChecks(t *testing.T) {
 func TestChecker_Readiness_AllHealthy(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusHealthy, Message: "connected"}
@@ -112,7 +114,7 @@ func TestChecker_Readiness_AllHealthy(t *testing.T) {
 func TestChecker_Readiness_OneUnhealthy(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusHealthy}
@@ -130,7 +132,7 @@ func TestChecker_Readiness_OneUnhealthy(t *testing.T) {
 func TestChecker_Readiness_OneDegraded(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusHealthy}
@@ -147,7 +149,7 @@ func TestChecker_Readiness_OneDegraded(t *testing.T) {
 func TestChecker_Readiness_UnhealthyOverridesDegraded(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusDegraded}
@@ -164,7 +166,7 @@ func TestChecker_Readiness_UnhealthyOverridesDegraded(t *testing.T) {
 func TestChecker_HealthHandler(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.HealthHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -186,7 +188,7 @@ func TestChecker_HealthHandler(t *testing.T) {
 func TestChecker_ReadinessHandler_Healthy(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusHealthy}
 	})
@@ -211,7 +213,7 @@ func TestChecker_ReadinessHandler_Healthy(t *testing.T) {
 func TestChecker_ReadinessHandler_Unhealthy(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	checker.RegisterCheck("database", func() Check {
 		return Check{Status: StatusUnhealthy, Message: "connection failed"}
 	})
@@ -235,7 +237,7 @@ func TestChecker_ReadinessHandler_Unhealthy(t *testing.T) {
 func TestChecker_LivenessHandler(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.LivenessHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/live", nil)
@@ -251,7 +253,7 @@ func TestChecker_LivenessHandler(t *testing.T) {
 func TestNewHandler(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := NewHandler(checker)
 
 	assert.NotNil(t, handler)
@@ -261,7 +263,7 @@ func TestNewHandler(t *testing.T) {
 func TestHandler_Health(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := NewHandler(checker)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -275,7 +277,7 @@ func TestHandler_Health(t *testing.T) {
 func TestHandler_Readiness(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := NewHandler(checker)
 
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -289,7 +291,7 @@ func TestHandler_Readiness(t *testing.T) {
 func TestHandler_Liveness(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := NewHandler(checker)
 
 	req := httptest.NewRequest(http.MethodGet, "/live", nil)
@@ -303,7 +305,7 @@ func TestHandler_Liveness(t *testing.T) {
 func TestChecker_Uptime(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	// Wait a bit
 	time.Sleep(10 * time.Millisecond)

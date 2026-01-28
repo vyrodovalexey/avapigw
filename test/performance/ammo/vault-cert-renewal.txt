@@ -5,13 +5,11 @@
 [X-Perf-Test: vault-cert-renewal]
 /health
 /health
-/api/v1/simple
-/api/v1/simple
-/api/v1/simple
 /api/v1/items
-/api/v1/items/1
-/api/v1/items/2
-/api/v1/users
-/api/v1/users/1
-/api/v1/orders
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
 /backend/health

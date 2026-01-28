@@ -18,7 +18,7 @@
 //
 // Create a health checker and register checks:
 //
-//	checker := health.NewChecker(version)
+//	checker := health.NewChecker(version, logger)
 //
 //	checker.RegisterCheck("database", func() health.Check {
 //	    return health.Check{

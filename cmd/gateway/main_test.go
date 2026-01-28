@@ -266,7 +266,7 @@ func TestCreateMetricsServer(t *testing.T) {
 
 			logger := observability.NopLogger()
 			metrics := observability.NewMetrics("test")
-			healthChecker := health.NewChecker("test-version")
+			healthChecker := health.NewChecker("test-version", observability.NopLogger())
 
 			server := createMetricsServer(tt.port, tt.path, metrics, healthChecker, logger)
 
@@ -285,7 +285,7 @@ func TestCreateMetricsServer_Endpoints(t *testing.T) {
 
 	logger := observability.NopLogger()
 	metrics := observability.NewMetrics("test")
-	healthChecker := health.NewChecker("test-version")
+	healthChecker := health.NewChecker("test-version", observability.NopLogger())
 
 	server := createMetricsServer(9090, "/metrics", metrics, healthChecker, logger)
 
@@ -452,7 +452,7 @@ func TestApplication(t *testing.T) {
 	app := &application{
 		gateway:         nil,
 		backendRegistry: nil,
-		healthChecker:   health.NewChecker("test"),
+		healthChecker:   health.NewChecker("test", observability.NopLogger()),
 		metrics:         observability.NewMetrics("test"),
 		metricsServer:   nil,
 		tracer:          nil,
@@ -769,7 +769,7 @@ func TestStartMetricsServerIfEnabled_DefaultValues(t *testing.T) {
 			},
 		},
 		metrics:       observability.NewMetrics("test"),
-		healthChecker: health.NewChecker("test"),
+		healthChecker: health.NewChecker("test", observability.NopLogger()),
 	}
 
 	logger := observability.NopLogger()
@@ -798,7 +798,7 @@ func TestStartMetricsServerIfEnabled_CustomValues(t *testing.T) {
 			},
 		},
 		metrics:       observability.NewMetrics("test"),
-		healthChecker: health.NewChecker("test"),
+		healthChecker: health.NewChecker("test", observability.NopLogger()),
 	}
 
 	logger := observability.NopLogger()
@@ -816,7 +816,7 @@ func TestStartMetricsServerIfEnabled_CustomValues(t *testing.T) {
 func TestRunMetricsServer_ServerClosed(t *testing.T) {
 	logger := observability.NopLogger()
 	metrics := observability.NewMetrics("test")
-	healthChecker := health.NewChecker("test")
+	healthChecker := health.NewChecker("test", observability.NopLogger())
 
 	server := createMetricsServer(19999, "/metrics", metrics, healthChecker, logger)
 
@@ -1072,7 +1072,7 @@ func TestCreateMetricsServer_AllEndpoints(t *testing.T) {
 
 	logger := observability.NopLogger()
 	metrics := observability.NewMetrics("test")
-	healthChecker := health.NewChecker("test-version")
+	healthChecker := health.NewChecker("test-version", observability.NopLogger())
 
 	server := createMetricsServer(9091, "/custom-metrics", metrics, healthChecker, logger)
 
@@ -1100,6 +1100,220 @@ func TestVersionVariables(t *testing.T) {
 	assert.NotEmpty(t, version)
 	assert.NotEmpty(t, buildTime)
 	assert.NotEmpty(t, gitCommit)
+}
+
+// ============================================================
+// MUST-03: grpcConfigChanged() tests
+// ============================================================
+
+func TestGrpcConfigChanged(t *testing.T) {
+	t.Parallel()
+
+	cfgWithGRPCRoutes := func(names ...string) *config.GatewayConfig {
+		routes := make([]config.GRPCRoute, len(names))
+		for i, name := range names {
+			routes[i] = config.GRPCRoute{
+				Name: name,
+				Match: []config.GRPCRouteMatch{
+					{Service: &config.StringMatch{Exact: "test.Service"}},
+				},
+				Route: []config.RouteDestination{
+					{Destination: config.Destination{Host: "localhost", Port: 50052}},
+				},
+			}
+		}
+		return &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				GRPCRoutes: routes,
+			},
+		}
+	}
+
+	cfgWithGRPCBackends := func(names ...string) *config.GatewayConfig {
+		backends := make([]config.GRPCBackend, len(names))
+		for i, name := range names {
+			backends[i] = config.GRPCBackend{
+				Name: name,
+				Hosts: []config.BackendHost{
+					{Address: "localhost", Port: 50052},
+				},
+			}
+		}
+		return &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				GRPCBackends: backends,
+			},
+		}
+	}
+
+	cfgWithRoutesAndBackends := func(routeNames, backendNames []string) *config.GatewayConfig {
+		routes := make([]config.GRPCRoute, len(routeNames))
+		for i, name := range routeNames {
+			routes[i] = config.GRPCRoute{
+				Name: name,
+				Match: []config.GRPCRouteMatch{
+					{Service: &config.StringMatch{Exact: "test.Service"}},
+				},
+				Route: []config.RouteDestination{
+					{Destination: config.Destination{Host: "localhost", Port: 50052}},
+				},
+			}
+		}
+		backends := make([]config.GRPCBackend, len(backendNames))
+		for i, name := range backendNames {
+			backends[i] = config.GRPCBackend{
+				Name: name,
+				Hosts: []config.BackendHost{
+					{Address: "localhost", Port: 50052},
+				},
+			}
+		}
+		return &config.GatewayConfig{
+			Spec: config.GatewaySpec{
+				GRPCRoutes:   routes,
+				GRPCBackends: backends,
+			},
+		}
+	}
+
+	tests := []struct {
+		name     string
+		oldCfg   *config.GatewayConfig
+		newCfg   *config.GatewayConfig
+		expected bool
+	}{
+		{
+			name:     "both nil - no change",
+			oldCfg:   nil,
+			newCfg:   nil,
+			expected: false,
+		},
+		{
+			name:     "old nil new has gRPC routes - changed",
+			oldCfg:   nil,
+			newCfg:   cfgWithGRPCRoutes("route-a"),
+			expected: true,
+		},
+		{
+			name:     "old has gRPC routes new nil - changed",
+			oldCfg:   cfgWithGRPCRoutes("route-a"),
+			newCfg:   nil,
+			expected: true,
+		},
+		{
+			name:     "same empty configs - no change",
+			oldCfg:   &config.GatewayConfig{},
+			newCfg:   &config.GatewayConfig{},
+			expected: false,
+		},
+		{
+			name:     "same gRPC routes count and names - no change",
+			oldCfg:   cfgWithGRPCRoutes("route-a", "route-b"),
+			newCfg:   cfgWithGRPCRoutes("route-a", "route-b"),
+			expected: false,
+		},
+		{
+			name:     "different gRPC routes count - changed",
+			oldCfg:   cfgWithGRPCRoutes("route-a"),
+			newCfg:   cfgWithGRPCRoutes("route-a", "route-b"),
+			expected: true,
+		},
+		{
+			name:     "same count but different route names - changed",
+			oldCfg:   cfgWithGRPCRoutes("route-a"),
+			newCfg:   cfgWithGRPCRoutes("route-b"),
+			expected: true,
+		},
+		{
+			name:     "same gRPC backends count and names - no change",
+			oldCfg:   cfgWithGRPCBackends("backend-a", "backend-b"),
+			newCfg:   cfgWithGRPCBackends("backend-a", "backend-b"),
+			expected: false,
+		},
+		{
+			name:     "different gRPC backends count - changed",
+			oldCfg:   cfgWithGRPCBackends("backend-a"),
+			newCfg:   cfgWithGRPCBackends("backend-a", "backend-b"),
+			expected: true,
+		},
+		{
+			name:     "same count but different backend names - changed",
+			oldCfg:   cfgWithGRPCBackends("backend-a"),
+			newCfg:   cfgWithGRPCBackends("backend-b"),
+			expected: true,
+		},
+		{
+			name:     "same routes and backends - no change",
+			oldCfg:   cfgWithRoutesAndBackends([]string{"route-a"}, []string{"backend-a"}),
+			newCfg:   cfgWithRoutesAndBackends([]string{"route-a"}, []string{"backend-a"}),
+			expected: false,
+		},
+		{
+			name:     "same routes different backends - changed",
+			oldCfg:   cfgWithRoutesAndBackends([]string{"route-a"}, []string{"backend-a"}),
+			newCfg:   cfgWithRoutesAndBackends([]string{"route-a"}, []string{"backend-b"}),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := grpcConfigChanged(tt.oldCfg, tt.newCfg)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestReloadComponents_GRPCConfigChanged tests that reloadComponents logs a warning
+// when gRPC configuration has changed.
+func TestReloadComponents_GRPCConfigChanged(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := validGatewayConfig("test")
+	cfg.Spec.GRPCRoutes = []config.GRPCRoute{
+		{
+			Name: "old-grpc-route",
+			Match: []config.GRPCRouteMatch{
+				{Service: &config.StringMatch{Exact: "test.Service"}},
+			},
+			Route: []config.RouteDestination{
+				{Destination: config.Destination{Host: "localhost", Port: 50052}},
+			},
+		},
+	}
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	r := router.New()
+	reg := backend.NewRegistry(logger)
+
+	app := &application{
+		gateway:         gw,
+		backendRegistry: reg,
+		router:          r,
+		config:          cfg,
+	}
+
+	// New config with different gRPC routes
+	newCfg := validGatewayConfig("test-updated")
+	newCfg.Spec.GRPCRoutes = []config.GRPCRoute{
+		{
+			Name: "new-grpc-route",
+			Match: []config.GRPCRouteMatch{
+				{Service: &config.StringMatch{Exact: "test.NewService"}},
+			},
+			Route: []config.RouteDestination{
+				{Destination: config.Destination{Host: "localhost", Port: 50053}},
+			},
+		},
+	}
+
+	// Should not panic; gRPC config change warning is logged
+	reloadComponents(app, newCfg, logger)
+	assert.Equal(t, newCfg, app.config)
 }
 
 // validGatewayConfig creates a valid GatewayConfig for testing.

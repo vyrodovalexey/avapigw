@@ -144,6 +144,7 @@ func TestE2E_VaultPKI_ListenerTLS(t *testing.T) {
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				RootCAs:    caPool,
+				ServerName: "localhost",
 				MinVersion: tls.VersionTLS12,
 			},
 		},
@@ -569,6 +570,7 @@ func TestE2E_VaultPKI_CertRenewal_NoDowntime(t *testing.T) {
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
 					RootCAs:    caPool,
+					ServerName: "localhost",
 					MinVersion: tls.VersionTLS12,
 				},
 			},
@@ -860,6 +862,7 @@ func TestE2E_VaultPKI_FullGatewayWorkflow(t *testing.T) {
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
 					RootCAs:    caPool,
+					ServerName: "localhost",
 					MinVersion: tls.VersionTLS12,
 				},
 			},

@@ -17,7 +17,7 @@ phantom:
     schedule: line(1, 300, 2m) const(300, 5m) step(300, 600, 100, 1m) const(600, 3m) line(600, 1, 2m)
 
   ammofile: /var/loadtest/ammo/mixed.txt
-  ammo_type: uripost
+  ammo_type: uri
 
   # Connection settings
   connection_test: true

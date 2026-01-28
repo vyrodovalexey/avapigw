@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -391,17 +392,23 @@ func (l *logger) Close() error {
 	return nil
 }
 
-// extractTraceID extracts the trace ID from context.
+// extractTraceID extracts the trace ID from the OpenTelemetry span context.
+// Returns an empty string when no valid trace context is present.
 func extractTraceID(ctx context.Context) string {
-	// This would integrate with the observability package
-	// For now, return empty string
+	sc := trace.SpanContextFromContext(ctx)
+	if sc.HasTraceID() {
+		return sc.TraceID().String()
+	}
 	return ""
 }
 
-// extractSpanID extracts the span ID from context.
+// extractSpanID extracts the span ID from the OpenTelemetry span context.
+// Returns an empty string when no valid span context is present.
 func extractSpanID(ctx context.Context) string {
-	// This would integrate with the observability package
-	// For now, return empty string
+	sc := trace.SpanContextFromContext(ctx)
+	if sc.HasSpanID() {
+		return sc.SpanID().String()
+	}
 	return ""
 }
 

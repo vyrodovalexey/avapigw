@@ -11,6 +11,7 @@ import (
 	internaltls "github.com/vyrodovalexey/avapigw/internal/tls"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
 // VaultProvider implements tls.CertificateProvider using Vault PKI.
@@ -215,6 +216,14 @@ func (p *VaultProvider) Close() error {
 
 // issueCertificate issues a new certificate from Vault.
 func (p *VaultProvider) issueCertificate(ctx context.Context) error {
+	// Check for context cancellation before starting the operation
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		// Context is still valid, proceed with certificate issuance
+	}
+
 	opts := &PKIIssueOptions{
 		Mount:      p.config.PKIMount,
 		Role:       p.config.Role,
@@ -261,6 +270,14 @@ func (p *VaultProvider) issueCertificate(ctx context.Context) error {
 
 // loadCAPool loads the CA certificate pool from Vault.
 func (p *VaultProvider) loadCAPool(ctx context.Context) error {
+	// Check for context cancellation before starting the operation
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		// Context is still valid, proceed with CA pool loading
+	}
+
 	mount := p.config.CAMount
 	if mount == "" {
 		mount = p.config.PKIMount
@@ -297,6 +314,14 @@ func (p *VaultProvider) renewalLoop(ctx context.Context) {
 		observability.Time("next_renewal", renewAt),
 	)
 
+	// Exponential backoff parameters for renewal failures
+	const (
+		renewalInitialBackoff = 5 * time.Second
+		renewalMaxBackoff     = 5 * time.Minute
+		renewalJitterFactor   = 0.25
+	)
+	var retryAttempt int
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -309,17 +334,31 @@ func (p *VaultProvider) renewalLoop(ctx context.Context) {
 			p.logger.Info("renewing certificate")
 
 			if err := p.issueCertificate(ctx); err != nil {
-				p.logger.Error("failed to renew certificate", observability.Error(err))
+				p.logger.Error("failed to renew certificate",
+					observability.Error(err),
+					observability.Int("retry_attempt", retryAttempt),
+				)
 				p.sendEvent(internaltls.CertificateEvent{
 					Type:    internaltls.CertificateEventError,
 					Error:   err,
 					Message: "failed to renew certificate",
 				})
 
-				// Retry in 1 minute
-				timer.Reset(time.Minute)
+				// Retry with exponential backoff
+				backoff := retry.CalculateBackoff(
+					retryAttempt, renewalInitialBackoff, renewalMaxBackoff, renewalJitterFactor,
+				)
+				retryAttempt++
+				p.logger.Info("scheduling certificate renewal retry",
+					observability.Int("retry_attempt", retryAttempt),
+					observability.Duration("backoff", backoff),
+				)
+				timer.Reset(backoff)
 				continue
 			}
+
+			// Reset retry counter on success
+			retryAttempt = 0
 
 			p.sendEvent(internaltls.CertificateEvent{
 				Type:        internaltls.CertificateEventReloaded,

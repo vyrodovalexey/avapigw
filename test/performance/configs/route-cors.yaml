@@ -17,7 +17,7 @@ phantom:
     schedule: line(50, 500, 30s) const(500, 2m) line(500, 50, 30s)
 
   ammofile: /var/loadtest/ammo/route-cors.txt
-  ammo_type: request
+  ammo_type: uri
 
   # Connection settings
   connection_test: true

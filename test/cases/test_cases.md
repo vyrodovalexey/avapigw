@@ -2393,3 +2393,195 @@
   4. Send GET to /backend/health
   5. Verify all succeed
 - **Expected Results**: All HTTP methods work through gateway with audit
+
+## WebSocket Tests
+
+### Integration Tests
+
+#### TestIntegration_WebSocket_DirectConnection
+- **Description**: Test WebSocket connection directly to backend /ws endpoint
+- **Preconditions**: Backend service running with /ws WebSocket endpoint
+- **Steps**:
+  1. Connect to backend WebSocket endpoint
+  2. Verify HTTP 101 Switching Protocols response
+  3. Read a message from the WebSocket stream
+  4. Verify message is non-empty text
+- **Expected Results**: Direct WebSocket connection works and receives messages
+
+#### TestIntegration_WebSocket_MessageStreaming
+- **Description**: Test WebSocket message streaming from backend
+- **Preconditions**: Backend service running with /ws endpoint streaming random values every 1s
+- **Steps**:
+  1. Connect to backend WebSocket endpoint
+  2. Read 3 consecutive messages
+  3. Verify all messages are received
+  4. Verify messages contain different random values
+- **Expected Results**: Multiple streamed messages are received with different values
+
+#### TestIntegration_WebSocket_CloseHandling
+- **Description**: Test WebSocket connection close handling
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Connect to WebSocket, read a message, send close frame
+  2. Verify graceful close completes
+  3. Connect to WebSocket and close immediately without reading
+  4. Verify immediate close works
+- **Expected Results**: Both graceful and immediate close work correctly
+
+#### TestIntegration_WebSocket_ConcurrentConnections
+- **Description**: Test multiple concurrent WebSocket connections to backend
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Establish 5 concurrent WebSocket connections
+  2. Read 2 messages per connection
+  3. Verify at least 75% of connections succeed
+  4. Verify at least one message per connection
+- **Expected Results**: Concurrent WebSocket connections work independently
+
+#### TestIntegration_WebSocket_ConnectionTimeout
+- **Description**: Test WebSocket read deadline and timeout behavior
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Connect to WebSocket endpoint
+  2. Set very short read deadline (1ms)
+  3. Attempt to read message
+  4. Verify timeout error is returned
+- **Expected Results**: Read deadline causes proper timeout error
+
+#### TestIntegration_WebSocket_UpgradeHeaders
+- **Description**: Test WebSocket upgrade handshake headers
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Connect to WebSocket endpoint
+  2. Inspect upgrade response
+  3. Verify HTTP 101 status code
+  4. Verify Upgrade: websocket header
+- **Expected Results**: Upgrade response contains correct headers
+
+#### TestIntegration_WebSocket_InvalidEndpoint
+- **Description**: Test WebSocket connection to non-WebSocket endpoint
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Attempt WebSocket connection to /health (non-WebSocket endpoint)
+  2. Verify connection fails with error
+- **Expected Results**: Non-WebSocket endpoint rejects upgrade
+
+#### TestIntegration_WebSocket_SendAndReceive
+- **Description**: Test bidirectional WebSocket communication
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Connect to WebSocket endpoint
+  2. Send a text message
+  3. Read the next streamed message
+  4. Verify message is received
+- **Expected Results**: Bidirectional communication works
+
+#### TestIntegration_WebSocket_MockBackend
+- **Description**: Test WebSocket with local mock server (no external dependencies)
+- **Preconditions**: None (uses in-process mock server)
+- **Steps**:
+  1. Start mock WebSocket echo server
+  2. Test text message echo
+  3. Test binary message echo
+  4. Test 10 concurrent connections with echo verification
+- **Expected Results**: Mock WebSocket server works for all message types and concurrency
+
+### E2E Tests
+
+#### TestE2E_WebSocket_ProxyConnection
+- **Description**: Test WebSocket connection through gateway proxy
+- **Preconditions**: Backend service running, gateway started with websocket-test.yaml
+- **Steps**:
+  1. Start gateway with WebSocket route configuration
+  2. Connect to WebSocket through gateway (/ws)
+  3. Verify upgrade succeeds through proxy
+  4. Read 3 streamed messages through gateway
+  5. Verify messages contain different random values
+- **Expected Results**: WebSocket upgrade and streaming work through gateway proxy
+
+#### TestE2E_WebSocket_SendReceive
+- **Description**: Test bidirectional WebSocket through gateway
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Connect to WebSocket through gateway
+  2. Send a text message through gateway
+  3. Read response message through gateway
+  4. Verify non-empty response
+- **Expected Results**: Bidirectional WebSocket works through gateway
+
+#### TestE2E_WebSocket_GracefulClose
+- **Description**: Test WebSocket close handling through gateway
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Connect, read message, send close frame through gateway
+  2. Verify graceful close through proxy
+  3. Connect and close immediately through gateway
+  4. Verify immediate close through proxy
+- **Expected Results**: Close handling works correctly through gateway proxy
+
+#### TestE2E_WebSocket_ConcurrentConnections
+- **Description**: Test concurrent WebSocket connections through gateway
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Establish 5 concurrent WebSocket connections through gateway
+  2. Read 2 messages per connection
+  3. Verify at least 75% of connections succeed
+  4. Verify message delivery through proxy
+- **Expected Results**: Gateway handles concurrent WebSocket connections
+
+#### TestE2E_WebSocket_LoadBalancing
+- **Description**: Test WebSocket load balancing across backends
+- **Preconditions**: Both backend services running, gateway started
+- **Steps**:
+  1. Establish 10 WebSocket connections to /ws-lb (50/50 weight)
+  2. Read one message per connection
+  3. Verify at least 75% of connections succeed
+- **Expected Results**: WebSocket connections are distributed across backends
+
+#### TestE2E_WebSocket_ConnectionResilience
+- **Description**: Test gateway resilience with WebSocket connections
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Perform 10 rapid connect-disconnect cycles
+  2. Verify at least 75% succeed
+  3. Verify gateway is still healthy after cycles
+  4. Test sequential connection after previous close
+  5. Verify second connection works after first is closed
+- **Expected Results**: Gateway remains stable through rapid WebSocket cycles
+
+#### TestE2E_WebSocket_InvalidUpgrade
+- **Description**: Test invalid WebSocket upgrade through gateway
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Attempt WebSocket upgrade to /health (direct response route)
+  2. Verify upgrade fails with error
+- **Expected Results**: Non-WebSocket routes reject upgrade through gateway
+
+#### TestE2E_WebSocket_LongLivedConnection
+- **Description**: Test long-lived WebSocket connection through gateway
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Connect to WebSocket through gateway
+  2. Read 5 messages over ~5 seconds
+  3. Verify most messages are received
+  4. Log elapsed time and message count
+- **Expected Results**: Long-lived WebSocket connection remains active through gateway
+
+#### TestE2E_WebSocket_MixedTraffic
+- **Description**: Test concurrent HTTP and WebSocket traffic through gateway
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Start 3 WebSocket connections reading 2 messages each
+  2. Simultaneously make 10 HTTP requests to /health
+  3. Verify most WebSocket connections succeed
+  4. Verify most HTTP requests succeed
+- **Expected Results**: Gateway handles mixed HTTP and WebSocket traffic simultaneously
+
+#### TestE2E_WebSocket_SequentialConnections
+- **Description**: Test sequential WebSocket connect-use-close cycles
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Perform 3 sequential cycles: connect, read message, close
+  2. Verify each cycle succeeds independently
+  3. Verify messages are received in each cycle
+- **Expected Results**: Sequential WebSocket connections work reliably through gateway

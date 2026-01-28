@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 // unmarshalableResponse is a type that cannot be marshaled to JSON.
@@ -18,7 +20,7 @@ import (
 func TestChecker_HealthHandler_ResponseFields(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("2.0.0")
+	checker := NewChecker("2.0.0", observability.NopLogger())
 	handler := checker.HealthHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -48,7 +50,7 @@ func TestChecker_HealthHandler_ResponseFields(t *testing.T) {
 func TestChecker_ReadinessHandler_DegradedStatus(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	checker.RegisterCheck("degraded_service", func() Check {
 		return Check{Status: StatusDegraded, Message: "service is slow"}
 	})
@@ -74,7 +76,7 @@ func TestChecker_ReadinessHandler_DegradedStatus(t *testing.T) {
 func TestChecker_ReadinessHandler_MultipleChecks(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	// Add multiple checks with different statuses
 	checker.RegisterCheck("healthy_service", func() Check {
@@ -110,7 +112,7 @@ func TestChecker_ReadinessHandler_MultipleChecks(t *testing.T) {
 func TestChecker_LivenessHandler_ResponseFormat(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.LivenessHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/live", nil)
@@ -129,7 +131,7 @@ func TestChecker_LivenessHandler_ResponseFormat(t *testing.T) {
 func TestChecker_UnregisterCheck_NonExistent(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	// Should not panic when unregistering non-existent check
 	checker.UnregisterCheck("non_existent")
@@ -146,7 +148,7 @@ func TestChecker_UnregisterCheck_NonExistent(t *testing.T) {
 func TestChecker_RegisterCheck_Override(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	// Register initial check
 	checker.RegisterCheck("service", func() Check {
@@ -228,7 +230,7 @@ func TestCheck_EmptyMessage(t *testing.T) {
 func TestChecker_Health_StartTime(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	response := checker.Health()
 
 	// Start time should be before or equal to timestamp
@@ -239,7 +241,7 @@ func TestChecker_Health_StartTime(t *testing.T) {
 func TestChecker_Readiness_DegradedDoesNotOverrideUnhealthy(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	// Register unhealthy first, then degraded
 	checker.RegisterCheck("unhealthy", func() Check {
@@ -271,7 +273,7 @@ func TestHandler_NilChecker(t *testing.T) {
 func TestChecker_EmptyVersion(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("")
+	checker := NewChecker("", observability.NopLogger())
 	response := checker.Health()
 
 	assert.Equal(t, "", response.Version)
@@ -291,7 +293,7 @@ func TestChecker_HealthHandler_HTTPMethods(t *testing.T) {
 		http.MethodOptions,
 	}
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.HealthHandler()
 
 	for _, method := range methods {

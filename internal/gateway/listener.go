@@ -150,6 +150,16 @@ func (l *Listener) convertToTLSConfig(cfg *config.ListenerTLSConfig) *tlspkg.Con
 			CommonName: cfg.Vault.CommonName,
 			AltNames:   cfg.Vault.AltNames,
 		}
+		// When Vault is the certificate source, set ServerCertificate accordingly
+		if tlsCfg.ServerCertificate == nil {
+			tlsCfg.ServerCertificate = &tlspkg.CertificateConfig{
+				Source: tlspkg.CertificateSourceVault,
+			}
+		}
+		// Default to SIMPLE mode when Vault is enabled and no mode is set
+		if tlsCfg.Mode == "" {
+			tlsCfg.Mode = tlspkg.TLSModeSimple
+		}
 	}
 
 	return tlsCfg
@@ -194,6 +204,17 @@ func (l *Listener) Start(ctx context.Context) error {
 		WriteTimeout:      timeouts.GetEffectiveWriteTimeout(),
 		IdleTimeout:       timeouts.GetEffectiveIdleTimeout(),
 		MaxHeaderBytes:    config.DefaultMaxHeaderSize,
+	}
+
+	// Start TLS managers to trigger certificate issuance (e.g., from Vault PKI)
+	if l.routeTLSManager != nil {
+		if err := l.routeTLSManager.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start route TLS manager for listener %s: %w", l.config.Name, err)
+		}
+	} else if l.tlsManager != nil {
+		if err := l.tlsManager.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start TLS manager for listener %s: %w", l.config.Name, err)
+		}
 	}
 
 	// Configure TLS if enabled

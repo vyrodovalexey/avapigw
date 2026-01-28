@@ -2,6 +2,7 @@ package health
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 // errorResponseWriter is a mock ResponseWriter that fails on Write.
@@ -42,7 +45,7 @@ func (w *errorResponseWriter) WriteHeader(statusCode int) {
 func TestChecker_HealthHandler_WriteFailure(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.HealthHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -60,7 +63,7 @@ func TestChecker_HealthHandler_WriteFailure(t *testing.T) {
 func TestChecker_ReadinessHandler_WriteFailure(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.ReadinessHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
@@ -78,7 +81,7 @@ func TestChecker_ReadinessHandler_WriteFailure(t *testing.T) {
 func TestChecker_Concurrent(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 
 	// Register some checks
 	checker.RegisterCheck("db", func() Check {
@@ -132,7 +135,7 @@ func TestChecker_Concurrent(t *testing.T) {
 func TestChecker_HealthHandler_Concurrent(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.HealthHandler()
 
 	const numGoroutines = 100
@@ -156,7 +159,7 @@ func TestChecker_HealthHandler_Concurrent(t *testing.T) {
 func TestChecker_ReadinessHandler_Concurrent(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	checker.RegisterCheck("db", func() Check {
 		return Check{Status: StatusHealthy}
 	})
@@ -184,7 +187,7 @@ func TestChecker_ReadinessHandler_Concurrent(t *testing.T) {
 func TestChecker_LivenessHandler_Concurrent(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := checker.LivenessHandler()
 
 	const numGoroutines = 100
@@ -208,7 +211,7 @@ func TestChecker_LivenessHandler_Concurrent(t *testing.T) {
 func TestChecker_Health_MemoryStats(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	response := checker.Health()
 
 	assert.True(t, response.MemoryMB > 0, "memory should be greater than 0")
@@ -220,7 +223,7 @@ func TestChecker_Health_MemoryStats(t *testing.T) {
 func TestChecker_Health_Hostname(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	response := checker.Health()
 
 	// Hostname might be empty in some environments, but should not panic
@@ -287,7 +290,7 @@ func TestChecker_Readiness_StatusPriority(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			checker := NewChecker("1.0.0")
+			checker := NewChecker("1.0.0", observability.NopLogger())
 			for name, check := range tt.checks {
 				checkCopy := check // Capture for closure
 				checker.RegisterCheck(name, func() Check {
@@ -305,7 +308,7 @@ func TestChecker_Readiness_StatusPriority(t *testing.T) {
 func TestHandler_Methods(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	handler := NewHandler(checker)
 
 	tests := []struct {
@@ -352,7 +355,7 @@ func TestHandler_Methods(t *testing.T) {
 func TestHealthResponse_Fields(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	response := checker.Health()
 
 	// Verify all fields are populated
@@ -371,7 +374,7 @@ func TestHealthResponse_Fields(t *testing.T) {
 func TestReadinessResponse_Fields(t *testing.T) {
 	t.Parallel()
 
-	checker := NewChecker("1.0.0")
+	checker := NewChecker("1.0.0", observability.NopLogger())
 	checker.RegisterCheck("test", func() Check {
 		return Check{Status: StatusHealthy, Message: "ok"}
 	})
@@ -410,4 +413,54 @@ func TestConstants(t *testing.T) {
 
 	assert.Equal(t, "Content-Type", HeaderContentType)
 	assert.Equal(t, "application/json", ContentTypeJSON)
+}
+
+// TestChecker_HealthHandler_MarshalError tests HealthHandler when json.Marshal fails.
+// Not parallel — modifies package-level jsonMarshalFunc.
+func TestChecker_HealthHandler_MarshalError(t *testing.T) {
+	// Save and restore original marshal function
+	origMarshal := jsonMarshalFunc
+	defer func() { jsonMarshalFunc = origMarshal }()
+
+	// Inject a failing marshal function
+	jsonMarshalFunc = func(_ interface{}) ([]byte, error) {
+		return nil, errors.New("simulated marshal error")
+	}
+
+	checker := NewChecker("1.0.0", observability.NopLogger())
+	handler := checker.HealthHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	// Should return 500 Internal Server Error
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "failed to encode response")
+}
+
+// TestChecker_ReadinessHandler_MarshalError tests ReadinessHandler when json.Marshal fails.
+// Not parallel — modifies package-level jsonMarshalFunc.
+func TestChecker_ReadinessHandler_MarshalError(t *testing.T) {
+	// Save and restore original marshal function
+	origMarshal := jsonMarshalFunc
+	defer func() { jsonMarshalFunc = origMarshal }()
+
+	// Inject a failing marshal function
+	jsonMarshalFunc = func(_ interface{}) ([]byte, error) {
+		return nil, errors.New("simulated marshal error")
+	}
+
+	checker := NewChecker("1.0.0", observability.NopLogger())
+	handler := checker.ReadinessHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec := httptest.NewRecorder()
+
+	handler(rec, req)
+
+	// Should return 500 Internal Server Error
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "failed to encode response")
 }

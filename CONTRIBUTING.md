@@ -196,7 +196,16 @@ methods with curl and gRPC examples.
   ├── auth/          # Authentication logic
   ├── authz/         # Authorization logic
   ├── cache/         # Caching implementations
-  ├── config/        # Configuration handling
+  ├── config/        # Configuration handling (split into domain files)
+  │   ├── config.go        # Core GatewayConfig, Metadata, GatewaySpec
+  │   ├── listener.go      # Listener types
+  │   ├── route.go         # Route types
+  │   ├── backend.go       # Backend types
+  │   ├── grpc_config.go   # gRPC config types
+  │   ├── middleware.go    # Middleware config types
+  │   ├── observability.go # Observability config types
+  │   ├── security.go      # Security/Auth/Audit config types
+  │   └── duration.go      # Duration type
   ├── grpc/          # gRPC server and handlers
   ├── middleware/    # HTTP middleware
   ├── observability/ # Metrics, tracing, logging
@@ -204,6 +213,22 @@ methods with curl and gRPC examples.
   ├── security/      # Security utilities
   └── ...
   ```
+
+#### Main Application Organization
+
+The main application (`cmd/gateway/`) has been split into focused files:
+```
+cmd/gateway/
+├── main.go          # main(), parseFlags(), printVersion()
+├── app.go           # application struct, initApplication()
+├── config_loader.go # loadAndValidateConfig(), initAuditLogger(), initTracer()
+├── middleware.go    # buildMiddlewareChain()
+├── metrics.go       # metrics server functions
+├── vault.go         # vault client functions
+├── reload.go        # config reload functions
+├── shutdown.go      # shutdown functions
+└── env.go           # getEnvOrDefault()
+```
 
 #### Error Handling
 
@@ -213,6 +238,7 @@ methods with curl and gRPC examples.
 - Return meaningful error messages
 - Use shared error types like `util.ServerError` for consistent circuit breaker tracking
 - Use `util.StatusCapturingResponseWriter` for middleware that needs to inspect response status codes
+- Use `ValidateConfigWithWarnings()` to provide helpful warnings for deprecated settings
 
 Example:
 ```go
@@ -507,6 +533,7 @@ func AuthenticateRequest(req *http.Request, config *AuthConfig) (*User, error) {
 - **Profiling**: Profile code for performance bottlenecks
 - **Resource cleanup**: Always clean up timers, goroutines, and other resources
 - **Timer management**: Use defer statements to prevent timer leaks (see config watcher implementation)
+- **Hot-reload limitations**: Be aware that gRPC routes/backends do NOT support hot-reload and require restart
 
 Example benchmark:
 ```go

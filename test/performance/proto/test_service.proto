@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package api.v1;
+
+option go_package = "api/v1;apiv1";
+
+service TestService {
+  rpc Unary(UnaryRequest) returns (UnaryResponse);
+  rpc ServerStream(StreamRequest) returns (stream StreamResponse);
+  rpc BidirectionalStream(stream BidirectionalRequest) returns (stream BidirectionalResponse);
+}
+
+message UnaryRequest {
+  string message = 1;
+}
+
+message UnaryResponse {
+  string message = 1;
+  int64 timestamp = 2;
+}
+
+message StreamRequest {
+  string message = 1;
+  int32 count = 2;
+}
+
+message StreamResponse {
+  string message = 1;
+  int32 sequence = 2;
+  int64 timestamp = 3;
+}
+
+message BidirectionalRequest {
+  string message = 1;
+}
+
+message BidirectionalResponse {
+  string message = 1;
+  int64 timestamp = 2;
+}

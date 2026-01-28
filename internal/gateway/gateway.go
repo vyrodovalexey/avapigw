@@ -13,6 +13,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 )
 
 // configField is an atomic pointer for lock-free config access.
@@ -67,6 +68,9 @@ type Gateway struct {
 	// Handlers
 	routeHandler http.Handler
 
+	// TLS
+	vaultProviderFactory tlspkg.VaultProviderFactory
+
 	// Shutdown
 	shutdownTimeout time.Duration
 }
@@ -92,6 +96,15 @@ func WithShutdownTimeout(timeout time.Duration) Option {
 func WithRouteHandler(handler http.Handler) Option {
 	return func(g *Gateway) {
 		g.routeHandler = handler
+	}
+}
+
+// WithGatewayVaultProviderFactory sets the Vault provider factory for TLS certificate management.
+// The factory is propagated to all HTTP and gRPC listeners created by the gateway,
+// enabling Vault PKI-based certificate issuance and renewal.
+func WithGatewayVaultProviderFactory(factory tlspkg.VaultProviderFactory) Option {
+	return func(g *Gateway) {
+		g.vaultProviderFactory = factory
 	}
 }
 
@@ -279,9 +292,14 @@ func (g *Gateway) createListeners() error {
 	for _, listenerCfg := range cfg.Spec.Listeners {
 		// Check if this is a gRPC listener
 		if listenerCfg.Protocol == config.ProtocolGRPC {
-			grpcListener, err := NewGRPCListener(listenerCfg,
+			grpcOpts := []GRPCListenerOption{
 				WithGRPCListenerLogger(g.logger),
-			)
+			}
+			if g.vaultProviderFactory != nil {
+				grpcOpts = append(grpcOpts, WithGRPCVaultProviderFactory(g.vaultProviderFactory))
+			}
+
+			grpcListener, err := NewGRPCListener(listenerCfg, grpcOpts...)
 			if err != nil {
 				return fmt.Errorf(
 					"failed to create gRPC listener %s: %w",
@@ -300,9 +318,16 @@ func (g *Gateway) createListeners() error {
 			g.grpcListeners = append(g.grpcListeners, grpcListener)
 		} else {
 			// HTTP listener
+			httpOpts := []ListenerOption{
+				WithListenerLogger(g.logger),
+			}
+			if g.vaultProviderFactory != nil {
+				httpOpts = append(httpOpts, WithVaultProviderFactory(g.vaultProviderFactory))
+			}
+
 			listener, err := NewListener(
 				listenerCfg, g.engine,
-				WithListenerLogger(g.logger),
+				httpOpts...,
 			)
 			if err != nil {
 				return fmt.Errorf(
@@ -318,8 +343,10 @@ func (g *Gateway) createListeners() error {
 }
 
 // stopListeners stops all listeners.
+// It respects context cancellation but ensures all stop operations are initiated.
 func (g *Gateway) stopListeners(ctx context.Context) {
 	var wg sync.WaitGroup
+	done := make(chan struct{})
 
 	// Stop HTTP listeners
 	for _, listener := range g.listeners {
@@ -349,7 +376,22 @@ func (g *Gateway) stopListeners(ctx context.Context) {
 		}(listener)
 	}
 
-	wg.Wait()
+	// Wait for all listeners to stop or context to be canceled
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All listeners stopped successfully
+	case <-ctx.Done():
+		g.logger.Warn("context canceled while waiting for listeners to stop",
+			observability.Error(ctx.Err()),
+		)
+		// Wait for remaining listeners to stop (they should respect the context)
+		<-done
+	}
 }
 
 // GetListeners returns all HTTP listeners.

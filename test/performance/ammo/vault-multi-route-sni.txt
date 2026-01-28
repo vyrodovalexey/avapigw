@@ -4,18 +4,13 @@
 [Connection: keep-alive]
 [X-Perf-Test: vault-multi-route-sni]
 /health
-/api/v1/simple
-/api/v1/simple
 /api/v1/items
-/api/v1/items/1
-/api/v1/items/2
-/api/v1/items/3
-/api/v1/items/4
-/api/v1/items/5
-/api/v1/users
-/api/v1/users/1
-/api/v1/users/2
-/api/v1/users/3
-/api/v1/orders
-/api/v1/orders/1
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
 /backend/health

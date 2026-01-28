@@ -425,6 +425,79 @@ func TestClientIPExtractor_SpoofingPrevention(t *testing.T) {
 	})
 }
 
+func TestGetClientIP_WithGlobalExtractor(t *testing.T) {
+	// Save and restore the global extractor
+	original := globalExtractor
+	defer func() { globalExtractor = original }()
+
+	tests := []struct {
+		name           string
+		trustedProxies []string
+		remoteAddr     string
+		xff            string
+		expectedIP     string
+	}{
+		{
+			name:           "no trusted proxies - uses RemoteAddr",
+			trustedProxies: nil,
+			remoteAddr:     "203.0.113.1:12345",
+			xff:            "10.0.0.1",
+			expectedIP:     "203.0.113.1",
+		},
+		{
+			name:           "no trusted proxies - ignores XFF",
+			trustedProxies: nil,
+			remoteAddr:     "192.168.1.1:8080",
+			xff:            "1.2.3.4",
+			expectedIP:     "192.168.1.1",
+		},
+		{
+			name:           "trusted proxies configured - extracts from XFF",
+			trustedProxies: []string{"10.0.0.0/8"},
+			remoteAddr:     "10.0.0.1:12345",
+			xff:            "203.0.113.50",
+			expectedIP:     "203.0.113.50",
+		},
+		{
+			name:           "trusted proxies configured - no XFF falls back to RemoteAddr",
+			trustedProxies: []string{"10.0.0.0/8"},
+			remoteAddr:     "10.0.0.1:12345",
+			xff:            "",
+			expectedIP:     "10.0.0.1",
+		},
+		{
+			name:           "trusted proxies configured - untrusted RemoteAddr ignores XFF",
+			trustedProxies: []string{"10.0.0.0/8"},
+			remoteAddr:     "203.0.113.1:12345",
+			xff:            "1.2.3.4",
+			expectedIP:     "203.0.113.1",
+		},
+		{
+			name:           "RemoteAddr without port",
+			trustedProxies: nil,
+			remoteAddr:     "192.168.1.1",
+			expectedIP:     "192.168.1.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set global extractor for this test case
+			extractor := NewClientIPExtractor(tt.trustedProxies)
+			SetGlobalIPExtractor(extractor)
+
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.RemoteAddr = tt.remoteAddr
+			if tt.xff != "" {
+				req.Header.Set("X-Forwarded-For", tt.xff)
+			}
+
+			ip := GetClientIP(req)
+			assert.Equal(t, tt.expectedIP, ip)
+		})
+	}
+}
+
 func TestSingleIPToCIDR(t *testing.T) {
 	t.Parallel()
 

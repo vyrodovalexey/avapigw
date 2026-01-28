@@ -103,13 +103,19 @@ parse_phout() {
         fi
     fi
     
-    log_info "Parsing $phout_file..."
+    # Log to stderr so it doesn't interfere with variable capture
+    echo -e "${BLUE}[INFO]${NC} Parsing $phout_file..." >&2
     
-    # phout.txt format:
-    # timestamp tag interval_real connect_time send_time latency receive_time interval_event size_out size_in net_code proto_code
+    # Calculate statistics using awk + sort for percentiles (macOS compatible)
+    # phout format (tab-separated):
+    # col1=timestamp col2=tag col3=interval_real col4=connect_time col5=send_time
+    # col6=latency col7=receive_time col8=interval_event col9=size_out col10=size_in
+    # col11=net_code col12=proto_code
     
-    # Calculate statistics using awk
-    awk '
+    # First pass: collect total response times (interval_real) and sort for percentiles
+    awk -F'\t' '{print $3 / 1000}' "$phout_file" | sort -n > /tmp/perf_latencies.txt
+    
+    awk -F'\t' -v lat_file="/tmp/perf_latencies.txt" '
     BEGIN {
         total = 0
         errors = 0
@@ -125,8 +131,8 @@ parse_phout() {
     }
     {
         total++
-        latency = $4 / 1000  # Convert to ms
-        connect = $5 / 1000
+        latency = $3 / 1000  # interval_real (total time) in ms
+        connect = $4 / 1000  # connect_time in ms
         proto_code = $12
         net_code = $11
         
@@ -135,9 +141,6 @@ parse_phout() {
         
         if (latency < min_latency) min_latency = latency
         if (latency > max_latency) max_latency = latency
-        
-        # Store for percentile calculation
-        latencies[total] = latency
         
         # Count HTTP codes
         if (proto_code >= 200 && proto_code < 300) http_2xx++
@@ -161,12 +164,18 @@ parse_phout() {
         avg_connect = sum_connect / total
         error_rate = (errors / total) * 100
         
-        # Sort latencies for percentiles
-        n = asort(latencies)
-        p50 = latencies[int(n * 0.50)]
-        p90 = latencies[int(n * 0.90)]
-        p95 = latencies[int(n * 0.95)]
-        p99 = latencies[int(n * 0.99)]
+        # Read sorted latencies for percentiles
+        n = 0
+        while ((getline line < lat_file) > 0) {
+            n++
+            sorted[n] = line + 0
+        }
+        close(lat_file)
+        
+        p50 = sorted[int(n * 0.50)]
+        p90 = sorted[int(n * 0.90)]
+        p95 = sorted[int(n * 0.95)]
+        p99 = sorted[int(n * 0.99)]
         
         printf "TOTAL_REQUESTS=%d\n", total
         printf "ERRORS=%d\n", errors
@@ -186,6 +195,9 @@ parse_phout() {
         printf "NET_ERRORS=%d\n", net_errors
     }
     ' "$phout_file"
+    
+    # Cleanup temp file
+    rm -f /tmp/perf_latencies.txt
 }
 
 # Display summary
@@ -231,9 +243,14 @@ display_summary() {
     echo ""
     
     # Determine overall status
-    if (( $(echo "$ERROR_RATE < 1" | bc -l) )) && (( $(echo "$P95_LATENCY < 500" | bc -l) )); then
+    local err_ok=$(echo "${ERROR_RATE:-100} < 1" | bc -l 2>/dev/null || echo "0")
+    local p95_ok=$(echo "${P95_LATENCY:-9999} < 500" | bc -l 2>/dev/null || echo "0")
+    local err_warn=$(echo "${ERROR_RATE:-100} < 5" | bc -l 2>/dev/null || echo "0")
+    local p95_warn=$(echo "${P95_LATENCY:-9999} < 1000" | bc -l 2>/dev/null || echo "0")
+    
+    if [[ "$err_ok" == "1" ]] && [[ "$p95_ok" == "1" ]]; then
         echo -e "${GREEN}Status: PASSED${NC} - Error rate < 1% and P95 latency < 500ms"
-    elif (( $(echo "$ERROR_RATE < 5" | bc -l) )) && (( $(echo "$P95_LATENCY < 1000" | bc -l) )); then
+    elif [[ "$err_warn" == "1" ]] && [[ "$p95_warn" == "1" ]]; then
         echo -e "${YELLOW}Status: WARNING${NC} - Performance is acceptable but could be improved"
     else
         echo -e "${RED}Status: FAILED${NC} - Error rate >= 5% or P95 latency >= 1000ms"
@@ -251,58 +268,56 @@ display_detailed() {
     echo -e "${CYAN}  Detailed Analysis${NC}"
     echo "============================================"
     
-    # Calculate RPS over time
+    # Find phout file
     local phout_file="$RESULTS_DIR/phout.txt"
+    if [ ! -f "$phout_file" ]; then
+        phout_file=$(find "$RESULTS_DIR" -name "phout_*.log" -o -name "phout*.log" -o -name "phout*.txt" 2>/dev/null | head -1)
+    fi
     
-    if [ -f "$phout_file" ]; then
+    if [ -n "$phout_file" ] && [ -f "$phout_file" ]; then
         echo ""
         echo -e "${BLUE}Throughput Over Time (RPS):${NC}"
         
-        awk '
+        # Use sort-based approach for macOS compatibility
+        awk -F'\t' '{print int($1)}' "$phout_file" | sort -n | uniq -c | awk '
+        BEGIN { n = 0; total = 0; max_rps = 0 }
         {
-            timestamp = int($1)
-            requests[timestamp]++
+            n++
+            count = $1
+            ts = $2
+            total += count
+            if (count > max_rps) max_rps = count
+            timestamps[n] = ts
+            counts[n] = count
         }
         END {
-            n = asorti(requests, sorted)
-            
-            # Show first 10 and last 10 seconds
             print "  First 10 seconds:"
             for (i = 1; i <= 10 && i <= n; i++) {
-                printf "    %s: %d RPS\n", sorted[i], requests[sorted[i]]
+                printf "    %s: %d RPS\n", timestamps[i], counts[i]
             }
             
             if (n > 20) {
                 print "  ..."
                 print "  Last 10 seconds:"
                 for (i = n - 9; i <= n; i++) {
-                    printf "    %s: %d RPS\n", sorted[i], requests[sorted[i]]
+                    printf "    %s: %d RPS\n", timestamps[i], counts[i]
                 }
             }
             
-            # Calculate average RPS
-            total = 0
-            for (ts in requests) total += requests[ts]
             avg_rps = total / n
             printf "\n  Average RPS: %.2f\n", avg_rps
-            
-            # Find peak RPS
-            max_rps = 0
-            for (ts in requests) {
-                if (requests[ts] > max_rps) max_rps = requests[ts]
-            }
             printf "  Peak RPS: %d\n", max_rps
         }
-        ' "$phout_file"
+        '
     fi
     
     # Show latency distribution
     echo ""
     echo -e "${BLUE}Latency Distribution:${NC}"
     
-    awk '
+    awk -F'\t' '
     {
-        latency = $4 / 1000  # Convert to ms
+        latency = $3 / 1000  # interval_real in ms
         
         if (latency < 10) bucket["0-10ms"]++
         else if (latency < 50) bucket["10-50ms"]++

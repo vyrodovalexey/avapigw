@@ -248,8 +248,11 @@ func TestIntegration_Manager_VaultPKI_TLSHandshake(t *testing.T) {
 	require.NotNil(t, caPool)
 
 	// Create client TLS config
+	// Use ServerName: "localhost" because the certificate has "localhost" as SAN,
+	// but the listener binds to 127.0.0.1 (IP address, not hostname).
 	clientTLSConfig := &tls.Config{
 		RootCAs:    caPool,
+		ServerName: "localhost",
 		MinVersion: tls.VersionTLS12,
 	}
 
@@ -353,13 +356,19 @@ func TestIntegration_Manager_VaultProvider_WithMetrics(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cert)
 
-	// Verify metrics were recorded by gathering from registry
+	// Verify metrics were recorded by gathering from registry.
+	// Certificate events are processed asynchronously, so we retry
+	// a few times to allow the event goroutine to record metrics.
 	registry := metrics.Registry()
 	require.NotNil(t, registry)
 
+	require.Eventually(t, func() bool {
+		metricFamilies, gatherErr := registry.Gather()
+		return gatherErr == nil && len(metricFamilies) > 0
+	}, 5*time.Second, 100*time.Millisecond, "Metrics should have been recorded")
+
 	metricFamilies, err := registry.Gather()
 	require.NoError(t, err)
-	assert.NotEmpty(t, metricFamilies, "Metrics should have been recorded")
 
 	// Check for certificate_expiry_seconds metric
 	found := false

@@ -17,6 +17,10 @@ const (
 	// DefaultClientTTL is the default TTL for client rate limiter entries.
 	DefaultClientTTL = 10 * time.Minute
 
+	// DefaultMaxClients is the default maximum number of client entries.
+	// This prevents unbounded memory growth from malicious or high-cardinality clients.
+	DefaultMaxClients = 100000
+
 	// MinCleanupInterval is the minimum interval for cleanup operations.
 	MinCleanupInterval = 10 * time.Second
 
@@ -32,16 +36,17 @@ type clientEntry struct {
 
 // RateLimiter provides rate limiting functionality.
 type RateLimiter struct {
-	limiter   *rate.Limiter
-	perClient bool
-	clients   map[string]*clientEntry
-	mu        sync.RWMutex
-	rps       int
-	burst     int
-	logger    observability.Logger
-	clientTTL time.Duration
-	stopCh    chan struct{}
-	stopped   bool
+	limiter    *rate.Limiter
+	perClient  bool
+	clients    map[string]*clientEntry
+	mu         sync.RWMutex
+	rps        int
+	burst      int
+	logger     observability.Logger
+	clientTTL  time.Duration
+	maxClients int
+	stopCh     chan struct{}
+	stopped    bool
 }
 
 // RateLimiterOption is a functional option for configuring the rate limiter.
@@ -54,17 +59,32 @@ func WithRateLimiterLogger(logger observability.Logger) RateLimiterOption {
 	}
 }
 
+// WithClientTTL sets the TTL for client entries.
+func WithClientTTL(ttl time.Duration) RateLimiterOption {
+	return func(rl *RateLimiter) {
+		rl.clientTTL = ttl
+	}
+}
+
+// WithMaxClients sets the maximum number of client entries.
+func WithMaxClients(maxClients int) RateLimiterOption {
+	return func(rl *RateLimiter) {
+		rl.maxClients = maxClients
+	}
+}
+
 // NewRateLimiter creates a new rate limiter.
 func NewRateLimiter(rps, burst int, perClient bool, opts ...RateLimiterOption) *RateLimiter {
 	rl := &RateLimiter{
-		limiter:   rate.NewLimiter(rate.Limit(rps), burst),
-		perClient: perClient,
-		clients:   make(map[string]*clientEntry),
-		rps:       rps,
-		burst:     burst,
-		logger:    observability.NopLogger(),
-		clientTTL: DefaultClientTTL,
-		stopCh:    make(chan struct{}),
+		limiter:    rate.NewLimiter(rate.Limit(rps), burst),
+		perClient:  perClient,
+		clients:    make(map[string]*clientEntry),
+		rps:        rps,
+		burst:      burst,
+		logger:     observability.NopLogger(),
+		clientTTL:  DefaultClientTTL,
+		maxClients: DefaultMaxClients,
+		stopCh:     make(chan struct{}),
 	}
 
 	for _, opt := range opts {
@@ -96,6 +116,11 @@ func (rl *RateLimiter) allowPerClient(clientIP string) bool {
 	rl.mu.Lock()
 	entry, exists := rl.clients[clientIP]
 	if !exists {
+		// Check if we've hit the max clients limit before adding a new entry
+		if len(rl.clients) >= rl.maxClients {
+			// Evict oldest entries to make room
+			rl.evictOldestLocked()
+		}
 		entry = &clientEntry{
 			limiter:    rate.NewLimiter(rate.Limit(rl.rps), rl.burst),
 			lastAccess: now,
@@ -111,6 +136,43 @@ func (rl *RateLimiter) allowPerClient(clientIP string) bool {
 
 	// Allow() is thread-safe on the limiter itself
 	return limiter.Allow()
+}
+
+// evictOldestLocked evicts the oldest entries to make room for new ones.
+// Must be called with the mutex held.
+func (rl *RateLimiter) evictOldestLocked() {
+	// First, remove expired entries
+	now := time.Now()
+	for clientIP, entry := range rl.clients {
+		if now.Sub(entry.lastAccess) > rl.clientTTL {
+			delete(rl.clients, clientIP)
+		}
+	}
+
+	// If still over capacity, remove oldest entries until we're at 90% capacity
+	targetSize := rl.maxClients * 9 / 10
+	for len(rl.clients) > targetSize {
+		var oldestKey string
+		var oldestTime time.Time
+
+		for key, entry := range rl.clients {
+			if oldestKey == "" || entry.lastAccess.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = entry.lastAccess
+			}
+		}
+
+		if oldestKey != "" {
+			delete(rl.clients, oldestKey)
+		} else {
+			break
+		}
+	}
+
+	rl.logger.Debug("evicted old rate limiter entries",
+		observability.Int("remaining", len(rl.clients)),
+		observability.Int("max_clients", rl.maxClients),
+	)
 }
 
 // RateLimit returns a middleware that applies rate limiting.
@@ -285,4 +347,18 @@ func (rl *RateLimiter) SetClientTTL(ttl time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	rl.clientTTL = ttl
+}
+
+// SetMaxClients sets the maximum number of client entries.
+func (rl *RateLimiter) SetMaxClients(maxClients int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.maxClients = maxClients
+}
+
+// ClientCount returns the current number of client entries.
+func (rl *RateLimiter) ClientCount() int {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+	return len(rl.clients)
 }

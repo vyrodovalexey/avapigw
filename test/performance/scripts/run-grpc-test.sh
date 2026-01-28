@@ -208,8 +208,8 @@ get_test_config() {
     case $test_name in
         unary)
             SERVICE="api.v1.TestService"
-            METHOD="Echo"
-            DATA='{"message":"Performance test message","timestamp":"2024-01-01T00:00:00Z"}'
+            METHOD="Unary"
+            DATA='{"message":"Performance test message"}'
             DEFAULT_RPS=2000
             DEFAULT_CONCURRENCY=100
             USE_TLS=false
@@ -312,14 +312,15 @@ run_test() {
     ghz_cmd+=" ghcr.io/bojand/ghz:latest"
     
     if [[ "$USE_TLS" == "true" ]]; then
-        ghz_cmd+=" --skipTLS"  # Skip TLS verification for self-signed certs
+        # TLS enabled - skip verification for self-signed Vault PKI certs
+        ghz_cmd+=" --skipTLS"
+        # Optional: specify CA cert if available
+        # ghz_cmd+=" --cacert=/path/to/ca.crt"
     else
         ghz_cmd+=" --insecure"
     fi
     
     ghz_cmd+=" --call $SERVICE/$METHOD"
-    ghz_cmd+=" --host host.docker.internal"
-    ghz_cmd+=" --port $PORT"
     ghz_cmd+=" --duration $DURATION"
     ghz_cmd+=" --rps $RPS"
     ghz_cmd+=" --concurrency $CONCURRENCY"
@@ -336,6 +337,9 @@ run_test() {
     ghz_cmd+=" --format json"
     ghz_cmd+=" --output /results/results.json"
     ghz_cmd+=" --data '$DATA'"
+    
+    # Host is a positional argument in ghz
+    ghz_cmd+=" host.docker.internal:$PORT"
     
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "Dry run - would execute:"

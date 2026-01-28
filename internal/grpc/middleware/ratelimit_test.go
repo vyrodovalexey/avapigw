@@ -3,7 +3,9 @@ package middleware
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,15 +112,48 @@ func TestGRPCRateLimiter_CleanupOldClients_ManyClients(t *testing.T) {
 
 	limiter := NewGRPCRateLimiter(100, 10, true)
 
-	// Add more than 10000 clients to trigger cleanup
-	for i := 0; i < 10001; i++ {
-		limiter.clients["client"+string(rune(i))] = nil
+	// Add many clients using the Allow method to properly create entries
+	for i := 0; i < 1000; i++ {
+		limiter.Allow("client" + string(rune('A'+i%26)) + string(rune('0'+i%10)))
 	}
 
+	// Verify clients were added
+	assert.Greater(t, limiter.ClientCount(), 0)
+
+	// Cleanup should not panic and should work correctly
 	limiter.CleanupOldClients()
 
-	// Clients should be cleared
-	assert.Empty(t, limiter.clients)
+	// Clients should still exist since they haven't expired
+	// (TTL-based cleanup only removes expired entries)
+	assert.Greater(t, limiter.ClientCount(), 0)
+}
+
+func TestGRPCRateLimiter_MemoryBounds(t *testing.T) {
+	t.Parallel()
+
+	// Create a limiter with a very small max clients limit
+	limiter := NewGRPCRateLimiter(100, 10, true, WithGRPCMaxClients(100))
+
+	// Add more clients than the limit
+	for i := 0; i < 150; i++ {
+		limiter.Allow("client" + string(rune('A'+i%26)) + string(rune('0'+i%10)) + string(rune('a'+i%26)))
+	}
+
+	// Client count should be bounded
+	assert.LessOrEqual(t, limiter.ClientCount(), 100)
+}
+
+func TestGRPCRateLimiter_Stop(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewGRPCRateLimiter(100, 10, true)
+	limiter.StartAutoCleanup()
+
+	// Stop should not panic
+	limiter.Stop()
+
+	// Calling Stop again should not panic
+	limiter.Stop()
 }
 
 func TestUnaryRateLimitInterceptor(t *testing.T) {
@@ -302,3 +337,285 @@ func (m *rateLimitTestServerStream) SetTrailer(_ metadata.MD)       {}
 func (m *rateLimitTestServerStream) Context() context.Context       { return m.ctx }
 func (m *rateLimitTestServerStream) SendMsg(_ interface{}) error    { return nil }
 func (m *rateLimitTestServerStream) RecvMsg(_ interface{}) error    { return nil }
+
+// TestGRPCRateLimiter_EvictOldestLocked tests the evictOldestLocked memory management function.
+func TestGRPCRateLimiter_EvictOldestLocked(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		maxClients  int
+		clientTTL   time.Duration
+		numClients  int
+		expectedMax int
+		description string
+	}{
+		{
+			name:        "evict when at capacity",
+			maxClients:  10,
+			clientTTL:   time.Hour, // Long TTL so entries don't expire
+			numClients:  15,
+			expectedMax: 10, // Should be at or below maxClients
+			description: "should evict oldest entries when at capacity",
+		},
+		{
+			name:        "small max clients",
+			maxClients:  5,
+			clientTTL:   time.Hour,
+			numClients:  20,
+			expectedMax: 5,
+			description: "should handle small max clients limit",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			limiter := NewGRPCRateLimiter(100, 10, true,
+				WithRateLimiterLogger(observability.NopLogger()),
+				WithGRPCMaxClients(tt.maxClients),
+				WithGRPCClientTTL(tt.clientTTL),
+			)
+			t.Cleanup(func() {
+				limiter.Stop()
+			})
+
+			// Add clients to trigger eviction
+			for i := 0; i < tt.numClients; i++ {
+				clientAddr := "192.168.1." + string(rune('A'+i%26)) + string(rune('0'+i%10)) + ":12345"
+				limiter.Allow(clientAddr)
+			}
+
+			// Verify client count is bounded
+			clientCount := limiter.ClientCount()
+			assert.LessOrEqual(t, clientCount, tt.expectedMax, tt.description)
+		})
+	}
+}
+
+// TestGRPCRateLimiter_EvictOldestLocked_ExpiredEntries tests that expired entries are removed during eviction.
+func TestGRPCRateLimiter_EvictOldestLocked_ExpiredEntries(t *testing.T) {
+	t.Parallel()
+
+	// Use a very short TTL
+	limiter := NewGRPCRateLimiter(100, 10, true,
+		WithRateLimiterLogger(observability.NopLogger()),
+		WithGRPCMaxClients(10),
+		WithGRPCClientTTL(1*time.Millisecond),
+	)
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	// Add some clients
+	for i := 0; i < 5; i++ {
+		clientAddr := "old-client-" + string(rune('0'+i)) + ":12345"
+		limiter.Allow(clientAddr)
+	}
+
+	// Wait for entries to expire
+	time.Sleep(10 * time.Millisecond)
+
+	// Add more clients to trigger eviction (need to exceed maxClients)
+	for i := 0; i < 10; i++ {
+		clientAddr := "new-client-" + string(rune('0'+i)) + ":12345"
+		limiter.Allow(clientAddr)
+	}
+
+	// The expired entries should have been removed during eviction
+	// Client count should be at or below maxClients
+	clientCount := limiter.ClientCount()
+	assert.LessOrEqual(t, clientCount, 10)
+}
+
+// TestGRPCRateLimiter_EvictOldestLocked_PreservesNewerEntries tests that eviction preserves newer entries.
+func TestGRPCRateLimiter_EvictOldestLocked_PreservesNewerEntries(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewGRPCRateLimiter(100, 10, true,
+		WithRateLimiterLogger(observability.NopLogger()),
+		WithGRPCMaxClients(10),
+		WithGRPCClientTTL(time.Hour),
+	)
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	// Add old clients
+	for i := 0; i < 5; i++ {
+		clientAddr := "old-client-" + string(rune('0'+i)) + ":12345"
+		limiter.Allow(clientAddr)
+	}
+
+	// Wait a bit to create time difference
+	time.Sleep(10 * time.Millisecond)
+
+	// Add new clients that will trigger eviction
+	for i := 0; i < 10; i++ {
+		clientAddr := "new-client-" + string(rune('0'+i)) + ":12345"
+		limiter.Allow(clientAddr)
+	}
+
+	// Verify we're at or below max clients
+	clientCount := limiter.ClientCount()
+	assert.LessOrEqual(t, clientCount, 10)
+}
+
+// TestGRPCRateLimiter_EvictOldestLocked_EmptyMap tests eviction with empty client map.
+func TestGRPCRateLimiter_EvictOldestLocked_EmptyMap(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewGRPCRateLimiter(100, 10, true,
+		WithRateLimiterLogger(observability.NopLogger()),
+		WithGRPCMaxClients(5),
+		WithGRPCClientTTL(time.Hour),
+	)
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	// No clients added, just verify no panic
+	assert.Equal(t, 0, limiter.ClientCount())
+
+	// Add one client - should work fine
+	limiter.Allow("first-client:12345")
+	assert.Equal(t, 1, limiter.ClientCount())
+}
+
+// TestGRPCRateLimiter_EvictOldestLocked_TargetSize tests that eviction targets 90% capacity.
+func TestGRPCRateLimiter_EvictOldestLocked_TargetSize(t *testing.T) {
+	t.Parallel()
+
+	maxClients := 100
+	limiter := NewGRPCRateLimiter(1000, 100, true,
+		WithRateLimiterLogger(observability.NopLogger()),
+		WithGRPCMaxClients(maxClients),
+		WithGRPCClientTTL(time.Hour),
+	)
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	// Fill to capacity and beyond
+	for i := 0; i < maxClients+10; i++ {
+		clientAddr := "client-" + string(rune('A'+i%26)) + string(rune('a'+i%26)) + string(rune('0'+i%10)) + ":12345"
+		limiter.Allow(clientAddr)
+	}
+
+	// After eviction, should be at or below max clients
+	targetSize := maxClients * 9 / 10
+	clientCount := limiter.ClientCount()
+	assert.LessOrEqual(t, clientCount, maxClients)
+	assert.GreaterOrEqual(t, clientCount, targetSize)
+}
+
+// TestGRPCRateLimiter_WithGRPCClientTTL tests the WithGRPCClientTTL option.
+func TestGRPCRateLimiter_WithGRPCClientTTL(t *testing.T) {
+	t.Parallel()
+
+	ttl := 5 * time.Minute
+	limiter := NewGRPCRateLimiter(100, 10, true, WithGRPCClientTTL(ttl))
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	assert.Equal(t, ttl, limiter.clientTTL)
+}
+
+// TestGRPCRateLimiter_WithGRPCMaxClients tests the WithGRPCMaxClients option.
+func TestGRPCRateLimiter_WithGRPCMaxClients(t *testing.T) {
+	t.Parallel()
+
+	maxClients := 500
+	limiter := NewGRPCRateLimiter(100, 10, true, WithGRPCMaxClients(maxClients))
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	assert.Equal(t, maxClients, limiter.maxClients)
+}
+
+// TestGRPCRateLimiter_SetClientTTL tests the SetClientTTL method.
+func TestGRPCRateLimiter_SetClientTTL(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewGRPCRateLimiter(100, 10, true)
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	newTTL := 30 * time.Minute
+	limiter.SetClientTTL(newTTL)
+
+	limiter.mu.RLock()
+	actualTTL := limiter.clientTTL
+	limiter.mu.RUnlock()
+
+	assert.Equal(t, newTTL, actualTTL)
+}
+
+// TestGRPCRateLimiter_SetMaxClients tests the SetMaxClients method.
+func TestGRPCRateLimiter_SetMaxClients(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewGRPCRateLimiter(100, 10, true)
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	newMax := 50000
+	limiter.SetMaxClients(newMax)
+
+	limiter.mu.RLock()
+	actualMax := limiter.maxClients
+	limiter.mu.RUnlock()
+
+	assert.Equal(t, newMax, actualMax)
+}
+
+// TestGRPCRateLimiter_StartAutoCleanup_AlreadyStopped tests that StartAutoCleanup does nothing if already stopped.
+func TestGRPCRateLimiter_StartAutoCleanup_AlreadyStopped(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewGRPCRateLimiter(100, 10, true)
+
+	// Stop first
+	limiter.Stop()
+
+	// StartAutoCleanup should return early without starting goroutine
+	limiter.StartAutoCleanup()
+
+	// Should not panic or cause issues
+}
+
+// TestGRPCRateLimiter_ConcurrentEviction tests concurrent access during eviction.
+func TestGRPCRateLimiter_ConcurrentEviction(t *testing.T) {
+	t.Parallel()
+
+	limiter := NewGRPCRateLimiter(1000, 100, true,
+		WithRateLimiterLogger(observability.NopLogger()),
+		WithGRPCMaxClients(50),
+		WithGRPCClientTTL(time.Hour),
+	)
+	t.Cleanup(func() {
+		limiter.Stop()
+	})
+
+	var wg sync.WaitGroup
+
+	// Concurrent Allow calls that will trigger eviction
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			clientAddr := "client-" + string(rune('A'+n%26)) + string(rune('0'+n%10)) + ":12345"
+			_ = limiter.Allow(clientAddr)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Should not panic and client count should be bounded
+	assert.LessOrEqual(t, limiter.ClientCount(), 50)
+}

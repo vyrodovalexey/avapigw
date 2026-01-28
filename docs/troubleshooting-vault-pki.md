@@ -397,7 +397,103 @@ ERROR: x509: certificate signed by unknown authority
      ext_key_usage="client_auth"
    ```
 
-### 6. Performance Issues
+### 6. WebSocket Proxy Issues
+
+#### Symptoms
+```
+ERROR: WebSocket connection failed: bad handshake
+ERROR: WebSocket upgrade failed: hop-by-hop header handling
+WARN: WebSocket connection dropped unexpectedly
+```
+
+#### Diagnostic Steps
+
+1. **Check WebSocket Endpoint**
+   ```bash
+   # Test WebSocket endpoint manually
+   wscat -c ws://127.0.0.1:8080/ws
+   
+   # Check WebSocket upgrade headers
+   curl -H "Upgrade: websocket" -H "Connection: Upgrade" \
+        -H "Sec-WebSocket-Key: test" -H "Sec-WebSocket-Version: 13" \
+        http://127.0.0.1:8080/ws
+   ```
+
+2. **Verify Header Handling**
+   ```bash
+   # Check if hop-by-hop headers are properly handled
+   curl -v -H "Connection: keep-alive, upgrade" \
+        -H "Upgrade: websocket" \
+        http://127.0.0.1:8080/ws
+   ```
+
+#### Solutions
+
+1. **Fix WebSocket Configuration**
+   ```yaml
+   routes:
+     - name: websocket-route
+       match:
+         - uri:
+             prefix: /ws
+       route:
+         - destination:
+             host: websocket-backend
+             port: 8080
+       # Ensure proper WebSocket handling
+       headers:
+         request:
+           # Preserve WebSocket upgrade headers
+           preserve:
+             - "Upgrade"
+             - "Connection"
+             - "Sec-WebSocket-Key"
+             - "Sec-WebSocket-Version"
+   ```
+
+2. **Backend WebSocket Support**
+   - Ensure backend properly handles WebSocket upgrade
+   - Verify backend supports WebSocket protocol
+   - Check backend WebSocket message handling
+
+### 7. gRPC Plaintext Warnings
+
+#### Symptoms
+```
+WARN: gRPC listener running in plaintext mode (no TLS)
+WARN: gRPC connections are not encrypted
+```
+
+#### Solutions
+
+1. **Enable gRPC TLS**
+   ```yaml
+   listeners:
+     - name: grpc
+       port: 9000
+       protocol: GRPC
+       tls:
+         enabled: true
+         mode: SIMPLE
+         vault:
+           enabled: true
+           pkiMount: pki
+           role: grpc-server
+           commonName: grpc.example.com
+   ```
+
+2. **Accept Plaintext for Development**
+   ```yaml
+   # For development environments only
+   listeners:
+     - name: grpc-dev
+       port: 9000
+       protocol: GRPC
+       # No TLS configuration = plaintext mode
+       # Warning will be logged but connection allowed
+   ```
+
+### 8. Performance Issues
 
 #### Symptoms
 ```

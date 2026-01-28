@@ -73,8 +73,12 @@ service:
   type: ClusterIP
   # -- HTTP port for REST API traffic
   httpPort: 8080
+  # -- HTTPS port for TLS-encrypted REST API traffic
+  httpsPort: 8443
   # -- gRPC port for gRPC traffic
   grpcPort: 9000
+  # -- gRPC TLS port for TLS-encrypted gRPC traffic
+  grpcTlsPort: 9443
   # -- Metrics and health endpoints port
   metricsPort: 9090
   # -- Annotations to add to the service
@@ -220,6 +224,28 @@ gateway:
       # -- Allowed hosts
       hosts:
         - "*"
+      # -- TLS configuration for HTTP listener (static certificates)
+      # When vault.pki.enabled is true, Vault PKI takes precedence over static TLS.
+      # Use this for non-Vault TLS with static certificate files.
+      tls:
+        # -- Enable TLS for HTTP listener (switches protocol to HTTPS)
+        enabled: false
+        # -- TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL)
+        mode: ""
+        # -- Path to server certificate file
+        certFile: ""
+        # -- Path to server private key file
+        keyFile: ""
+        # -- Path to CA certificate file (for client validation in MUTUAL mode)
+        caFile: ""
+        # -- Minimum TLS version (TLS12, TLS13)
+        minVersion: ""
+        # -- Maximum TLS version
+        maxVersion: ""
+        # -- Allowed cipher suites
+        cipherSuites: []
+        # -- Require client certificate (for MUTUAL mode)
+        requireClientCert: false
 
     grpc:
       # -- Enable gRPC listener
@@ -241,6 +267,28 @@ gateway:
       reflection: true
       # -- Enable gRPC health check
       healthCheck: true
+      # -- TLS configuration for gRPC listener (static certificates)
+      # When vault.pki.enabled is true, Vault PKI takes precedence over static TLS.
+      # Use this for non-Vault TLS with static certificate files.
+      tls:
+        # -- Enable TLS for gRPC listener
+        enabled: false
+        # -- TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE)
+        mode: ""
+        # -- Path to server certificate file
+        certFile: ""
+        # -- Path to server private key file
+        keyFile: ""
+        # -- Path to CA certificate file (for client validation in MUTUAL mode)
+        caFile: ""
+        # -- Minimum TLS version (TLS12, TLS13)
+        minVersion: ""
+        # -- Maximum TLS version
+        maxVersion: ""
+        # -- Allowed cipher suites
+        cipherSuites: []
+        # -- Require client certificate (for MUTUAL mode)
+        requireClientCert: false
 
   # Rate limiting configuration
   rateLimit:
@@ -624,6 +672,10 @@ tls:
     #   secretName: tenant-b-tls
 
 # Vault configuration
+# NOTE: The Go gateway reads Vault connection settings exclusively from
+# environment variables (VAULT_ADDR, VAULT_TOKEN, VAULT_AUTH_METHOD, etc.).
+# The values below control environment variable injection in the deployment
+# and the vault section in the generated config (for reference only).
 vault:
   # -- Enable Vault integration
   enabled: false
@@ -633,7 +685,15 @@ vault:
   authMethod: kubernetes
   # -- Vault role for Kubernetes auth
   role: ""
+  # -- Vault Kubernetes auth mount path
+  kubernetesMountPath: "kubernetes"
   # -- Vault token (use only for development)
+  # WARNING: Storing Vault tokens in values.yaml is insecure and should only be
+  # used for local development/testing. For production deployments, use one of:
+  #   1. Kubernetes auth method (recommended): Set authMethod: kubernetes
+  #   2. Existing secret: Create a secret with the token and reference it via extraEnvFrom
+  #   3. AppRole auth: Set authMethod: approle with role_id/secret_id from secrets
+  # NEVER commit actual tokens to version control!
   token: ""
   # -- Secret path in Vault
   secretPath: ""
@@ -648,8 +708,9 @@ vault:
   # -- Vault PKI configuration for listener TLS certificates
   # When enabled, the gateway obtains its TLS certificate from Vault PKI
   # instead of using static certificate files.
+  # Vault PKI is the DEFAULT and RECOMMENDED method for TLS certificates in production.
   pki:
-    # -- Enable Vault PKI for listener TLS
+    # -- Enable Vault PKI for listener TLS (default for gRPC TLS)
     enabled: false
     # -- Vault PKI secrets engine mount path
     pkiMount: "pki"
@@ -663,6 +724,29 @@ vault:
     ttl: "24h"
     # -- Duration before expiry to renew (e.g., "1h", "30m")
     renewBefore: "1h"
+    # -- gRPC listener PKI overrides
+    # INHERITANCE BEHAVIOR:
+    #   - When vault.pki.enabled is true and grpc.enabled is not explicitly set to false,
+    #     the gRPC listener automatically inherits TLS from vault.pki settings.
+    #   - Individual grpc.* fields (pkiMount, role, commonName, etc.) override the parent
+    #     vault.pki.* values only when explicitly set (non-empty).
+    #   - To disable gRPC TLS while keeping HTTP TLS, explicitly set grpc.enabled: false.
+    #   - Empty string values ("") mean "inherit from parent vault.pki.*"
+    grpc:
+      # -- Enable Vault PKI for gRPC listener TLS.
+      # When not explicitly set (or set to true), inherits from vault.pki.enabled.
+      # Set to false to disable gRPC TLS even when vault.pki.enabled is true.
+      # enabled: true  # Uncomment to explicitly enable/disable
+      # -- Vault PKI secrets engine mount path for gRPC (inherits from vault.pki.pkiMount if empty)
+      pkiMount: ""
+      # -- Vault PKI role name for gRPC (inherits from vault.pki.role if empty)
+      role: ""
+      # -- Common name for gRPC certificate requests (inherits from vault.pki.commonName if empty)
+      commonName: ""
+      # -- Subject alternative names for gRPC (inherits from vault.pki.altNames if empty)
+      altNames: []
+      # -- Certificate TTL for gRPC (inherits from vault.pki.ttl if empty)
+      ttl: ""
 
 # Keycloak configuration
 keycloak:
