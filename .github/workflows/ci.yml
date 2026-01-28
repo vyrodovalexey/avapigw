@@ -404,10 +404,11 @@ jobs:
             sleep 5
           done
           
-          # Get admin token
+          # Get admin token (with X-Forwarded-Proto for Keycloak 24+ SSL requirement)
           echo "Getting admin token..."
           ADMIN_TOKEN=$(curl -s -X POST "http://127.0.0.1:8090/realms/master/protocol/openid-connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
+            -H "X-Forwarded-Proto: https" \
             -d "username=admin" \
             -d "password=admin" \
             -d "grant_type=password" \
@@ -418,18 +419,20 @@ jobs:
             exit 1
           fi
           
-          # Create test realm
+          # Create test realm with sslRequired=none
           echo "Creating test realm..."
           curl -s -X POST "http://127.0.0.1:8090/admin/realms" \
             -H "Authorization: Bearer $ADMIN_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"realm": "gateway-test", "enabled": true}'
+            -H "X-Forwarded-Proto: https" \
+            -d '{"realm": "gateway-test", "enabled": true, "sslRequired": "none"}'
           
           # Create client
           echo "Creating gateway client..."
           curl -s -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/clients" \
             -H "Authorization: Bearer $ADMIN_TOKEN" \
             -H "Content-Type: application/json" \
+            -H "X-Forwarded-Proto: https" \
             -d '{
               "clientId": "gateway",
               "enabled": true,
@@ -440,29 +443,79 @@ jobs:
               "serviceAccountsEnabled": true
             }'
           
-          # Create test user
-          echo "Creating test user..."
-          curl -s -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/users" \
-            -H "Authorization: Bearer $ADMIN_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "username": "testuser",
-              "enabled": true,
-              "emailVerified": true,
-              "credentials": [{"type": "password", "value": "testpass", "temporary": false}]
-            }'
+          # Function to create or update user
+          create_or_update_user() {
+            local username=$1
+            local password=$2
+            
+            echo "Setting up user: $username..."
+            
+            # Try to create user first
+            CREATE_RESULT=$(curl -s -w "%{http_code}" -o /tmp/create_response.txt -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/users" \
+              -H "Authorization: Bearer $ADMIN_TOKEN" \
+              -H "Content-Type: application/json" \
+              -H "X-Forwarded-Proto: https" \
+              -d "{
+                \"username\": \"$username\",
+                \"enabled\": true,
+                \"emailVerified\": true,
+                \"email\": \"${username}@test.local\",
+                \"firstName\": \"$username\",
+                \"lastName\": \"TestUser\",
+                \"requiredActions\": [],
+                \"credentials\": [{\"type\": \"password\", \"value\": \"$password\", \"temporary\": false}]
+              }")
+            
+            if [ "$CREATE_RESULT" = "201" ]; then
+              echo "User $username created successfully"
+              return 0
+            fi
+            
+            # User exists (409), need to update it
+            if [ "$CREATE_RESULT" = "409" ]; then
+              echo "User $username already exists, updating..."
+              
+              # Get user ID
+              USER_ID=$(curl -s "http://127.0.0.1:8090/admin/realms/gateway-test/users?username=$username" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" \
+                -H "X-Forwarded-Proto: https" | jq -r '.[0].id')
+              
+              if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+                echo "Failed to get user ID for $username"
+                return 1
+              fi
+              
+              # Update user to clear required actions and ensure enabled
+              curl -s -X PUT "http://127.0.0.1:8090/admin/realms/gateway-test/users/$USER_ID" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" \
+                -H "Content-Type: application/json" \
+                -H "X-Forwarded-Proto: https" \
+                -d "{
+                  \"enabled\": true,
+                  \"emailVerified\": true,
+                  \"requiredActions\": []
+                }"
+              
+              # Reset password
+              curl -s -X PUT "http://127.0.0.1:8090/admin/realms/gateway-test/users/$USER_ID/reset-password" \
+                -H "Authorization: Bearer $ADMIN_TOKEN" \
+                -H "Content-Type: application/json" \
+                -H "X-Forwarded-Proto: https" \
+                -d "{\"type\": \"password\", \"value\": \"$password\", \"temporary\": false}"
+              
+              echo "User $username updated successfully"
+              return 0
+            fi
+            
+            echo "Failed to create user $username: HTTP $CREATE_RESULT"
+            cat /tmp/create_response.txt
+            return 1
+          }
           
-          # Create admin user
-          echo "Creating admin user..."
-          curl -s -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/users" \
-            -H "Authorization: Bearer $ADMIN_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "username": "adminuser",
-              "enabled": true,
-              "emailVerified": true,
-              "credentials": [{"type": "password", "value": "adminpass", "temporary": false}]
-            }'
+          # Create or update test users
+          create_or_update_user "testuser" "testpass"
+          create_or_update_user "adminuser" "adminpass"
+          create_or_update_user "reader" "readerpass"
           
           echo "Keycloak setup complete!"
 

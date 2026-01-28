@@ -31,7 +31,11 @@ const (
 )
 
 // GetKeycloakAddr returns the Keycloak address from environment or default.
+// Checks TEST_KEYCLOAK_ADDR first (for CI), then KEYCLOAK_ADDR.
 func GetKeycloakAddr() string {
+	if addr := os.Getenv("TEST_KEYCLOAK_ADDR"); addr != "" {
+		return addr
+	}
 	if addr := os.Getenv("KEYCLOAK_ADDR"); addr != "" {
 		return addr
 	}
@@ -55,7 +59,11 @@ func GetKeycloakAdminPassword() string {
 }
 
 // GetKeycloakRealm returns the Keycloak realm from environment or default.
+// Checks TEST_KEYCLOAK_REALM first (for CI), then KEYCLOAK_REALM.
 func GetKeycloakRealm() string {
+	if realm := os.Getenv("TEST_KEYCLOAK_REALM"); realm != "" {
+		return realm
+	}
 	if realm := os.Getenv("KEYCLOAK_REALM"); realm != "" {
 		return realm
 	}
@@ -63,7 +71,11 @@ func GetKeycloakRealm() string {
 }
 
 // GetKeycloakClientID returns the Keycloak client ID from environment or default.
+// Checks TEST_KEYCLOAK_CLIENT_ID first (for CI), then KEYCLOAK_CLIENT_ID.
 func GetKeycloakClientID() string {
+	if clientID := os.Getenv("TEST_KEYCLOAK_CLIENT_ID"); clientID != "" {
+		return clientID
+	}
 	if clientID := os.Getenv("KEYCLOAK_CLIENT_ID"); clientID != "" {
 		return clientID
 	}
@@ -71,7 +83,11 @@ func GetKeycloakClientID() string {
 }
 
 // GetKeycloakClientSecret returns the Keycloak client secret from environment or default.
+// Checks TEST_KEYCLOAK_CLIENT_SECRET first (for CI), then KEYCLOAK_CLIENT_SECRET.
 func GetKeycloakClientSecret() string {
+	if secret := os.Getenv("TEST_KEYCLOAK_CLIENT_SECRET"); secret != "" {
+		return secret
+	}
 	if secret := os.Getenv("KEYCLOAK_CLIENT_SECRET"); secret != "" {
 		return secret
 	}
