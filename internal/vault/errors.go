@@ -1,4 +1,3 @@
-// Package vault provides HashiCorp Vault integration for secret management.
 package vault
 
 import (
@@ -6,89 +5,206 @@ import (
 	"fmt"
 )
 
-// Common errors for Vault operations.
+// Sentinel errors for Vault operations.
 var (
-	// ErrNotAuthenticated indicates the client is not authenticated.
-	ErrNotAuthenticated = errors.New("vault: client not authenticated")
+	// ErrVaultDisabled indicates that Vault integration is disabled.
+	ErrVaultDisabled = errors.New("vault integration is disabled")
 
-	// ErrAuthenticationFailed indicates authentication failed.
-	ErrAuthenticationFailed = errors.New("vault: authentication failed")
+	// ErrVaultSealed indicates that Vault is sealed.
+	ErrVaultSealed = errors.New("vault is sealed")
 
-	// ErrSecretNotFound indicates the secret was not found.
-	ErrSecretNotFound = errors.New("vault: secret not found")
+	// ErrVaultUnavailable indicates that Vault is unavailable.
+	ErrVaultUnavailable = errors.New("vault is unavailable")
 
-	// ErrInvalidPath indicates an invalid secret path.
-	ErrInvalidPath = errors.New("vault: invalid secret path")
+	// ErrAuthenticationFailed indicates that Vault authentication failed.
+	ErrAuthenticationFailed = errors.New("vault authentication failed")
 
-	// ErrInvalidConfig indicates invalid configuration.
-	ErrInvalidConfig = errors.New("vault: invalid configuration")
+	// ErrTokenExpired indicates that the Vault token has expired.
+	ErrTokenExpired = errors.New("vault token expired")
 
-	// ErrConnectionFailed indicates connection to Vault failed.
-	ErrConnectionFailed = errors.New("vault: connection failed")
+	// ErrSecretNotFound indicates that the requested secret was not found.
+	ErrSecretNotFound = errors.New("secret not found")
 
-	// ErrTokenExpired indicates the token has expired.
-	ErrTokenExpired = errors.New("vault: token expired")
+	// ErrPKIIssueFailed indicates that PKI certificate issuance failed.
+	ErrPKIIssueFailed = errors.New("PKI certificate issuance failed")
 
-	// ErrPermissionDenied indicates permission was denied.
-	ErrPermissionDenied = errors.New("vault: permission denied")
+	// ErrInvalidConfig indicates that the Vault configuration is invalid.
+	ErrInvalidConfig = errors.New("invalid vault configuration")
 
-	// ErrCacheMiss indicates a cache miss.
-	ErrCacheMiss = errors.New("vault: cache miss")
+	// ErrClientClosed indicates that the Vault client has been closed.
+	ErrClientClosed = errors.New("vault client closed")
 
-	// ErrWatcherStopped indicates the watcher was stopped.
-	ErrWatcherStopped = errors.New("vault: watcher stopped")
+	// ErrTransitOperationFailed indicates that a Transit operation failed.
+	ErrTransitOperationFailed = errors.New("transit operation failed")
 
-	// ErrCertificateInvalid indicates an invalid certificate.
-	ErrCertificateInvalid = errors.New("vault: invalid certificate")
-
-	// ErrRetryExhausted indicates all retry attempts were exhausted.
-	ErrRetryExhausted = errors.New("vault: retry attempts exhausted")
+	// ErrKVOperationFailed indicates that a KV operation failed.
+	ErrKVOperationFailed = errors.New("KV operation failed")
 )
 
-// VaultError represents a Vault-specific error with additional context.
+// VaultError represents a Vault-related error with additional context.
 type VaultError struct {
-	Op      string // Operation that failed
-	Path    string // Secret path if applicable
-	Err     error  // Underlying error
-	Code    int    // HTTP status code if applicable
-	Message string // Additional message
+	Operation string
+	Path      string
+	Message   string
+	Cause     error
 }
 
 // Error implements the error interface.
 func (e *VaultError) Error() string {
-	if e.Path != "" {
-		return fmt.Sprintf("vault %s on path %s: %v", e.Op, e.Path, e.Err)
+	msg := e.buildMessage()
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: %v", msg, e.Cause)
 	}
-	return fmt.Sprintf("vault %s: %v", e.Op, e.Err)
+	return msg
+}
+
+// buildMessage constructs the error message based on available fields.
+func (e *VaultError) buildMessage() string {
+	switch {
+	case e.Operation != "" && e.Path != "":
+		return fmt.Sprintf("vault %s at %s: %s", e.Operation, e.Path, e.Message)
+	case e.Operation != "":
+		return fmt.Sprintf("vault %s: %s", e.Operation, e.Message)
+	default:
+		return fmt.Sprintf("vault error: %s", e.Message)
+	}
 }
 
 // Unwrap returns the underlying error.
 func (e *VaultError) Unwrap() error {
-	return e.Err
+	return e.Cause
 }
 
-// Is implements errors.Is for VaultError.
+// Is checks if the error matches the target.
 func (e *VaultError) Is(target error) bool {
-	return errors.Is(e.Err, target)
+	_, ok := target.(*VaultError)
+	return ok || errors.Is(e.Cause, target)
 }
 
 // NewVaultError creates a new VaultError.
-func NewVaultError(op, path string, err error) *VaultError {
+func NewVaultError(operation, path, message string) *VaultError {
 	return &VaultError{
-		Op:   op,
-		Path: path,
-		Err:  err,
+		Operation: operation,
+		Path:      path,
+		Message:   message,
 	}
 }
 
-// NewVaultErrorWithCode creates a new VaultError with an HTTP status code.
-func NewVaultErrorWithCode(op, path string, err error, code int) *VaultError {
+// NewVaultErrorWithCause creates a new VaultError with a cause.
+func NewVaultErrorWithCause(operation, path, message string, cause error) *VaultError {
 	return &VaultError{
-		Op:   op,
-		Path: path,
-		Err:  err,
-		Code: code,
+		Operation: operation,
+		Path:      path,
+		Message:   message,
+		Cause:     cause,
 	}
+}
+
+// AuthenticationError represents an authentication-related error.
+type AuthenticationError struct {
+	Method  string
+	Message string
+	Cause   error
+}
+
+// Error implements the error interface.
+func (e *AuthenticationError) Error() string {
+	msg := fmt.Sprintf("vault authentication failed (%s): %s", e.Method, e.Message)
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: %v", msg, e.Cause)
+	}
+	return msg
+}
+
+// Unwrap returns the underlying error.
+func (e *AuthenticationError) Unwrap() error {
+	return e.Cause
+}
+
+// Is checks if the error matches the target.
+func (e *AuthenticationError) Is(target error) bool {
+	if errors.Is(target, ErrAuthenticationFailed) {
+		return true
+	}
+	_, ok := target.(*AuthenticationError)
+	return ok || errors.Is(e.Cause, target)
+}
+
+// NewAuthenticationError creates a new AuthenticationError.
+func NewAuthenticationError(method, message string) *AuthenticationError {
+	return &AuthenticationError{
+		Method:  method,
+		Message: message,
+	}
+}
+
+// NewAuthenticationErrorWithCause creates a new AuthenticationError with a cause.
+func NewAuthenticationErrorWithCause(method, message string, cause error) *AuthenticationError {
+	return &AuthenticationError{
+		Method:  method,
+		Message: message,
+		Cause:   cause,
+	}
+}
+
+// ConfigurationError represents a configuration-related error.
+type ConfigurationError struct {
+	Field   string
+	Message string
+	Cause   error
+}
+
+// Error implements the error interface.
+func (e *ConfigurationError) Error() string {
+	if e.Field != "" {
+		if e.Cause != nil {
+			return fmt.Sprintf("vault config error at %s: %s: %v", e.Field, e.Message, e.Cause)
+		}
+		return fmt.Sprintf("vault config error at %s: %s", e.Field, e.Message)
+	}
+	if e.Cause != nil {
+		return fmt.Sprintf("vault config error: %s: %v", e.Message, e.Cause)
+	}
+	return fmt.Sprintf("vault config error: %s", e.Message)
+}
+
+// Unwrap returns the underlying error.
+func (e *ConfigurationError) Unwrap() error {
+	return e.Cause
+}
+
+// Is checks if the error matches the target.
+func (e *ConfigurationError) Is(target error) bool {
+	if errors.Is(target, ErrInvalidConfig) {
+		return true
+	}
+	_, ok := target.(*ConfigurationError)
+	return ok || errors.Is(e.Cause, target)
+}
+
+// NewConfigurationError creates a new ConfigurationError.
+func NewConfigurationError(field, message string) *ConfigurationError {
+	return &ConfigurationError{
+		Field:   field,
+		Message: message,
+	}
+}
+
+// NewConfigurationErrorWithCause creates a new ConfigurationError with a cause.
+func NewConfigurationErrorWithCause(field, message string, cause error) *ConfigurationError {
+	return &ConfigurationError{
+		Field:   field,
+		Message: message,
+		Cause:   cause,
+	}
+}
+
+// WrapError wraps an error with additional context.
+func WrapError(err error, message string) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", message, err)
 }
 
 // IsRetryable returns true if the error is retryable.
@@ -97,40 +213,29 @@ func IsRetryable(err error) bool {
 		return false
 	}
 
-	var vaultErr *VaultError
-	if errors.As(err, &vaultErr) {
-		// Retry on server errors (5xx) and rate limiting (429)
-		if vaultErr.Code >= 500 || vaultErr.Code == 429 {
-			return true
-		}
-	}
-
-	// Retry on connection errors
-	if errors.Is(err, ErrConnectionFailed) {
+	// Network errors and unavailability are retryable
+	if errors.Is(err, ErrVaultUnavailable) {
 		return true
 	}
 
-	return false
-}
-
-// IsAuthError returns true if the error is an authentication error.
-func IsAuthError(err error) bool {
-	if err == nil {
+	// Token expiration requires re-authentication, not retry
+	if errors.Is(err, ErrTokenExpired) {
 		return false
 	}
 
-	if errors.Is(err, ErrNotAuthenticated) ||
-		errors.Is(err, ErrAuthenticationFailed) ||
-		errors.Is(err, ErrTokenExpired) {
-		return true
+	// Authentication failures are not retryable
+	if errors.Is(err, ErrAuthenticationFailed) {
+		return false
 	}
 
-	var vaultErr *VaultError
-	if errors.As(err, &vaultErr) {
-		// 401 Unauthorized or 403 Forbidden
-		if vaultErr.Code == 401 || vaultErr.Code == 403 {
-			return true
-		}
+	// Configuration errors are not retryable
+	if errors.Is(err, ErrInvalidConfig) {
+		return false
+	}
+
+	// Vault sealed is potentially retryable (may be unsealed)
+	if errors.Is(err, ErrVaultSealed) {
+		return true
 	}
 
 	return false

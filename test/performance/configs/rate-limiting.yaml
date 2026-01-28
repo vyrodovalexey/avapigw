@@ -1,0 +1,61 @@
+# Yandex Tank Configuration: Rate Limiting Stress Test
+# Purpose: Verify rate limiting behavior under high load
+# Target: Rate limited endpoint - expects 429 responses when limit exceeded
+# Duration: 8 minutes total (multiple phases)
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Phase 1: Ramp to 500 RPS (below 1000 RPS limit) - 1 min
+    # Phase 2: Sustain at 500 RPS - 1 min
+    # Phase 3: Ramp to 2000 RPS (exceeds limit) - 1 min
+    # Phase 4: Sustain at 2000 RPS (should see 429s) - 3 min
+    # Phase 5: Ramp down to 500 RPS - 1 min
+    # Phase 6: Sustain at 500 RPS (should recover) - 1 min
+    schedule: line(1, 500, 1m) const(500, 1m) line(500, 2000, 1m) const(2000, 3m) line(2000, 500, 1m) const(500, 1m)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings - high instances to generate load
+  instances: 2000
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: rate-limiting]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Don't stop on 429s - they're expected
+    # Stop only if 5xx errors exceed 5%
+    - http(5xx,5%,10)
+    # Stop if network errors exceed 2%
+    - http(net,2%,10s)
+    # Stop if response time exceeds 2000ms for 50% of requests
+    - time(2000,50%,30)

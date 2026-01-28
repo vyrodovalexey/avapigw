@@ -1,0 +1,88 @@
+# Yandex Tank Configuration: Backend mTLS with Vault Client Certificates
+# Purpose: Measure backend connection latency with Vault-issued client certs
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 1000+ RPS with backend mTLS
+#
+# Test Case 3: Backend mTLS with Vault Client Certificates
+# =========================================================
+# Measures:
+#   - Backend connection setup time with Vault-issued client certs
+#   - Request latency through gateway -> mTLS backend path
+#   - Compare with file-based client cert baseline
+#
+# Expected Behavior:
+#   - Gateway uses Vault-issued client cert for backend mTLS
+#   - Client cert is cached via atomic.Pointer (no Vault call per request)
+#   - Connection pool reuses mTLS connections
+#   - Latency overhead should be minimal after initial connection
+#
+# Baselines & Thresholds:
+#   - p50 latency: < 10ms
+#   - p95 latency: < 30ms
+#   - p99 latency: < 100ms
+#   - Error rate: < 0.1%
+#   - Throughput: > 1000 RPS
+#
+# Prerequisites:
+#   - Vault running at localhost:8200 with PKI engine configured
+#   - Gateway running with gateway-perftest-vault-tls.yaml config
+#     (backend TLS with Vault client cert enabled)
+#   - Backend services on ports 8801, 8802 (accepting mTLS)
+#
+# Note: This test targets the HTTP listener (port 8080) to isolate
+# backend mTLS overhead from listener TLS overhead.
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 50 to 1000 RPS
+    # Sustain: 3 min at 1000 RPS (main measurement phase)
+    # Cooldown: 1 min ramp down
+    schedule: line(50, 1000, 1m) const(1000, 3m) line(1000, 50, 1m)
+
+  ammofile: /var/loadtest/ammo/vault-backend-mtls.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 15s
+
+  # Instance settings
+  instances: 1500
+  threads: 6
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-VaultBackendMTLS]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: vault-backend-mtls]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 5%
+    - http(5xx,5%,30s)
+    # Stop if response time exceeds 5 seconds for 50% of requests
+    - time(5000,50%,30s)
+    # Stop if net errors exceed 5%
+    - http(net,5%,30s)
+    # Stop if 4xx errors exceed 10%
+    - http(4xx,10%,30s)

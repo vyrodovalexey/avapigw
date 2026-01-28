@@ -1,0 +1,47 @@
+# Yandex Tank Configuration: Max Sessions Smoke Test
+# Purpose: Quick validation of max sessions test setup
+# Duration: 2 minutes total
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    schedule: line(10, 100, 30s) const(100, 1m) line(100, 10, 30s)
+
+  ammofile: /var/loadtest/ammo/maxsessions.txt
+  ammo_type: uri
+
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  instances: 200
+  threads: 2
+
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/SmokeTest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 20% for 10 seconds
+    - http(5xx,20%,10s)
+    # Stop if net errors exceed 10%
+    - http(net,10%,10s)

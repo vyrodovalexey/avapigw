@@ -13,44 +13,50 @@ func TestTime_UnmarshalJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		input     string
-		expected  time.Time
-		wantError bool
+		name     string
+		input    string
+		expected time.Time
+		wantErr  bool
 	}{
 		{
-			name:     "Valid timestamp",
+			name:     "valid timestamp",
 			input:    "1609459200",
 			expected: time.Unix(1609459200, 0),
+			wantErr:  false,
 		},
 		{
-			name:     "Valid timestamp with decimals",
+			name:     "valid timestamp with decimals",
 			input:    "1609459200.5",
 			expected: time.Unix(1609459200, 0),
+			wantErr:  false,
 		},
 		{
-			name:     "Zero timestamp",
+			name:     "zero timestamp",
 			input:    "0",
 			expected: time.Unix(0, 0),
+			wantErr:  false,
 		},
 		{
-			name:      "Invalid timestamp",
-			input:     `"not-a-number"`,
-			wantError: true,
+			name:    "invalid string",
+			input:   `"not a number"`,
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
 			var tm Time
 			err := json.Unmarshal([]byte(tt.input), &tm)
-			if tt.wantError {
+
+			if tt.wantErr {
 				assert.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tt.expected.Unix(), tm.Unix())
+				return
 			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected.Unix(), tm.Unix())
 		})
 	}
 }
@@ -69,44 +75,50 @@ func TestAudience_UnmarshalJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		input     string
-		expected  Audience
-		wantError bool
+		name     string
+		input    string
+		expected Audience
+		wantErr  bool
 	}{
 		{
-			name:     "Single audience as string",
-			input:    `"api"`,
-			expected: Audience{"api"},
+			name:     "single string",
+			input:    `"api.example.com"`,
+			expected: Audience{"api.example.com"},
+			wantErr:  false,
 		},
 		{
-			name:     "Multiple audiences as array",
-			input:    `["api", "web", "mobile"]`,
-			expected: Audience{"api", "web", "mobile"},
+			name:     "array of strings",
+			input:    `["api.example.com", "web.example.com"]`,
+			expected: Audience{"api.example.com", "web.example.com"},
+			wantErr:  false,
 		},
 		{
-			name:     "Empty array",
+			name:     "empty array",
 			input:    `[]`,
 			expected: Audience{},
+			wantErr:  false,
 		},
 		{
-			name:      "Invalid JSON",
-			input:     `{invalid}`,
-			wantError: true,
+			name:    "invalid type",
+			input:   `123`,
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
 			var aud Audience
 			err := json.Unmarshal([]byte(tt.input), &aud)
-			if tt.wantError {
+
+			if tt.wantErr {
 				assert.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tt.expected, aud)
+				return
 			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, aud)
 		})
 	}
 }
@@ -120,25 +132,21 @@ func TestAudience_MarshalJSON(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "Single audience",
-			audience: Audience{"api"},
-			expected: `"api"`,
+			name:     "single value",
+			audience: Audience{"api.example.com"},
+			expected: `"api.example.com"`,
 		},
 		{
-			name:     "Multiple audiences",
-			audience: Audience{"api", "web"},
-			expected: `["api","web"]`,
-		},
-		{
-			name:     "Empty audience",
-			audience: Audience{},
-			expected: `[]`,
+			name:     "multiple values",
+			audience: Audience{"api.example.com", "web.example.com"},
+			expected: `["api.example.com","web.example.com"]`,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
 			data, err := json.Marshal(tt.audience)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, string(data))
@@ -149,133 +157,146 @@ func TestAudience_MarshalJSON(t *testing.T) {
 func TestAudience_Contains(t *testing.T) {
 	t.Parallel()
 
+	aud := Audience{"api.example.com", "web.example.com"}
+
+	assert.True(t, aud.Contains("api.example.com"))
+	assert.True(t, aud.Contains("web.example.com"))
+	assert.False(t, aud.Contains("other.example.com"))
+	assert.False(t, aud.Contains(""))
+}
+
+func TestAudience_ContainsAny(t *testing.T) {
+	t.Parallel()
+
+	aud := Audience{"api.example.com", "web.example.com"}
+
+	assert.True(t, aud.ContainsAny("api.example.com"))
+	assert.True(t, aud.ContainsAny("other.example.com", "api.example.com"))
+	assert.True(t, aud.ContainsAny("web.example.com", "api.example.com"))
+	assert.False(t, aud.ContainsAny("other.example.com"))
+	assert.False(t, aud.ContainsAny())
+}
+
+func TestClaims_Valid(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		name     string
-		audience Audience
-		value    string
-		expected bool
+		name    string
+		claims  *Claims
+		wantErr bool
 	}{
 		{
-			name:     "Contains value",
-			audience: Audience{"api", "web", "mobile"},
-			value:    "web",
-			expected: true,
+			name: "valid claims - no expiration",
+			claims: &Claims{
+				Subject: "user123",
+				Issuer:  "test-issuer",
+			},
+			wantErr: false,
 		},
 		{
-			name:     "Does not contain value",
-			audience: Audience{"api", "web", "mobile"},
-			value:    "admin",
-			expected: false,
+			name: "valid claims - future expiration",
+			claims: &Claims{
+				Subject:   "user123",
+				ExpiresAt: &Time{Time: time.Now().Add(time.Hour)},
+			},
+			wantErr: false,
 		},
 		{
-			name:     "Empty audience",
-			audience: Audience{},
-			value:    "api",
-			expected: false,
+			name: "expired token",
+			claims: &Claims{
+				Subject:   "user123",
+				ExpiresAt: &Time{Time: time.Now().Add(-time.Hour)},
+			},
+			wantErr: true,
 		},
 		{
-			name:     "Single audience contains",
-			audience: Audience{"api"},
-			value:    "api",
-			expected: true,
+			name: "not yet valid",
+			claims: &Claims{
+				Subject:   "user123",
+				NotBefore: &Time{Time: time.Now().Add(time.Hour)},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid with not before in past",
+			claims: &Claims{
+				Subject:   "user123",
+				NotBefore: &Time{Time: time.Now().Add(-time.Hour)},
+			},
+			wantErr: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := tt.audience.Contains(tt.value)
-			assert.Equal(t, tt.expected, result)
+
+			err := tt.claims.Valid()
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
 
-func TestParseClaims(t *testing.T) {
+func TestClaims_ValidWithSkew(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		data      map[string]interface{}
-		validate  func(*testing.T, *Claims)
-		wantError bool
+		name    string
+		claims  *Claims
+		skew    time.Duration
+		wantErr bool
 	}{
 		{
-			name: "Standard claims",
-			data: map[string]interface{}{
-				"iss": "https://issuer.example.com",
-				"sub": "user123",
-				"aud": "api",
-				"exp": float64(1609459200),
-				"nbf": float64(1609455600),
-				"iat": float64(1609455600),
-				"jti": "token-id-123",
+			name: "expired but within skew",
+			claims: &Claims{
+				Subject:   "user123",
+				ExpiresAt: &Time{Time: time.Now().Add(-30 * time.Second)},
 			},
-			validate: func(t *testing.T, c *Claims) {
-				assert.Equal(t, "https://issuer.example.com", c.Issuer)
-				assert.Equal(t, "user123", c.Subject)
-				assert.True(t, c.Audience.Contains("api"))
-				assert.NotNil(t, c.ExpiresAt)
-				assert.NotNil(t, c.NotBefore)
-				assert.NotNil(t, c.IssuedAt)
-				assert.Equal(t, "token-id-123", c.ID)
-			},
+			skew:    time.Minute,
+			wantErr: false,
 		},
 		{
-			name: "OIDC claims",
-			data: map[string]interface{}{
-				"name":           "John Doe",
-				"email":          "john@example.com",
-				"email_verified": true,
-				"groups":         []interface{}{"admin", "users"},
-				"roles":          []interface{}{"editor", "viewer"},
-				"scope":          "openid profile email",
+			name: "expired beyond skew",
+			claims: &Claims{
+				Subject:   "user123",
+				ExpiresAt: &Time{Time: time.Now().Add(-2 * time.Minute)},
 			},
-			validate: func(t *testing.T, c *Claims) {
-				assert.Equal(t, "John Doe", c.Name)
-				assert.Equal(t, "john@example.com", c.Email)
-				assert.True(t, c.EmailVerified)
-				assert.Equal(t, []string{"admin", "users"}, c.Groups)
-				assert.Equal(t, []string{"editor", "viewer"}, c.Roles)
-				assert.Equal(t, "openid profile email", c.Scope)
-			},
+			skew:    time.Minute,
+			wantErr: true,
 		},
 		{
-			name: "Custom claims",
-			data: map[string]interface{}{
-				"iss":          "issuer",
-				"custom_claim": "custom_value",
-				"nested": map[string]interface{}{
-					"key": "value",
-				},
+			name: "not yet valid but within skew",
+			claims: &Claims{
+				Subject:   "user123",
+				NotBefore: &Time{Time: time.Now().Add(30 * time.Second)},
 			},
-			validate: func(t *testing.T, c *Claims) {
-				assert.Equal(t, "custom_value", c.Custom["custom_claim"])
-				assert.NotNil(t, c.Custom["nested"])
-			},
+			skew:    time.Minute,
+			wantErr: false,
 		},
 		{
-			name: "Multiple audiences",
-			data: map[string]interface{}{
-				"aud": []interface{}{"api", "web", "mobile"},
+			name: "not yet valid beyond skew",
+			claims: &Claims{
+				Subject:   "user123",
+				NotBefore: &Time{Time: time.Now().Add(2 * time.Minute)},
 			},
-			validate: func(t *testing.T, c *Claims) {
-				assert.Len(t, c.Audience, 3)
-				assert.True(t, c.Audience.Contains("api"))
-				assert.True(t, c.Audience.Contains("web"))
-				assert.True(t, c.Audience.Contains("mobile"))
-			},
+			skew:    time.Minute,
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			claims, err := ParseClaims(tt.data)
-			if tt.wantError {
+
+			err := tt.claims.ValidWithSkew(tt.skew)
+			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
-				require.NoError(t, err)
-				tt.validate(t, claims)
+				assert.NoError(t, err)
 			}
 		})
 	}
@@ -284,19 +305,22 @@ func TestParseClaims(t *testing.T) {
 func TestClaims_GetClaim(t *testing.T) {
 	t.Parallel()
 
-	data := map[string]interface{}{
-		"iss":    "issuer",
-		"sub":    "subject",
-		"custom": "value",
-		"nested": map[string]interface{}{
-			"level1": map[string]interface{}{
-				"level2": "deep_value",
+	now := time.Now()
+	claims := &Claims{
+		Issuer:    "test-issuer",
+		Subject:   "user123",
+		Audience:  Audience{"api.example.com"},
+		ExpiresAt: &Time{Time: now},
+		NotBefore: &Time{Time: now},
+		IssuedAt:  &Time{Time: now},
+		JWTID:     "jti-123",
+		Extra: map[string]interface{}{
+			"custom_claim": "custom_value",
+			"nested": map[string]interface{}{
+				"key": "value",
 			},
 		},
 	}
-
-	claims, err := ParseClaims(data)
-	require.NoError(t, err)
 
 	tests := []struct {
 		name     string
@@ -304,39 +328,22 @@ func TestClaims_GetClaim(t *testing.T) {
 		expected interface{}
 		found    bool
 	}{
-		{
-			name:     "Standard claim",
-			claim:    "iss",
-			expected: "issuer",
-			found:    true,
-		},
-		{
-			name:     "Custom claim",
-			claim:    "custom",
-			expected: "value",
-			found:    true,
-		},
-		{
-			name:     "Nested claim",
-			claim:    "nested.level1.level2",
-			expected: "deep_value",
-			found:    true,
-		},
-		{
-			name:  "Non-existent claim",
-			claim: "nonexistent",
-			found: false,
-		},
-		{
-			name:  "Non-existent nested claim",
-			claim: "nested.nonexistent",
-			found: false,
-		},
+		{"issuer", "iss", "test-issuer", true},
+		{"subject", "sub", "user123", true},
+		{"audience", "aud", []string{"api.example.com"}, true},
+		{"expiration", "exp", now.Unix(), true},
+		{"not before", "nbf", now.Unix(), true},
+		{"issued at", "iat", now.Unix(), true},
+		{"jwt id", "jti", "jti-123", true},
+		{"custom claim", "custom_claim", "custom_value", true},
+		{"missing claim", "missing", nil, false},
+		{"empty issuer", "iss", "test-issuer", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
 			value, found := claims.GetClaim(tt.claim)
 			assert.Equal(t, tt.found, found)
 			if tt.found {
@@ -346,466 +353,306 @@ func TestClaims_GetClaim(t *testing.T) {
 	}
 }
 
-func TestClaims_GetClaim_NilRaw(t *testing.T) {
+func TestClaims_GetNestedClaim(t *testing.T) {
 	t.Parallel()
 
-	claims := &Claims{}
-	value, found := claims.GetClaim("any")
-	assert.False(t, found)
-	assert.Nil(t, value)
+	claims := &Claims{
+		Subject: "user123",
+		Extra: map[string]interface{}{
+			"nested": map[string]interface{}{
+				"level1": map[string]interface{}{
+					"level2": "deep_value",
+				},
+			},
+			"simple": "value",
+		},
+	}
+
+	tests := []struct {
+		name     string
+		path     string
+		expected interface{}
+		found    bool
+	}{
+		{"simple path", "simple", "value", true},
+		{"nested path", "nested.level1.level2", "deep_value", true},
+		{"partial path", "nested.level1", map[string]interface{}{"level2": "deep_value"}, true},
+		{"missing path", "nested.missing", nil, false},
+		{"standard claim", "sub", "user123", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			value, found := claims.GetNestedClaim(tt.path)
+			assert.Equal(t, tt.found, found)
+			if tt.found {
+				assert.Equal(t, tt.expected, value)
+			}
+		})
+	}
 }
 
 func TestClaims_GetStringClaim(t *testing.T) {
 	t.Parallel()
 
-	data := map[string]interface{}{
-		"string_claim": "value",
-		"int_claim":    123,
+	claims := &Claims{
+		Subject: "user123",
+		Extra: map[string]interface{}{
+			"string_claim": "string_value",
+			"int_claim":    123,
+		},
 	}
 
-	claims, err := ParseClaims(data)
-	require.NoError(t, err)
-
-	// String claim
-	value, ok := claims.GetStringClaim("string_claim")
-	assert.True(t, ok)
-	assert.Equal(t, "value", value)
-
-	// Non-string claim
-	_, ok = claims.GetStringClaim("int_claim")
-	assert.False(t, ok)
-
-	// Non-existent claim
-	_, ok = claims.GetStringClaim("nonexistent")
-	assert.False(t, ok)
+	assert.Equal(t, "user123", claims.GetStringClaim("sub"))
+	assert.Equal(t, "string_value", claims.GetStringClaim("string_claim"))
+	assert.Equal(t, "", claims.GetStringClaim("int_claim"))
+	assert.Equal(t, "", claims.GetStringClaim("missing"))
 }
 
 func TestClaims_GetStringSliceClaim(t *testing.T) {
 	t.Parallel()
 
-	data := map[string]interface{}{
-		"string_slice": []interface{}{"a", "b", "c"},
-		"mixed_slice":  []interface{}{"a", 1, "c"},
-		"string_value": "not-a-slice",
+	claims := &Claims{
+		Audience: Audience{"aud1", "aud2"},
+		Extra: map[string]interface{}{
+			"roles":       []string{"admin", "user"},
+			"permissions": []interface{}{"read", "write"},
+			"scopes":      "read write delete",
+			"invalid":     123,
+		},
 	}
 
-	claims, err := ParseClaims(data)
-	require.NoError(t, err)
+	tests := []struct {
+		name     string
+		claim    string
+		expected []string
+	}{
+		{"string slice", "roles", []string{"admin", "user"}},
+		{"interface slice", "permissions", []string{"read", "write"}},
+		{"space-separated string", "scopes", []string{"read", "write", "delete"}},
+		{"invalid type", "invalid", nil},
+		{"missing claim", "missing", nil},
+	}
 
-	// String slice claim
-	value, ok := claims.GetStringSliceClaim("string_slice")
-	assert.True(t, ok)
-	assert.Equal(t, []string{"a", "b", "c"}, value)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Mixed slice (only strings extracted)
-	value, ok = claims.GetStringSliceClaim("mixed_slice")
-	assert.True(t, ok)
-	assert.Equal(t, []string{"a", "c"}, value)
-
-	// Non-slice claim
-	_, ok = claims.GetStringSliceClaim("string_value")
-	assert.False(t, ok)
-
-	// Non-existent claim
-	_, ok = claims.GetStringSliceClaim("nonexistent")
-	assert.False(t, ok)
+			result := claims.GetStringSliceClaim(tt.claim)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }
 
-func TestClaims_HasRole(t *testing.T) {
+func TestClaims_GetNestedStringSliceClaim(t *testing.T) {
 	t.Parallel()
 
 	claims := &Claims{
-		Roles: []string{"admin", "editor", "viewer"},
+		Extra: map[string]interface{}{
+			"realm_access": map[string]interface{}{
+				"roles": []interface{}{"admin", "user"},
+			},
+		},
 	}
 
-	assert.True(t, claims.HasRole("admin"))
-	assert.True(t, claims.HasRole("editor"))
-	assert.True(t, claims.HasRole("viewer"))
-	assert.False(t, claims.HasRole("superadmin"))
-	assert.False(t, claims.HasRole(""))
+	result := claims.GetNestedStringSliceClaim("realm_access.roles")
+	assert.Equal(t, []string{"admin", "user"}, result)
+
+	result = claims.GetNestedStringSliceClaim("missing.path")
+	assert.Nil(t, result)
 }
 
-func TestClaims_HasAnyRole(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Roles: []string{"admin", "editor"},
-	}
-
-	assert.True(t, claims.HasAnyRole("admin", "superadmin"))
-	assert.True(t, claims.HasAnyRole("viewer", "editor"))
-	assert.False(t, claims.HasAnyRole("viewer", "superadmin"))
-	assert.False(t, claims.HasAnyRole())
-}
-
-func TestClaims_HasAllRoles(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Roles: []string{"admin", "editor", "viewer"},
-	}
-
-	assert.True(t, claims.HasAllRoles("admin", "editor"))
-	assert.True(t, claims.HasAllRoles("admin"))
-	assert.True(t, claims.HasAllRoles())
-	assert.False(t, claims.HasAllRoles("admin", "superadmin"))
-}
-
-func TestClaims_HasGroup(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Groups: []string{"developers", "qa", "devops"},
-	}
-
-	assert.True(t, claims.HasGroup("developers"))
-	assert.True(t, claims.HasGroup("qa"))
-	assert.False(t, claims.HasGroup("management"))
-	assert.False(t, claims.HasGroup(""))
-}
-
-func TestClaims_HasAnyGroup(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Groups: []string{"developers", "qa"},
-	}
-
-	assert.True(t, claims.HasAnyGroup("developers", "management"))
-	assert.True(t, claims.HasAnyGroup("devops", "qa"))
-	assert.False(t, claims.HasAnyGroup("management", "hr"))
-	assert.False(t, claims.HasAnyGroup())
-}
-
-func TestClaims_HasAllGroups(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Groups: []string{"developers", "qa", "devops"},
-	}
-
-	assert.True(t, claims.HasAllGroups("developers", "qa"))
-	assert.True(t, claims.HasAllGroups("developers"))
-	assert.True(t, claims.HasAllGroups())
-	assert.False(t, claims.HasAllGroups("developers", "management"))
-}
-
-func TestClaims_HasScope(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Scope: "openid profile email read:users write:users",
-	}
-
-	assert.True(t, claims.HasScope("openid"))
-	assert.True(t, claims.HasScope("profile"))
-	assert.True(t, claims.HasScope("read:users"))
-	assert.True(t, claims.HasScope("write:users"))
-	assert.False(t, claims.HasScope("admin"))
-	assert.False(t, claims.HasScope(""))
-}
-
-func TestClaims_HasAnyScope(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Scope: "openid profile",
-	}
-
-	assert.True(t, claims.HasAnyScope("openid", "admin"))
-	assert.True(t, claims.HasAnyScope("admin", "profile"))
-	assert.False(t, claims.HasAnyScope("admin", "superadmin"))
-	assert.False(t, claims.HasAnyScope())
-}
-
-func TestClaims_HasAllScopes(t *testing.T) {
-	t.Parallel()
-
-	claims := &Claims{
-		Scope: "openid profile email",
-	}
-
-	assert.True(t, claims.HasAllScopes("openid", "profile"))
-	assert.True(t, claims.HasAllScopes("openid"))
-	assert.True(t, claims.HasAllScopes())
-	assert.False(t, claims.HasAllScopes("openid", "admin"))
-}
-
-func TestClaims_GetScopes(t *testing.T) {
+func TestParseClaims(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		scope    string
-		expected []string
+		data     map[string]interface{}
+		expected *Claims
 	}{
 		{
-			name:     "Multiple scopes",
-			scope:    "openid profile email",
-			expected: []string{"openid", "profile", "email"},
+			name: "full claims",
+			data: map[string]interface{}{
+				"iss":          "test-issuer",
+				"sub":          "user123",
+				"aud":          "api.example.com",
+				"exp":          float64(1609459200),
+				"nbf":          float64(1609455600),
+				"iat":          float64(1609455600),
+				"jti":          "jti-123",
+				"custom_claim": "custom_value",
+			},
+			expected: &Claims{
+				Issuer:    "test-issuer",
+				Subject:   "user123",
+				Audience:  Audience{"api.example.com"},
+				ExpiresAt: &Time{Time: time.Unix(1609459200, 0)},
+				NotBefore: &Time{Time: time.Unix(1609455600, 0)},
+				IssuedAt:  &Time{Time: time.Unix(1609455600, 0)},
+				JWTID:     "jti-123",
+				Extra: map[string]interface{}{
+					"custom_claim": "custom_value",
+				},
+			},
 		},
 		{
-			name:     "Single scope",
-			scope:    "openid",
-			expected: []string{"openid"},
+			name: "audience as array",
+			data: map[string]interface{}{
+				"aud": []interface{}{"aud1", "aud2"},
+			},
+			expected: &Claims{
+				Audience: Audience{"aud1", "aud2"},
+				Extra:    map[string]interface{}{},
+			},
 		},
 		{
-			name:     "Empty scope",
-			scope:    "",
-			expected: nil,
+			name: "minimal claims",
+			data: map[string]interface{}{
+				"sub": "user123",
+			},
+			expected: &Claims{
+				Subject: "user123",
+				Extra:   map[string]interface{}{},
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			claims := &Claims{Scope: tt.scope}
-			scopes := claims.GetScopes()
-			assert.Equal(t, tt.expected, scopes)
-		})
-	}
-}
 
-func TestClaims_IsExpired(t *testing.T) {
-	t.Parallel()
+			claims, err := ParseClaims(tt.data)
+			require.NoError(t, err)
 
-	tests := []struct {
-		name      string
-		expiresAt *Time
-		expected  bool
-	}{
-		{
-			name:      "Not expired",
-			expiresAt: &Time{Time: time.Now().Add(time.Hour)},
-			expected:  false,
-		},
-		{
-			name:      "Expired",
-			expiresAt: &Time{Time: time.Now().Add(-time.Hour)},
-			expected:  true,
-		},
-		{
-			name:      "No expiry",
-			expiresAt: nil,
-			expected:  false,
-		},
-	}
+			assert.Equal(t, tt.expected.Issuer, claims.Issuer)
+			assert.Equal(t, tt.expected.Subject, claims.Subject)
+			assert.Equal(t, tt.expected.Audience, claims.Audience)
+			assert.Equal(t, tt.expected.JWTID, claims.JWTID)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			claims := &Claims{ExpiresAt: tt.expiresAt}
-			assert.Equal(t, tt.expected, claims.IsExpired())
-		})
-	}
-}
-
-func TestClaims_IsExpiredWithSkew(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		expiresAt *Time
-		skew      time.Duration
-		expected  bool
-	}{
-		{
-			name:      "Not expired with skew",
-			expiresAt: &Time{Time: time.Now().Add(30 * time.Second)},
-			skew:      time.Minute,
-			expected:  false,
-		},
-		{
-			name:      "Expired even with skew",
-			expiresAt: &Time{Time: time.Now().Add(-2 * time.Minute)},
-			skew:      time.Minute,
-			expected:  true,
-		},
-		{
-			name:      "No expiry",
-			expiresAt: nil,
-			skew:      time.Minute,
-			expected:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			claims := &Claims{ExpiresAt: tt.expiresAt}
-			assert.Equal(t, tt.expected, claims.IsExpiredWithSkew(tt.skew))
-		})
-	}
-}
-
-func TestClaims_IsNotYetValid(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		notBefore *Time
-		expected  bool
-	}{
-		{
-			name:      "Valid now",
-			notBefore: &Time{Time: time.Now().Add(-time.Hour)},
-			expected:  false,
-		},
-		{
-			name:      "Not yet valid",
-			notBefore: &Time{Time: time.Now().Add(time.Hour)},
-			expected:  true,
-		},
-		{
-			name:      "No nbf claim",
-			notBefore: nil,
-			expected:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			claims := &Claims{NotBefore: tt.notBefore}
-			assert.Equal(t, tt.expected, claims.IsNotYetValid())
-		})
-	}
-}
-
-func TestClaims_IsNotYetValidWithSkew(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		notBefore *Time
-		skew      time.Duration
-		expected  bool
-	}{
-		{
-			name:      "Valid with skew",
-			notBefore: &Time{Time: time.Now().Add(30 * time.Second)},
-			skew:      time.Minute,
-			expected:  false,
-		},
-		{
-			name:      "Not yet valid even with skew",
-			notBefore: &Time{Time: time.Now().Add(2 * time.Minute)},
-			skew:      time.Minute,
-			expected:  true,
-		},
-		{
-			name:      "No nbf claim",
-			notBefore: nil,
-			skew:      time.Minute,
-			expected:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			claims := &Claims{NotBefore: tt.notBefore}
-			assert.Equal(t, tt.expected, claims.IsNotYetValidWithSkew(tt.skew))
-		})
-	}
-}
-
-func TestClaims_Valid(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		expiresAt *Time
-		notBefore *Time
-		expected  bool
-	}{
-		{
-			name:      "Valid token",
-			expiresAt: &Time{Time: time.Now().Add(time.Hour)},
-			notBefore: &Time{Time: time.Now().Add(-time.Hour)},
-			expected:  true,
-		},
-		{
-			name:      "Expired token",
-			expiresAt: &Time{Time: time.Now().Add(-time.Hour)},
-			notBefore: &Time{Time: time.Now().Add(-2 * time.Hour)},
-			expected:  false,
-		},
-		{
-			name:      "Not yet valid token",
-			expiresAt: &Time{Time: time.Now().Add(2 * time.Hour)},
-			notBefore: &Time{Time: time.Now().Add(time.Hour)},
-			expected:  false,
-		},
-		{
-			name:      "No time claims",
-			expiresAt: nil,
-			notBefore: nil,
-			expected:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			claims := &Claims{
-				ExpiresAt: tt.expiresAt,
-				NotBefore: tt.notBefore,
+			if tt.expected.ExpiresAt != nil {
+				require.NotNil(t, claims.ExpiresAt)
+				assert.Equal(t, tt.expected.ExpiresAt.Unix(), claims.ExpiresAt.Unix())
 			}
-			assert.Equal(t, tt.expected, claims.Valid())
 		})
 	}
 }
 
-func TestClaims_ValidWithSkew(t *testing.T) {
+func TestClaims_ToMap(t *testing.T) {
 	t.Parallel()
 
-	skew := time.Minute
+	now := time.Now()
+	claims := &Claims{
+		Issuer:    "test-issuer",
+		Subject:   "user123",
+		Audience:  Audience{"api.example.com"},
+		ExpiresAt: &Time{Time: now},
+		JWTID:     "jti-123",
+		Extra: map[string]interface{}{
+			"custom": "value",
+		},
+	}
+
+	result := claims.ToMap()
+
+	assert.Equal(t, "test-issuer", result["iss"])
+	assert.Equal(t, "user123", result["sub"])
+	assert.Equal(t, "api.example.com", result["aud"])
+	assert.Equal(t, now.Unix(), result["exp"])
+	assert.Equal(t, "jti-123", result["jti"])
+	assert.Equal(t, "value", result["custom"])
+}
+
+func TestClaims_ToMap_MultipleAudience(t *testing.T) {
+	t.Parallel()
+
+	claims := &Claims{
+		Audience: Audience{"aud1", "aud2"},
+	}
+
+	result := claims.ToMap()
+	assert.Equal(t, []string{"aud1", "aud2"}, result["aud"])
+}
+
+func TestParseAudience(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
-		name      string
-		expiresAt *Time
-		notBefore *Time
-		expected  bool
+		name     string
+		value    interface{}
+		expected Audience
 	}{
-		{
-			name:      "Valid with skew",
-			expiresAt: &Time{Time: time.Now().Add(30 * time.Second)},
-			notBefore: &Time{Time: time.Now().Add(30 * time.Second)},
-			expected:  true,
-		},
-		{
-			name:      "Expired even with skew",
-			expiresAt: &Time{Time: time.Now().Add(-2 * time.Minute)},
-			notBefore: nil,
-			expected:  false,
-		},
+		{"string", "single", Audience{"single"}},
+		{"string slice", []string{"a", "b"}, Audience{"a", "b"}},
+		{"interface slice", []interface{}{"a", "b"}, Audience{"a", "b"}},
+		{"invalid type", 123, nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			claims := &Claims{
-				ExpiresAt: tt.expiresAt,
-				NotBefore: tt.notBefore,
-			}
-			assert.Equal(t, tt.expected, claims.ValidWithSkew(skew))
+
+			result := parseAudience(tt.value)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
-func TestClaims_Raw(t *testing.T) {
+func TestParseTime(t *testing.T) {
 	t.Parallel()
 
-	data := map[string]interface{}{
-		"iss":    "issuer",
-		"sub":    "subject",
-		"custom": "value",
+	tests := []struct {
+		name     string
+		value    interface{}
+		expected int64
+		isNil    bool
+	}{
+		{"float64", float64(1609459200), 1609459200, false},
+		{"int64", int64(1609459200), 1609459200, false},
+		{"int", int(1609459200), 1609459200, false},
+		{"json.Number", json.Number("1609459200"), 1609459200, false},
+		{"invalid type", "not a number", 0, true},
 	}
 
-	claims, err := ParseClaims(data)
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	raw := claims.Raw()
-	assert.Equal(t, data, raw)
+			result := parseTime(tt.value)
+			if tt.isNil {
+				assert.Nil(t, result)
+			} else {
+				require.NotNil(t, result)
+				assert.Equal(t, tt.expected, result.Unix())
+			}
+		})
+	}
+}
+
+func TestClaims_GetClaim_EmptyValues(t *testing.T) {
+	t.Parallel()
+
+	claims := &Claims{
+		Issuer:  "",
+		Subject: "",
+	}
+
+	_, found := claims.GetClaim("iss")
+	assert.False(t, found)
+
+	_, found = claims.GetClaim("sub")
+	assert.False(t, found)
+}
+
+func TestClaims_GetClaim_NilExtra(t *testing.T) {
+	t.Parallel()
+
+	claims := &Claims{
+		Subject: "user123",
+		Extra:   nil,
+	}
+
+	_, found := claims.GetClaim("custom")
+	assert.False(t, found)
 }

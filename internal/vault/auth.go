@@ -3,289 +3,136 @@ package vault
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"net/url"
 	"os"
-	"strings"
+	"time"
 
-	vault "github.com/hashicorp/vault/api"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
-// ErrInvalidAuthConfig is returned when auth configuration is invalid.
-var ErrInvalidAuthConfig = errors.New("invalid auth configuration")
-
-const (
-	// DefaultServiceAccountTokenPath is the default path to the service account token.
-	// This is the standard Kubernetes service account token path, not a hardcoded credential.
-	//nolint:gosec // G101: This is a standard Kubernetes path, not a credential
-	DefaultServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-
-	// DefaultKubernetesMountPath is the default mount path for Kubernetes auth.
-	DefaultKubernetesMountPath = "kubernetes"
-
-	// DefaultAppRoleMountPath is the default mount path for AppRole auth.
-	DefaultAppRoleMountPath = "approle"
-)
-
-// AuthMethod defines the interface for Vault authentication methods.
-type AuthMethod interface {
-	// Authenticate authenticates with Vault and returns the auth secret.
-	Authenticate(ctx context.Context, client *vault.Client) (*vault.Secret, error)
-
-	// Name returns the name of the authentication method.
-	Name() string
-}
-
-// KubernetesAuth implements Kubernetes authentication for Vault.
-type KubernetesAuth struct {
-	role               string
-	serviceAccountPath string
-	mountPath          string
-}
-
-// NewKubernetesAuth creates a new Kubernetes authentication method.
-func NewKubernetesAuth(role, mountPath string) (*KubernetesAuth, error) {
-	if role == "" {
-		return nil, fmt.Errorf("%w: role is required", ErrInvalidAuthConfig)
-	}
-	if mountPath == "" {
-		mountPath = DefaultKubernetesMountPath
+// authenticateWithToken authenticates using a direct token.
+func (c *vaultClient) authenticateWithToken(_ context.Context) error {
+	if c.config.Token == "" {
+		return NewAuthenticationError("token", "token is empty")
 	}
 
-	return &KubernetesAuth{
-		role:               role,
-		serviceAccountPath: DefaultServiceAccountTokenPath,
-		mountPath:          mountPath,
-	}, nil
-}
+	c.api.SetToken(c.config.Token)
 
-// NewKubernetesAuthWithTokenPath creates a new Kubernetes authentication method with a custom token path.
-func NewKubernetesAuthWithTokenPath(role, mountPath, tokenPath string) (*KubernetesAuth, error) {
-	if role == "" {
-		return nil, fmt.Errorf("%w: role is required", ErrInvalidAuthConfig)
-	}
-	if mountPath == "" {
-		mountPath = DefaultKubernetesMountPath
-	}
-	if tokenPath == "" {
-		tokenPath = DefaultServiceAccountTokenPath
-	}
-
-	return &KubernetesAuth{
-		role:               role,
-		serviceAccountPath: tokenPath,
-		mountPath:          mountPath,
-	}, nil
-}
-
-// Authenticate implements AuthMethod.
-func (a *KubernetesAuth) Authenticate(ctx context.Context, client *vault.Client) (*vault.Secret, error) {
-	if client == nil {
-		return nil, fmt.Errorf("kubernetes auth failed: vault client is nil")
-	}
-
-	// Check context before file operation
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("kubernetes auth failed: %w", ctx.Err())
-	default:
-	}
-
-	// Read the service account token
-	jwt, err := os.ReadFile(a.serviceAccountPath)
+	// Lookup token to get TTL
+	secret, err := c.api.Auth().Token().LookupSelf()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read service account token: %w", err)
+		return NewAuthenticationErrorWithCause("token", "failed to lookup token", err)
 	}
 
-	// Authenticate with Vault
-	path := fmt.Sprintf("auth/%s/login", a.mountPath)
+	if secret != nil && secret.Data != nil {
+		if ttl, ok := secret.Data["ttl"]; ok {
+			// Handle both json.Number (from Vault API) and float64 (from tests)
+			ttlSeconds := extractTTLSeconds(ttl)
+			if ttlSeconds > 0 {
+				c.tokenTTL.Store(ttlSeconds)
+				c.tokenExpiry.Store(time.Now().Add(time.Duration(ttlSeconds) * time.Second).Unix())
+				c.metrics.SetTokenTTL(float64(ttlSeconds))
+			}
+		}
+	}
+
+	c.logger.Debug("authenticated with token")
+	return nil
+}
+
+// extractTTLSeconds extracts TTL seconds from various numeric types.
+// The Vault API may return json.Number, float64, or int depending on context.
+func extractTTLSeconds(ttl interface{}) int64 {
+	switch v := ttl.(type) {
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i
+		}
+		if f, err := v.Float64(); err == nil {
+			return int64(f)
+		}
+	case float64:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	}
+	return 0
+}
+
+// authenticateWithKubernetes authenticates using Kubernetes ServiceAccount JWT.
+func (c *vaultClient) authenticateWithKubernetes(ctx context.Context) error {
+	if c.config.Kubernetes == nil {
+		return NewAuthenticationError("kubernetes", "kubernetes configuration is nil")
+	}
+
+	tokenPath := c.config.Kubernetes.GetTokenPath()
+	jwt, err := os.ReadFile(tokenPath) // #nosec G304 -- token path from trusted config
+	if err != nil {
+		return NewAuthenticationErrorWithCause("kubernetes", "failed to read service account token", err)
+	}
+
+	mountPath := c.config.Kubernetes.GetMountPath()
+	path := "auth/" + mountPath + "/login"
+
 	data := map[string]interface{}{
-		"role": a.role,
+		"role": c.config.Kubernetes.Role,
 		"jwt":  string(jwt),
 	}
 
-	secret, err := client.Logical().WriteWithContext(ctx, path, data)
+	secret, err := c.api.Logical().WriteWithContext(ctx, path, data)
 	if err != nil {
-		return nil, fmt.Errorf("kubernetes auth failed: %w", err)
+		return NewAuthenticationErrorWithCause("kubernetes", "failed to authenticate", err)
 	}
 
-	return secret, nil
+	if secret == nil || secret.Auth == nil {
+		return NewAuthenticationError("kubernetes", "no auth info in response")
+	}
+
+	c.api.SetToken(secret.Auth.ClientToken)
+	c.tokenTTL.Store(int64(secret.Auth.LeaseDuration))
+	c.tokenExpiry.Store(time.Now().Add(time.Duration(secret.Auth.LeaseDuration) * time.Second).Unix())
+	c.metrics.SetTokenTTL(float64(secret.Auth.LeaseDuration))
+
+	c.logger.Debug("authenticated with kubernetes",
+		observability.String("role", c.config.Kubernetes.Role),
+		observability.Int64("ttl_seconds", int64(secret.Auth.LeaseDuration)),
+	)
+
+	return nil
 }
 
-// Name implements AuthMethod.
-func (a *KubernetesAuth) Name() string {
-	return "kubernetes"
-}
-
-// TokenAuth implements token-based authentication for Vault.
-type TokenAuth struct {
-	token string
-}
-
-// NewTokenAuth creates a new token authentication method.
-func NewTokenAuth(token string) (*TokenAuth, error) {
-	if token == "" {
-		return nil, fmt.Errorf("%w: token is required", ErrInvalidAuthConfig)
-	}
-	return &TokenAuth{
-		token: token,
-	}, nil
-}
-
-// Authenticate implements AuthMethod.
-func (a *TokenAuth) Authenticate(ctx context.Context, client *vault.Client) (*vault.Secret, error) {
-	if client == nil {
-		return nil, fmt.Errorf("token auth failed: vault client is nil")
+// authenticateWithAppRole authenticates using AppRole.
+func (c *vaultClient) authenticateWithAppRole(ctx context.Context) error {
+	if c.config.AppRole == nil {
+		return NewAuthenticationError("approle", "approle configuration is nil")
 	}
 
-	// Set the token directly
-	client.SetToken(a.token)
+	mountPath := c.config.AppRole.GetMountPath()
+	path := "auth/" + mountPath + "/login"
 
-	// Verify the token by looking up self
-	secret, err := client.Auth().Token().LookupSelfWithContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("token auth failed: %w", err)
-	}
-
-	// Create an auth response similar to other auth methods
-	authSecret := &vault.Secret{
-		Auth: &vault.SecretAuth{
-			ClientToken: a.token,
-			Renewable:   false,
-		},
-	}
-
-	// Extract lease duration from token lookup
-	if secret != nil && secret.Data != nil {
-		// Handle both float64 and json.Number types
-		switch ttl := secret.Data["ttl"].(type) {
-		case float64:
-			authSecret.Auth.LeaseDuration = int(ttl)
-		case json.Number:
-			if v, err := ttl.Int64(); err == nil {
-				authSecret.Auth.LeaseDuration = int(v)
-			}
-		}
-
-		if renewable, ok := secret.Data["renewable"].(bool); ok {
-			authSecret.Auth.Renewable = renewable
-		}
-	}
-
-	return authSecret, nil
-}
-
-// Name implements AuthMethod.
-func (a *TokenAuth) Name() string {
-	return "token"
-}
-
-// AppRoleAuth implements AppRole authentication for Vault.
-type AppRoleAuth struct {
-	roleID    string
-	secretID  string
-	mountPath string
-}
-
-// NewAppRoleAuth creates a new AppRole authentication method.
-func NewAppRoleAuth(roleID, secretID, mountPath string) (*AppRoleAuth, error) {
-	if roleID == "" {
-		return nil, fmt.Errorf("%w: roleID is required", ErrInvalidAuthConfig)
-	}
-	if secretID == "" {
-		return nil, fmt.Errorf("%w: secretID is required", ErrInvalidAuthConfig)
-	}
-	if mountPath == "" {
-		mountPath = DefaultAppRoleMountPath
-	}
-
-	return &AppRoleAuth{
-		roleID:    roleID,
-		secretID:  secretID,
-		mountPath: mountPath,
-	}, nil
-}
-
-// Authenticate implements AuthMethod.
-func (a *AppRoleAuth) Authenticate(ctx context.Context, client *vault.Client) (*vault.Secret, error) {
-	if client == nil {
-		return nil, fmt.Errorf("approle auth failed: vault client is nil")
-	}
-
-	path := fmt.Sprintf("auth/%s/login", a.mountPath)
 	data := map[string]interface{}{
-		"role_id":   a.roleID,
-		"secret_id": a.secretID,
+		"role_id":   c.config.AppRole.RoleID,
+		"secret_id": c.config.AppRole.SecretID,
 	}
 
-	secret, err := client.Logical().WriteWithContext(ctx, path, data)
+	secret, err := c.api.Logical().WriteWithContext(ctx, path, data)
 	if err != nil {
-		return nil, fmt.Errorf("approle auth failed: %w", err)
+		return NewAuthenticationErrorWithCause("approle", "failed to authenticate", err)
 	}
 
-	return secret, nil
-}
-
-// Name implements AuthMethod.
-func (a *AppRoleAuth) Name() string {
-	return "approle"
-}
-
-// UserpassAuth implements username/password authentication for Vault.
-type UserpassAuth struct {
-	username  string
-	password  string
-	mountPath string
-}
-
-// NewUserpassAuth creates a new username/password authentication method.
-func NewUserpassAuth(username, password, mountPath string) (*UserpassAuth, error) {
-	if username == "" {
-		return nil, fmt.Errorf("%w: username is required", ErrInvalidAuthConfig)
-	}
-	if password == "" {
-		return nil, fmt.Errorf("%w: password is required", ErrInvalidAuthConfig)
-	}
-	if mountPath == "" {
-		mountPath = "userpass"
+	if secret == nil || secret.Auth == nil {
+		return NewAuthenticationError("approle", "no auth info in response")
 	}
 
-	return &UserpassAuth{
-		username:  username,
-		password:  password,
-		mountPath: mountPath,
-	}, nil
-}
+	c.api.SetToken(secret.Auth.ClientToken)
+	c.tokenTTL.Store(int64(secret.Auth.LeaseDuration))
+	c.tokenExpiry.Store(time.Now().Add(time.Duration(secret.Auth.LeaseDuration) * time.Second).Unix())
+	c.metrics.SetTokenTTL(float64(secret.Auth.LeaseDuration))
 
-// Authenticate implements AuthMethod.
-func (a *UserpassAuth) Authenticate(ctx context.Context, client *vault.Client) (*vault.Secret, error) {
-	if client == nil {
-		return nil, fmt.Errorf("userpass auth failed: vault client is nil")
-	}
+	c.logger.Debug("authenticated with approle",
+		observability.Int64("ttl_seconds", int64(secret.Auth.LeaseDuration)),
+	)
 
-	// Validate username to prevent path injection - check original username for dangerous patterns
-	if strings.Contains(a.username, "..") || strings.Contains(a.username, "/") {
-		return nil, fmt.Errorf("userpass auth failed: invalid username")
-	}
-
-	// Sanitize username for URL path
-	sanitizedUsername := url.PathEscape(a.username)
-
-	path := fmt.Sprintf("auth/%s/login/%s", a.mountPath, sanitizedUsername)
-	data := map[string]interface{}{
-		"password": a.password,
-	}
-
-	secret, err := client.Logical().WriteWithContext(ctx, path, data)
-	if err != nil {
-		return nil, fmt.Errorf("userpass auth failed: %w", err)
-	}
-
-	return secret, nil
-}
-
-// Name implements AuthMethod.
-func (a *UserpassAuth) Name() string {
-	return "userpass"
+	return nil
 }

@@ -1,0 +1,19 @@
+[Host: localhost]
+[User-Agent: YandexTank/CapacityLB]
+[Accept: application/json]
+[Connection: keep-alive]
+/health
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/fast
+/api/v1/fast
+/api/v1/fast
+/api/v1/weighted
+/api/v1/weighted
+/api/v1/weighted
+/api/v1/leastconn
+/api/v1/leastconn
+/api/v1/leastconn

@@ -1,0 +1,54 @@
+# Yandex Tank Configuration: Audit Logging Performance Test
+# Purpose: Measure performance impact of audit logging middleware
+# Duration: 3 minutes total (30s warmup + 2m sustain + 30s cooldown)
+# Target: 2000 RPS to measure audit overhead
+# This test is run twice: once with audit disabled (baseline) and once with audit enabled
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 30s ramp from 100 to 2000 RPS
+    # Sustain: 2m at 2000 RPS (main measurement phase)
+    # Cooldown: 30s ramp down
+    schedule: line(100, 2000, 30s) const(2000, 2m) line(2000, 100, 30s)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings - high concurrency for throughput testing
+  instances: 2000
+  threads: 8
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/AuditPerftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: audit-throughput]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 10% for 30 seconds
+    - http(5xx,10%,30s)

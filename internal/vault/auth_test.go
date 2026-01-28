@@ -7,1101 +7,1231 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
-	vault "github.com/hashicorp/vault/api"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
-func TestNewKubernetesAuth(t *testing.T) {
-	t.Run("with default mount path", func(t *testing.T) {
-		auth, err := NewKubernetesAuth("test-role", "")
-		require.NoError(t, err)
-		assert.Equal(t, "test-role", auth.role)
-		assert.Equal(t, DefaultKubernetesMountPath, auth.mountPath)
-		assert.Equal(t, DefaultServiceAccountTokenPath, auth.serviceAccountPath)
-		assert.Equal(t, "kubernetes", auth.Name())
-	})
+// TestAuthenticateWithToken_Success tests successful token authentication.
+func TestAuthenticateWithToken_Success(t *testing.T) {
+	t.Parallel()
 
-	t.Run("with custom mount path", func(t *testing.T) {
-		auth, err := NewKubernetesAuth("test-role", "custom-kubernetes")
-		require.NoError(t, err)
-		assert.Equal(t, "test-role", auth.role)
-		assert.Equal(t, "custom-kubernetes", auth.mountPath)
-	})
-
-	t.Run("with empty role returns error", func(t *testing.T) {
-		auth, err := NewKubernetesAuth("", "")
-		require.Error(t, err)
-		assert.Nil(t, auth)
-		assert.ErrorIs(t, err, ErrInvalidAuthConfig)
-		assert.Contains(t, err.Error(), "role is required")
-	})
-}
-
-func TestNewKubernetesAuthWithTokenPath(t *testing.T) {
-	t.Run("with all custom values", func(t *testing.T) {
-		auth, err := NewKubernetesAuthWithTokenPath("test-role", "custom-mount", "/custom/token/path")
-		require.NoError(t, err)
-		assert.Equal(t, "test-role", auth.role)
-		assert.Equal(t, "custom-mount", auth.mountPath)
-		assert.Equal(t, "/custom/token/path", auth.serviceAccountPath)
-	})
-
-	t.Run("with empty mount path uses default", func(t *testing.T) {
-		auth, err := NewKubernetesAuthWithTokenPath("test-role", "", "/custom/token/path")
-		require.NoError(t, err)
-		assert.Equal(t, "test-role", auth.role)
-		assert.Equal(t, DefaultKubernetesMountPath, auth.mountPath)
-		assert.Equal(t, "/custom/token/path", auth.serviceAccountPath)
-	})
-
-	t.Run("with empty token path uses default", func(t *testing.T) {
-		auth, err := NewKubernetesAuthWithTokenPath("test-role", "custom-mount", "")
-		require.NoError(t, err)
-		assert.Equal(t, "test-role", auth.role)
-		assert.Equal(t, "custom-mount", auth.mountPath)
-		assert.Equal(t, DefaultServiceAccountTokenPath, auth.serviceAccountPath)
-	})
-
-	t.Run("with both empty uses defaults", func(t *testing.T) {
-		auth, err := NewKubernetesAuthWithTokenPath("test-role", "", "")
-		require.NoError(t, err)
-		assert.Equal(t, "test-role", auth.role)
-		assert.Equal(t, DefaultKubernetesMountPath, auth.mountPath)
-		assert.Equal(t, DefaultServiceAccountTokenPath, auth.serviceAccountPath)
-	})
-
-	t.Run("with empty role returns error", func(t *testing.T) {
-		auth, err := NewKubernetesAuthWithTokenPath("", "custom-mount", "/custom/token/path")
-		require.Error(t, err)
-		assert.Nil(t, auth)
-		assert.ErrorIs(t, err, ErrInvalidAuthConfig)
-		assert.Contains(t, err.Error(), "role is required")
-	})
-}
-
-func TestNewTokenAuth(t *testing.T) {
-	t.Run("with valid token", func(t *testing.T) {
-		auth, err := NewTokenAuth("test-token")
-		require.NoError(t, err)
-		assert.Equal(t, "test-token", auth.token)
-		assert.Equal(t, "token", auth.Name())
-	})
-
-	t.Run("with empty token returns error", func(t *testing.T) {
-		auth, err := NewTokenAuth("")
-		require.Error(t, err)
-		assert.Nil(t, auth)
-		assert.ErrorIs(t, err, ErrInvalidAuthConfig)
-		assert.Contains(t, err.Error(), "token is required")
-	})
-}
-
-func TestNewAppRoleAuth(t *testing.T) {
-	t.Run("with default mount path", func(t *testing.T) {
-		auth, err := NewAppRoleAuth("role-id", "secret-id", "")
-		require.NoError(t, err)
-		assert.Equal(t, "role-id", auth.roleID)
-		assert.Equal(t, "secret-id", auth.secretID)
-		assert.Equal(t, DefaultAppRoleMountPath, auth.mountPath)
-		assert.Equal(t, "approle", auth.Name())
-	})
-
-	t.Run("with custom mount path", func(t *testing.T) {
-		auth, err := NewAppRoleAuth("role-id", "secret-id", "custom-approle")
-		require.NoError(t, err)
-		assert.Equal(t, "custom-approle", auth.mountPath)
-	})
-
-	t.Run("with empty roleID returns error", func(t *testing.T) {
-		auth, err := NewAppRoleAuth("", "secret-id", "")
-		require.Error(t, err)
-		assert.Nil(t, auth)
-		assert.ErrorIs(t, err, ErrInvalidAuthConfig)
-		assert.Contains(t, err.Error(), "roleID is required")
-	})
-
-	t.Run("with empty secretID returns error", func(t *testing.T) {
-		auth, err := NewAppRoleAuth("role-id", "", "")
-		require.Error(t, err)
-		assert.Nil(t, auth)
-		assert.ErrorIs(t, err, ErrInvalidAuthConfig)
-		assert.Contains(t, err.Error(), "secretID is required")
-	})
-}
-
-func TestNewUserpassAuth(t *testing.T) {
-	t.Run("with default mount path", func(t *testing.T) {
-		auth, err := NewUserpassAuth("user", "pass", "")
-		require.NoError(t, err)
-		assert.Equal(t, "user", auth.username)
-		assert.Equal(t, "pass", auth.password)
-		assert.Equal(t, "userpass", auth.mountPath)
-		assert.Equal(t, "userpass", auth.Name())
-	})
-
-	t.Run("with custom mount path", func(t *testing.T) {
-		auth, err := NewUserpassAuth("user", "pass", "custom-userpass")
-		require.NoError(t, err)
-		assert.Equal(t, "custom-userpass", auth.mountPath)
-	})
-
-	t.Run("with empty username returns error", func(t *testing.T) {
-		auth, err := NewUserpassAuth("", "pass", "")
-		require.Error(t, err)
-		assert.Nil(t, auth)
-		assert.ErrorIs(t, err, ErrInvalidAuthConfig)
-		assert.Contains(t, err.Error(), "username is required")
-	})
-
-	t.Run("with empty password returns error", func(t *testing.T) {
-		auth, err := NewUserpassAuth("user", "", "")
-		require.Error(t, err)
-		assert.Nil(t, auth)
-		assert.ErrorIs(t, err, ErrInvalidAuthConfig)
-		assert.Contains(t, err.Error(), "password is required")
-	})
-}
-
-// createTestVaultClient creates a Vault client configured to use the test server.
-func createTestVaultClient(t *testing.T, serverURL string) *vault.Client {
-	t.Helper()
-	config := vault.DefaultConfig()
-	config.Address = serverURL
-	client, err := vault.NewClient(config)
-	require.NoError(t, err)
-	return client
-}
-
-// TestKubernetesAuth_Authenticate tests the KubernetesAuth.Authenticate method.
-func TestKubernetesAuth_Authenticate(t *testing.T) {
-	tests := []struct {
-		name           string
-		setupTokenFile func(t *testing.T) string
-		serverHandler  http.HandlerFunc
-		wantErr        bool
-		errContains    string
-		validateResult func(t *testing.T, secret *vault.Secret)
-	}{
-		{
-			name: "successful authentication",
-			setupTokenFile: func(t *testing.T) string {
-				tmpDir := t.TempDir()
-				tokenPath := filepath.Join(tmpDir, "token")
-				err := os.WriteFile(tokenPath, []byte("mock-jwt-token"), 0600)
-				require.NoError(t, err)
-				return tokenPath
-			},
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/auth/kubernetes/login", r.URL.Path)
-				assert.Equal(t, http.MethodPut, r.Method)
-
-				// Verify request body
-				var reqBody map[string]interface{}
-				err := json.NewDecoder(r.Body).Decode(&reqBody)
-				assert.NoError(t, err)
-				assert.Equal(t, "test-role", reqBody["role"])
-				assert.Equal(t, "mock-jwt-token", reqBody["jwt"])
-
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "test-client-token",
-						"renewable":      true,
-						"lease_duration": 3600,
-						"policies":       []string{"default", "test-policy"},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "test-client-token", secret.Auth.ClientToken)
-				assert.True(t, secret.Auth.Renewable)
-				assert.Equal(t, 3600, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name: "token file not found",
-			setupTokenFile: func(t *testing.T) string {
-				return "/nonexistent/path/to/token"
-			},
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				t.Fatal("server should not be called when token file is missing")
-			},
-			wantErr:     true,
-			errContains: "failed to read service account token",
-		},
-		{
-			name: "vault API error",
-			setupTokenFile: func(t *testing.T) string {
-				tmpDir := t.TempDir()
-				tokenPath := filepath.Join(tmpDir, "token")
-				err := os.WriteFile(tokenPath, []byte("invalid-jwt-token"), 0600)
-				require.NoError(t, err)
-				return tokenPath
-			},
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusForbidden)
-				response := map[string]interface{}{
-					"errors": []string{"permission denied"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "kubernetes auth failed",
-		},
-		{
-			name: "with custom mount path",
-			setupTokenFile: func(t *testing.T) string {
-				tmpDir := t.TempDir()
-				tokenPath := filepath.Join(tmpDir, "token")
-				err := os.WriteFile(tokenPath, []byte("mock-jwt-token"), 0600)
-				require.NoError(t, err)
-				return tokenPath
-			},
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				// This will be overridden in the test case
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "custom-mount-token",
-						"renewable":      false,
-						"lease_duration": 1800,
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "custom-mount-token", secret.Auth.ClientToken)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Arrange
-			tokenPath := tt.setupTokenFile(t)
-
-			server := httptest.NewServer(tt.serverHandler)
-			defer server.Close()
-
-			client := createTestVaultClient(t, server.URL)
-
-			var auth *KubernetesAuth
-			var authErr error
-			if tt.name == "with custom mount path" {
-				auth, authErr = NewKubernetesAuthWithTokenPath("test-role", "custom-k8s", tokenPath)
-			} else {
-				auth, authErr = NewKubernetesAuthWithTokenPath("test-role", "kubernetes", tokenPath)
-			}
-			require.NoError(t, authErr)
-
-			// Act
-			secret, err := auth.Authenticate(context.Background(), client)
-
-			// Assert
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-				return
-			}
-
-			require.NoError(t, err)
-			if tt.validateResult != nil {
-				tt.validateResult(t, secret)
-			}
-		})
-	}
-}
-
-// TestKubernetesAuth_Authenticate_CustomMountPath tests custom mount path handling.
-func TestKubernetesAuth_Authenticate_CustomMountPath(t *testing.T) {
 	// Arrange
-	tmpDir := t.TempDir()
-	tokenPath := filepath.Join(tmpDir, "token")
-	err := os.WriteFile(tokenPath, []byte("mock-jwt-token"), 0600)
-	require.NoError(t, err)
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify custom mount path is used
-		assert.Equal(t, "/v1/auth/custom-k8s-mount/login", r.URL.Path)
-
-		response := map[string]interface{}{
-			"auth": map[string]interface{}{
-				"client_token":   "custom-mount-token",
-				"renewable":      true,
-				"lease_duration": 7200,
-			},
+		if r.URL.Path == "/v1/auth/token/lookup-self" {
+			w.Header().Set("Content-Type", "application/json")
+			// Vault API returns ttl as a number (not json.Number string)
+			// The api.Secret struct expects numeric values for ttl
+			resp := `{
+				"request_id": "test-request-id",
+				"lease_id": "",
+				"renewable": false,
+				"lease_duration": 0,
+				"data": {
+					"ttl": 3600
+				},
+				"wrap_info": null,
+				"warnings": null,
+				"auth": null
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		http.NotFound(w, r)
 	}))
 	defer server.Close()
 
-	client := createTestVaultClient(t, server.URL)
-	auth, authErr := NewKubernetesAuthWithTokenPath("test-role", "custom-k8s-mount", tokenPath)
-	require.NoError(t, authErr)
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodToken,
+		Token:      "test-token",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
 
 	// Act
-	secret, err := auth.Authenticate(context.Background(), client)
+	err = vc.authenticateWithToken(context.Background())
 
 	// Assert
-	require.NoError(t, err)
-	require.NotNil(t, secret)
-	assert.Equal(t, "custom-mount-token", secret.Auth.ClientToken)
+	if err != nil {
+		t.Errorf("authenticateWithToken() error = %v, want nil", err)
+	}
+
+	ttl := vc.tokenTTL.Load()
+	if ttl != 3600 {
+		t.Errorf("tokenTTL = %v, want 3600", ttl)
+	}
 }
 
-// TestTokenAuth_Authenticate tests the TokenAuth.Authenticate method.
-func TestTokenAuth_Authenticate(t *testing.T) {
+// TestAuthenticateWithToken_EmptyToken tests token authentication with empty token.
+func TestAuthenticateWithToken_EmptyToken(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    "http://localhost:8200",
+		AuthMethod: AuthMethodToken,
+		Token:      "placeholder", // Need valid token for config validation
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+	// Clear the token to test empty token scenario
+	vc.config.Token = ""
+
+	// Act
+	err = vc.authenticateWithToken(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithToken() should return error for empty token")
+	}
+
+	var authErr *AuthenticationError
+	if !isAuthenticationError(err, &authErr) {
+		t.Errorf("authenticateWithToken() error type = %T, want *AuthenticationError", err)
+	}
+}
+
+// TestAuthenticateWithToken_LookupFails tests token authentication when lookup fails.
+func TestAuthenticateWithToken_LookupFails(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/token/lookup-self" {
+			w.WriteHeader(http.StatusForbidden)
+			resp := `{"errors": ["permission denied"]}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodToken,
+		Token:      "invalid-token",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithToken(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithToken() should return error when lookup fails")
+	}
+}
+
+// TestAuthenticateWithToken_NoTTLInResponse tests token authentication with no TTL in response.
+func TestAuthenticateWithToken_NoTTLInResponse(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/token/lookup-self" {
+			w.Header().Set("Content-Type", "application/json")
+			// Vault API response without ttl field
+			resp := `{
+				"request_id": "test-request-id",
+				"lease_id": "",
+				"renewable": false,
+				"lease_duration": 0,
+				"data": {
+					"accessor": "test-accessor"
+				},
+				"wrap_info": null,
+				"warnings": null,
+				"auth": null
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodToken,
+		Token:      "test-token",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithToken(context.Background())
+
+	// Assert
+	if err != nil {
+		t.Errorf("authenticateWithToken() error = %v, want nil", err)
+	}
+
+	// TTL should remain 0 if not in response
+	ttl := vc.tokenTTL.Load()
+	if ttl != 0 {
+		t.Errorf("tokenTTL = %v, want 0", ttl)
+	}
+}
+
+// TestAuthenticateWithKubernetes_Success tests successful Kubernetes authentication.
+func TestAuthenticateWithKubernetes_Success(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/kubernetes/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			// Vault API response with auth structure - use raw JSON to ensure proper types
+			resp := `{
+				"request_id": "test-request-id",
+				"lease_id": "",
+				"renewable": false,
+				"lease_duration": 0,
+				"data": null,
+				"wrap_info": null,
+				"warnings": null,
+				"auth": {
+					"client_token": "test-client-token",
+					"accessor": "test-accessor",
+					"policies": ["default"],
+					"token_policies": ["default"],
+					"metadata": {},
+					"lease_duration": 3600,
+					"renewable": true
+				}
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	// Create a temporary token file
+	tmpDir := t.TempDir()
+	tokenPath := filepath.Join(tmpDir, "token")
+	if err := os.WriteFile(tokenPath, []byte("test-jwt-token"), 0600); err != nil {
+		t.Fatalf("Failed to create token file: %v", err)
+	}
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodKubernetes,
+		Kubernetes: &KubernetesAuthConfig{
+			Role:      "test-role",
+			TokenPath: tokenPath,
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithKubernetes(context.Background())
+
+	// Assert
+	if err != nil {
+		t.Errorf("authenticateWithKubernetes() error = %v, want nil", err)
+	}
+
+	ttl := vc.tokenTTL.Load()
+	if ttl != 3600 {
+		t.Errorf("tokenTTL = %v, want 3600", ttl)
+	}
+}
+
+// TestAuthenticateWithKubernetes_NilConfig tests Kubernetes auth with nil config.
+func TestAuthenticateWithKubernetes_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    "http://localhost:8200",
+		AuthMethod: AuthMethodToken,
+		Token:      "placeholder",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+	vc.config.Kubernetes = nil
+
+	// Act
+	err = vc.authenticateWithKubernetes(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithKubernetes() should return error for nil config")
+	}
+}
+
+// TestAuthenticateWithKubernetes_TokenFileNotFound tests Kubernetes auth when token file is missing.
+func TestAuthenticateWithKubernetes_TokenFileNotFound(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    "http://localhost:8200",
+		AuthMethod: AuthMethodToken,
+		Token:      "placeholder",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+	vc.config.Kubernetes = &KubernetesAuthConfig{
+		Role:      "test-role",
+		TokenPath: "/nonexistent/path/token",
+	}
+
+	// Act
+	err = vc.authenticateWithKubernetes(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithKubernetes() should return error when token file not found")
+	}
+}
+
+// TestAuthenticateWithKubernetes_NoAuthInResponse tests Kubernetes auth with no auth in response.
+func TestAuthenticateWithKubernetes_NoAuthInResponse(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/kubernetes/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			resp := `{"data": {}}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	// Create a temporary token file
+	tmpDir := t.TempDir()
+	tokenPath := filepath.Join(tmpDir, "token")
+	if err := os.WriteFile(tokenPath, []byte("test-jwt-token"), 0600); err != nil {
+		t.Fatalf("Failed to create token file: %v", err)
+	}
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodKubernetes,
+		Kubernetes: &KubernetesAuthConfig{
+			Role:      "test-role",
+			TokenPath: tokenPath,
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithKubernetes(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithKubernetes() should return error when no auth in response")
+	}
+}
+
+// TestAuthenticateWithKubernetes_CustomMountPath tests Kubernetes auth with custom mount path.
+func TestAuthenticateWithKubernetes_CustomMountPath(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		if r.URL.Path == "/v1/auth/custom-k8s/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			// Vault API response with auth structure - use raw JSON to ensure proper types
+			resp := `{
+				"request_id": "test-request-id",
+				"lease_id": "",
+				"renewable": false,
+				"lease_duration": 0,
+				"data": null,
+				"wrap_info": null,
+				"warnings": null,
+				"auth": {
+					"client_token": "test-client-token",
+					"accessor": "test-accessor",
+					"policies": ["default"],
+					"token_policies": ["default"],
+					"metadata": {},
+					"lease_duration": 3600,
+					"renewable": true
+				}
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	// Create a temporary token file
+	tmpDir := t.TempDir()
+	tokenPath := filepath.Join(tmpDir, "token")
+	if err := os.WriteFile(tokenPath, []byte("test-jwt-token"), 0600); err != nil {
+		t.Fatalf("Failed to create token file: %v", err)
+	}
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodKubernetes,
+		Kubernetes: &KubernetesAuthConfig{
+			Role:      "test-role",
+			MountPath: "custom-k8s",
+			TokenPath: tokenPath,
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithKubernetes(context.Background())
+
+	// Assert
+	if err != nil {
+		t.Errorf("authenticateWithKubernetes() error = %v, want nil", err)
+	}
+
+	if requestPath != "/v1/auth/custom-k8s/login" {
+		t.Errorf("request path = %v, want /v1/auth/custom-k8s/login", requestPath)
+	}
+}
+
+// TestAuthenticateWithAppRole_Success tests successful AppRole authentication.
+func TestAuthenticateWithAppRole_Success(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Vault API uses PUT for write operations
+		if r.URL.Path == "/v1/auth/approle/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			// Vault API response with auth structure - use raw JSON to ensure proper types
+			resp := `{
+				"request_id": "test-request-id",
+				"lease_id": "",
+				"renewable": false,
+				"lease_duration": 0,
+				"data": null,
+				"wrap_info": null,
+				"warnings": null,
+				"auth": {
+					"client_token": "test-client-token",
+					"accessor": "test-accessor",
+					"policies": ["default"],
+					"token_policies": ["default"],
+					"metadata": {},
+					"lease_duration": 7200,
+					"renewable": true
+				}
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodAppRole,
+		AppRole: &AppRoleAuthConfig{
+			RoleID:   "test-role-id",
+			SecretID: "test-secret-id",
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithAppRole(context.Background())
+
+	// Assert
+	if err != nil {
+		t.Errorf("authenticateWithAppRole() error = %v, want nil", err)
+	}
+
+	ttl := vc.tokenTTL.Load()
+	if ttl != 7200 {
+		t.Errorf("tokenTTL = %v, want 7200", ttl)
+	}
+}
+
+// TestAuthenticateWithAppRole_NilConfig tests AppRole auth with nil config.
+func TestAuthenticateWithAppRole_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    "http://localhost:8200",
+		AuthMethod: AuthMethodToken,
+		Token:      "placeholder",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+	vc.config.AppRole = nil
+
+	// Act
+	err = vc.authenticateWithAppRole(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithAppRole() should return error for nil config")
+	}
+}
+
+// TestAuthenticateWithAppRole_NoAuthInResponse tests AppRole auth with no auth in response.
+func TestAuthenticateWithAppRole_NoAuthInResponse(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/approle/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			resp := `{"data": {}}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodAppRole,
+		AppRole: &AppRoleAuthConfig{
+			RoleID:   "test-role-id",
+			SecretID: "test-secret-id",
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithAppRole(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithAppRole() should return error when no auth in response")
+	}
+}
+
+// TestAuthenticateWithAppRole_CustomMountPath tests AppRole auth with custom mount path.
+func TestAuthenticateWithAppRole_CustomMountPath(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	var requestPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestPath = r.URL.Path
+		if r.URL.Path == "/v1/auth/custom-approle/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			// Vault API response with auth structure - use raw JSON to ensure proper types
+			resp := `{
+				"request_id": "test-request-id",
+				"lease_id": "",
+				"renewable": false,
+				"lease_duration": 0,
+				"data": null,
+				"wrap_info": null,
+				"warnings": null,
+				"auth": {
+					"client_token": "test-client-token",
+					"accessor": "test-accessor",
+					"policies": ["default"],
+					"token_policies": ["default"],
+					"metadata": {},
+					"lease_duration": 7200,
+					"renewable": true
+				}
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodAppRole,
+		AppRole: &AppRoleAuthConfig{
+			RoleID:    "test-role-id",
+			SecretID:  "test-secret-id",
+			MountPath: "custom-approle",
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithAppRole(context.Background())
+
+	// Assert
+	if err != nil {
+		t.Errorf("authenticateWithAppRole() error = %v, want nil", err)
+	}
+
+	if requestPath != "/v1/auth/custom-approle/login" {
+		t.Errorf("request path = %v, want /v1/auth/custom-approle/login", requestPath)
+	}
+}
+
+// TestAuthenticateWithAppRole_AuthFails tests AppRole auth when authentication fails.
+func TestAuthenticateWithAppRole_AuthFails(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/approle/login" && r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusUnauthorized)
+			resp := `{"errors": ["invalid role_id or secret_id"]}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodAppRole,
+		AppRole: &AppRoleAuthConfig{
+			RoleID:   "invalid-role-id",
+			SecretID: "invalid-secret-id",
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.authenticateWithAppRole(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithAppRole() should return error when auth fails")
+	}
+}
+
+// TestAuthenticate_UnsupportedAuthMethod tests authentication with unsupported method.
+func TestAuthenticate_UnsupportedAuthMethod(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    "http://localhost:8200",
+		AuthMethod: AuthMethodToken,
+		Token:      "placeholder",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+	vc.config.AuthMethod = AuthMethod("unsupported")
+
+	// Act
+	err = vc.Authenticate(context.Background())
+
+	// Assert
+	if err == nil {
+		t.Error("Authenticate() should return error for unsupported auth method")
+	}
+}
+
+// TestAuthenticate_TableDriven tests authentication with various configurations.
+func TestAuthenticate_TableDriven(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		name           string
-		token          string
-		serverHandler  http.HandlerFunc
-		wantErr        bool
-		errContains    string
-		validateResult func(t *testing.T, secret *vault.Secret)
+		name      string
+		setupMock func() *httptest.Server
+		setupCfg  func(serverURL string) *Config
+		wantErr   bool
+		wantTTL   int64
+		skipClose bool
 	}{
 		{
-			name:  "successful authentication with renewable token",
-			token: "test-renewable-token",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/auth/token/lookup-self", r.URL.Path)
-				assert.Equal(t, "test-renewable-token", r.Header.Get("X-Vault-Token"))
-
-				// Note: Vault client parses JSON numbers as json.Number, not float64
-				// The code expects float64, so TTL won't be extracted from json.Number
-				// This tests the actual behavior of the code
-				response := map[string]interface{}{
-					"data": map[string]interface{}{
-						"id":               "test-renewable-token",
-						"ttl":              3600,
-						"renewable":        true,
-						"display_name":     "token",
-						"creation_time":    1234567890,
-						"expire_time":      "2024-01-01T00:00:00Z",
-						"explicit_max_ttl": 0,
-						"policies":         []string{"default", "admin"},
-					},
+			name: "token auth success",
+			setupMock: func() *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/auth/token/lookup-self" {
+						w.Header().Set("Content-Type", "application/json")
+						// Use raw JSON to ensure proper numeric types
+						resp := `{"data": {"ttl": 1800}}`
+						_, _ = w.Write([]byte(resp))
+						return
+					}
+					http.NotFound(w, r)
+				}))
+			},
+			setupCfg: func(serverURL string) *Config {
+				return &Config{
+					Enabled:    true,
+					Address:    serverURL,
+					AuthMethod: AuthMethodToken,
+					Token:      "test-token",
 				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
 			},
 			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "test-renewable-token", secret.Auth.ClientToken)
-				assert.True(t, secret.Auth.Renewable)
-				// TTL is correctly parsed from both float64 and json.Number types
-				assert.Equal(t, 3600, secret.Auth.LeaseDuration)
-			},
+			wantTTL: 1800,
 		},
 		{
-			name:  "successful authentication with non-renewable token",
-			token: "test-non-renewable-token",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				response := map[string]interface{}{
-					"data": map[string]interface{}{
-						"id":        "test-non-renewable-token",
-						"ttl":       1800,
-						"renewable": false,
-						"policies":  []string{"default"},
-					},
+			name: "token auth with zero TTL",
+			setupMock: func() *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/auth/token/lookup-self" {
+						w.Header().Set("Content-Type", "application/json")
+						// Use raw JSON to ensure proper numeric types
+						resp := `{"data": {"ttl": 0}}`
+						_, _ = w.Write([]byte(resp))
+						return
+					}
+					http.NotFound(w, r)
+				}))
+			},
+			setupCfg: func(serverURL string) *Config {
+				return &Config{
+					Enabled:    true,
+					Address:    serverURL,
+					AuthMethod: AuthMethodToken,
+					Token:      "root-token",
 				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
 			},
 			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "test-non-renewable-token", secret.Auth.ClientToken)
-				assert.False(t, secret.Auth.Renewable)
-				// TTL is correctly parsed from both float64 and json.Number types
-				assert.Equal(t, 1800, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name:  "token lookup failure - invalid token",
-			token: "invalid-token",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusForbidden)
-				response := map[string]interface{}{
-					"errors": []string{"permission denied"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "token auth failed",
-		},
-		{
-			name:  "response with missing TTL field",
-			token: "token-no-ttl",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				response := map[string]interface{}{
-					"data": map[string]interface{}{
-						"id":        "token-no-ttl",
-						"renewable": true,
-						// TTL is missing
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "token-no-ttl", secret.Auth.ClientToken)
-				assert.True(t, secret.Auth.Renewable)
-				assert.Equal(t, 0, secret.Auth.LeaseDuration) // Default when TTL is missing
-			},
-		},
-		{
-			name:  "response with missing renewable field",
-			token: "token-no-renewable",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				response := map[string]interface{}{
-					"data": map[string]interface{}{
-						"id":  "token-no-renewable",
-						"ttl": float64(7200),
-						// renewable is missing
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "token-no-renewable", secret.Auth.ClientToken)
-				assert.False(t, secret.Auth.Renewable) // Default when renewable is missing
-				// TTL is correctly parsed from both float64 and json.Number types
-				assert.Equal(t, 7200, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name:  "response with nil data",
-			token: "token-nil-data",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				response := map[string]interface{}{
-					"data": nil,
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "token-nil-data", secret.Auth.ClientToken)
-				assert.False(t, secret.Auth.Renewable) // Default
-				assert.Equal(t, 0, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name:  "response with empty data",
-			token: "token-empty-data",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				response := map[string]interface{}{
-					"data": map[string]interface{}{},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "token-empty-data", secret.Auth.ClientToken)
-				assert.False(t, secret.Auth.Renewable)
-				assert.Equal(t, 0, secret.Auth.LeaseDuration)
-			},
+			wantTTL: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			// Arrange
-			server := httptest.NewServer(tt.serverHandler)
+			server := tt.setupMock()
 			defer server.Close()
 
-			client := createTestVaultClient(t, server.URL)
-			auth, authErr := NewTokenAuth(tt.token)
-			require.NoError(t, authErr)
+			cfg := tt.setupCfg(server.URL)
+			logger := observability.NopLogger()
 
-			// Act
-			secret, err := auth.Authenticate(context.Background(), client)
-
-			// Assert
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-				return
+			client, err := New(cfg, logger)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if !tt.skipClose {
+				defer func() { _ = client.Close() }()
 			}
 
-			require.NoError(t, err)
-			if tt.validateResult != nil {
-				tt.validateResult(t, secret)
+			// Act
+			err = client.Authenticate(context.Background())
+
+			// Assert
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Authenticate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+
+			if !tt.wantErr {
+				vc := client.(*vaultClient)
+				if vc.tokenTTL.Load() != tt.wantTTL {
+					t.Errorf("tokenTTL = %v, want %v", vc.tokenTTL.Load(), tt.wantTTL)
+				}
 			}
 		})
 	}
 }
 
-// TestAppRoleAuth_Authenticate tests the AppRoleAuth.Authenticate method.
-func TestAppRoleAuth_Authenticate(t *testing.T) {
-	tests := []struct {
-		name           string
-		roleID         string
-		secretID       string
-		mountPath      string
-		serverHandler  http.HandlerFunc
-		wantErr        bool
-		errContains    string
-		validateResult func(t *testing.T, secret *vault.Secret)
-	}{
-		{
-			name:      "successful authentication with default mount path",
-			roleID:    "test-role-id",
-			secretID:  "test-secret-id",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/auth/approle/login", r.URL.Path)
-				assert.Equal(t, http.MethodPut, r.Method)
-
-				// Verify request body
-				var reqBody map[string]interface{}
-				err := json.NewDecoder(r.Body).Decode(&reqBody)
-				assert.NoError(t, err)
-				assert.Equal(t, "test-role-id", reqBody["role_id"])
-				assert.Equal(t, "test-secret-id", reqBody["secret_id"])
-
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "approle-client-token",
-						"renewable":      true,
-						"lease_duration": 3600,
-						"policies":       []string{"default", "approle-policy"},
-						"metadata": map[string]interface{}{
-							"role_name": "test-role",
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "approle-client-token", secret.Auth.ClientToken)
-				assert.True(t, secret.Auth.Renewable)
-				assert.Equal(t, 3600, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name:      "successful authentication with custom mount path",
-			roleID:    "custom-role-id",
-			secretID:  "custom-secret-id",
-			mountPath: "custom-approle",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/auth/custom-approle/login", r.URL.Path)
-
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "custom-approle-token",
-						"renewable":      false,
-						"lease_duration": 1800,
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "custom-approle-token", secret.Auth.ClientToken)
-				assert.False(t, secret.Auth.Renewable)
-				assert.Equal(t, 1800, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name:      "authentication failure - invalid credentials",
-			roleID:    "invalid-role-id",
-			secretID:  "invalid-secret-id",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusBadRequest)
-				response := map[string]interface{}{
-					"errors": []string{"invalid role or secret ID"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "approle auth failed",
-		},
-		{
-			name:      "authentication failure - permission denied",
-			roleID:    "role-id",
-			secretID:  "secret-id",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusForbidden)
-				response := map[string]interface{}{
-					"errors": []string{"permission denied"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "approle auth failed",
-		},
-		{
-			name:      "server error",
-			roleID:    "role-id",
-			secretID:  "secret-id",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusInternalServerError)
-				response := map[string]interface{}{
-					"errors": []string{"internal server error"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "approle auth failed",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Arrange
-			server := httptest.NewServer(tt.serverHandler)
-			defer server.Close()
-
-			client := createTestVaultClient(t, server.URL)
-			auth, authErr := NewAppRoleAuth(tt.roleID, tt.secretID, tt.mountPath)
-			require.NoError(t, authErr)
-
-			// Act
-			secret, err := auth.Authenticate(context.Background(), client)
-
-			// Assert
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-				return
-			}
-
-			require.NoError(t, err)
-			if tt.validateResult != nil {
-				tt.validateResult(t, secret)
-			}
-		})
-	}
-}
-
-// TestUserpassAuth_Authenticate tests the UserpassAuth.Authenticate method.
-func TestUserpassAuth_Authenticate(t *testing.T) {
-	tests := []struct {
-		name           string
-		username       string
-		password       string
-		mountPath      string
-		serverHandler  http.HandlerFunc
-		wantErr        bool
-		errContains    string
-		validateResult func(t *testing.T, secret *vault.Secret)
-	}{
-		{
-			name:      "successful authentication with default mount path",
-			username:  "testuser",
-			password:  "testpassword",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/auth/userpass/login/testuser", r.URL.Path)
-				assert.Equal(t, http.MethodPut, r.Method)
-
-				// Verify request body
-				var reqBody map[string]interface{}
-				err := json.NewDecoder(r.Body).Decode(&reqBody)
-				assert.NoError(t, err)
-				assert.Equal(t, "testpassword", reqBody["password"])
-
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "userpass-client-token",
-						"renewable":      true,
-						"lease_duration": 3600,
-						"policies":       []string{"default", "user-policy"},
-						"metadata": map[string]interface{}{
-							"username": "testuser",
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "userpass-client-token", secret.Auth.ClientToken)
-				assert.True(t, secret.Auth.Renewable)
-				assert.Equal(t, 3600, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name:      "successful authentication with custom mount path",
-			username:  "admin",
-			password:  "adminpass",
-			mountPath: "custom-userpass",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/auth/custom-userpass/login/admin", r.URL.Path)
-
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "custom-userpass-token",
-						"renewable":      false,
-						"lease_duration": 7200,
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "custom-userpass-token", secret.Auth.ClientToken)
-				assert.False(t, secret.Auth.Renewable)
-				assert.Equal(t, 7200, secret.Auth.LeaseDuration)
-			},
-		},
-		{
-			name:      "authentication failure - wrong password",
-			username:  "testuser",
-			password:  "wrongpassword",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusBadRequest)
-				response := map[string]interface{}{
-					"errors": []string{"invalid username or password"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "userpass auth failed",
-		},
-		{
-			name:      "authentication failure - user not found",
-			username:  "nonexistent",
-			password:  "password",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusBadRequest)
-				response := map[string]interface{}{
-					"errors": []string{"invalid username or password"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "userpass auth failed",
-		},
-		{
-			name:      "authentication failure - permission denied",
-			username:  "testuser",
-			password:  "testpassword",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusForbidden)
-				response := map[string]interface{}{
-					"errors": []string{"permission denied"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "userpass auth failed",
-		},
-		{
-			name:      "server error",
-			username:  "testuser",
-			password:  "testpassword",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusInternalServerError)
-				response := map[string]interface{}{
-					"errors": []string{"internal server error"},
-				}
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr:     true,
-			errContains: "userpass auth failed",
-		},
-		{
-			name:      "username with special characters",
-			username:  "user@domain.com",
-			password:  "password123",
-			mountPath: "",
-			serverHandler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, "/v1/auth/userpass/login/user@domain.com", r.URL.Path)
-
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "special-user-token",
-						"renewable":      true,
-						"lease_duration": 3600,
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			},
-			wantErr: false,
-			validateResult: func(t *testing.T, secret *vault.Secret) {
-				require.NotNil(t, secret)
-				require.NotNil(t, secret.Auth)
-				assert.Equal(t, "special-user-token", secret.Auth.ClientToken)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Arrange
-			server := httptest.NewServer(tt.serverHandler)
-			defer server.Close()
-
-			client := createTestVaultClient(t, server.URL)
-			auth, authErr := NewUserpassAuth(tt.username, tt.password, tt.mountPath)
-			require.NoError(t, authErr)
-
-			// Act
-			secret, err := auth.Authenticate(context.Background(), client)
-
-			// Assert
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-				return
-			}
-
-			require.NoError(t, err)
-			if tt.validateResult != nil {
-				tt.validateResult(t, secret)
-			}
-		})
-	}
-}
-
-// TestAuthMethod_Interface tests that all auth methods implement the AuthMethod interface.
-func TestAuthMethod_Interface(t *testing.T) {
-	k8sAuth, err := NewKubernetesAuth("role", "")
-	require.NoError(t, err)
-
-	tokenAuth, err := NewTokenAuth("token")
-	require.NoError(t, err)
-
-	appRoleAuth, err := NewAppRoleAuth("role-id", "secret-id", "")
-	require.NoError(t, err)
-
-	userpassAuth, err := NewUserpassAuth("user", "pass", "")
-	require.NoError(t, err)
+// TestReauthenticate_TableDriven tests reauthentication with various auth methods.
+func TestReauthenticate_TableDriven(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
 		name       string
 		authMethod AuthMethod
-		wantName   string
+		setupMock  func() *httptest.Server
+		setupCfg   func(serverURL string) *Config
+		wantErr    bool
 	}{
 		{
-			name:       "KubernetesAuth implements AuthMethod",
-			authMethod: k8sAuth,
-			wantName:   "kubernetes",
+			name:       "reauthenticate with token",
+			authMethod: AuthMethodToken,
+			setupMock: func() *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/auth/token/lookup-self" {
+						w.Header().Set("Content-Type", "application/json")
+						// Use raw JSON to ensure proper numeric types
+						resp := `{"data": {"ttl": 3600}}`
+						_, _ = w.Write([]byte(resp))
+						return
+					}
+					http.NotFound(w, r)
+				}))
+			},
+			setupCfg: func(serverURL string) *Config {
+				return &Config{
+					Enabled:    true,
+					Address:    serverURL,
+					AuthMethod: AuthMethodToken,
+					Token:      "test-token",
+				}
+			},
+			wantErr: false,
 		},
 		{
-			name:       "TokenAuth implements AuthMethod",
-			authMethod: tokenAuth,
-			wantName:   "token",
-		},
-		{
-			name:       "AppRoleAuth implements AuthMethod",
-			authMethod: appRoleAuth,
-			wantName:   "approle",
-		},
-		{
-			name:       "UserpassAuth implements AuthMethod",
-			authMethod: userpassAuth,
-			wantName:   "userpass",
+			name:       "reauthenticate with unsupported method",
+			authMethod: AuthMethod("unsupported"),
+			setupMock: func() *httptest.Server {
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.NotFound(w, r)
+				}))
+			},
+			setupCfg: func(serverURL string) *Config {
+				return &Config{
+					Enabled:    true,
+					Address:    serverURL,
+					AuthMethod: AuthMethodToken,
+					Token:      "test-token",
+				}
+			},
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Verify the Name() method returns expected value
-			assert.Equal(t, tt.wantName, tt.authMethod.Name())
+			t.Parallel()
 
-			// Verify the type implements AuthMethod interface
-			var _ AuthMethod = tt.authMethod
+			// Arrange
+			server := tt.setupMock()
+			defer server.Close()
+
+			cfg := tt.setupCfg(server.URL)
+			logger := observability.NopLogger()
+
+			client, err := New(cfg, logger)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			defer func() { _ = client.Close() }()
+
+			vc := client.(*vaultClient)
+			vc.config.AuthMethod = tt.authMethod
+
+			// Act
+			err = vc.reauthenticate(context.Background())
+
+			// Assert
+			if (err != nil) != tt.wantErr {
+				t.Errorf("reauthenticate() error = %v, wantErr %v", err, tt.wantErr)
+			}
 		})
 	}
 }
 
-// TestKubernetesAuth_Authenticate_ContextCancellation tests context cancellation handling.
-func TestKubernetesAuth_Authenticate_ContextCancellation(t *testing.T) {
-	// Arrange
-	tmpDir := t.TempDir()
-	tokenPath := filepath.Join(tmpDir, "token")
-	err := os.WriteFile(tokenPath, []byte("mock-jwt-token"), 0600)
-	require.NoError(t, err)
+// TestAuthenticateWithKubernetes_AuthFails tests Kubernetes auth when authentication fails.
+func TestAuthenticateWithKubernetes_AuthFails(t *testing.T) {
+	t.Parallel()
 
+	// Arrange
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate slow response - context should be cancelled before this completes
-		select {
-		case <-r.Context().Done():
+		if r.URL.Path == "/v1/auth/kubernetes/login" && r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusUnauthorized)
+			resp := `{"errors": ["invalid JWT"]}`
+			_, _ = w.Write([]byte(resp))
 			return
-		case <-make(chan struct{}): // Block forever
 		}
+		http.NotFound(w, r)
 	}))
 	defer server.Close()
 
-	client := createTestVaultClient(t, server.URL)
-	auth, authErr := NewKubernetesAuthWithTokenPath("test-role", "kubernetes", tokenPath)
-	require.NoError(t, authErr)
+	// Create a temporary token file
+	tmpDir := t.TempDir()
+	tokenPath := filepath.Join(tmpDir, "token")
+	if err := os.WriteFile(tokenPath, []byte("invalid-jwt-token"), 0600); err != nil {
+		t.Fatalf("Failed to create token file: %v", err)
+	}
 
-	// Create a cancelled context
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodKubernetes,
+		Kubernetes: &KubernetesAuthConfig{
+			Role:      "test-role",
+			TokenPath: tokenPath,
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
 
 	// Act
-	_, err = auth.Authenticate(ctx, client)
+	err = vc.authenticateWithKubernetes(context.Background())
 
-	// Assert - should get an error due to cancelled context
-	require.Error(t, err)
+	// Assert
+	if err == nil {
+		t.Error("authenticateWithKubernetes() should return error when auth fails")
+	}
 }
 
-// TestKubernetesAuth_Authenticate_NilClient tests nil client handling.
-func TestKubernetesAuth_Authenticate_NilClient(t *testing.T) {
-	auth, err := NewKubernetesAuth("test-role", "")
-	require.NoError(t, err)
+// TestAuthenticate_ConcurrentAccess tests concurrent authentication attempts.
+func TestAuthenticate_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 
-	_, err = auth.Authenticate(context.Background(), nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "vault client is nil")
+	// Arrange
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		if r.URL.Path == "/v1/auth/token/lookup-self" {
+			w.Header().Set("Content-Type", "application/json")
+			// Use raw JSON to ensure proper numeric types
+			resp := `{"data": {"ttl": 3600}}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodToken,
+		Token:      "test-token",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act - run multiple concurrent authentications
+	const numGoroutines = 10
+	errCh := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			errCh <- vc.authenticateWithToken(context.Background())
+		}()
+	}
+
+	// Assert
+	for i := 0; i < numGoroutines; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("concurrent authenticateWithToken() error = %v", err)
+		}
+	}
+
+	if requestCount.Load() != numGoroutines {
+		t.Errorf("request count = %v, want %v", requestCount.Load(), numGoroutines)
+	}
 }
 
-// TestTokenAuth_Authenticate_NilClient tests nil client handling.
-func TestTokenAuth_Authenticate_NilClient(t *testing.T) {
-	auth, err := NewTokenAuth("test-token")
-	require.NoError(t, err)
-
-	_, err = auth.Authenticate(context.Background(), nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "vault client is nil")
+// isAuthenticationError is a helper to check if error is AuthenticationError.
+func isAuthenticationError(err error, target **AuthenticationError) bool {
+	if err == nil {
+		return false
+	}
+	authErr, ok := err.(*AuthenticationError)
+	if ok && target != nil {
+		*target = authErr
+	}
+	return ok
 }
 
-// TestAppRoleAuth_Authenticate_NilClient tests nil client handling.
-func TestAppRoleAuth_Authenticate_NilClient(t *testing.T) {
-	auth, err := NewAppRoleAuth("role-id", "secret-id", "")
-	require.NoError(t, err)
-
-	_, err = auth.Authenticate(context.Background(), nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "vault client is nil")
-}
-
-// TestUserpassAuth_Authenticate_NilClient tests nil client handling.
-func TestUserpassAuth_Authenticate_NilClient(t *testing.T) {
-	auth, err := NewUserpassAuth("user", "pass", "")
-	require.NoError(t, err)
-
-	_, err = auth.Authenticate(context.Background(), nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "vault client is nil")
-}
-
-// TestUserpassAuth_Authenticate_PathInjection tests path injection prevention.
-func TestUserpassAuth_Authenticate_PathInjection(t *testing.T) {
+// TestExtractTTLSeconds tests the extractTTLSeconds function with various types.
+func TestExtractTTLSeconds(t *testing.T) {
 	tests := []struct {
-		name        string
-		username    string
-		wantErr     bool
-		errContains string
+		name     string
+		input    interface{}
+		expected int64
 	}{
 		{
-			name:     "normal username",
-			username: "testuser",
-			wantErr:  false,
+			name:     "json.Number as int",
+			input:    json.Number("3600"),
+			expected: 3600,
 		},
 		{
-			name:     "username with email format",
-			username: "user@domain.com",
-			wantErr:  false,
+			name:     "json.Number as float",
+			input:    json.Number("3600.5"),
+			expected: 3600,
 		},
 		{
-			name:        "username with path traversal",
-			username:    "../../../etc/passwd",
-			wantErr:     true,
-			errContains: "invalid username",
+			name:     "float64",
+			input:    float64(7200),
+			expected: 7200,
 		},
 		{
-			name:        "username with slash",
-			username:    "user/admin",
-			wantErr:     true,
-			errContains: "invalid username",
+			name:     "int",
+			input:    int(1800),
+			expected: 1800,
 		},
 		{
-			name:        "username with double dots",
-			username:    "user..admin",
-			wantErr:     true,
-			errContains: "invalid username",
+			name:     "int64",
+			input:    int64(900),
+			expected: 900,
+		},
+		{
+			name:     "string (unsupported)",
+			input:    "3600",
+			expected: 0,
+		},
+		{
+			name:     "nil",
+			input:    nil,
+			expected: 0,
+		},
+		{
+			name:     "invalid json.Number",
+			input:    json.Number("invalid"),
+			expected: 0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			auth, err := NewUserpassAuth(tt.username, "password", "")
-			require.NoError(t, err)
-
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				response := map[string]interface{}{
-					"auth": map[string]interface{}{
-						"client_token":   "test-token",
-						"renewable":      true,
-						"lease_duration": 3600,
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(response)
-			}))
-			defer server.Close()
-
-			client := createTestVaultClient(t, server.URL)
-			_, err = auth.Authenticate(context.Background(), client)
-
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-			} else {
-				require.NoError(t, err)
+			result := extractTTLSeconds(tt.input)
+			if result != tt.expected {
+				t.Errorf("extractTTLSeconds(%v) = %v, want %v", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestReauthenticate_WithKubernetes tests reauthentication with Kubernetes auth method.
+func TestReauthenticate_WithKubernetes(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/kubernetes/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			resp := `{
+				"auth": {
+					"client_token": "test-client-token",
+					"lease_duration": 3600,
+					"renewable": true
+				}
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	// Create a temporary token file
+	tmpDir := t.TempDir()
+	tokenPath := filepath.Join(tmpDir, "token")
+	if err := os.WriteFile(tokenPath, []byte("test-jwt-token"), 0600); err != nil {
+		t.Fatalf("Failed to create token file: %v", err)
+	}
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodKubernetes,
+		Kubernetes: &KubernetesAuthConfig{
+			Role:      "test-role",
+			TokenPath: tokenPath,
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.reauthenticate(context.Background())
+
+	// Assert
+	if err != nil {
+		t.Errorf("reauthenticate() error = %v, want nil", err)
+	}
+}
+
+// TestReauthenticate_WithAppRole tests reauthentication with AppRole auth method.
+func TestReauthenticate_WithAppRole(t *testing.T) {
+	t.Parallel()
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/approle/login" && r.Method == http.MethodPut {
+			w.Header().Set("Content-Type", "application/json")
+			resp := `{
+				"auth": {
+					"client_token": "test-client-token",
+					"lease_duration": 7200,
+					"renewable": true
+				}
+			}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodAppRole,
+		AppRole: &AppRoleAuthConfig{
+			RoleID:   "test-role-id",
+			SecretID: "test-secret-id",
+		},
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	vc := client.(*vaultClient)
+
+	// Act
+	err = vc.reauthenticate(context.Background())
+
+	// Assert
+	if err != nil {
+		t.Errorf("reauthenticate() error = %v, want nil", err)
 	}
 }

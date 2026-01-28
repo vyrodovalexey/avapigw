@@ -1,0 +1,86 @@
+# Yandex Tank Configuration: Vault PKI TLS Handshake Performance
+# Purpose: Compare TLS handshake latency between Vault-issued and file-based certs
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000+ RPS with TLS
+#
+# Test Case 1: TLS Handshake Performance with Vault-Issued Certificates
+# =====================================================================
+# Measures:
+#   - p50, p95, p99 latency for HTTPS requests via Vault-issued certs
+#   - Throughput (RPS) achievable with Vault TLS
+#   - Compare with file-based cert baseline (http-tls-throughput.yaml)
+#
+# Expected Behavior:
+#   - Vault cert is cached in atomic.Pointer, so handshake latency should be
+#     comparable to file-based certs after initial issuance
+#   - No Vault API calls during TLS handshake (cert is pre-fetched)
+#
+# Baselines & Thresholds:
+#   - p50 latency: < 5ms (comparable to file-based)
+#   - p95 latency: < 20ms
+#   - p99 latency: < 50ms
+#   - Error rate: < 0.1%
+#   - Throughput: > 2000 RPS
+#
+# Prerequisites:
+#   - Vault running at localhost:8200 with PKI engine configured
+#   - Gateway running with gateway-perftest-vault-tls.yaml config
+#   - Backend services on ports 8801, 8802
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8443
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 100 to 2000 RPS
+    # Sustain: 3 min at 2000 RPS (main measurement phase)
+    # Cooldown: 1 min ramp down
+    schedule: line(100, 2000, 1m) const(2000, 3m) line(2000, 100, 1m)
+
+  ammofile: /var/loadtest/ammo/vault-tls-handshake.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+
+  # TLS settings - Vault-issued certs
+  ssl: true
+  # Skip cert verification for self-signed Vault CA in test environment
+  timeout: 15s
+
+  # Instance settings - high concurrency for throughput testing
+  instances: 2000
+  threads: 8
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-VaultTLS]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: vault-tls-handshake]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 4xx error rate exceeds 10%
+    - http(4xx,10%,30s)
+    # Stop if HTTP 5xx error rate exceeds 5%
+    - http(5xx,5%,30s)
+    # Stop if response time exceeds 5 seconds for 50% of requests
+    - time(5000,50%,30s)
+    # Stop if net errors exceed 5%
+    - http(net,5%,30s)

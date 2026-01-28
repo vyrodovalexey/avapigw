@@ -1,392 +1,248 @@
 package vault
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-var (
-	// vaultRequestsTotal counts total Vault requests.
-	vaultRequestsTotal = promauto.NewCounterVec(
+// Metrics holds Prometheus metrics for Vault operations.
+type Metrics struct {
+	requestsTotal   *prometheus.CounterVec
+	requestDuration *prometheus.HistogramVec
+	tokenTTL        prometheus.Gauge
+	cacheHits       prometheus.Counter
+	cacheMisses     prometheus.Counter
+	authAttempts    *prometheus.CounterVec
+	errors          *prometheus.CounterVec
+
+	registry *prometheus.Registry
+	mu       sync.RWMutex
+}
+
+// MetricsOption is a functional option for configuring Metrics.
+type MetricsOption func(*Metrics)
+
+// WithMetricsRegistry sets a custom Prometheus registry.
+func WithMetricsRegistry(registry *prometheus.Registry) MetricsOption {
+	return func(m *Metrics) {
+		m.registry = registry
+	}
+}
+
+// NewMetrics creates a new Metrics instance with the given namespace.
+func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
+	if namespace == "" {
+		namespace = "gateway"
+	}
+
+	m := &Metrics{}
+
+	for _, opt := range opts {
+		opt(m)
+	}
+
+	if m.registry == nil {
+		m.registry = prometheus.NewRegistry()
+	}
+
+	m.requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "vault_requests_total",
-			Help: "Total number of Vault requests",
+			Namespace: namespace,
+			Subsystem: "vault",
+			Name:      "requests_total",
+			Help:      "Total number of Vault requests by operation and status",
 		},
 		[]string{"operation", "status"},
 	)
 
-	// vaultRequestDuration measures Vault request duration.
-	vaultRequestDuration = promauto.NewHistogramVec(
+	m.requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "vault_request_duration_seconds",
-			Help:    "Duration of Vault requests in seconds",
-			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+			Namespace: namespace,
+			Subsystem: "vault",
+			Name:      "request_duration_seconds",
+			Help:      "Vault request duration in seconds",
+			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		},
 		[]string{"operation"},
 	)
 
-	// vaultAuthenticationsTotal counts total Vault authentications.
-	vaultAuthenticationsTotal = promauto.NewCounterVec(
+	m.tokenTTL = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: "vault",
+			Name:      "token_ttl_seconds",
+			Help:      "Current Vault token TTL in seconds",
+		},
+	)
+
+	m.cacheHits = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Name: "vault_authentications_total",
-			Help: "Total number of Vault authentication attempts",
+			Namespace: namespace,
+			Subsystem: "vault",
+			Name:      "cache_hits_total",
+			Help:      "Total number of Vault cache hits",
+		},
+	)
+
+	m.cacheMisses = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "vault",
+			Name:      "cache_misses_total",
+			Help:      "Total number of Vault cache misses",
+		},
+	)
+
+	m.authAttempts = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "vault",
+			Name:      "auth_attempts_total",
+			Help:      "Total number of Vault authentication attempts by method and status",
 		},
 		[]string{"method", "status"},
 	)
 
-	// vaultSecretsWatched tracks the number of secrets being watched.
-	vaultSecretsWatched = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "vault_secrets_watched",
-			Help: "Number of secrets currently being watched",
-		},
-	)
-
-	// vaultSecretRefreshTotal counts secret refresh operations.
-	vaultSecretRefreshTotal = promauto.NewCounterVec(
+	m.errors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "vault_secret_refresh_total",
-			Help: "Total number of secret refresh operations",
+			Namespace: namespace,
+			Subsystem: "vault",
+			Name:      "errors_total",
+			Help:      "Total number of Vault errors by type",
 		},
-		[]string{"path", "status"},
+		[]string{"type"},
 	)
 
-	// vaultCacheHits counts cache hits.
-	vaultCacheHits = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "vault_cache_hits_total",
-			Help: "Total number of Vault cache hits",
-		},
+	// Register all metrics
+	m.registry.MustRegister(
+		m.requestsTotal,
+		m.requestDuration,
+		m.tokenTTL,
+		m.cacheHits,
+		m.cacheMisses,
+		m.authAttempts,
+		m.errors,
 	)
 
-	// vaultCacheMisses counts cache misses.
-	vaultCacheMisses = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "vault_cache_misses_total",
-			Help: "Total number of Vault cache misses",
-		},
-	)
-
-	// vaultTokenExpiryTime tracks token expiry time.
-	vaultTokenExpiryTime = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "vault_token_expiry_timestamp_seconds",
-			Help: "Unix timestamp when the Vault token expires",
-		},
-	)
-
-	// vaultRetryTotal counts retry attempts.
-	vaultRetryTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "vault_retry_total",
-			Help: "Total number of Vault retry attempts",
-		},
-		[]string{"operation", "attempt"},
-	)
-
-	// vaultConnectionErrors counts connection errors.
-	vaultConnectionErrors = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "vault_connection_errors_total",
-			Help: "Total number of Vault connection errors",
-		},
-	)
-
-	// vaultCacheSize tracks the current size of the secret cache.
-	vaultCacheSize = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "vault_cache_size",
-			Help: "Current number of entries in the Vault secret cache",
-		},
-	)
-
-	// vaultCacheEvictions counts cache evictions.
-	vaultCacheEvictions = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "vault_cache_evictions_total",
-			Help: "Total number of Vault cache evictions due to LRU policy",
-		},
-	)
-
-	// vaultClientCacheSize tracks the current size of the Vault client cache.
-	vaultClientCacheSize = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "vault_client_cache_size",
-			Help: "Current number of Vault clients in the cache",
-		},
-	)
-
-	// vaultClientCacheHits counts Vault client cache hits.
-	vaultClientCacheHits = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "vault_client_cache_hits_total",
-			Help: "Total number of Vault client cache hits",
-		},
-	)
-
-	// vaultClientCacheMisses counts Vault client cache misses.
-	vaultClientCacheMisses = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "vault_client_cache_misses_total",
-			Help: "Total number of Vault client cache misses",
-		},
-	)
-
-	// vaultClientCacheEvictions counts Vault client cache evictions.
-	vaultClientCacheEvictions = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "vault_client_cache_evictions_total",
-			Help: "Total number of Vault client cache evictions",
-		},
-	)
-)
-
-const (
-	statusSuccess = "success"
-	statusError   = "error"
-)
-
-// RecordRequest records a Vault request metric.
-// Includes nil checks and panic recovery for safety.
-func RecordRequest(operation string, duration time.Duration, success bool) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		// This ensures metrics issues don't crash the application
-		_ = recover()
-	}()
-
-	if vaultRequestsTotal == nil || vaultRequestDuration == nil {
-		return
-	}
-
-	status := statusSuccess
-	if !success {
-		status = statusError
-	}
-	vaultRequestsTotal.WithLabelValues(operation, status).Inc()
-	vaultRequestDuration.WithLabelValues(operation).Observe(duration.Seconds())
+	return m
 }
 
-// RecordAuthentication records a Vault authentication metric.
-// Includes nil checks and panic recovery for safety.
-func RecordAuthentication(method string, success bool) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+// RecordRequest records a Vault request.
+func (m *Metrics) RecordRequest(operation, status string, duration time.Duration) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	if vaultAuthenticationsTotal == nil {
-		return
-	}
-
-	status := statusSuccess
-	if !success {
-		status = statusError
-	}
-	vaultAuthenticationsTotal.WithLabelValues(method, status).Inc()
+	m.requestsTotal.WithLabelValues(operation, status).Inc()
+	m.requestDuration.WithLabelValues(operation).Observe(duration.Seconds())
 }
 
-// UpdateSecretsWatched updates the number of secrets being watched.
-// Includes nil checks and panic recovery for safety.
-func UpdateSecretsWatched(count int) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+// SetTokenTTL sets the current token TTL.
+func (m *Metrics) SetTokenTTL(ttl float64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	if vaultSecretsWatched == nil {
-		return
-	}
-
-	vaultSecretsWatched.Set(float64(count))
-}
-
-// RecordSecretRefresh records a secret refresh operation.
-// Includes nil checks and panic recovery for safety.
-func RecordSecretRefresh(path string, success bool) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
-
-	if vaultSecretRefreshTotal == nil {
-		return
-	}
-
-	status := statusSuccess
-	if !success {
-		status = statusError
-	}
-	vaultSecretRefreshTotal.WithLabelValues(path, status).Inc()
+	m.tokenTTL.Set(ttl)
 }
 
 // RecordCacheHit records a cache hit.
-// Includes nil checks and panic recovery for safety.
-func RecordCacheHit() {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+func (m *Metrics) RecordCacheHit() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	if vaultCacheHits == nil {
-		return
-	}
-
-	vaultCacheHits.Inc()
+	m.cacheHits.Inc()
 }
 
 // RecordCacheMiss records a cache miss.
-// Includes nil checks and panic recovery for safety.
-func RecordCacheMiss() {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+func (m *Metrics) RecordCacheMiss() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	if vaultCacheMisses == nil {
-		return
-	}
-
-	vaultCacheMisses.Inc()
+	m.cacheMisses.Inc()
 }
 
-// UpdateTokenExpiry updates the token expiry timestamp.
-// Includes nil checks and panic recovery for safety.
-func UpdateTokenExpiry(expiry time.Time) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+// RecordAuthAttempt records an authentication attempt.
+func (m *Metrics) RecordAuthAttempt(method, status string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	if vaultTokenExpiryTime == nil {
-		return
-	}
-
-	if expiry.IsZero() {
-		vaultTokenExpiryTime.Set(0)
-	} else {
-		vaultTokenExpiryTime.Set(float64(expiry.Unix()))
-	}
+	m.authAttempts.WithLabelValues(method, status).Inc()
 }
 
-// RecordRetry records a retry attempt.
-// Includes nil checks and panic recovery for safety.
-func RecordRetry(operation string, attempt int) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+// RecordError records an error.
+func (m *Metrics) RecordError(errorType string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	if vaultRetryTotal == nil {
-		return
-	}
-
-	vaultRetryTotal.WithLabelValues(operation, string(rune('0'+attempt))).Inc()
+	m.errors.WithLabelValues(errorType).Inc()
 }
 
-// RecordConnectionError records a connection error.
-// Includes nil checks and panic recovery for safety.
-func RecordConnectionError() {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
-
-	if vaultConnectionErrors == nil {
-		return
-	}
-
-	vaultConnectionErrors.Inc()
+// Registry returns the Prometheus registry.
+func (m *Metrics) Registry() *prometheus.Registry {
+	return m.registry
 }
 
-// UpdateCacheSize updates the current cache size metric.
-// Includes nil checks and panic recovery for safety.
-func UpdateCacheSize(size int) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
-
-	if vaultCacheSize == nil {
-		return
-	}
-
-	vaultCacheSize.Set(float64(size))
+// Describe implements prometheus.Collector.
+func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
+	m.requestsTotal.Describe(ch)
+	m.requestDuration.Describe(ch)
+	m.tokenTTL.Describe(ch)
+	m.cacheHits.Describe(ch)
+	m.cacheMisses.Describe(ch)
+	m.authAttempts.Describe(ch)
+	m.errors.Describe(ch)
 }
 
-// RecordCacheEviction records a cache eviction due to LRU policy.
-// Includes nil checks and panic recovery for safety.
-func RecordCacheEviction() {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
-
-	if vaultCacheEvictions == nil {
-		return
-	}
-
-	vaultCacheEvictions.Inc()
+// Collect implements prometheus.Collector.
+func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
+	m.requestsTotal.Collect(ch)
+	m.requestDuration.Collect(ch)
+	m.tokenTTL.Collect(ch)
+	m.cacheHits.Collect(ch)
+	m.cacheMisses.Collect(ch)
+	m.authAttempts.Collect(ch)
+	m.errors.Collect(ch)
 }
 
-// UpdateVaultClientCacheSize updates the current Vault client cache size metric.
-// Includes nil checks and panic recovery for safety.
-func UpdateVaultClientCacheSize(size int) {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+// NopMetrics is a no-op implementation of metrics for testing.
+type NopMetrics struct{}
 
-	if vaultClientCacheSize == nil {
-		return
-	}
-
-	vaultClientCacheSize.Set(float64(size))
+// NewNopMetrics creates a new NopMetrics instance.
+func NewNopMetrics() *NopMetrics {
+	return &NopMetrics{}
 }
 
-// RecordVaultClientCacheHit records a Vault client cache hit.
-// Includes nil checks and panic recovery for safety.
-func RecordVaultClientCacheHit() {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
+// RecordRequest is a no-op.
+func (m *NopMetrics) RecordRequest(_, _ string, _ time.Duration) {}
 
-	if vaultClientCacheHits == nil {
-		return
-	}
+// SetTokenTTL is a no-op.
+func (m *NopMetrics) SetTokenTTL(_ float64) {}
 
-	vaultClientCacheHits.Inc()
+// RecordCacheHit is a no-op.
+func (m *NopMetrics) RecordCacheHit() {}
+
+// RecordCacheMiss is a no-op.
+func (m *NopMetrics) RecordCacheMiss() {}
+
+// RecordAuthAttempt is a no-op.
+func (m *NopMetrics) RecordAuthAttempt(_, _ string) {}
+
+// RecordError is a no-op.
+func (m *NopMetrics) RecordError(_ string) {}
+
+// MetricsRecorder defines the interface for recording Vault metrics.
+type MetricsRecorder interface {
+	RecordRequest(operation, status string, duration time.Duration)
+	SetTokenTTL(ttl float64)
+	RecordCacheHit()
+	RecordCacheMiss()
+	RecordAuthAttempt(method, status string)
+	RecordError(errorType string)
 }
 
-// RecordVaultClientCacheMiss records a Vault client cache miss.
-// Includes nil checks and panic recovery for safety.
-func RecordVaultClientCacheMiss() {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
-
-	if vaultClientCacheMisses == nil {
-		return
-	}
-
-	vaultClientCacheMisses.Inc()
-}
-
-// RecordVaultClientCacheEviction records a Vault client cache eviction.
-// Includes nil checks and panic recovery for safety.
-func RecordVaultClientCacheEviction() {
-	defer func() {
-		// Silently recover from any panic in metrics recording
-		_ = recover()
-	}()
-
-	if vaultClientCacheEvictions == nil {
-		return
-	}
-
-	vaultClientCacheEvictions.Inc()
-}
+// Ensure implementations satisfy the interface.
+var (
+	_ MetricsRecorder = (*Metrics)(nil)
+	_ MetricsRecorder = (*NopMetrics)(nil)
+)

@@ -7,660 +7,490 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
-func TestNewMemoryStore(t *testing.T) {
+func TestNewStore(t *testing.T) {
 	t.Parallel()
-
-	store := NewMemoryStore()
-	assert.NotNil(t, store)
-	assert.NotNil(t, store.keys)
-	assert.Equal(t, 0, store.Count())
-}
-
-func TestMemoryStore_Get(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	// Add a key
-	key := &APIKey{
-		ID:        "key-1",
-		Name:      "Test Key",
-		KeyHash:   "hash123",
-		Enabled:   true,
-		CreatedAt: time.Now(),
-	}
-	store.keys["hash123"] = key
 
 	tests := []struct {
-		name          string
-		keyHash       string
-		expectedError error
+		name    string
+		config  *Config
+		wantErr bool
+		errMsg  string
 	}{
 		{
-			name:          "Existing key",
-			keyHash:       "hash123",
-			expectedError: nil,
+			name:    "nil config",
+			config:  nil,
+			wantErr: true,
+			errMsg:  "config is required",
 		},
 		{
-			name:          "Non-existent key",
-			keyHash:       "nonexistent",
-			expectedError: ErrKeyNotFound,
+			name: "memory store",
+			config: &Config{
+				Enabled: true,
+				Store: &StoreConfig{
+					Type: "memory",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "default store (memory)",
+			config: &Config{
+				Enabled: true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "vault store without client",
+			config: &Config{
+				Enabled: true,
+				Store: &StoreConfig{
+					Type: "vault",
+				},
+			},
+			wantErr: true,
+			errMsg:  "vault store requires vault client",
+		},
+		{
+			name: "file store not implemented",
+			config: &Config{
+				Enabled: true,
+				Store: &StoreConfig{
+					Type: "file",
+				},
+			},
+			wantErr: true,
+			errMsg:  "file store not yet implemented",
+		},
+		{
+			name: "unknown store type",
+			config: &Config{
+				Enabled: true,
+				Store: &StoreConfig{
+					Type: "unknown",
+				},
+			},
+			wantErr: true,
+			errMsg:  "unknown store type",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result, err := store.Get(ctx, tt.keyHash)
 
-			if tt.expectedError != nil {
-				assert.ErrorIs(t, err, tt.expectedError)
-				assert.Nil(t, result)
+			store, err := NewStore(tt.config, observability.NopLogger())
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+				assert.Nil(t, store)
 			} else {
-				require.NoError(t, err)
-				assert.Equal(t, key, result)
+				assert.NoError(t, err)
+				assert.NotNil(t, store)
 			}
 		})
 	}
 }
 
+func TestNewMemoryStore(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+			Keys: []StaticKey{
+				{
+					ID:      "key1",
+					Key:     "api-key-1",
+					Name:    "Key 1",
+					Enabled: true,
+					Scopes:  []string{"read"},
+				},
+				{
+					ID:      "key2",
+					Key:     "api-key-2",
+					Name:    "Key 2",
+					Enabled: true,
+					Roles:   []string{"admin"},
+				},
+			},
+		},
+	}
+
+	store, err := NewMemoryStore(config, observability.NopLogger())
+	require.NoError(t, err)
+	assert.NotNil(t, store)
+
+	// Verify keys were loaded
+	key1, err := store.Get(context.Background(), "api-key-1")
+	require.NoError(t, err)
+	assert.Equal(t, "key1", key1.ID)
+	assert.Equal(t, "Key 1", key1.Name)
+	assert.Equal(t, []string{"read"}, key1.Scopes)
+
+	key2, err := store.GetByID(context.Background(), "key2")
+	require.NoError(t, err)
+	assert.Equal(t, "api-key-2", key2.Key)
+	assert.Equal(t, []string{"admin"}, key2.Roles)
+}
+
+func TestMemoryStore_Get(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+			Keys: []StaticKey{
+				{
+					ID:      "key1",
+					Key:     "api-key-1",
+					Enabled: true,
+				},
+			},
+		},
+	}
+
+	store, err := NewMemoryStore(config, observability.NopLogger())
+	require.NoError(t, err)
+
+	// Test existing key
+	key, err := store.Get(context.Background(), "api-key-1")
+	require.NoError(t, err)
+	assert.Equal(t, "key1", key.ID)
+
+	// Test non-existing key
+	key, err = store.Get(context.Background(), "nonexistent")
+	assert.Error(t, err)
+	assert.Nil(t, key)
+	assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+}
+
+func TestMemoryStore_GetByID(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+			Keys: []StaticKey{
+				{
+					ID:      "key1",
+					Key:     "api-key-1",
+					Enabled: true,
+				},
+			},
+		},
+	}
+
+	store, err := NewMemoryStore(config, observability.NopLogger())
+	require.NoError(t, err)
+
+	// Test existing key
+	key, err := store.GetByID(context.Background(), "key1")
+	require.NoError(t, err)
+	assert.Equal(t, "api-key-1", key.Key)
+
+	// Test non-existing key
+	key, err = store.GetByID(context.Background(), "nonexistent")
+	assert.Error(t, err)
+	assert.Nil(t, key)
+	assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+}
+
 func TestMemoryStore_List(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	// Empty store
-	keys, err := store.List(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, keys)
-
-	// Add some keys
-	store.keys["hash1"] = &APIKey{ID: "key-1", KeyHash: "hash1"}
-	store.keys["hash2"] = &APIKey{ID: "key-2", KeyHash: "hash2"}
-	store.keys["hash3"] = &APIKey{ID: "key-3", KeyHash: "hash3"}
-
-	keys, err = store.List(ctx)
-	require.NoError(t, err)
-	assert.Len(t, keys, 3)
-}
-
-func TestMemoryStore_Create(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	key := &APIKey{
-		ID:        "key-1",
-		Name:      "Test Key",
-		KeyHash:   "hash123",
-		Enabled:   true,
-		CreatedAt: time.Now(),
-	}
-
-	// Create new key
-	err := store.Create(ctx, key)
-	require.NoError(t, err)
-	assert.Equal(t, 1, store.Count())
-
-	// Try to create duplicate
-	err = store.Create(ctx, key)
-	assert.ErrorIs(t, err, ErrKeyInvalid)
-}
-
-func TestMemoryStore_Delete(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	// Add a key
-	store.keys["hash123"] = &APIKey{ID: "key-1", KeyHash: "hash123"}
-
-	// Delete existing key
-	err := store.Delete(ctx, "hash123")
-	require.NoError(t, err)
-	assert.Equal(t, 0, store.Count())
-
-	// Delete non-existent key
-	err = store.Delete(ctx, "nonexistent")
-	assert.ErrorIs(t, err, ErrKeyNotFound)
-}
-
-func TestMemoryStore_Validate(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	// Add valid key
-	store.keys["valid"] = &APIKey{
-		ID:      "key-1",
-		KeyHash: "valid",
+	config := &Config{
 		Enabled: true,
-	}
-
-	// Add disabled key
-	store.keys["disabled"] = &APIKey{
-		ID:      "key-2",
-		KeyHash: "disabled",
-		Enabled: false,
-	}
-
-	// Add expired key
-	expiredTime := time.Now().Add(-time.Hour)
-	store.keys["expired"] = &APIKey{
-		ID:        "key-3",
-		KeyHash:   "expired",
-		Enabled:   true,
-		ExpiresAt: &expiredTime,
-	}
-
-	tests := []struct {
-		name     string
-		keyHash  string
-		expected bool
-	}{
-		{
-			name:     "Valid key",
-			keyHash:  "valid",
-			expected: true,
-		},
-		{
-			name:     "Disabled key",
-			keyHash:  "disabled",
-			expected: false,
-		},
-		{
-			name:     "Expired key",
-			keyHash:  "expired",
-			expected: false,
-		},
-		{
-			name:     "Non-existent key",
-			keyHash:  "nonexistent",
-			expected: false,
+		Store: &StoreConfig{
+			Type: "memory",
+			Keys: []StaticKey{
+				{ID: "key1", Key: "api-key-1", Enabled: true},
+				{ID: "key2", Key: "api-key-2", Enabled: true},
+				{ID: "key3", Key: "api-key-3", Enabled: true},
+			},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			valid, err := store.Validate(ctx, tt.keyHash)
-			require.NoError(t, err)
-			assert.Equal(t, tt.expected, valid)
-		})
-	}
-}
-
-func TestMemoryStore_Update(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-	ctx := context.Background()
-
-	// Add a key
-	store.keys["hash123"] = &APIKey{
-		ID:      "key-1",
-		Name:    "Original Name",
-		KeyHash: "hash123",
-		Enabled: true,
-	}
-
-	// Update existing key
-	updatedKey := &APIKey{
-		ID:      "key-1",
-		Name:    "Updated Name",
-		KeyHash: "hash123",
-		Enabled: false,
-	}
-	err := store.Update(ctx, updatedKey)
+	store, err := NewMemoryStore(config, observability.NopLogger())
 	require.NoError(t, err)
-
-	// Verify update
-	key, err := store.Get(ctx, "hash123")
-	require.NoError(t, err)
-	assert.Equal(t, "Updated Name", key.Name)
-	assert.False(t, key.Enabled)
-
-	// Update non-existent key
-	nonExistent := &APIKey{KeyHash: "nonexistent"}
-	err = store.Update(ctx, nonExistent)
-	assert.ErrorIs(t, err, ErrKeyNotFound)
-}
-
-func TestMemoryStore_Count(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-
-	assert.Equal(t, 0, store.Count())
-
-	store.keys["hash1"] = &APIKey{ID: "key-1"}
-	assert.Equal(t, 1, store.Count())
-
-	store.keys["hash2"] = &APIKey{ID: "key-2"}
-	assert.Equal(t, 2, store.Count())
-}
-
-func TestMemoryStore_Clear(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-
-	store.keys["hash1"] = &APIKey{ID: "key-1"}
-	store.keys["hash2"] = &APIKey{ID: "key-2"}
-	assert.Equal(t, 2, store.Count())
-
-	store.Clear()
-	assert.Equal(t, 0, store.Count())
-}
-
-func TestMemoryStore_LoadFromMap(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-
-	keys := map[string]*APIKey{
-		"hash1": {ID: "key-1", KeyHash: "hash1"},
-		"hash2": {ID: "key-2", KeyHash: "hash2"},
-		"hash3": {ID: "key-3", KeyHash: "hash3"},
-	}
-
-	store.LoadFromMap(keys)
-	assert.Equal(t, 3, store.Count())
-
-	// Verify keys are loaded
-	key, err := store.Get(context.Background(), "hash1")
-	require.NoError(t, err)
-	assert.Equal(t, "key-1", key.ID)
-}
-
-func TestMemoryStore_LoadFromSecretData(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-	hasher := &SHA256Hasher{}
-
-	data := map[string][]byte{
-		"api-key-1": []byte("secret-value-1"),
-		"api-key-2": []byte("secret-value-2"),
-	}
-
-	store.LoadFromSecretData(data, hasher)
-	assert.Equal(t, 2, store.Count())
-
-	// Verify keys are loaded with correct hashes
-	hash1 := hasher.Hash("secret-value-1")
-	key, err := store.Get(context.Background(), hash1)
-	require.NoError(t, err)
-	assert.Equal(t, "api-key-1", key.ID)
-	assert.True(t, key.Enabled)
-}
-
-func TestMemoryStore_LoadFromSecretData_NilHasher(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-
-	data := map[string][]byte{
-		"api-key-1": []byte("secret-value-1"),
-	}
-
-	// Should use default SHA256Hasher
-	store.LoadFromSecretData(data, nil)
-	assert.Equal(t, 1, store.Count())
-}
-
-func TestNewSecretStore(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		hasher Hasher
-	}{
-		{
-			name:   "With custom hasher",
-			hasher: &SHA256Hasher{},
-		},
-		{
-			name:   "With nil hasher",
-			hasher: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			store := NewSecretStore(tt.hasher)
-			assert.NotNil(t, store)
-			assert.NotNil(t, store.MemoryStore)
-			assert.NotNil(t, store.hasher)
-		})
-	}
-}
-
-func TestSecretStore_LoadSecret(t *testing.T) {
-	t.Parallel()
-
-	store := NewSecretStore(nil)
-
-	data := map[string][]byte{
-		"key-1": []byte("value-1"),
-		"key-2": []byte("value-2"),
-	}
-
-	store.LoadSecret(data)
-	assert.Equal(t, 2, store.Count())
-}
-
-func TestSecretStore_AddKey(t *testing.T) {
-	t.Parallel()
-
-	store := NewSecretStore(nil)
-
-	// Add key without expiry
-	err := store.AddKey("key-1", "secret-value", []string{"read", "write"}, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 1, store.Count())
-
-	// Add key with expiry
-	expiry := time.Now().Add(time.Hour)
-	err = store.AddKey("key-2", "another-secret", []string{"admin"}, &expiry)
-	require.NoError(t, err)
-	assert.Equal(t, 2, store.Count())
-
-	// Try to add duplicate
-	err = store.AddKey("key-1", "secret-value", nil, nil)
-	assert.ErrorIs(t, err, ErrKeyInvalid)
-}
-
-func TestSecretStore_RemoveKey(t *testing.T) {
-	t.Parallel()
-
-	store := NewSecretStore(nil)
-
-	// Add a key
-	err := store.AddKey("key-1", "secret-value", nil, nil)
-	require.NoError(t, err)
-
-	// Remove the key
-	err = store.RemoveKey("secret-value")
-	require.NoError(t, err)
-	assert.Equal(t, 0, store.Count())
-
-	// Remove non-existent key
-	err = store.RemoveKey("nonexistent")
-	assert.ErrorIs(t, err, ErrKeyNotFound)
-}
-
-func TestSecretStore_ValidateKey(t *testing.T) {
-	t.Parallel()
-
-	store := NewSecretStore(nil)
-
-	// Add a key
-	err := store.AddKey("key-1", "secret-value", []string{"read"}, nil)
-	require.NoError(t, err)
-
-	// Validate existing key
-	key, err := store.ValidateKey(context.Background(), "secret-value")
-	require.NoError(t, err)
-	assert.Equal(t, "key-1", key.ID)
-
-	// Validate non-existent key
-	_, err = store.ValidateKey(context.Background(), "nonexistent")
-	assert.ErrorIs(t, err, ErrKeyNotFound)
-}
-
-func TestNewStaticStore(t *testing.T) {
-	t.Parallel()
-
-	keys := []string{"key1", "key2", "key3"}
-
-	tests := []struct {
-		name   string
-		keys   []string
-		hasher Hasher
-	}{
-		{
-			name:   "With keys and hasher",
-			keys:   keys,
-			hasher: &SHA256Hasher{},
-		},
-		{
-			name:   "With nil hasher",
-			keys:   keys,
-			hasher: nil,
-		},
-		{
-			name:   "With empty keys",
-			keys:   []string{},
-			hasher: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			store := NewStaticStore(tt.keys, tt.hasher)
-			assert.NotNil(t, store)
-			assert.NotNil(t, store.hasher)
-			assert.Len(t, store.keys, len(tt.keys))
-		})
-	}
-}
-
-func TestStaticStore_Get(t *testing.T) {
-	t.Parallel()
-
-	hasher := &SHA256Hasher{}
-	store := NewStaticStore([]string{"valid-key"}, hasher)
-
-	ctx := context.Background()
-
-	// Get existing key
-	keyHash := hasher.Hash("valid-key")
-	key, err := store.Get(ctx, keyHash)
-	require.NoError(t, err)
-	assert.Equal(t, keyHash, key.ID)
-	assert.Equal(t, "static-key", key.Name)
-	assert.True(t, key.Enabled)
-
-	// Get non-existent key
-	_, err = store.Get(ctx, "nonexistent")
-	assert.ErrorIs(t, err, ErrKeyNotFound)
-}
-
-func TestStaticStore_List(t *testing.T) {
-	t.Parallel()
-
-	store := NewStaticStore([]string{"key1", "key2", "key3"}, nil)
 
 	keys, err := store.List(context.Background())
 	require.NoError(t, err)
 	assert.Len(t, keys, 3)
 }
 
-func TestStaticStore_Create(t *testing.T) {
+func TestMemoryStore_Add(t *testing.T) {
 	t.Parallel()
 
-	store := NewStaticStore(nil, nil)
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+		},
+	}
 
-	key := &APIKey{KeyHash: "newhash"}
-	err := store.Create(context.Background(), key)
+	store, err := NewMemoryStore(config, observability.NopLogger())
 	require.NoError(t, err)
 
-	assert.True(t, store.keys["newhash"])
+	// Add a key
+	store.Add(&StaticKey{
+		ID:      "new-key",
+		Key:     "new-api-key",
+		Enabled: true,
+	})
+
+	// Verify it was added
+	key, err := store.Get(context.Background(), "new-api-key")
+	require.NoError(t, err)
+	assert.Equal(t, "new-key", key.ID)
+
+	key, err = store.GetByID(context.Background(), "new-key")
+	require.NoError(t, err)
+	assert.Equal(t, "new-api-key", key.Key)
 }
 
-func TestStaticStore_Delete(t *testing.T) {
+func TestMemoryStore_Remove(t *testing.T) {
 	t.Parallel()
 
-	store := NewStaticStore([]string{"key1"}, nil)
-	hasher := &SHA256Hasher{}
-	keyHash := hasher.Hash("key1")
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+			Keys: []StaticKey{
+				{ID: "key1", Key: "api-key-1", Enabled: true},
+			},
+		},
+	}
 
-	err := store.Delete(context.Background(), keyHash)
+	store, err := NewMemoryStore(config, observability.NopLogger())
 	require.NoError(t, err)
 
-	assert.False(t, store.keys[keyHash])
-}
-
-func TestStaticStore_Validate(t *testing.T) {
-	t.Parallel()
-
-	hasher := &SHA256Hasher{}
-	store := NewStaticStore([]string{"valid-key"}, hasher)
-
-	ctx := context.Background()
-
-	// Validate existing key
-	keyHash := hasher.Hash("valid-key")
-	valid, err := store.Validate(ctx, keyHash)
+	// Verify key exists
+	_, err = store.Get(context.Background(), "api-key-1")
 	require.NoError(t, err)
-	assert.True(t, valid)
 
-	// Validate non-existent key
-	valid, err = store.Validate(ctx, "nonexistent")
+	// Remove the key
+	store.Remove("key1")
+
+	// Verify it was removed
+	_, err = store.Get(context.Background(), "api-key-1")
+	assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+
+	_, err = store.GetByID(context.Background(), "key1")
+	assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+}
+
+func TestMemoryStore_Remove_NonExistent(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+		},
+	}
+
+	store, err := NewMemoryStore(config, observability.NopLogger())
 	require.NoError(t, err)
-	assert.False(t, valid)
+
+	// Should not panic when removing non-existent key
+	store.Remove("nonexistent")
 }
 
-func TestStaticStore_AddKey(t *testing.T) {
+func TestMemoryStore_Close(t *testing.T) {
 	t.Parallel()
 
-	store := NewStaticStore(nil, nil)
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+		},
+	}
 
-	store.AddKey("new-key")
-	assert.Len(t, store.keys, 1)
+	store, err := NewMemoryStore(config, observability.NopLogger())
+	require.NoError(t, err)
 
-	// Verify the key was hashed
-	hasher := &SHA256Hasher{}
-	keyHash := hasher.Hash("new-key")
-	assert.True(t, store.keys[keyHash])
+	err = store.Close()
+	assert.NoError(t, err)
 }
 
-func TestStaticStore_RemoveKey(t *testing.T) {
+func TestMemoryStore_EmptyConfig(t *testing.T) {
 	t.Parallel()
 
-	store := NewStaticStore([]string{"key-to-remove"}, nil)
-	hasher := &SHA256Hasher{}
-	keyHash := hasher.Hash("key-to-remove")
+	config := &Config{
+		Enabled: true,
+	}
 
-	assert.True(t, store.keys[keyHash])
+	store, err := NewMemoryStore(config, observability.NopLogger())
+	require.NoError(t, err)
 
-	store.RemoveKey("key-to-remove")
-	assert.False(t, store.keys[keyHash])
+	keys, err := store.List(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, keys)
 }
 
-func TestStaticStore_ValidateRawKey(t *testing.T) {
+func TestKeyCache_GetSet(t *testing.T) {
 	t.Parallel()
 
-	store := NewStaticStore([]string{"valid-key"}, nil)
+	cache := &keyCache{
+		entries: make(map[string]*cacheEntry),
+		ttl:     time.Minute,
+	}
 
-	assert.True(t, store.ValidateRawKey("valid-key"))
-	assert.False(t, store.ValidateRawKey("invalid-key"))
+	key := &StaticKey{
+		ID:      "key1",
+		Key:     "api-key-1",
+		Enabled: true,
+	}
+
+	// Set a key
+	cache.set("api-key-1", key)
+
+	// Get the key
+	result := cache.get("api-key-1")
+	require.NotNil(t, result)
+	assert.Equal(t, "key1", result.ID)
+
+	// Get non-existent key
+	result = cache.get("nonexistent")
+	assert.Nil(t, result)
 }
 
-// Concurrent access tests
-func TestMemoryStore_ConcurrentAccess(t *testing.T) {
+func TestKeyCache_Expiration(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore()
-	ctx := context.Background()
+	cache := &keyCache{
+		entries: make(map[string]*cacheEntry),
+		ttl:     10 * time.Millisecond,
+	}
 
+	key := &StaticKey{
+		ID:      "key1",
+		Key:     "api-key-1",
+		Enabled: true,
+	}
+
+	// Set a key
+	cache.set("api-key-1", key)
+
+	// Key should be available immediately
+	result := cache.get("api-key-1")
+	require.NotNil(t, result)
+
+	// Wait for expiration
+	time.Sleep(20 * time.Millisecond)
+
+	// Key should be expired
+	result = cache.get("api-key-1")
+	assert.Nil(t, result)
+}
+
+func TestParseKeyFromVault(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		data     map[string]interface{}
+		expected *StaticKey
+	}{
+		{
+			name: "full data",
+			data: map[string]interface{}{
+				"id":      "key1",
+				"name":    "Test Key",
+				"hash":    "abc123",
+				"key":     "api-key-1",
+				"scopes":  []interface{}{"read", "write"},
+				"roles":   []interface{}{"admin"},
+				"enabled": true,
+			},
+			expected: &StaticKey{
+				ID:      "key1",
+				Name:    "Test Key",
+				Hash:    "abc123",
+				Key:     "api-key-1",
+				Scopes:  []string{"read", "write"},
+				Roles:   []string{"admin"},
+				Enabled: true,
+			},
+		},
+		{
+			name: "minimal data",
+			data: map[string]interface{}{
+				"id": "key1",
+			},
+			expected: &StaticKey{
+				ID:      "key1",
+				Enabled: true, // Default
+			},
+		},
+		{
+			name:     "empty data",
+			data:     map[string]interface{}{},
+			expected: &StaticKey{Enabled: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := parseKeyFromVault(tt.data)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected.ID, result.ID)
+			assert.Equal(t, tt.expected.Name, result.Name)
+			assert.Equal(t, tt.expected.Hash, result.Hash)
+			assert.Equal(t, tt.expected.Key, result.Key)
+			assert.Equal(t, tt.expected.Scopes, result.Scopes)
+			assert.Equal(t, tt.expected.Roles, result.Roles)
+			assert.Equal(t, tt.expected.Enabled, result.Enabled)
+		})
+	}
+}
+
+func TestMemoryStore_Concurrency(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Store: &StoreConfig{
+			Type: "memory",
+		},
+	}
+
+	store, err := NewMemoryStore(config, observability.NopLogger())
+	require.NoError(t, err)
+
+	// Add initial keys
+	for i := 0; i < 100; i++ {
+		store.Add(&StaticKey{
+			ID:      "key" + string(rune(i)),
+			Key:     "api-key-" + string(rune(i)),
+			Enabled: true,
+		})
+	}
+
+	// Concurrent reads and writes
 	done := make(chan bool)
-
-	// Concurrent writes
 	for i := 0; i < 10; i++ {
 		go func(id int) {
 			for j := 0; j < 100; j++ {
-				key := &APIKey{
-					ID:      "key",
-					KeyHash: "hash",
-					Enabled: true,
-				}
-				_ = store.Create(ctx, key)
-				_ = store.Delete(ctx, "hash")
+				_, _ = store.List(context.Background())
+				_, _ = store.Get(context.Background(), "api-key-"+string(rune(id)))
+				_, _ = store.GetByID(context.Background(), "key"+string(rune(id)))
 			}
 			done <- true
 		}(i)
-	}
-
-	// Concurrent reads
-	for i := 0; i < 10; i++ {
-		go func() {
-			for j := 0; j < 100; j++ {
-				_, _ = store.Get(ctx, "hash")
-				_, _ = store.List(ctx)
-				_, _ = store.Validate(ctx, "hash")
-			}
-			done <- true
-		}()
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < 20; i++ {
-		<-done
-	}
-}
-
-func TestSecretStore_ConcurrentAccess(t *testing.T) {
-	t.Parallel()
-
-	store := NewSecretStore(nil)
-
-	done := make(chan bool)
-
-	// Concurrent operations
-	for i := 0; i < 10; i++ {
-		go func(id int) {
-			for j := 0; j < 100; j++ {
-				_ = store.AddKey("key", "value", nil, nil)
-				_ = store.RemoveKey("value")
-			}
-			done <- true
-		}(i)
-	}
-
 	for i := 0; i < 10; i++ {
 		<-done
-	}
-}
-
-// Benchmark tests
-func BenchmarkMemoryStore_Get(b *testing.B) {
-	store := NewMemoryStore()
-	store.keys["hash123"] = &APIKey{ID: "key-1", KeyHash: "hash123"}
-	ctx := context.Background()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		store.Get(ctx, "hash123")
-	}
-}
-
-func BenchmarkMemoryStore_Create(b *testing.B) {
-	ctx := context.Background()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		store := NewMemoryStore()
-		key := &APIKey{ID: "key-1", KeyHash: "hash123"}
-		store.Create(ctx, key)
-	}
-}
-
-func BenchmarkStaticStore_ValidateRawKey(b *testing.B) {
-	store := NewStaticStore([]string{"valid-key"}, nil)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		store.ValidateRawKey("valid-key")
 	}
 }

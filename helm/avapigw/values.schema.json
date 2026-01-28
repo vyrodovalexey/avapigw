@@ -1,0 +1,900 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "title": "Ava API Gateway Helm Chart Values",
+  "description": "Configuration values for the avapigw Helm chart",
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Number of replicas for the deployment"
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "default": "ghcr.io/vyrodovalexey/avapigw",
+          "description": "Container image repository"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "default": "IfNotPresent",
+          "description": "Image pull policy"
+        },
+        "tag": {
+          "type": "string",
+          "default": "",
+          "description": "Overrides the image tag whose default is the chart appVersion"
+        }
+      },
+      "required": ["repository", "pullPolicy"]
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "default": [],
+      "description": "Image pull secrets for private registries"
+    },
+    "nameOverride": {
+      "type": "string",
+      "default": "",
+      "description": "Override the name of the chart"
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "default": "",
+      "description": "Override the full name of the chart"
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "default": true,
+          "description": "Specifies whether a service account should be created"
+        },
+        "automount": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically mount a ServiceAccount's API credentials"
+        },
+        "annotations": {
+          "type": "object",
+          "default": {},
+          "description": "Annotations to add to the service account"
+        },
+        "name": {
+          "type": "string",
+          "default": "",
+          "description": "The name of the service account to use"
+        }
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "default": {},
+      "description": "Annotations to add to the pod"
+    },
+    "podLabels": {
+      "type": "object",
+      "default": {},
+      "description": "Labels to add to the pod"
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "runAsNonRoot": {
+          "type": "boolean",
+          "default": true
+        },
+        "runAsUser": {
+          "type": "integer",
+          "default": 1000
+        },
+        "runAsGroup": {
+          "type": "integer",
+          "default": 1000
+        },
+        "fsGroup": {
+          "type": "integer",
+          "default": 1000
+        }
+      },
+      "description": "Pod security context"
+    },
+    "securityContext": {
+      "type": "object",
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "type": "boolean",
+          "default": false
+        },
+        "readOnlyRootFilesystem": {
+          "type": "boolean",
+          "default": true
+        },
+        "runAsNonRoot": {
+          "type": "boolean",
+          "default": true
+        },
+        "runAsUser": {
+          "type": "integer",
+          "default": 1000
+        },
+        "runAsGroup": {
+          "type": "integer",
+          "default": 1000
+        },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "drop": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": ["ALL"]
+            }
+          }
+        }
+      },
+      "description": "Container security context"
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+          "default": "ClusterIP",
+          "description": "Service type"
+        },
+        "httpPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8080,
+          "description": "HTTP port for REST API traffic"
+        },
+        "httpsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8443,
+          "description": "HTTPS port for TLS-encrypted REST API traffic"
+        },
+        "grpcPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9000,
+          "description": "gRPC port for gRPC traffic"
+        },
+        "grpcTlsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9443,
+          "description": "gRPC TLS port for TLS-encrypted gRPC traffic"
+        },
+        "metricsPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9090,
+          "description": "Metrics and health endpoints port"
+        },
+        "annotations": {
+          "type": "object",
+          "default": {},
+          "description": "Annotations to add to the service"
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable ingress"
+        },
+        "className": {
+          "type": "string",
+          "default": "",
+          "description": "Ingress class name"
+        },
+        "annotations": {
+          "type": "object",
+          "default": {},
+          "description": "Annotations to add to the ingress"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "pathType": {
+                      "type": "string",
+                      "enum": ["Prefix", "Exact", "ImplementationSpecific"]
+                    },
+                    "port": {
+                      "type": ["string", "integer"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "secretName": {
+                "type": "string"
+              },
+              "hosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "string"
+            },
+            "memory": {
+              "type": "string"
+            }
+          }
+        },
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": {
+              "type": "string"
+            },
+            "memory": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "description": "Resource limits and requests"
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable horizontal pod autoscaler"
+        },
+        "minReplicas": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Minimum number of replicas"
+        },
+        "maxReplicas": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10,
+          "description": "Maximum number of replicas"
+        },
+        "targetCPUUtilizationPercentage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 80,
+          "description": "Target CPU utilization percentage"
+        },
+        "targetMemoryUtilizationPercentage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 80,
+          "description": "Target memory utilization percentage"
+        }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable pod disruption budget"
+        },
+        "minAvailable": {
+          "type": ["integer", "string"],
+          "description": "Minimum available pods"
+        },
+        "maxUnavailable": {
+          "type": ["integer", "string"],
+          "description": "Maximum unavailable pods"
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "logLevel": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"],
+          "default": "info",
+          "description": "Log level"
+        },
+        "logFormat": {
+          "type": "string",
+          "enum": ["json", "console"],
+          "default": "json",
+          "description": "Log format"
+        },
+        "environment": {
+          "type": "string",
+          "default": "production",
+          "description": "Environment name"
+        },
+        "listeners": {
+          "type": "object",
+          "properties": {
+            "http": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "port": {
+                  "type": "integer",
+                  "default": 8080
+                },
+                "bind": {
+                  "type": "string",
+                  "default": "0.0.0.0"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "grpc": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "port": {
+                  "type": "integer",
+                  "default": 9000
+                },
+                "bind": {
+                  "type": "string",
+                  "default": "0.0.0.0"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "rateLimit": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "requestsPerSecond": {
+              "type": "integer",
+              "default": 100
+            },
+            "burst": {
+              "type": "integer",
+              "default": 200
+            },
+            "perClient": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "circuitBreaker": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "threshold": {
+              "type": "integer",
+              "default": 5
+            },
+            "timeout": {
+              "type": "string",
+              "default": "30s"
+            },
+            "halfOpenRequests": {
+              "type": "integer",
+              "default": 3
+            }
+          }
+        },
+        "maxSessions": {
+          "type": "object",
+          "description": "Global max sessions configuration for concurrent connection limiting",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable max sessions limiting"
+            },
+            "maxConcurrent": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 10000,
+              "description": "Maximum concurrent sessions allowed"
+            },
+            "queueSize": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 1000,
+              "description": "Queue size for pending requests when max is reached"
+            },
+            "queueTimeout": {
+              "type": "string",
+              "default": "30s",
+              "description": "Timeout for queued requests"
+            }
+          }
+        },
+        "routes": {
+          "type": "array",
+          "description": "Route configurations",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Route name"
+              },
+              "match": {
+                "type": "array",
+                "description": "Match conditions for the route"
+              },
+              "route": {
+                "type": "array",
+                "description": "Route destinations"
+              },
+              "timeout": {
+                "type": "string",
+                "description": "Request timeout"
+              },
+              "maxSessions": {
+                "type": "object",
+                "description": "Route-level max sessions configuration",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "maxConcurrent": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "queueSize": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "queueTimeout": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "audit": {
+          "type": "object",
+          "description": "Audit logging configuration",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable audit logging"
+            },
+            "output": {
+              "type": "string",
+              "default": "stdout",
+              "description": "Audit output destination (stdout, stderr, or file path)"
+            },
+            "format": {
+              "type": "string",
+              "enum": ["json", "text"],
+              "default": "json",
+              "description": "Audit log format"
+            },
+            "level": {
+              "type": "string",
+              "enum": ["debug", "info", "warn", "error"],
+              "default": "info",
+              "description": "Minimum audit level"
+            },
+            "events": {
+              "type": "object",
+              "description": "Events to audit",
+              "properties": {
+                "authentication": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit authentication events"
+                },
+                "authorization": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit authorization events"
+                },
+                "request": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Audit request events"
+                },
+                "response": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Audit response events"
+                },
+                "configuration": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit configuration change events"
+                },
+                "security": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Audit security events"
+                }
+              }
+            },
+            "skipPaths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths to skip from auditing"
+            },
+            "redactFields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Fields to redact from audit logs"
+            }
+          }
+        },
+        "backends": {
+          "type": "array",
+          "description": "Backend service configurations",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Backend name"
+              },
+              "hosts": {
+                "type": "array",
+                "description": "Backend hosts"
+              },
+              "healthCheck": {
+                "type": "object",
+                "description": "Health check configuration"
+              },
+              "loadBalancer": {
+                "type": "object",
+                "description": "Load balancer configuration"
+              },
+              "authentication": {
+                "type": "object",
+                "description": "Authentication configuration"
+              },
+              "circuitBreaker": {
+                "type": "object",
+                "description": "Circuit breaker configuration"
+              },
+              "maxSessions": {
+                "type": "object",
+                "description": "Backend-level max sessions configuration",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "maxConcurrent": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "queueSize": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "queueTimeout": {
+                    "type": "string"
+                  }
+                }
+              },
+              "rateLimit": {
+                "type": "object",
+                "description": "Backend-level rate limit configuration",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable rate limiting for this backend"
+                  },
+                  "requestsPerSecond": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 100,
+                    "description": "Maximum requests per second"
+                  },
+                  "burst": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 200,
+                    "description": "Burst size for rate limiting"
+                  }
+                }
+              }
+            },
+            "required": ["name"]
+          }
+        }
+      },
+      "description": "Gateway configuration"
+    },
+    "redis": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Redis dependency"
+        }
+      }
+    },
+    "vault": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Vault integration"
+        },
+        "address": {
+          "type": "string",
+          "default": "",
+          "description": "Vault server address"
+        },
+        "authMethod": {
+          "type": "string",
+          "enum": ["token", "kubernetes", "approle"],
+          "default": "kubernetes",
+          "description": "Vault authentication method"
+        },
+        "role": {
+          "type": "string",
+          "default": "",
+          "description": "Vault role for Kubernetes auth"
+        },
+        "kubernetesMountPath": {
+          "type": "string",
+          "default": "kubernetes",
+          "description": "Vault Kubernetes auth mount path"
+        },
+        "token": {
+          "type": "string",
+          "default": "",
+          "description": "Vault token (use only for development)"
+        },
+        "secretPath": {
+          "type": "string",
+          "default": "",
+          "description": "Secret path in Vault"
+        },
+        "tls": {
+          "type": "object",
+          "description": "TLS configuration for Vault connection",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable TLS for Vault connection"
+            },
+            "caSecretName": {
+              "type": "string",
+              "default": "",
+              "description": "CA certificate secret name"
+            },
+            "skipVerify": {
+              "type": "boolean",
+              "default": false,
+              "description": "Skip TLS verification (not recommended for production)"
+            }
+          }
+        },
+        "pki": {
+          "type": "object",
+          "description": "Vault PKI configuration for listener TLS certificates",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable Vault PKI for listener TLS"
+            },
+            "pkiMount": {
+              "type": "string",
+              "default": "pki",
+              "description": "Vault PKI secrets engine mount path"
+            },
+            "role": {
+              "type": "string",
+              "default": "",
+              "description": "Vault PKI role name"
+            },
+            "commonName": {
+              "type": "string",
+              "default": "",
+              "description": "Common name for certificate requests"
+            },
+            "altNames": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Subject alternative names (DNS)"
+            },
+            "ttl": {
+              "type": "string",
+              "default": "24h",
+              "description": "Certificate TTL"
+            },
+            "renewBefore": {
+              "type": "string",
+              "default": "1h",
+              "description": "Duration before expiry to renew"
+            },
+            "grpc": {
+              "type": "object",
+              "description": "gRPC listener PKI overrides. Falls back to main vault.pki settings when not set.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Enable Vault PKI for gRPC listener TLS (defaults to vault.pki.enabled)"
+                },
+                "pkiMount": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Vault PKI secrets engine mount path for gRPC (defaults to vault.pki.pkiMount)"
+                },
+                "role": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Vault PKI role name for gRPC (defaults to vault.pki.role)"
+                },
+                "commonName": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Common name for gRPC certificate requests (defaults to vault.pki.commonName)"
+                },
+                "altNames": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [],
+                  "description": "Subject alternative names for gRPC (defaults to vault.pki.altNames)"
+                },
+                "ttl": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Certificate TTL for gRPC (defaults to vault.pki.ttl)"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "keycloak": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Keycloak integration"
+        },
+        "url": {
+          "type": "string",
+          "default": "",
+          "description": "Keycloak server URL"
+        },
+        "realm": {
+          "type": "string",
+          "default": "",
+          "description": "Keycloak realm"
+        },
+        "clientId": {
+          "type": "string",
+          "default": "",
+          "description": "Keycloak client ID"
+        }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable ServiceMonitor for Prometheus Operator"
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable network policies"
+        }
+      }
+    }
+  },
+  "required": ["replicaCount", "image", "service", "gateway"]
+}

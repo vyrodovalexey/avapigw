@@ -1,0 +1,281 @@
+# Gateway configuration for Capacity-Aware Load Balancer Performance Testing
+# This configuration tests load balancer behavior when backends have max sessions limits
+# The load balancer should skip hosts that are at capacity
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-capacity-aware-lb
+  labels:
+    app: avapigw
+    environment: perftest
+    feature: capacity-aware-lb
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+  routes:
+    # Health check endpoint - direct response (no backend)
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"perftest-capacity-aware-lb"}'
+        headers:
+          Content-Type: application/json
+
+    # Capacity-limited backend endpoint
+    - name: capacity-limited-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: capacity-limited-backend
+            port: 8801
+      timeout: 30s
+
+    # High-capacity backend endpoint
+    - name: high-capacity-api
+      match:
+        - uri:
+            prefix: /api/v1/fast
+          methods:
+            - GET
+      route:
+        - destination:
+            host: high-capacity-backend
+            port: 8801
+      timeout: 10s
+
+    # Weighted capacity endpoint
+    - name: weighted-capacity-api
+      match:
+        - uri:
+            prefix: /api/v1/weighted
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: weighted-capacity-backend
+            port: 8801
+      timeout: 30s
+
+    # Least-connections with capacity
+    - name: least-conn-api
+      match:
+        - uri:
+            prefix: /api/v1/leastconn
+          methods:
+            - GET
+      route:
+        - destination:
+            host: least-conn-backend
+            port: 8801
+      timeout: 30s
+
+    # Users API - unlimited capacity
+    - name: users-api
+      match:
+        - uri:
+            prefix: /api/v1/users
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 30s
+
+    # Catch-all route
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    # Backend with low max sessions per host (50 each = 100 total)
+    - name: capacity-limited-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      maxSessions:
+        enabled: true
+        maxConcurrent: 50
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 100
+        maxPendingRequests: 50
+        connectTimeout: 5s
+
+    # Backend with high max sessions (500 per host)
+    - name: high-capacity-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 500
+        connectTimeout: 5s
+
+    # Weighted backend with capacity limits
+    - name: weighted-capacity-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 3
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      maxSessions:
+        enabled: true
+        maxConcurrent: 100
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: weighted
+      connectionPool:
+        maxConnections: 200
+        maxPendingRequests: 100
+        connectTimeout: 5s
+
+    # Least-connections backend with capacity limits
+    - name: least-conn-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      maxSessions:
+        enabled: true
+        maxConcurrent: 75
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: leastConn
+      connectionPool:
+        maxConnections: 150
+        maxPendingRequests: 75
+        connectTimeout: 5s
+
+    # Combined rate limit and max sessions
+    - name: combined-limits-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      maxSessions:
+        enabled: true
+        maxConcurrent: 100
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 200
+        burst: 400
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 200
+        maxPendingRequests: 100
+        connectTimeout: 5s
+
+  # Disable global rate limiting
+  rateLimit:
+    enabled: false
+
+  # Disable circuit breaker
+  circuitBreaker:
+    enabled: false
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - X-Perf-Test
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: warn
+      format: json

@@ -1,287 +1,317 @@
-// Package apikey provides API key validation for the API Gateway.
 package apikey
 
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
+)
+
+// Hash algorithm constants.
+const (
+	HashAlgSHA256    = "sha256"
+	HashAlgSHA512    = "sha512"
+	HashAlgBcrypt    = "bcrypt"
+	HashAlgPlaintext = "plaintext"
 )
 
 // Common errors for API key validation.
 var (
-	ErrKeyNotFound       = errors.New("API key not found")
-	ErrKeyExpired        = errors.New("API key has expired")
-	ErrKeyDisabled       = errors.New("API key is disabled")
-	ErrKeyInvalid        = errors.New("invalid API key")
-	ErrInvalidHash       = errors.New("invalid key hash")
-	ErrMissingKey        = errors.New("missing API key")
-	ErrInsufficientScope = errors.New("insufficient scope")
+	// ErrInvalidAPIKey indicates that the API key is invalid.
+	ErrInvalidAPIKey = errors.New("invalid API key")
+
+	// ErrAPIKeyNotFound indicates that the API key was not found.
+	ErrAPIKeyNotFound = errors.New("API key not found")
+
+	// ErrAPIKeyExpired indicates that the API key has expired.
+	ErrAPIKeyExpired = errors.New("API key expired")
+
+	// ErrAPIKeyDisabled indicates that the API key is disabled.
+	ErrAPIKeyDisabled = errors.New("API key disabled")
+
+	// ErrAPIKeyRevoked indicates that the API key has been revoked.
+	ErrAPIKeyRevoked = errors.New("API key revoked")
+
+	// ErrEmptyAPIKey indicates that the API key is empty.
+	ErrEmptyAPIKey = errors.New("API key is empty")
 )
 
-// Metrics for API key validation.
-var (
-	apiKeyValidationTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "avapigw_apikey_validation_total",
-			Help: "Total number of API key validation attempts",
-		},
-		[]string{"result"},
-	)
-
-	apiKeyValidationDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "avapigw_apikey_validation_duration_seconds",
-			Help:    "Duration of API key validation in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"result"},
-	)
-)
-
-// Store defines the interface for API key storage.
-type Store interface {
-	// Get retrieves an API key by its hash.
-	Get(ctx context.Context, keyHash string) (*APIKey, error)
-
-	// List returns all API keys.
-	List(ctx context.Context) ([]*APIKey, error)
-
-	// Create creates a new API key.
-	Create(ctx context.Context, key *APIKey) error
-
-	// Delete deletes an API key by its hash.
-	Delete(ctx context.Context, keyHash string) error
-
-	// Validate validates an API key hash exists and is valid.
-	Validate(ctx context.Context, keyHash string) (bool, error)
-}
-
-// Hasher defines the interface for hashing API keys.
-type Hasher interface {
-	// Hash hashes an API key.
-	Hash(key string) string
-
-	// Compare compares a key with a hash using constant-time comparison.
-	Compare(key, hash string) bool
-}
-
-// APIKey represents an API key.
-type APIKey struct {
-	// ID is the unique identifier for the API key.
+// KeyInfo contains information about a validated API key.
+type KeyInfo struct {
+	// ID is the unique identifier for the key.
 	ID string `json:"id"`
 
-	// Name is a human-readable name for the API key.
-	Name string `json:"name"`
+	// Name is a human-readable name for the key.
+	Name string `json:"name,omitempty"`
 
-	// KeyHash is the hashed API key.
-	KeyHash string `json:"keyHash"`
-
-	// Scopes is the list of scopes granted to this API key.
+	// Scopes is a list of scopes granted to the key.
 	Scopes []string `json:"scopes,omitempty"`
 
-	// Metadata is additional metadata for the API key.
+	// Roles is a list of roles granted to the key.
+	Roles []string `json:"roles,omitempty"`
+
+	// ExpiresAt is when the key expires.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+
+	// Metadata contains additional metadata.
 	Metadata map[string]string `json:"metadata,omitempty"`
 
-	// CreatedAt is when the API key was created.
-	CreatedAt time.Time `json:"createdAt"`
-
-	// ExpiresAt is when the API key expires (nil means no expiry).
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
-
-	// LastUsedAt is when the API key was last used.
-	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
-
-	// Enabled indicates whether the API key is enabled.
-	Enabled bool `json:"enabled"`
+	// RateLimit is the rate limit for this key.
+	RateLimit *KeyRateLimit `json:"rate_limit,omitempty"`
 }
 
-// IsExpired checks if the API key has expired.
-func (k *APIKey) IsExpired() bool {
+// KeyRateLimit contains rate limit information for a key.
+type KeyRateLimit struct {
+	// RequestsPerSecond is the rate limit.
+	RequestsPerSecond int `json:"requests_per_second"`
+
+	// Burst is the burst size.
+	Burst int `json:"burst"`
+}
+
+// IsExpired returns true if the key has expired.
+func (k *KeyInfo) IsExpired() bool {
 	if k.ExpiresAt == nil {
 		return false
 	}
 	return time.Now().After(*k.ExpiresAt)
 }
 
-// IsValid checks if the API key is valid (enabled and not expired).
-func (k *APIKey) IsValid() bool {
-	return k.Enabled && !k.IsExpired()
-}
-
-// HasScope checks if the API key has the specified scope.
-func (k *APIKey) HasScope(scope string) bool {
-	for _, s := range k.Scopes {
-		if s == scope || s == "*" {
-			return true
-		}
-	}
-	return false
-}
-
-// HasAnyScope checks if the API key has any of the specified scopes.
-func (k *APIKey) HasAnyScope(scopes ...string) bool {
-	for _, scope := range scopes {
-		if k.HasScope(scope) {
-			return true
-		}
-	}
-	return false
-}
-
-// HasAllScopes checks if the API key has all of the specified scopes.
-func (k *APIKey) HasAllScopes(scopes ...string) bool {
-	for _, scope := range scopes {
-		if !k.HasScope(scope) {
-			return false
-		}
-	}
-	return true
-}
-
 // Validator validates API keys.
-type Validator struct {
-	store  Store
-	hasher Hasher
-	logger *zap.Logger
+type Validator interface {
+	// Validate validates an API key and returns key information.
+	Validate(ctx context.Context, key string) (*KeyInfo, error)
 }
 
-// ValidatorConfig holds configuration for the API key validator.
-type ValidatorConfig struct {
-	Store  Store
-	Hasher Hasher
-	Logger *zap.Logger
+// validator implements the Validator interface.
+type validator struct {
+	config  *Config
+	store   Store
+	logger  observability.Logger
+	metrics *Metrics
+}
+
+// ValidatorOption is a functional option for the validator.
+type ValidatorOption func(*validator)
+
+// WithValidatorLogger sets the logger for the validator.
+func WithValidatorLogger(logger observability.Logger) ValidatorOption {
+	return func(v *validator) {
+		v.logger = logger
+	}
+}
+
+// WithValidatorMetrics sets the metrics for the validator.
+func WithValidatorMetrics(metrics *Metrics) ValidatorOption {
+	return func(v *validator) {
+		v.metrics = metrics
+	}
+}
+
+// WithStore sets the store for the validator.
+func WithStore(store Store) ValidatorOption {
+	return func(v *validator) {
+		v.store = store
+	}
 }
 
 // NewValidator creates a new API key validator.
-func NewValidator(store Store, logger *zap.Logger) *Validator {
-	if logger == nil {
-		logger = zap.NewNop()
+func NewValidator(config *Config, opts ...ValidatorOption) (Validator, error) {
+	if config == nil {
+		return nil, fmt.Errorf("config is required")
 	}
 
-	return &Validator{
-		store:  store,
-		hasher: &SHA256Hasher{},
-		logger: logger,
+	v := &validator{
+		config: config,
+		logger: observability.NopLogger(),
 	}
+
+	for _, opt := range opts {
+		opt(v)
+	}
+
+	// Initialize store if not provided
+	if v.store == nil {
+		store, err := NewStore(config, v.logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create store: %w", err)
+		}
+		v.store = store
+	}
+
+	// Initialize metrics if not provided
+	if v.metrics == nil {
+		v.metrics = NewMetrics("gateway")
+	}
+
+	return v, nil
 }
 
-// NewValidatorWithConfig creates a new API key validator with custom configuration.
-func NewValidatorWithConfig(config *ValidatorConfig) *Validator {
-	if config.Logger == nil {
-		config.Logger = zap.NewNop()
-	}
-
-	hasher := config.Hasher
-	if hasher == nil {
-		hasher = &SHA256Hasher{}
-	}
-
-	return &Validator{
-		store:  config.Store,
-		hasher: hasher,
-		logger: config.Logger,
-	}
-}
-
-// Validate validates an API key and returns the key details.
-func (v *Validator) Validate(ctx context.Context, key string) (*APIKey, error) {
+// Validate validates an API key and returns key information.
+func (v *validator) Validate(ctx context.Context, key string) (*KeyInfo, error) {
 	start := time.Now()
-	result := "success"
-
-	defer func() {
-		duration := time.Since(start).Seconds()
-		apiKeyValidationTotal.WithLabelValues(result).Inc()
-		apiKeyValidationDuration.WithLabelValues(result).Observe(duration)
-	}()
 
 	if key == "" {
-		result = "missing_key"
-		return nil, ErrMissingKey
+		v.metrics.RecordValidation("error", "empty_key", time.Since(start))
+		return nil, ErrEmptyAPIKey
 	}
 
-	// Hash the key
-	keyHash := v.hasher.Hash(key)
-
-	// Look up the key
-	apiKey, err := v.store.Get(ctx, keyHash)
+	// Look up the key in the store
+	storedKey, err := v.store.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, ErrKeyNotFound) {
-			result = "not_found"
-			return nil, ErrKeyNotFound
+		if errors.Is(err, ErrAPIKeyNotFound) {
+			v.metrics.RecordValidation("error", "not_found", time.Since(start))
+			return nil, ErrAPIKeyNotFound
 		}
-		result = "store_error"
-		v.logger.Error("failed to get API key from store",
-			zap.Error(err),
-		)
+		v.metrics.RecordValidation("error", "store_error", time.Since(start))
+		return nil, fmt.Errorf("failed to look up API key: %w", err)
+	}
+
+	// Validate the key
+	if err := v.validateKey(key, storedKey); err != nil {
+		v.metrics.RecordValidation("error", "invalid", time.Since(start))
 		return nil, err
 	}
 
-	// Check if the key is enabled
-	if !apiKey.Enabled {
-		result = "disabled"
-		return nil, ErrKeyDisabled
+	// Check if key is enabled
+	if !storedKey.Enabled {
+		v.metrics.RecordValidation("error", "disabled", time.Since(start))
+		return nil, ErrAPIKeyDisabled
 	}
 
-	// Check if the key has expired
-	if apiKey.IsExpired() {
-		result = "expired"
-		return nil, ErrKeyExpired
+	// Check expiration
+	if storedKey.ExpiresAt != nil && time.Now().After(*storedKey.ExpiresAt) {
+		v.metrics.RecordValidation("error", "expired", time.Since(start))
+		return nil, ErrAPIKeyExpired
 	}
 
-	v.logger.Debug("API key validated successfully",
-		zap.String("keyID", apiKey.ID),
-		zap.String("keyName", apiKey.Name),
+	keyInfo := &KeyInfo{
+		ID:        storedKey.ID,
+		Name:      storedKey.Name,
+		Scopes:    storedKey.Scopes,
+		Roles:     storedKey.Roles,
+		ExpiresAt: storedKey.ExpiresAt,
+		Metadata:  storedKey.Metadata,
+	}
+
+	v.metrics.RecordValidation("success", "valid", time.Since(start))
+	v.logger.Debug("API key validated",
+		observability.String("key_id", storedKey.ID),
+		observability.String("key_name", storedKey.Name),
 	)
 
-	return apiKey, nil
+	return keyInfo, nil
 }
 
-// ValidateWithScopes validates an API key and checks for required scopes.
-func (v *Validator) ValidateWithScopes(ctx context.Context, key string, requiredScopes ...string) (*APIKey, error) {
-	apiKey, err := v.Validate(ctx, key)
-	if err != nil {
-		return nil, err
+// validateKey validates the provided key against the stored key.
+func (v *validator) validateKey(providedKey string, storedKey *StaticKey) error {
+	algorithm := v.config.GetEffectiveHashAlgorithm()
+
+	switch algorithm {
+	case HashAlgSHA256:
+		return v.validateSHA256(providedKey, storedKey)
+	case HashAlgSHA512:
+		return v.validateSHA512(providedKey, storedKey)
+	case HashAlgBcrypt:
+		return v.validateBcrypt(providedKey, storedKey)
+	case HashAlgPlaintext:
+		return v.validatePlaintext(providedKey, storedKey)
+	default:
+		return fmt.Errorf("unsupported hash algorithm: %s", algorithm)
+	}
+}
+
+// validateSHA256 validates using SHA-256 hash comparison.
+func (v *validator) validateSHA256(providedKey string, storedKey *StaticKey) error {
+	hash := sha256.Sum256([]byte(providedKey))
+	providedHash := hex.EncodeToString(hash[:])
+
+	storedHash := storedKey.Hash
+	if storedHash == "" {
+		// If no hash is stored, hash the stored key for comparison
+		storedHashBytes := sha256.Sum256([]byte(storedKey.Key))
+		storedHash = hex.EncodeToString(storedHashBytes[:])
 	}
 
-	if len(requiredScopes) > 0 && !apiKey.HasAllScopes(requiredScopes...) {
-		return nil, ErrInsufficientScope
+	if subtle.ConstantTimeCompare([]byte(providedHash), []byte(storedHash)) != 1 {
+		return ErrInvalidAPIKey
 	}
 
-	return apiKey, nil
+	return nil
 }
 
-// SHA256Hasher implements Hasher using SHA256.
-type SHA256Hasher struct{}
+// validateSHA512 validates using SHA-512 hash comparison.
+func (v *validator) validateSHA512(providedKey string, storedKey *StaticKey) error {
+	hash := sha512.Sum512([]byte(providedKey))
+	providedHash := hex.EncodeToString(hash[:])
 
-// Hash hashes an API key using SHA256.
-func (h *SHA256Hasher) Hash(key string) string {
-	hash := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(hash[:])
+	storedHash := storedKey.Hash
+	if storedHash == "" {
+		storedHashBytes := sha512.Sum512([]byte(storedKey.Key))
+		storedHash = hex.EncodeToString(storedHashBytes[:])
+	}
+
+	if subtle.ConstantTimeCompare([]byte(providedHash), []byte(storedHash)) != 1 {
+		return ErrInvalidAPIKey
+	}
+
+	return nil
 }
 
-// Compare compares a key with a hash using constant-time comparison.
-func (h *SHA256Hasher) Compare(key, hash string) bool {
-	keyHash := h.Hash(key)
-	return subtle.ConstantTimeCompare([]byte(keyHash), []byte(hash)) == 1
+// validateBcrypt validates using bcrypt hash comparison.
+func (v *validator) validateBcrypt(providedKey string, storedKey *StaticKey) error {
+	storedHash := storedKey.Hash
+	if storedHash == "" {
+		storedHash = storedKey.Key
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(providedKey)); err != nil {
+		return ErrInvalidAPIKey
+	}
+
+	return nil
 }
 
-// APIKeyContextKey is the context key for storing API key information.
-type APIKeyContextKey struct{}
+// validatePlaintext validates using plaintext comparison (dev only).
+func (v *validator) validatePlaintext(providedKey string, storedKey *StaticKey) error {
+	v.logger.Warn("using plaintext API key comparison - not recommended for production")
 
-// GetAPIKeyFromContext retrieves the API key from the context.
-func GetAPIKeyFromContext(ctx context.Context) (*APIKey, bool) {
-	key, ok := ctx.Value(APIKeyContextKey{}).(*APIKey)
-	return key, ok
+	if subtle.ConstantTimeCompare([]byte(providedKey), []byte(storedKey.Key)) != 1 {
+		return ErrInvalidAPIKey
+	}
+
+	return nil
 }
 
-// ContextWithAPIKey returns a new context with the API key.
-func ContextWithAPIKey(ctx context.Context, key *APIKey) context.Context {
-	return context.WithValue(ctx, APIKeyContextKey{}, key)
+// HashKey hashes an API key using the configured algorithm.
+func HashKey(key, algorithm string) (string, error) {
+	switch algorithm {
+	case HashAlgSHA256:
+		hash := sha256.Sum256([]byte(key))
+		return hex.EncodeToString(hash[:]), nil
+	case HashAlgSHA512:
+		hash := sha512.Sum512([]byte(key))
+		return hex.EncodeToString(hash[:]), nil
+	case HashAlgBcrypt:
+		hash, err := bcrypt.GenerateFromPassword([]byte(key), bcrypt.DefaultCost)
+		if err != nil {
+			return "", err
+		}
+		return string(hash), nil
+	case HashAlgPlaintext:
+		return key, nil
+	default:
+		return "", fmt.Errorf("unsupported hash algorithm: %s", algorithm)
+	}
 }
+
+// Ensure validator implements Validator.
+var _ Validator = (*validator)(nil)

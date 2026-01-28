@@ -1,0 +1,792 @@
+# Default values for avapigw.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# -- Number of replicas for the deployment
+replicaCount: 1
+
+image:
+  # -- Container image repository
+  repository: ghcr.io/vyrodovalexey/avapigw
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag whose default is the chart appVersion
+  tag: ""
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# -- Override the name of the chart
+nameOverride: ""
+
+# -- Override the full name of the chart
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: true
+  # -- Automatically mount a ServiceAccount's API credentials
+  automount: true
+  # -- Annotations to add to the service account
+  annotations: {}
+  # -- The name of the service account to use
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# -- Annotations to add to the pod
+podAnnotations: {}
+
+# -- Labels to add to the pod
+podLabels: {}
+
+podSecurityContext:
+  # -- Run as non-root user
+  runAsNonRoot: true
+  # -- Run as user ID
+  runAsUser: 1000
+  # -- Run as group ID
+  runAsGroup: 1000
+  # -- Filesystem group ID
+  fsGroup: 1000
+  # -- Seccomp profile
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  # -- Allow privilege escalation
+  allowPrivilegeEscalation: false
+  # -- Read-only root filesystem
+  readOnlyRootFilesystem: true
+  # -- Run as non-root user
+  runAsNonRoot: true
+  # -- Run as user ID
+  runAsUser: 1000
+  # -- Run as group ID
+  runAsGroup: 1000
+  # -- Drop all capabilities
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  # -- Service type
+  type: ClusterIP
+  # -- HTTP port for REST API traffic
+  httpPort: 8080
+  # -- HTTPS port for TLS-encrypted REST API traffic
+  httpsPort: 8443
+  # -- gRPC port for gRPC traffic
+  grpcPort: 9000
+  # -- gRPC TLS port for TLS-encrypted gRPC traffic
+  grpcTlsPort: 9443
+  # -- Metrics and health endpoints port
+  metricsPort: 9090
+  # -- Annotations to add to the service
+  annotations: {}
+
+ingress:
+  # -- Enable ingress
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Annotations to add to the ingress
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: avapigw.local
+      paths:
+        - path: /
+          pathType: Prefix
+          port: http
+  # -- TLS configuration for ingress
+  tls: []
+  #  - secretName: avapigw-tls
+  #    hosts:
+  #      - avapigw.local
+
+resources:
+  limits:
+    # -- CPU limit
+    cpu: 500m
+    # -- Memory limit
+    memory: 256Mi
+  requests:
+    # -- CPU request
+    cpu: 100m
+    # -- Memory request
+    memory: 128Mi
+
+livenessProbe:
+  httpGet:
+    # -- Liveness probe path
+    path: /health
+    # -- Liveness probe port
+    port: metrics
+  # -- Initial delay before liveness probe starts
+  initialDelaySeconds: 10
+  # -- Period between liveness probes
+  periodSeconds: 15
+  # -- Timeout for liveness probe
+  timeoutSeconds: 5
+  # -- Number of failures before pod is restarted
+  failureThreshold: 3
+  # -- Number of successes before pod is considered healthy
+  successThreshold: 1
+
+readinessProbe:
+  httpGet:
+    # -- Readiness probe path
+    path: /ready
+    # -- Readiness probe port
+    port: metrics
+  # -- Initial delay before readiness probe starts
+  initialDelaySeconds: 5
+  # -- Period between readiness probes
+  periodSeconds: 10
+  # -- Timeout for readiness probe
+  timeoutSeconds: 5
+  # -- Number of failures before pod is marked unready
+  failureThreshold: 3
+  # -- Number of successes before pod is considered ready
+  successThreshold: 1
+
+autoscaling:
+  # -- Enable horizontal pod autoscaler
+  enabled: false
+  # -- Minimum number of replicas
+  minReplicas: 1
+  # -- Maximum number of replicas
+  maxReplicas: 10
+  # -- Target CPU utilization percentage
+  targetCPUUtilizationPercentage: 80
+  # -- Target memory utilization percentage
+  targetMemoryUtilizationPercentage: 80
+  # -- Custom metrics for autoscaling
+  customMetrics: []
+
+podDisruptionBudget:
+  # -- Enable pod disruption budget
+  enabled: false
+  # -- Minimum available pods (can be number or percentage)
+  minAvailable: 1
+  # -- Maximum unavailable pods (can be number or percentage)
+  # maxUnavailable: 1
+
+# -- Additional volumes for the pod
+volumes: []
+
+# -- Additional volume mounts for the container
+volumeMounts: []
+
+# -- Node selector for pod scheduling
+nodeSelector: {}
+
+# -- Tolerations for pod scheduling
+tolerations: []
+
+# -- Affinity rules for pod scheduling
+affinity: {}
+
+# -- Topology spread constraints for pod scheduling
+topologySpreadConstraints: []
+
+# -- Extra environment variables
+extraEnv: []
+  # - name: EXAMPLE_VAR
+  #   value: "example-value"
+
+# -- Extra environment variables from secrets or configmaps
+extraEnvFrom: []
+  # - secretRef:
+  #     name: my-secret
+  # - configMapRef:
+  #     name: my-configmap
+
+# Gateway configuration
+gateway:
+  # -- Log level (debug, info, warn, error)
+  logLevel: info
+  # -- Log format (json, console)
+  logFormat: json
+  # -- Environment name
+  environment: production
+
+  # Listener configuration
+  listeners:
+    http:
+      # -- Enable HTTP listener
+      enabled: true
+      # -- HTTP listener port
+      port: 8080
+      # -- HTTP listener bind address
+      bind: "0.0.0.0"
+      # -- Allowed hosts
+      hosts:
+        - "*"
+      # -- TLS configuration for HTTP listener (static certificates)
+      # When vault.pki.enabled is true, Vault PKI takes precedence over static TLS.
+      # Use this for non-Vault TLS with static certificate files.
+      tls:
+        # -- Enable TLS for HTTP listener (switches protocol to HTTPS)
+        enabled: false
+        # -- TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL)
+        mode: ""
+        # -- Path to server certificate file
+        certFile: ""
+        # -- Path to server private key file
+        keyFile: ""
+        # -- Path to CA certificate file (for client validation in MUTUAL mode)
+        caFile: ""
+        # -- Minimum TLS version (TLS12, TLS13)
+        minVersion: ""
+        # -- Maximum TLS version
+        maxVersion: ""
+        # -- Allowed cipher suites
+        cipherSuites: []
+        # -- Require client certificate (for MUTUAL mode)
+        requireClientCert: false
+
+    grpc:
+      # -- Enable gRPC listener
+      enabled: false
+      # -- gRPC listener port
+      port: 9000
+      # -- gRPC listener bind address
+      bind: "0.0.0.0"
+      # -- Allowed hosts
+      hosts:
+        - "*"
+      # -- Max concurrent streams
+      maxConcurrentStreams: 100
+      # -- Max receive message size in bytes
+      maxRecvMsgSize: 4194304
+      # -- Max send message size in bytes
+      maxSendMsgSize: 4194304
+      # -- Enable gRPC reflection
+      reflection: true
+      # -- Enable gRPC health check
+      healthCheck: true
+      # -- TLS configuration for gRPC listener (static certificates)
+      # When vault.pki.enabled is true, Vault PKI takes precedence over static TLS.
+      # Use this for non-Vault TLS with static certificate files.
+      tls:
+        # -- Enable TLS for gRPC listener
+        enabled: false
+        # -- TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE)
+        mode: ""
+        # -- Path to server certificate file
+        certFile: ""
+        # -- Path to server private key file
+        keyFile: ""
+        # -- Path to CA certificate file (for client validation in MUTUAL mode)
+        caFile: ""
+        # -- Minimum TLS version (TLS12, TLS13)
+        minVersion: ""
+        # -- Maximum TLS version
+        maxVersion: ""
+        # -- Allowed cipher suites
+        cipherSuites: []
+        # -- Require client certificate (for MUTUAL mode)
+        requireClientCert: false
+
+  # Rate limiting configuration
+  rateLimit:
+    # -- Enable rate limiting
+    enabled: true
+    # -- Requests per second
+    requestsPerSecond: 100
+    # -- Burst size
+    burst: 200
+    # -- Enable per-client rate limiting
+    perClient: true
+
+  # Circuit breaker configuration
+  circuitBreaker:
+    # -- Enable circuit breaker
+    enabled: true
+    # -- Failure threshold before opening circuit
+    threshold: 5
+    # -- Timeout before attempting to close circuit
+    timeout: 30s
+    # -- Number of requests to allow in half-open state
+    halfOpenRequests: 3
+
+  # Max sessions configuration (global level)
+  # Controls concurrent connection limits for the gateway
+  maxSessions:
+    # -- Enable max sessions limiting
+    enabled: false
+    # -- Maximum concurrent sessions allowed
+    maxConcurrent: 10000
+    # -- Queue size for pending requests when max is reached
+    queueSize: 1000
+    # -- Timeout for queued requests
+    queueTimeout: 30s
+
+  # Default request limits (can be overridden per route)
+  requestLimits:
+    # -- Maximum request body size in bytes (default: 10MB)
+    maxBodySize: 10485760
+    # -- Maximum header size in bytes (default: 1MB)
+    maxHeaderSize: 1048576
+
+  # Security headers configuration
+  security:
+    # -- Enable security features
+    enabled: true
+    headers:
+      # -- Enable security headers middleware
+      enabled: true
+      # -- X-Frame-Options header value
+      xFrameOptions: "DENY"
+      # -- X-Content-Type-Options header value
+      xContentTypeOptions: "nosniff"
+      # -- X-XSS-Protection header value
+      xXSSProtection: "1; mode=block"
+    hsts:
+      # -- Enable HSTS
+      enabled: false
+      # -- HSTS max-age in seconds
+      maxAge: 31536000
+      # -- Include subdomains in HSTS
+      includeSubDomains: true
+      # -- Enable HSTS preload
+      preload: false
+
+  # CORS configuration
+  cors:
+    # -- Allowed origins
+    allowOrigins:
+      - "*"
+    # -- Allowed methods
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    # -- Allowed headers
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    # -- Exposed headers
+    exposeHeaders:
+      - X-Request-ID
+    # -- Max age in seconds
+    maxAge: 86400
+    # -- Allow credentials
+    allowCredentials: false
+
+  # Audit logging configuration
+  audit:
+    # -- Enable audit logging
+    enabled: true
+    # -- Audit output destination (stdout, stderr, or file path)
+    output: stdout
+    # -- Audit log format (json, text)
+    format: json
+    # -- Minimum audit level (debug, info, warn, error)
+    level: info
+    # -- Events to audit
+    events:
+      authentication: true
+      authorization: true
+      request: false
+      response: false
+      configuration: true
+      security: true
+    # -- Paths to skip from auditing
+    skipPaths:
+      - /health
+      - /metrics
+      - /ready
+      - /live
+    # -- Fields to redact from audit logs
+    redactFields:
+      - password
+      - secret
+      - token
+      - authorization
+      - cookie
+
+  # Observability configuration
+  observability:
+    metrics:
+      # -- Enable metrics
+      enabled: true
+      # -- Metrics endpoint path
+      path: /metrics
+      # -- Metrics port
+      port: 9090
+
+    tracing:
+      # -- Enable tracing
+      enabled: false
+      # -- Sampling rate (0.0 to 1.0)
+      samplingRate: 1.0
+      # -- OTLP endpoint for trace export
+      otlpEndpoint: ""
+      # -- Service name for tracing
+      serviceName: avapigw
+
+    logging:
+      # -- Log level
+      level: info
+      # -- Log format
+      format: json
+
+  # Routes configuration
+  # Define your routes here or use a separate ConfigMap
+  routes: []
+    # - name: example-route
+    #   match:
+    #     - uri:
+    #         prefix: /api/v1
+    #       methods:
+    #         - GET
+    #         - POST
+    #   route:
+    #     - destination:
+    #         host: backend-service
+    #         port: 8080
+    #   timeout: 30s
+    #   # Route-level max sessions (overrides global settings)
+    #   maxSessions:
+    #     enabled: true
+    #     maxConcurrent: 500
+    #     queueSize: 50
+    #     queueTimeout: 10s
+    #
+    # Example: Route with TLS override for SNI-based certificate selection
+    # - name: tenant-a-api
+    #   match:
+    #     - uri:
+    #         prefix: /api/tenant-a
+    #   route:
+    #     - destination:
+    #         host: backend-a
+    #         port: 8080
+    #   tls:
+    #     enabled: true
+    #     # Certificate paths (mounted from tls.routeCerts secrets)
+    #     certFile: /app/certs/routes/tenant-a/tls.crt
+    #     keyFile: /app/certs/routes/tenant-a/tls.key
+    #     # SNI hosts for certificate selection
+    #     sniHosts:
+    #       - tenant-a.example.com
+    #       - api.tenant-a.example.com
+    #     # TLS version constraints
+    #     minVersion: "1.2"
+    #     maxVersion: "1.3"
+    #     # Optional: Custom cipher suites
+    #     cipherSuites:
+    #       - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    #       - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    #     # Optional: Client certificate validation (mTLS)
+    #     clientValidation:
+    #       enabled: true
+    #       caFile: /app/certs/routes/tenant-a/ca.crt
+    #       verifyMode: require  # Options: require, optional, none
+    #     # Optional: Vault PKI for route-level certificate (instead of certFile/keyFile)
+    #     vault:
+    #       enabled: true
+    #       pkiMount: pki
+    #       role: my-role
+    #       commonName: tenant-a.example.com
+    #       altNames:
+    #         - api.tenant-a.example.com
+    #       ttl: "24h"
+
+  # Backends configuration
+  # Define backend services with optional authentication, circuit breaker, maxSessions, and rateLimit
+  backends: []
+    # Example: Simple backend without authentication
+    # - name: backend-service
+    #   hosts:
+    #     - address: backend-service.default.svc.cluster.local
+    #       port: 8080
+    #       weight: 1
+    #   healthCheck:
+    #     path: /health
+    #     interval: 10s
+    #     timeout: 5s
+    #     healthyThreshold: 2
+    #     unhealthyThreshold: 3
+    #   loadBalancer:
+    #     algorithm: roundRobin
+    #
+    # Example: Backend with maxSessions and rateLimit
+    # - name: api-backend
+    #   hosts:
+    #     - address: backend.example.com
+    #       port: 8080
+    #   maxSessions:
+    #     enabled: true
+    #     maxConcurrent: 500
+    #     queueSize: 50
+    #     queueTimeout: 10s
+    #   rateLimit:
+    #     enabled: true
+    #     requestsPerSecond: 100
+    #     burst: 200
+    #   circuitBreaker:
+    #     enabled: true
+    #     threshold: 5
+    #     timeout: 30s
+    #
+    # Example: Backend with JWT authentication (OIDC)
+    # - name: authenticated-backend
+    #   hosts:
+    #     - address: backend.example.com
+    #       port: 8080
+    #   authentication:
+    #     type: jwt
+    #     jwt:
+    #       enabled: true
+    #       tokenSource: oidc
+    #       oidc:
+    #         issuerUrl: https://keycloak.example.com/realms/myrealm
+    #         clientId: gateway-client
+    #         clientSecretVaultPath: secret/data/gateway/oidc
+    #   maxSessions:
+    #     enabled: true
+    #     maxConcurrent: 1000
+    #   rateLimit:
+    #     enabled: true
+    #     requestsPerSecond: 50
+    #     burst: 100
+    #   circuitBreaker:
+    #     enabled: true
+    #     threshold: 5
+    #     timeout: 30s
+    #
+    # Example: Backend with mTLS authentication
+    # - name: mtls-backend
+    #   hosts:
+    #     - address: secure-backend.example.com
+    #       port: 8443
+    #   authentication:
+    #     type: mtls
+    #     mtls:
+    #       enabled: true
+    #       certSecretName: backend-client-cert
+    #       caSecretName: backend-ca-cert
+    #   circuitBreaker:
+    #     enabled: true
+    #     threshold: 3
+    #     timeout: 60s
+    #
+    # Example: Backend with API key authentication
+    # - name: apikey-backend
+    #   hosts:
+    #     - address: api-backend.example.com
+    #       port: 8080
+    #   authentication:
+    #     type: apiKey
+    #     apiKey:
+    #       enabled: true
+    #       headerName: X-API-Key
+    #       vaultPath: secret/data/gateway/api-keys
+    #
+    # Example: Backend with Vault PKI mTLS (client certificate from Vault)
+    # - name: vault-mtls-backend
+    #   hosts:
+    #     - address: secure-backend.example.com
+    #       port: 8443
+    #   tls:
+    #     enabled: true
+    #     mode: MUTUAL
+    #     vault:
+    #       enabled: true
+    #       pkiMount: pki
+    #       role: backend-client
+    #       commonName: gateway-client.example.com
+    #       altNames:
+    #         - gateway.internal
+    #       ttl: "24h"
+
+  # gRPC routes configuration
+  grpcRoutes: []
+
+  # gRPC backends configuration
+  grpcBackends: []
+
+  # Custom gateway configuration
+  # This will be merged with the generated configuration
+  customConfig: {}
+
+# Redis configuration (Bitnami subchart)
+redis:
+  # -- Enable Redis dependency
+  enabled: false
+  # -- Redis architecture (standalone or replication)
+  architecture: standalone
+  auth:
+    # -- Enable Redis authentication
+    enabled: true
+    # -- Redis password (use existingSecret in production)
+    password: ""
+    # -- Use existing secret for Redis password
+    existingSecret: ""
+    # -- Key in existing secret containing password
+    existingSecretPasswordKey: "redis-password"
+  master:
+    persistence:
+      # -- Enable Redis persistence
+      enabled: false
+      # -- Redis persistence size
+      size: 1Gi
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+# TLS configuration for backend mTLS
+tls:
+  # -- Enable TLS certificate mounting
+  enabled: false
+  # -- Client certificate secret name (for mTLS to backends)
+  clientCertSecret: ""
+  # -- CA certificate secret name (for verifying backend certificates)
+  caCertSecret: ""
+  # -- Mount path for certificates
+  mountPath: /app/certs
+
+  # Route-level TLS certificates
+  # Each route can have its own TLS certificate for SNI-based certificate selection
+  # Certificates are mounted to /app/certs/routes/{name}/
+  routeCerts: []
+    # Example: Route-specific TLS certificates
+    # - name: tenant-a
+    #   # -- Kubernetes secret containing tls.crt and tls.key
+    #   secretName: tenant-a-tls
+    #   # -- Optional: CA certificate secret for client validation
+    #   caSecretName: tenant-a-ca
+    # - name: tenant-b
+    #   secretName: tenant-b-tls
+
+# Vault configuration
+# NOTE: The Go gateway reads Vault connection settings exclusively from
+# environment variables (VAULT_ADDR, VAULT_TOKEN, VAULT_AUTH_METHOD, etc.).
+# The values below control environment variable injection in the deployment
+# and the vault section in the generated config (for reference only).
+vault:
+  # -- Enable Vault integration
+  enabled: false
+  # -- Vault server address
+  address: ""
+  # -- Vault authentication method (token, kubernetes, approle)
+  authMethod: kubernetes
+  # -- Vault role for Kubernetes auth
+  role: ""
+  # -- Vault Kubernetes auth mount path
+  kubernetesMountPath: "kubernetes"
+  # -- Vault token (use only for development)
+  # WARNING: Storing Vault tokens in values.yaml is insecure and should only be
+  # used for local development/testing. For production deployments, use one of:
+  #   1. Kubernetes auth method (recommended): Set authMethod: kubernetes
+  #   2. Existing secret: Create a secret with the token and reference it via extraEnvFrom
+  #   3. AppRole auth: Set authMethod: approle with role_id/secret_id from secrets
+  # NEVER commit actual tokens to version control!
+  token: ""
+  # -- Secret path in Vault
+  secretPath: ""
+  # -- TLS configuration for Vault connection
+  tls:
+    # -- Enable TLS for Vault connection
+    enabled: false
+    # -- CA certificate secret name
+    caSecretName: ""
+    # -- Skip TLS verification (not recommended for production)
+    skipVerify: false
+  # -- Vault PKI configuration for listener TLS certificates
+  # When enabled, the gateway obtains its TLS certificate from Vault PKI
+  # instead of using static certificate files.
+  # Vault PKI is the DEFAULT and RECOMMENDED method for TLS certificates in production.
+  pki:
+    # -- Enable Vault PKI for listener TLS (default for gRPC TLS)
+    enabled: false
+    # -- Vault PKI secrets engine mount path
+    pkiMount: "pki"
+    # -- Vault PKI role name
+    role: ""
+    # -- Common name for certificate requests
+    commonName: ""
+    # -- Subject alternative names (DNS)
+    altNames: []
+    # -- Certificate TTL (e.g., "24h", "720h")
+    ttl: "24h"
+    # -- Duration before expiry to renew (e.g., "1h", "30m")
+    renewBefore: "1h"
+    # -- gRPC listener PKI overrides
+    # INHERITANCE BEHAVIOR:
+    #   - When vault.pki.enabled is true and grpc.enabled is not explicitly set to false,
+    #     the gRPC listener automatically inherits TLS from vault.pki settings.
+    #   - Individual grpc.* fields (pkiMount, role, commonName, etc.) override the parent
+    #     vault.pki.* values only when explicitly set (non-empty).
+    #   - To disable gRPC TLS while keeping HTTP TLS, explicitly set grpc.enabled: false.
+    #   - Empty string values ("") mean "inherit from parent vault.pki.*"
+    grpc:
+      # -- Enable Vault PKI for gRPC listener TLS.
+      # When not explicitly set (or set to true), inherits from vault.pki.enabled.
+      # Set to false to disable gRPC TLS even when vault.pki.enabled is true.
+      # enabled: true  # Uncomment to explicitly enable/disable
+      # -- Vault PKI secrets engine mount path for gRPC (inherits from vault.pki.pkiMount if empty)
+      pkiMount: ""
+      # -- Vault PKI role name for gRPC (inherits from vault.pki.role if empty)
+      role: ""
+      # -- Common name for gRPC certificate requests (inherits from vault.pki.commonName if empty)
+      commonName: ""
+      # -- Subject alternative names for gRPC (inherits from vault.pki.altNames if empty)
+      altNames: []
+      # -- Certificate TTL for gRPC (inherits from vault.pki.ttl if empty)
+      ttl: ""
+
+# Keycloak configuration
+keycloak:
+  # -- Enable Keycloak integration
+  enabled: false
+  # -- Keycloak server URL
+  url: ""
+  # -- Keycloak realm
+  realm: ""
+  # -- Keycloak client ID
+  clientId: ""
+  # -- Keycloak client secret (use existingSecret in production)
+  clientSecret: ""
+  # -- Use existing secret for Keycloak credentials
+  existingSecret: ""
+  # -- Key in existing secret containing client secret
+  existingSecretKey: "client-secret"
+
+# ServiceMonitor for Prometheus Operator
+serviceMonitor:
+  # -- Enable ServiceMonitor for Prometheus Operator
+  enabled: false
+  # -- Namespace for ServiceMonitor (defaults to release namespace)
+  namespace: ""
+  # -- Labels for ServiceMonitor
+  labels: {}
+  # -- Scrape interval
+  interval: 30s
+  # -- Scrape timeout
+  scrapeTimeout: 10s
+  # -- Metric relabeling configs
+  metricRelabelings: []
+  # -- Relabeling configs
+  relabelings: []
+
+# Network policies
+networkPolicy:
+  # -- Enable network policies
+  enabled: false
+  # -- Ingress rules
+  ingress: []
+  # -- Egress rules
+  egress: []

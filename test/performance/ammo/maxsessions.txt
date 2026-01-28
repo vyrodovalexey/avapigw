@@ -1,0 +1,19 @@
+[Host: localhost]
+[User-Agent: YandexTank/MaxSessions]
+[Accept: application/json]
+[Connection: keep-alive]
+/health
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/limited
+/api/v1/limited
+/api/v1/limited
+/api/v1/noqueue
+/api/v1/noqueue

@@ -1,0 +1,63 @@
+# Yandex Tank Configuration: HTTPS GET Throughput Test with TLS
+# Purpose: Measure maximum throughput for HTTPS requests with TLS encryption
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000+ RPS
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8443
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 100 to 2000 RPS
+    # Sustain: 3 min at 2000 RPS (main measurement phase)
+    # Cooldown: 1 min ramp down
+    schedule: line(100, 2000, 1m) const(2000, 3m) line(2000, 100, 1m)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  
+  # TLS settings
+  ssl: true
+  # Skip certificate verification for self-signed certs in test environment
+  # In production, use proper CA certificates
+  
+  timeout: 15s  # Slightly higher timeout for TLS handshake
+
+  # Instance settings - high concurrency for throughput testing
+  instances: 2000
+  threads: 8
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-TLS]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: http-tls-throughput]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP error rate exceeds 10%
+    - http(4xx,10%,30s)
+    - http(5xx,5%,30s)
+    # Stop if response time exceeds 5 seconds for 30 seconds
+    - time(5000,50%,30s)
+    # Stop if net errors exceed 5%
+    - http(net,5%,30s)

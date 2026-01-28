@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "avapigw.configMapName" . }}
+  labels:
+    {{- include "avapigw.labels" . | nindent 4 }}
+data:
+  gateway.yaml: |
+    {{- include "avapigw.gatewayConfig" . | nindent 4 }}

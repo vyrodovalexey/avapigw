@@ -1,0 +1,197 @@
+# Gateway configuration for Max Sessions Performance Testing
+# This configuration tests the max sessions limiting feature under load
+# with various queue configurations
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-maxsessions
+  labels:
+    app: avapigw
+    environment: perftest
+    feature: maxsessions
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+  # Global max sessions configuration
+  # This limits total concurrent requests across all routes
+  maxSessions:
+    enabled: true
+    maxConcurrent: 1000
+    queueSize: 500
+    queueTimeout: 10s
+
+  routes:
+    # Health check endpoint - direct response (no backend)
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"perftest-maxsessions"}'
+        headers:
+          Content-Type: application/json
+
+    # High-concurrency endpoint - uses global max sessions
+    - name: high-concurrency-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+
+    # Low-concurrency endpoint - route-level override with stricter limits
+    - name: low-concurrency-api
+      match:
+        - uri:
+            prefix: /api/v1/limited
+          methods:
+            - GET
+            - POST
+      maxSessions:
+        enabled: true
+        maxConcurrent: 50
+        queueSize: 25
+        queueTimeout: 5s
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 30s
+
+    # No-queue endpoint - immediate rejection when at capacity
+    - name: no-queue-api
+      match:
+        - uri:
+            prefix: /api/v1/noqueue
+          methods:
+            - GET
+      maxSessions:
+        enabled: true
+        maxConcurrent: 100
+        queueSize: 0
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 10s
+
+    # Users API - single backend
+    - name: users-api
+      match:
+        - uri:
+            prefix: /api/v1/users
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 30s
+
+    # Catch-all route
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    - name: backend-service-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 2000
+        maxPendingRequests: 1000
+        connectTimeout: 5s
+
+    - name: backend-service-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 2000
+        maxPendingRequests: 1000
+        connectTimeout: 5s
+
+  # Disable rate limiting for max sessions testing
+  rateLimit:
+    enabled: false
+
+  # Disable circuit breaker for max sessions testing
+  circuitBreaker:
+    enabled: false
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - X-Perf-Test
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: warn
+      format: json

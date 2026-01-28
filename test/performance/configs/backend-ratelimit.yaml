@@ -1,0 +1,64 @@
+# Yandex Tank Configuration: Backend Rate Limit Performance Test
+# Purpose: Test backend-level rate limiting under load
+# Tests: Rate limiter accuracy, burst handling, multi-host distribution
+# Duration: 12 minutes total (multiple phases)
+#
+# Test Phases:
+# 1. Warmup (1m): Ramp from 100 to 400 RPS - below rate limit
+# 2. Below limit (2m): Sustain at 400 RPS - within 500 RPS limit
+# 3. At limit (2m): Sustain at 500 RPS - exactly at limit
+# 4. Over limit (3m): Sustain at 800 RPS - exceeds limit, expect rejections
+# 5. Burst test (2m): Spike to 1200 RPS - test burst capacity
+# 6. Recovery (1m): Ramp down to 400 RPS
+# 7. Cooldown (1m): Ramp down to 100 RPS
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    schedule: line(100, 400, 1m) const(400, 2m) const(500, 2m) const(800, 3m) const(1200, 2m) line(1200, 400, 1m) line(400, 100, 1m)
+
+  ammofile: /var/loadtest/ammo/backend-ratelimit.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings
+  instances: 1500
+  threads: 6
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/BackendRateLimit]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: backend-ratelimit]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Don't stop on 429s - they're expected when rate limited
+    # Stop if 5xx errors (excluding 429) exceed 5%
+    - http(5xx,5%,30s)
+    # Stop if network errors exceed 2%
+    - http(net,2%,30s)
+    # Stop if response time exceeds 5000ms for 40% of requests
+    - time(5000,40%,60s)

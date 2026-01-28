@@ -1,0 +1,229 @@
+# Gateway configuration for Vault PKI multi-route SNI performance testing
+# Tests SNI-based certificate selection with Vault-issued certs per route
+# Simulates production scenario with multiple domains served by one gateway
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-gateway-vault-sni
+  labels:
+    app: avapigw
+    environment: perftest
+    security: vault-sni
+spec:
+  listeners:
+    # HTTP listener for baseline
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+    # HTTPS listener with Vault-issued default cert + SNI routing
+    - name: https-sni
+      port: 8443
+      protocol: HTTPS
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        minVersion: TLS12
+        maxVersion: TLS13
+        vault:
+          enabled: true
+          pkiMount: pki
+          role: test-role
+          commonName: localhost
+          altNames:
+            - localhost
+            - "127.0.0.1"
+            - host.docker.internal
+          ttl: 2m
+
+  routes:
+    # Health check
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"perftest-vault-sni"}'
+        headers:
+          Content-Type: application/json
+
+    # API route (api.service.local)
+    - name: api-route
+      match:
+        - uri:
+            prefix: /api/v1
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+
+    # Simple GET for throughput
+    - name: simple-get
+      match:
+        - uri:
+            exact: /api/v1/simple
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 10s
+
+    # Items API
+    - name: items-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+
+    # Users API
+    - name: users-api
+      match:
+        - uri:
+            prefix: /api/v1/users
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 30s
+
+    # Backend health
+    - name: backend-health
+      match:
+        - uri:
+            exact: /backend/health
+          methods:
+            - GET
+      rewrite:
+        uri: /health
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+    # Catch-all
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    - name: backend-service-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+    - name: backend-service-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5000
+    burst: 10000
+    perClient: true
+
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+    timeout: 30s
+    halfOpenRequests: 5
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - X-Request-ID
+      - X-Perf-Test
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+      samplingRate: 0.01
+      otlpEndpoint: ""
+      serviceName: avapigw-perftest-vault-sni
+    logging:
+      level: warn
+      format: json

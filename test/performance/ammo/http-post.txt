@@ -1,0 +1,8 @@
+106 /api/v1/items
+{"name":"Test Item 1","description":"Performance test item","price":99.99,"quantity":10,"category":"test"}
+121 /api/v1/items
+{"name":"Test Item 2","description":"Another performance test item","price":149.99,"quantity":5,"category":"electronics"}
+107 /api/v1/items
+{"name":"Test Item 3","description":"Load test item","price":29.99,"quantity":100,"category":"performance"}
+115 /api/v1/items
+{"name":"Test Item 4","description":"Stress test item for gateway","price":199.99,"quantity":3,"category":"stress"}

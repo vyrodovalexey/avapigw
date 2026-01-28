@@ -1,0 +1,351 @@
+# Docker Compose for Performance Testing
+# Usage: docker-compose -f test/performance/docker-compose.yml up [service]
+#
+# Profiles:
+#   http       - HTTP tests only (Yandex Tank)
+#   grpc       - gRPC tests only (ghz)
+#   websocket  - WebSocket tests only (k6)
+#   all        - All test types
+#
+# Examples:
+#   docker-compose --profile http up yandex-tank
+#   docker-compose --profile grpc up ghz-unary
+#   docker-compose --profile websocket up k6-connection
+#   docker-compose --profile all up
+
+services:
+  # ===========================================================================
+  # HTTP Performance Tests (Yandex Tank)
+  # ===========================================================================
+  
+  yandex-tank:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-yandex-tank
+    profiles:
+      - http
+      - all
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - TANK_CONFIG=/var/loadtest/configs/http-throughput.yaml
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/http-throughput.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/http-get.txt"
+    networks:
+      - perftest-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  tank-http-post:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-http-post
+    profiles:
+      - http
+      - http-post
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/http-post.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/http-post.txt"
+    networks:
+      - perftest-network
+
+  tank-load-balancing:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-load-balancing
+    profiles:
+      - http
+      - load-balancing
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/load-balancing.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/http-get.txt"
+    networks:
+      - perftest-network
+
+  tank-rate-limiting:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-rate-limiting
+    profiles:
+      - http
+      - rate-limiting
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/rate-limiting.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/http-get.txt"
+    networks:
+      - perftest-network
+
+  tank-circuit-breaker:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-circuit-breaker
+    profiles:
+      - http
+      - circuit-breaker
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/circuit-breaker.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/http-get.txt"
+    networks:
+      - perftest-network
+
+  tank-mixed-workload:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-mixed-workload
+    profiles:
+      - http
+      - mixed-workload
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/mixed-workload.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/mixed.txt"
+    networks:
+      - perftest-network
+
+  # ===========================================================================
+  # gRPC Performance Tests (ghz)
+  # ===========================================================================
+  
+  ghz-unary:
+    image: ghcr.io/bojand/ghz:latest
+    container_name: avapigw-ghz-unary
+    profiles:
+      - grpc
+      - grpc-unary
+      - all
+    volumes:
+      - ./results:/results
+      - ./configs/grpc:/configs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      --insecure
+      --call api.v1.TestService/Echo
+      --host host.docker.internal
+      --port 9000
+      --duration 4m
+      --rps 1000
+      --concurrency 50
+      --connections 10
+      --timeout 30s
+      --metadata '{"x-perf-test":"grpc-unary"}'
+      --format json
+      --output /results/grpc-unary-results.json
+      --data '{"message":"Performance test message"}'
+    networks:
+      - perftest-network
+
+  ghz-server-streaming:
+    image: ghcr.io/bojand/ghz:latest
+    container_name: avapigw-ghz-server-streaming
+    profiles:
+      - grpc
+      - grpc-streaming
+      - all
+    volumes:
+      - ./results:/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      --insecure
+      --call api.v1.TestService/ServerStream
+      --host host.docker.internal
+      --port 9000
+      --duration 4m
+      --rps 100
+      --concurrency 20
+      --connections 5
+      --timeout 60s
+      --metadata '{"x-perf-test":"grpc-server-streaming"}'
+      --format json
+      --output /results/grpc-server-streaming-results.json
+      --data '{"count":10,"message":"Stream test"}'
+    networks:
+      - perftest-network
+
+  ghz-client-streaming:
+    image: ghcr.io/bojand/ghz:latest
+    container_name: avapigw-ghz-client-streaming
+    profiles:
+      - grpc
+      - grpc-streaming
+      - all
+    volumes:
+      - ./results:/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      --insecure
+      --call api.v1.TestService/ClientStream
+      --host host.docker.internal
+      --port 9000
+      --duration 4m
+      --rps 100
+      --concurrency 20
+      --connections 5
+      --timeout 60s
+      --metadata '{"x-perf-test":"grpc-client-streaming"}'
+      --format json
+      --output /results/grpc-client-streaming-results.json
+      --data '[{"message":"msg1"},{"message":"msg2"},{"message":"msg3"}]'
+    networks:
+      - perftest-network
+
+  ghz-bidi-streaming:
+    image: ghcr.io/bojand/ghz:latest
+    container_name: avapigw-ghz-bidi-streaming
+    profiles:
+      - grpc
+      - grpc-streaming
+      - all
+    volumes:
+      - ./results:/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      --insecure
+      --call api.v1.TestService/BidiStream
+      --host host.docker.internal
+      --port 9000
+      --duration 4m
+      --rps 50
+      --concurrency 10
+      --connections 5
+      --timeout 120s
+      --metadata '{"x-perf-test":"grpc-bidi-streaming"}'
+      --format json
+      --output /results/grpc-bidi-streaming-results.json
+      --data '[{"message":"bidi1"},{"message":"bidi2"}]'
+    networks:
+      - perftest-network
+
+  # ===========================================================================
+  # WebSocket Performance Tests (k6)
+  # ===========================================================================
+  
+  k6-connection:
+    image: grafana/k6:latest
+    container_name: avapigw-k6-connection
+    profiles:
+      - websocket
+      - websocket-connection
+      - all
+    volumes:
+      - ./configs/websocket:/scripts:ro
+      - ./results:/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - WS_URL=ws://host.docker.internal:8080/ws
+    command: run /scripts/websocket-connection.js
+    networks:
+      - perftest-network
+
+  k6-message:
+    image: grafana/k6:latest
+    container_name: avapigw-k6-message
+    profiles:
+      - websocket
+      - websocket-message
+      - all
+    volumes:
+      - ./configs/websocket:/scripts:ro
+      - ./results:/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - WS_URL=ws://host.docker.internal:8080/ws
+    command: run /scripts/websocket-message.js
+    networks:
+      - perftest-network
+
+  k6-concurrent:
+    image: grafana/k6:latest
+    container_name: avapigw-k6-concurrent
+    profiles:
+      - websocket
+      - websocket-concurrent
+      - all
+    volumes:
+      - ./configs/websocket:/scripts:ro
+      - ./results:/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - WS_URL=ws://host.docker.internal:8080/ws
+    command: run /scripts/websocket-concurrent.js
+    networks:
+      - perftest-network
+
+  # ===========================================================================
+  # Utility Services
+  # ===========================================================================
+  
+  # Chart generation service
+  chart-generator:
+    image: python:3.11-slim
+    container_name: avapigw-chart-generator
+    profiles:
+      - charts
+      - all
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./results:/results
+    working_dir: /results
+    command: >
+      bash -c "
+        pip install matplotlib numpy --quiet &&
+        python /scripts/generate-charts.py /results --all --format=png
+      "
+    networks:
+      - perftest-network
+
+networks:
+  perftest-network:
+    driver: bridge

@@ -1,0 +1,59 @@
+# Yandex Tank Configuration: Mixed HTTP Workload Test
+# Purpose: Simulate realistic mixed traffic patterns
+# Target: Multiple endpoints with varying request types
+# Duration: 15 minutes total (realistic production-like test)
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 2 min ramp from 1 to 300 RPS
+    # Sustain: 5 min at 300 RPS
+    # Step up: 3 min stepping from 300 to 600 RPS (100 RPS per minute)
+    # Peak: 3 min at 600 RPS
+    # Cooldown: 2 min ramp down
+    schedule: line(1, 300, 2m) const(300, 5m) step(300, 600, 100, 1m) const(600, 3m) line(600, 1, 2m)
+
+  ammofile: /var/loadtest/ammo/mixed.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 15s
+
+  # Instance settings
+  instances: 800
+  threads: 4
+
+  # HTTP settings
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[X-Perf-Test: mixed-workload]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP errors exceed 5%
+    - http(5xx,5%,10)
+    # Stop if response time exceeds 1000ms for 30% of requests
+    - time(1000,30%,30)
+    # Stop if network errors exceed 1%
+    - http(net,1%,10s)
+    # Stop if 4xx errors exceed 10%
+    - http(4xx,10%,10)

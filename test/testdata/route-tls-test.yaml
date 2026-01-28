@@ -1,0 +1,202 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: route-tls-test-gateway
+  labels:
+    app: avapigw
+    environment: test
+    feature: route-tls
+spec:
+  listeners:
+    - name: https
+      port: 18443
+      protocol: HTTPS
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        minVersion: TLS12
+        maxVersion: TLS13
+        serverCertificate:
+          certFile: /path/to/listener-cert.pem
+          keyFile: /path/to/listener-key.pem
+
+  routes:
+    # Route with route-level TLS certificate override
+    - name: tenant-alpha-api
+      match:
+        - uri:
+            prefix: /api/alpha
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      tls:
+        certFile: /path/to/alpha-cert.pem
+        keyFile: /path/to/alpha-key.pem
+        sniHosts:
+          - alpha.example.com
+        minVersion: TLS12
+        maxVersion: TLS13
+
+    # Route with wildcard SNI
+    - name: wildcard-api
+      match:
+        - uri:
+            prefix: /api/v1
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+      tls:
+        certFile: /path/to/wildcard-cert.pem
+        keyFile: /path/to/wildcard-key.pem
+        sniHosts:
+          - "*.example.com"
+
+    # Route with mTLS (client certificate validation)
+    - name: secure-api
+      match:
+        - uri:
+            prefix: /api/secure
+          methods:
+            - GET
+            - POST
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+      tls:
+        certFile: /path/to/secure-cert.pem
+        keyFile: /path/to/secure-key.pem
+        sniHosts:
+          - secure.example.com
+        clientValidation:
+          enabled: true
+          caFile: /path/to/client-ca.pem
+          requireClientCert: true
+          allowedCNs:
+            - trusted-client-1
+            - trusted-client-2
+
+    # Route with multiple SNI hosts
+    - name: multi-host-api
+      match:
+        - uri:
+            prefix: /api/multi
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8804
+      tls:
+        certFile: /path/to/multi-cert.pem
+        keyFile: /path/to/multi-key.pem
+        sniHosts:
+          - api.example.com
+          - www.example.com
+          - admin.example.com
+
+    # Route with custom cipher suites
+    - name: custom-cipher-api
+      match:
+        - uri:
+            prefix: /api/custom
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8805
+      tls:
+        certFile: /path/to/custom-cert.pem
+        keyFile: /path/to/custom-key.pem
+        sniHosts:
+          - custom.example.com
+        cipherSuites:
+          - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+          - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+
+    # Route without TLS override (uses listener certificate)
+    - name: default-api
+      match:
+        - uri:
+            prefix: /api/default
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8806
+
+    # Health check route (no TLS override)
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy"}'
+        headers:
+          Content-Type: application/json
+
+  backends:
+    - name: alpha-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+
+    - name: wildcard-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+
+    - name: secure-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8803
+          weight: 1
+
+    - name: multi-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8804
+          weight: 1
+
+    - name: custom-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8805
+          weight: 1
+
+    - name: default-backend
+      hosts:
+        - address: 127.0.0.1
+          port: 8806
+          weight: 1
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+    logging:
+      level: debug
+      format: json

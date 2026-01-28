@@ -1,0 +1,86 @@
+# Yandex Tank Configuration: Multiple Routes with Vault Certificates (SNI)
+# Purpose: Measure SNI-based certificate selection performance with Vault certs
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 1500+ RPS across multiple SNI routes
+#
+# Test Case 4: Multiple Routes with Vault Certificates
+# =====================================================
+# Measures:
+#   - SNI-based certificate selection latency
+#   - Throughput with multiple Vault-issued route certs
+#   - Compare with file-based route cert baseline
+#
+# Expected Behavior:
+#   - Each route has its own Vault-issued certificate
+#   - SNI callback selects correct cert from route TLS manager
+#   - Cert lookup is O(1) via map, no Vault API call
+#   - Performance should be comparable to file-based route certs
+#
+# Baselines & Thresholds:
+#   - p50 latency: < 5ms
+#   - p95 latency: < 20ms
+#   - p99 latency: < 50ms
+#   - Error rate: < 0.1%
+#   - Throughput: > 1500 RPS
+#
+# Prerequisites:
+#   - Vault running at localhost:8200 with PKI engine configured
+#   - Gateway running with gateway-perftest-vault-sni.yaml config
+#   - Backend services on ports 8801, 8802
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8443
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 100 to 1500 RPS
+    # Sustain: 3 min at 1500 RPS (main measurement phase)
+    # Cooldown: 1 min ramp down
+    schedule: line(100, 1500, 1m) const(1500, 3m) line(1500, 100, 1m)
+
+  ammofile: /var/loadtest/ammo/vault-multi-route-sni.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+
+  # TLS settings
+  ssl: true
+  timeout: 15s
+
+  # Instance settings
+  instances: 1500
+  threads: 6
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-VaultSNI]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: vault-multi-route-sni]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 4xx error rate exceeds 10%
+    - http(4xx,10%,30s)
+    # Stop if HTTP 5xx error rate exceeds 5%
+    - http(5xx,5%,30s)
+    # Stop if response time exceeds 5 seconds for 50% of requests
+    - time(5000,50%,30s)
+    # Stop if net errors exceed 5%
+    - http(net,5%,30s)

@@ -1,290 +1,362 @@
-// Package apikey provides API key validation for the API Gateway.
 package apikey
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
-// MemoryStore is an in-memory implementation of the Store interface.
+// Store is the interface for API key storage.
+type Store interface {
+	// Get retrieves an API key by its value.
+	Get(ctx context.Context, key string) (*StaticKey, error)
+
+	// GetByID retrieves an API key by its ID.
+	GetByID(ctx context.Context, id string) (*StaticKey, error)
+
+	// List lists all API keys.
+	List(ctx context.Context) ([]*StaticKey, error)
+
+	// Close closes the store.
+	Close() error
+}
+
+// NewStore creates a new API key store based on configuration.
+func NewStore(config *Config, logger observability.Logger) (Store, error) {
+	if config == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+
+	storeType := "memory"
+	if config.Store != nil && config.Store.Type != "" {
+		storeType = config.Store.Type
+	}
+
+	switch storeType {
+	case "memory":
+		return NewMemoryStore(config, logger)
+	case "vault":
+		return nil, fmt.Errorf("vault store requires vault client - use NewVaultStore")
+	case "file":
+		return nil, fmt.Errorf("file store not yet implemented")
+	default:
+		return nil, fmt.Errorf("unknown store type: %s", storeType)
+	}
+}
+
+// MemoryStore implements Store using in-memory storage.
 type MemoryStore struct {
-	keys map[string]*APIKey
-	mu   sync.RWMutex
+	logger observability.Logger
+	mu     sync.RWMutex
+	keys   map[string]*StaticKey // key value -> key info
+	byID   map[string]*StaticKey // key ID -> key info
 }
 
 // NewMemoryStore creates a new in-memory API key store.
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
-		keys: make(map[string]*APIKey),
+func NewMemoryStore(config *Config, logger observability.Logger) (*MemoryStore, error) {
+	store := &MemoryStore{
+		logger: logger,
+		keys:   make(map[string]*StaticKey),
+		byID:   make(map[string]*StaticKey),
 	}
+
+	// Load static keys from configuration
+	if config.Store != nil {
+		for _, key := range config.Store.Keys {
+			keyCopy := key
+			store.keys[key.Key] = &keyCopy
+			store.byID[key.ID] = &keyCopy
+		}
+	}
+
+	logger.Info("memory API key store initialized",
+		observability.Int("key_count", len(store.keys)),
+	)
+
+	return store, nil
 }
 
-// Get retrieves an API key by its hash.
-func (s *MemoryStore) Get(ctx context.Context, keyHash string) (*APIKey, error) {
+// Get retrieves an API key by its value.
+func (s *MemoryStore) Get(_ context.Context, key string) (*StaticKey, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	key, ok := s.keys[keyHash]
+	storedKey, ok := s.keys[key]
 	if !ok {
-		return nil, ErrKeyNotFound
+		return nil, ErrAPIKeyNotFound
 	}
 
-	return key, nil
+	return storedKey, nil
 }
 
-// List returns all API keys.
-func (s *MemoryStore) List(ctx context.Context) ([]*APIKey, error) {
+// GetByID retrieves an API key by its ID.
+func (s *MemoryStore) GetByID(_ context.Context, id string) (*StaticKey, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	keys := make([]*APIKey, 0, len(s.keys))
-	for _, key := range s.keys {
+	storedKey, ok := s.byID[id]
+	if !ok {
+		return nil, ErrAPIKeyNotFound
+	}
+
+	return storedKey, nil
+}
+
+// List lists all API keys.
+func (s *MemoryStore) List(_ context.Context) ([]*StaticKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	keys := make([]*StaticKey, 0, len(s.byID))
+	for _, key := range s.byID {
 		keys = append(keys, key)
 	}
 
 	return keys, nil
 }
 
-// Create creates a new API key.
-func (s *MemoryStore) Create(ctx context.Context, key *APIKey) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, exists := s.keys[key.KeyHash]; exists {
-		return ErrKeyInvalid
-	}
-
-	s.keys[key.KeyHash] = key
+// Close closes the store.
+func (s *MemoryStore) Close() error {
 	return nil
 }
 
-// Delete deletes an API key by its hash.
-func (s *MemoryStore) Delete(ctx context.Context, keyHash string) error {
+// Add adds an API key to the store.
+func (s *MemoryStore) Add(key *StaticKey) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.keys[keyHash]; !exists {
-		return ErrKeyNotFound
-	}
-
-	delete(s.keys, keyHash)
-	return nil
+	s.keys[key.Key] = key
+	s.byID[key.ID] = key
 }
 
-// Validate validates an API key hash exists and is valid.
-func (s *MemoryStore) Validate(ctx context.Context, keyHash string) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	key, ok := s.keys[keyHash]
-	if !ok {
-		return false, nil
-	}
-
-	return key.IsValid(), nil
-}
-
-// Update updates an existing API key.
-func (s *MemoryStore) Update(ctx context.Context, key *APIKey) error {
+// Remove removes an API key from the store.
+func (s *MemoryStore) Remove(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.keys[key.KeyHash]; !exists {
-		return ErrKeyNotFound
-	}
-
-	s.keys[key.KeyHash] = key
-	return nil
-}
-
-// Count returns the number of API keys in the store.
-func (s *MemoryStore) Count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.keys)
-}
-
-// Clear removes all API keys from the store.
-func (s *MemoryStore) Clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.keys = make(map[string]*APIKey)
-}
-
-// LoadFromMap loads API keys from a map of key hash to API key.
-func (s *MemoryStore) LoadFromMap(keys map[string]*APIKey) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for hash, key := range keys {
-		s.keys[hash] = key
+	if key, ok := s.byID[id]; ok {
+		delete(s.keys, key.Key)
+		delete(s.byID, id)
 	}
 }
 
-// LoadFromSecretData loads API keys from Kubernetes secret data.
-// The secret data is expected to be a map of key names to key values.
-// Each key value is hashed and stored.
-func (s *MemoryStore) LoadFromSecretData(data map[string][]byte, hasher Hasher) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// VaultStore implements Store using Vault KV.
+type VaultStore struct {
+	client vault.Client
+	config *Config
+	logger observability.Logger
+	cache  *keyCache
+}
 
-	if hasher == nil {
-		hasher = &SHA256Hasher{}
+// keyCache provides caching for Vault-stored keys.
+type keyCache struct {
+	mu      sync.RWMutex
+	entries map[string]*cacheEntry
+	ttl     time.Duration
+}
+
+type cacheEntry struct {
+	key       *StaticKey
+	expiresAt time.Time
+}
+
+// NewVaultStore creates a new Vault-based API key store.
+func NewVaultStore(client vault.Client, config *Config, logger observability.Logger) (*VaultStore, error) {
+	if client == nil || !client.IsEnabled() {
+		return nil, fmt.Errorf("vault client is required and must be enabled")
 	}
 
-	for name, value := range data {
-		keyValue := string(value)
-		keyHash := hasher.Hash(keyValue)
+	if config.Vault == nil || !config.Vault.Enabled {
+		return nil, fmt.Errorf("vault configuration is required")
+	}
 
-		s.keys[keyHash] = &APIKey{
-			ID:        name,
-			Name:      name,
-			KeyHash:   keyHash,
-			Enabled:   true,
-			CreatedAt: time.Now(),
+	store := &VaultStore{
+		client: client,
+		config: config,
+		logger: logger,
+	}
+
+	// Initialize cache if enabled
+	if config.Cache != nil && config.Cache.Enabled {
+		store.cache = &keyCache{
+			entries: make(map[string]*cacheEntry),
+			ttl:     config.Cache.TTL,
 		}
 	}
+
+	logger.Info("vault API key store initialized",
+		observability.String("kv_mount", config.Vault.KVMount),
+		observability.String("path", config.Vault.Path),
+	)
+
+	return store, nil
 }
 
-// SecretStore wraps a MemoryStore and provides methods for loading from secrets.
-type SecretStore struct {
-	*MemoryStore
-	hasher Hasher
-}
-
-// NewSecretStore creates a new secret-backed API key store.
-func NewSecretStore(hasher Hasher) *SecretStore {
-	if hasher == nil {
-		hasher = &SHA256Hasher{}
+// Get retrieves an API key by its value.
+func (s *VaultStore) Get(ctx context.Context, key string) (*StaticKey, error) {
+	// Check cache first
+	if s.cache != nil {
+		if cached := s.cache.get(key); cached != nil {
+			return cached, nil
+		}
 	}
 
-	return &SecretStore{
-		MemoryStore: NewMemoryStore(),
-		hasher:      hasher,
-	}
-}
-
-// LoadSecret loads API keys from secret data.
-func (s *SecretStore) LoadSecret(data map[string][]byte) {
-	s.LoadFromSecretData(data, s.hasher)
-}
-
-// AddKey adds a new API key to the store.
-func (s *SecretStore) AddKey(name, key string, scopes []string, expiresAt *time.Time) error {
-	keyHash := s.hasher.Hash(key)
-
-	apiKey := &APIKey{
-		ID:        name,
-		Name:      name,
-		KeyHash:   keyHash,
-		Scopes:    scopes,
-		Enabled:   true,
-		CreatedAt: time.Now(),
-		ExpiresAt: expiresAt,
+	// Look up in Vault
+	// We need to hash the key to look it up
+	keyHash, err := HashKey(key, s.config.GetEffectiveHashAlgorithm())
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash key: %w", err)
 	}
 
-	return s.Create(context.Background(), apiKey)
-}
+	path := s.config.Vault.Path
+	if path != "" {
+		path += "/"
+	}
+	path += keyHash
 
-// RemoveKey removes an API key from the store by its raw value.
-func (s *SecretStore) RemoveKey(key string) error {
-	keyHash := s.hasher.Hash(key)
-	return s.Delete(context.Background(), keyHash)
-}
-
-// ValidateKey validates a raw API key.
-func (s *SecretStore) ValidateKey(ctx context.Context, key string) (*APIKey, error) {
-	keyHash := s.hasher.Hash(key)
-	return s.Get(ctx, keyHash)
-}
-
-// StaticStore is a simple store that validates against a static list of keys.
-type StaticStore struct {
-	keys   map[string]bool
-	hasher Hasher
-}
-
-// NewStaticStore creates a new static API key store.
-func NewStaticStore(keys []string, hasher Hasher) *StaticStore {
-	if hasher == nil {
-		hasher = &SHA256Hasher{}
+	data, err := s.client.KV().Read(ctx, s.config.Vault.KVMount, path)
+	if err != nil {
+		return nil, ErrAPIKeyNotFound
 	}
 
-	store := &StaticStore{
-		keys:   make(map[string]bool),
-		hasher: hasher,
+	storedKey, err := parseKeyFromVault(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse key from Vault: %w", err)
 	}
 
-	for _, key := range keys {
-		hash := hasher.Hash(key)
-		store.keys[hash] = true
+	// Cache the result
+	if s.cache != nil {
+		s.cache.set(key, storedKey)
 	}
 
-	return store
+	return storedKey, nil
 }
 
-// Get retrieves an API key by its hash.
-func (s *StaticStore) Get(ctx context.Context, keyHash string) (*APIKey, error) {
-	if !s.keys[keyHash] {
-		return nil, ErrKeyNotFound
+// GetByID retrieves an API key by its ID.
+func (s *VaultStore) GetByID(ctx context.Context, id string) (*StaticKey, error) {
+	path := s.config.Vault.Path
+	if path != "" {
+		path += "/"
+	}
+	path += "by-id/" + id
+
+	data, err := s.client.KV().Read(ctx, s.config.Vault.KVMount, path)
+	if err != nil {
+		return nil, ErrAPIKeyNotFound
 	}
 
-	return &APIKey{
-		ID:        keyHash,
-		Name:      "static-key",
-		KeyHash:   keyHash,
-		Enabled:   true,
-		CreatedAt: time.Now(),
-	}, nil
+	return parseKeyFromVault(data)
 }
 
-// List returns all API keys.
-func (s *StaticStore) List(ctx context.Context) ([]*APIKey, error) {
-	keys := make([]*APIKey, 0, len(s.keys))
-	for hash := range s.keys {
-		keys = append(keys, &APIKey{
-			ID:        hash,
-			Name:      "static-key",
-			KeyHash:   hash,
-			Enabled:   true,
-			CreatedAt: time.Now(),
-		})
+// List lists all API keys.
+func (s *VaultStore) List(ctx context.Context) ([]*StaticKey, error) {
+	path := s.config.Vault.Path
+	if path != "" {
+		path += "/"
 	}
+	path += "by-id"
+
+	ids, err := s.client.KV().List(ctx, s.config.Vault.KVMount, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list keys: %w", err)
+	}
+
+	keys := make([]*StaticKey, 0, len(ids))
+	for _, id := range ids {
+		key, err := s.GetByID(ctx, id)
+		if err != nil {
+			s.logger.Warn("failed to get key by ID",
+				observability.String("id", id),
+				observability.Error(err),
+			)
+			continue
+		}
+		keys = append(keys, key)
+	}
+
 	return keys, nil
 }
 
-// Create creates a new API key.
-func (s *StaticStore) Create(ctx context.Context, key *APIKey) error {
-	s.keys[key.KeyHash] = true
+// Close closes the store.
+func (s *VaultStore) Close() error {
 	return nil
 }
 
-// Delete deletes an API key by its hash.
-func (s *StaticStore) Delete(ctx context.Context, keyHash string) error {
-	delete(s.keys, keyHash)
-	return nil
+// parseKeyFromVault parses a StaticKey from Vault data.
+func parseKeyFromVault(data map[string]interface{}) (*StaticKey, error) {
+	key := &StaticKey{
+		Enabled: true,
+	}
+
+	if id, ok := data["id"].(string); ok {
+		key.ID = id
+	}
+	if name, ok := data["name"].(string); ok {
+		key.Name = name
+	}
+	if hash, ok := data["hash"].(string); ok {
+		key.Hash = hash
+	}
+	if keyVal, ok := data["key"].(string); ok {
+		key.Key = keyVal
+	}
+	if scopes, ok := data["scopes"].([]interface{}); ok {
+		key.Scopes = make([]string, 0, len(scopes))
+		for _, s := range scopes {
+			if str, ok := s.(string); ok {
+				key.Scopes = append(key.Scopes, str)
+			}
+		}
+	}
+	if roles, ok := data["roles"].([]interface{}); ok {
+		key.Roles = make([]string, 0, len(roles))
+		for _, r := range roles {
+			if str, ok := r.(string); ok {
+				key.Roles = append(key.Roles, str)
+			}
+		}
+	}
+	if enabled, ok := data["enabled"].(bool); ok {
+		key.Enabled = enabled
+	}
+
+	return key, nil
 }
 
-// Validate validates an API key hash exists and is valid.
-func (s *StaticStore) Validate(ctx context.Context, keyHash string) (bool, error) {
-	return s.keys[keyHash], nil
+// get retrieves a key from the cache.
+func (c *keyCache) get(key string) *StaticKey {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	entry, ok := c.entries[key]
+	if !ok {
+		return nil
+	}
+
+	if time.Now().After(entry.expiresAt) {
+		return nil
+	}
+
+	return entry.key
 }
 
-// AddKey adds a raw key to the store.
-func (s *StaticStore) AddKey(key string) {
-	hash := s.hasher.Hash(key)
-	s.keys[hash] = true
+// set stores a key in the cache.
+func (c *keyCache) set(key string, storedKey *StaticKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.entries[key] = &cacheEntry{
+		key:       storedKey,
+		expiresAt: time.Now().Add(c.ttl),
+	}
 }
 
-// RemoveKey removes a raw key from the store.
-func (s *StaticStore) RemoveKey(key string) {
-	hash := s.hasher.Hash(key)
-	delete(s.keys, hash)
-}
-
-// ValidateRawKey validates a raw API key.
-func (s *StaticStore) ValidateRawKey(key string) bool {
-	hash := s.hasher.Hash(key)
-	return s.keys[hash]
-}
+// Ensure implementations satisfy the interface.
+var (
+	_ Store = (*MemoryStore)(nil)
+	_ Store = (*VaultStore)(nil)
+)

@@ -1,0 +1,67 @@
+# Yandex Tank Configuration: Backend Circuit Breaker Test
+# Purpose: Measure circuit breaker behavior and recovery under load
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: Backend with circuit breaker enabled
+# Tests: Normal operation, circuit open, half-open recovery
+#
+# Test Procedure:
+# 1. Start test - circuit breaker should be closed
+# 2. After 1.5 min, stop backend-1 (simulate failure)
+# 3. Observe circuit breaker opening (5xx errors, then fast-fail)
+# 4. After 2.5 min, restart backend-1
+# 5. Observe circuit breaker recovery (half-open -> closed)
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Moderate load to observe circuit breaker behavior
+    # Warmup: 1 min ramp from 10 to 100 RPS
+    # Sustain: 3 min at 100 RPS (time for CB to trigger and recover)
+    # Cooldown: 1 min ramp down
+    schedule: line(10, 100, 1m) const(100, 3m) line(100, 10, 1m)
+
+  ammofile: /var/loadtest/ammo/backend-cb.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 15s
+
+  # Instance settings - moderate load
+  instances: 200
+  threads: 2
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: backend-circuit-breaker]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Higher tolerance for circuit breaker test - expect some errors
+    # Stop if 5xx errors exceed 50% for 60 seconds
+    - http(5xx,50%,60s)
+    # Stop if net errors exceed 10%
+    - http(net,10%,30s)
+    # Stop if response time exceeds 10 seconds for 50% of requests
+    - time(10000,50%,60s)

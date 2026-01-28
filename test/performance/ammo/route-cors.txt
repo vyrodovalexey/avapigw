@@ -1,0 +1,11 @@
+[Host: localhost]
+[User-Agent: YandexTank/Perftest-CORS]
+[Accept: application/json]
+[Connection: keep-alive]
+[X-Perf-Test: route-cors]
+[Origin: https://example.com]
+/api/v1/cors
+/api/v1/cors
+/api/v1/custom
+/api/v1/items
+/health

@@ -1,0 +1,27 @@
+{
+  "name": "k8s-grpc-unary-throughput",
+  "description": "Unary gRPC throughput test against gateway deployed in local Kubernetes",
+
+  "call": "api.v1.TestService/Unary",
+
+  "host": "127.0.0.1",
+  "port": 0,
+  "_port_note": "Port is dynamically set by run-k8s-test.sh from K8s NodePort discovery",
+
+  "insecure": true,
+
+  "concurrency": 10,
+  "total": 500,
+  "connections": 5,
+  "timeout": "10s",
+
+  "data": {
+    "message": "K8s gRPC performance test message"
+  },
+
+  "metadata": {
+    "x-perf-test": "k8s-grpc-unary"
+  },
+
+  "format": "json"
+}

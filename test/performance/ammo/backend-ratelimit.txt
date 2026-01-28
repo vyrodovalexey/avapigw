@@ -1,0 +1,22 @@
+[Host: localhost]
+[User-Agent: YandexTank/BackendRateLimit]
+[Accept: application/json]
+[Connection: keep-alive]
+/health
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/fast
+/api/v1/fast
+/api/v1/fast
+/api/v1/fast
+/api/v1/balanced
+/api/v1/balanced
+/api/v1/balanced
+/api/v1/balanced

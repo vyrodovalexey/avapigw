@@ -3,610 +3,591 @@ package jwt
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rsa"
-	"crypto/subtle"
+	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"hash"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"go.uber.org/zap"
-
-	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
-// Hash function name constants.
-const (
-	hashSHA256 = "SHA256"
-	hashSHA384 = "SHA384"
-	hashSHA512 = "SHA512"
-)
+// Validator validates JWT tokens.
+type Validator interface {
+	// Validate validates a JWT token and returns the claims.
+	Validate(ctx context.Context, token string) (*Claims, error)
 
-// Common validation errors.
-var (
-	ErrTokenExpired       = errors.New("token has expired")
-	ErrTokenNotYetValid   = errors.New("token is not yet valid")
-	ErrInvalidIssuer      = errors.New("invalid issuer")
-	ErrInvalidAudience    = errors.New("invalid audience")
-	ErrInvalidSignature   = errors.New("invalid signature")
-	ErrInvalidAlgorithm   = errors.New("invalid algorithm")
-	ErrMissingClaim       = errors.New("missing required claim")
-	ErrInvalidClaimValue  = errors.New("invalid claim value")
-	ErrKeyNotFound        = errors.New("signing key not found")
-	ErrMalformedToken     = errors.New("malformed token")
-	ErrUnsupportedKeyType = errors.New("unsupported key type")
-)
-
-// Metrics for JWT validation.
-var (
-	jwtValidationTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "avapigw_jwt_validation_total",
-			Help: "Total number of JWT validation attempts",
-		},
-		[]string{"result"},
-	)
-
-	jwtValidationDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "avapigw_jwt_validation_duration_seconds",
-			Help:    "Duration of JWT validation in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"result"},
-	)
-)
-
-// Config holds configuration for the JWT validator.
-type Config struct {
-	// Issuer is the expected issuer of the JWT.
-	Issuer string
-
-	// Audiences is the list of expected audiences.
-	Audiences []string
-
-	// JWKSURL is the URL to fetch the JWKS from.
-	JWKSURL string
-
-	// JWKSCacheTTL is the TTL for the JWKS cache.
-	JWKSCacheTTL time.Duration
-
-	// LocalJWKS is the local JWKS data (optional, used instead of JWKSURL).
-	LocalJWKS []byte
-
-	// Algorithms is the list of allowed algorithms.
-	Algorithms []string
-
-	// ClockSkew is the allowed clock skew for token validation.
-	ClockSkew time.Duration
-
-	// RequiredClaims is a map of claim names to allowed values.
-	RequiredClaims map[string][]string
-
-	// SkipExpiryCheck skips the expiry check (for testing only).
-	SkipExpiryCheck bool
+	// ValidateWithOptions validates a JWT token with custom options.
+	ValidateWithOptions(ctx context.Context, token string, opts ValidationOptions) (*Claims, error)
 }
 
-// DefaultConfig returns a Config with default values.
-func DefaultConfig() *Config {
-	return &Config{
-		JWKSCacheTTL: time.Hour,
-		Algorithms:   []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"},
-		ClockSkew:    time.Minute,
+// ValidationOptions contains options for token validation.
+type ValidationOptions struct {
+	// SkipExpirationCheck skips expiration validation.
+	SkipExpirationCheck bool
+
+	// SkipIssuerCheck skips issuer validation.
+	SkipIssuerCheck bool
+
+	// SkipAudienceCheck skips audience validation.
+	SkipAudienceCheck bool
+
+	// RequiredClaims is a list of claims that must be present.
+	RequiredClaims []string
+
+	// ClockSkew is the allowed clock skew.
+	ClockSkew time.Duration
+}
+
+// validator implements the Validator interface.
+type validator struct {
+	config  *Config
+	keySet  KeySet
+	logger  observability.Logger
+	metrics *Metrics
+}
+
+// ValidatorOption is a functional option for the validator.
+type ValidatorOption func(*validator)
+
+// WithValidatorLogger sets the logger for the validator.
+func WithValidatorLogger(logger observability.Logger) ValidatorOption {
+	return func(v *validator) {
+		v.logger = logger
 	}
 }
 
-// Validator validates JWT tokens.
-type Validator struct {
-	issuer         string
-	audiences      []string
-	jwksURL        string
-	jwksCache      *JWKSCache
-	localJWKS      *LocalJWKS
-	algorithms     map[string]bool
-	clockSkew      time.Duration
-	requiredClaims map[string][]string
-	skipExpiry     bool
-	logger         *zap.Logger
-	mu             sync.RWMutex
+// WithValidatorMetrics sets the metrics for the validator.
+func WithValidatorMetrics(metrics *Metrics) ValidatorOption {
+	return func(v *validator) {
+		v.metrics = metrics
+	}
+}
+
+// WithKeySet sets the key set for the validator.
+func WithKeySet(keySet KeySet) ValidatorOption {
+	return func(v *validator) {
+		v.keySet = keySet
+	}
 }
 
 // NewValidator creates a new JWT validator.
-func NewValidator(config *Config, logger *zap.Logger) (*Validator, error) {
+func NewValidator(config *Config, opts ...ValidatorOption) (Validator, error) {
 	if config == nil {
-		config = DefaultConfig()
+		return nil, fmt.Errorf("config is required")
 	}
 
-	if logger == nil {
-		logger = zap.NewNop()
+	v := &validator{
+		config: config,
+		logger: observability.NopLogger(),
 	}
 
-	v := &Validator{
-		issuer:         config.Issuer,
-		audiences:      config.Audiences,
-		jwksURL:        config.JWKSURL,
-		algorithms:     make(map[string]bool),
-		clockSkew:      config.ClockSkew,
-		requiredClaims: config.RequiredClaims,
-		skipExpiry:     config.SkipExpiryCheck,
-		logger:         logger,
+	for _, opt := range opts {
+		opt(v)
 	}
 
-	// Set allowed algorithms
-	if len(config.Algorithms) == 0 {
-		config.Algorithms = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512"}
-	}
-	for _, alg := range config.Algorithms {
-		v.algorithms[alg] = true
-	}
-
-	// Initialize JWKS cache or local JWKS
-	if config.JWKSURL != "" {
-		v.jwksCache = NewJWKSCache(config.JWKSURL, config.JWKSCacheTTL, logger)
-	}
-
-	if len(config.LocalJWKS) > 0 {
-		localJWKS, err := NewLocalJWKS(config.LocalJWKS)
+	// Initialize key set if not provided
+	if v.keySet == nil {
+		keySet, err := createKeySet(config, v.logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse local JWKS: %w", err)
+			return nil, fmt.Errorf("failed to create key set: %w", err)
 		}
-		v.localJWKS = localJWKS
+		v.keySet = keySet
+	}
+
+	// Initialize metrics if not provided
+	if v.metrics == nil {
+		v.metrics = NewMetrics("gateway")
 	}
 
 	return v, nil
 }
 
-// Validate validates a JWT token and returns the claims.
-func (v *Validator) Validate(ctx context.Context, tokenString string) (*Claims, error) {
-	return v.ValidateWithClaims(ctx, tokenString, nil)
+// createKeySet creates a key set based on configuration.
+func createKeySet(config *Config, logger observability.Logger) (KeySet, error) {
+	var keySets []KeySet
+
+	// Add JWKS key set
+	if config.JWKSUrl != "" {
+		jwksKeySet, err := NewJWKSKeySet(
+			config.JWKSUrl,
+			WithCacheTTL(config.GetEffectiveJWKSCacheTTL()),
+			WithJWKSLogger(logger),
+		)
+		if err != nil {
+			return nil, err
+		}
+		keySets = append(keySets, jwksKeySet)
+	}
+
+	// Add static key set
+	if len(config.StaticKeys) > 0 {
+		staticKeySet, err := NewStaticKeySet(config.StaticKeys, logger)
+		if err != nil {
+			return nil, err
+		}
+		keySets = append(keySets, staticKeySet)
+	}
+
+	if len(keySets) == 0 {
+		return nil, fmt.Errorf("no key source configured")
+	}
+
+	if len(keySets) == 1 {
+		return keySets[0], nil
+	}
+
+	return NewCompositeKeySet(keySets, logger), nil
 }
 
-// ValidateWithClaims validates a JWT token with additional required claims.
-func (v *Validator) ValidateWithClaims(
-	ctx context.Context,
-	tokenString string,
-	requiredClaims map[string][]string,
-) (*Claims, error) {
+// Validate validates a JWT token and returns the claims.
+func (v *validator) Validate(ctx context.Context, token string) (*Claims, error) {
+	return v.ValidateWithOptions(ctx, token, ValidationOptions{
+		ClockSkew: v.config.GetEffectiveClockSkew(),
+	})
+}
+
+// ValidateWithOptions validates a JWT token with custom options.
+func (v *validator) ValidateWithOptions(ctx context.Context, token string, opts ValidationOptions) (*Claims, error) {
 	start := time.Now()
-	result := auth.MetricResultSuccess
 
-	defer func() {
-		duration := time.Since(start).Seconds()
-		jwtValidationTotal.WithLabelValues(result).Inc()
-		jwtValidationDuration.WithLabelValues(result).Observe(duration)
-	}()
+	if token == "" {
+		v.metrics.RecordValidation("error", "empty_token", time.Since(start))
+		return nil, ErrEmptyToken
+	}
 
-	// Parse and validate token structure
-	header, payload, signature, result, err := v.parseAndValidateToken(tokenString)
+	// Parse the token
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		v.metrics.RecordValidation("error", "malformed", time.Since(start))
+		return nil, ErrTokenMalformed
+	}
+
+	// Decode header
+	header, err := v.decodeHeader(parts[0])
 	if err != nil {
+		v.metrics.RecordValidation("error", "invalid_header", time.Since(start))
+		return nil, NewValidationError("failed to decode header", err)
+	}
+
+	// Validate algorithm
+	if err := v.validateAlgorithm(header.Algorithm); err != nil {
+		v.metrics.RecordValidation("error", "invalid_algorithm", time.Since(start))
 		return nil, err
+	}
+
+	// Decode payload
+	claims, err := v.decodePayload(parts[1])
+	if err != nil {
+		v.metrics.RecordValidation("error", "invalid_payload", time.Since(start))
+		return nil, NewValidationError("failed to decode payload", err)
 	}
 
 	// Verify signature
-	result, err = v.verifyTokenSignature(tokenString, header, signature)
-	if err != nil {
+	if err := v.verifySignature(ctx, header, parts[0]+"."+parts[1], parts[2]); err != nil {
+		v.metrics.RecordValidation("error", "invalid_signature", time.Since(start))
 		return nil, err
 	}
 
-	// Parse and validate claims
-	claims, result, err := v.parseAndValidateClaims(payload, requiredClaims)
-	if err != nil {
+	// Validate claims
+	if err := v.validateClaims(claims, opts); err != nil {
+		v.metrics.RecordValidation("error", "invalid_claims", time.Since(start))
 		return nil, err
 	}
 
-	v.logger.Debug("JWT validated successfully",
-		zap.String("subject", claims.Subject),
-		zap.String("issuer", claims.Issuer),
+	v.metrics.RecordValidation("success", header.Algorithm, time.Since(start))
+	v.logger.Debug("JWT validated",
+		observability.String("subject", claims.Subject),
+		observability.String("issuer", claims.Issuer),
 	)
 
 	return claims, nil
 }
 
-// parseAndValidateToken parses the token and validates the algorithm.
-func (v *Validator) parseAndValidateToken(
-	tokenString string,
-) (header map[string]interface{}, payload map[string]interface{}, signature []byte, metricResult string, err error) {
-	header, payload, signature, err = v.parseToken(tokenString)
-	if err != nil {
-		return nil, nil, nil, "parse_error", err
-	}
-
-	alg, ok := header["alg"].(string)
-	if !ok {
-		return nil, nil, nil, "invalid_algorithm", ErrInvalidAlgorithm
-	}
-
-	if !v.algorithms[alg] {
-		return nil, nil, nil, "unsupported_algorithm", fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
-	}
-
-	return header, payload, signature, auth.MetricResultSuccess, nil
+// tokenHeader represents the JWT header.
+type tokenHeader struct {
+	Algorithm string `json:"alg"`
+	Type      string `json:"typ"`
+	KeyID     string `json:"kid"`
 }
 
-// verifyTokenSignature verifies the token signature using the appropriate key.
-func (v *Validator) verifyTokenSignature(
-	tokenString string,
-	header map[string]interface{},
-	signature []byte,
-) (string, error) {
-	kid, _ := header["kid"].(string)
-	alg, _ := header["alg"].(string)
-
-	key, err := v.getSigningKey(kid)
+// decodeHeader decodes the JWT header.
+func (v *validator) decodeHeader(encoded string) (*tokenHeader, error) {
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return "key_not_found", err
+		return nil, fmt.Errorf("failed to decode header: %w", err)
 	}
 
-	if err := v.verifySignature(tokenString, signature, key, alg); err != nil {
-		return "invalid_signature", err
+	var header tokenHeader
+	if err := json.Unmarshal(data, &header); err != nil {
+		return nil, fmt.Errorf("failed to parse header: %w", err)
 	}
 
-	return auth.MetricResultSuccess, nil
+	return &header, nil
 }
 
-// parseAndValidateClaims parses claims and validates them against requirements.
-func (v *Validator) parseAndValidateClaims(
-	payload map[string]interface{},
-	requiredClaims map[string][]string,
-) (*Claims, string, error) {
-	claims, err := ParseClaims(payload)
+// decodePayload decodes the JWT payload.
+func (v *validator) decodePayload(encoded string) (*Claims, error) {
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, "invalid_claims", fmt.Errorf("failed to parse claims: %w", err)
+		return nil, fmt.Errorf("failed to decode payload: %w", err)
 	}
 
-	if err := v.validateClaims(claims); err != nil {
-		return nil, "invalid_claims", err
+	var claimsMap map[string]interface{}
+	if err := json.Unmarshal(data, &claimsMap); err != nil {
+		return nil, fmt.Errorf("failed to parse payload: %w", err)
 	}
 
-	mergedClaims := v.mergeRequiredClaims(requiredClaims)
-	if err := v.validateRequiredClaims(claims, mergedClaims); err != nil {
-		return nil, "missing_claims", err
-	}
-
-	return claims, auth.MetricResultSuccess, nil
+	return ParseClaims(claimsMap)
 }
 
-// parseToken parses a JWT token into its components.
-// Returns header claims, payload claims, signature bytes, and any error.
-func (v *Validator) parseToken(
-	tokenString string,
-) (header map[string]interface{}, payload map[string]interface{}, signature []byte, err error) {
-	parts := strings.Split(tokenString, ".")
-	if len(parts) != 3 {
-		return nil, nil, nil, ErrMalformedToken
+// validateAlgorithm validates the signing algorithm.
+func (v *validator) validateAlgorithm(alg string) error {
+	if len(v.config.Algorithms) == 0 {
+		return nil
 	}
 
-	// Decode header
-	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: invalid header encoding", ErrMalformedToken)
-	}
-
-	if err = json.Unmarshal(headerBytes, &header); err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: invalid header JSON", ErrMalformedToken)
-	}
-
-	// Decode payload
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: invalid payload encoding", ErrMalformedToken)
-	}
-
-	if err = json.Unmarshal(payloadBytes, &payload); err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: invalid payload JSON", ErrMalformedToken)
-	}
-
-	// Decode signature
-	signature, err = base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: invalid signature encoding", ErrMalformedToken)
-	}
-
-	return header, payload, signature, nil
-}
-
-// getSigningKey retrieves the signing key for the given key ID.
-func (v *Validator) getSigningKey(kid string) (*JSONWebKey, error) {
-	// Try local JWKS first
-	if v.localJWKS != nil {
-		key, err := v.localJWKS.GetKey(kid)
-		if err == nil {
-			return key, nil
+	for _, allowed := range v.config.Algorithms {
+		if alg == allowed {
+			return nil
 		}
 	}
 
-	// Try remote JWKS
-	if v.jwksCache != nil {
-		key, err := v.jwksCache.GetKey(kid)
-		if err == nil {
-			return key, nil
-		}
-		return nil, fmt.Errorf("%w: %w", ErrKeyNotFound, err)
-	}
-
-	return nil, ErrKeyNotFound
+	return NewValidationError(fmt.Sprintf("algorithm %s is not allowed", alg), ErrUnsupportedAlgorithm)
 }
 
 // verifySignature verifies the token signature.
-func (v *Validator) verifySignature(tokenString string, signature []byte, key *JSONWebKey, alg string) error {
-	// Get the signing input (header.payload)
-	parts := strings.Split(tokenString, ".")
-	signingInput := parts[0] + "." + parts[1]
+func (v *validator) verifySignature(ctx context.Context, header *tokenHeader, signingInput, signature string) error {
+	sigBytes, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil {
+		return NewValidationError("failed to decode signature", err)
+	}
 
+	// Get the key
+	key, err := v.keySet.GetKeyForAlgorithm(ctx, header.KeyID, header.Algorithm)
+	if err != nil {
+		return NewValidationError("failed to get signing key", err)
+	}
+
+	return v.verifyWithAlgorithm(key, header.Algorithm, signingInput, sigBytes)
+}
+
+// verifyWithAlgorithm verifies the signature using the specified algorithm.
+func (v *validator) verifyWithAlgorithm(key crypto.PublicKey, alg, signingInput string, sigBytes []byte) error {
 	switch alg {
-	case "RS256", "RS384", "RS512":
-		return v.verifyRSASignature(signingInput, signature, key, alg)
-	case "PS256", "PS384", "PS512":
-		return v.verifyRSAPSSSignature(signingInput, signature, key, alg)
+	case AlgRS256, AlgRS384, AlgRS512:
+		return v.verifyRSA(key, signingInput, sigBytes, rsaHashAlgorithm(alg))
+	case AlgPS256, AlgPS384, AlgPS512:
+		return v.verifyRSAPSS(key, signingInput, sigBytes, rsaHashAlgorithm(alg))
+	case AlgES256, AlgES384, AlgES512:
+		return v.verifyECDSA(key, signingInput, sigBytes, ecdsaHashAlgorithm(alg))
+	case AlgHS256, AlgHS384, AlgHS512:
+		return v.verifyHMAC(key, signingInput, sigBytes, hmacHashFunc(alg))
+	case AlgEdDSA, AlgEd25519:
+		return v.verifyEdDSA(key, signingInput, sigBytes)
 	default:
-		return fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
+		return NewValidationError(fmt.Sprintf("unsupported algorithm: %s", alg), ErrUnsupportedAlgorithm)
 	}
 }
 
-// verifyRSASignature verifies an RSA PKCS#1 v1.5 signature.
-func (v *Validator) verifyRSASignature(signingInput string, signature []byte, key *JSONWebKey, alg string) error {
-	rsaKey, err := key.ToRSAPublicKey()
-	if err != nil {
-		return fmt.Errorf("failed to convert key to RSA: %w", err)
+// rsaHashAlgorithm returns the hash algorithm for RSA/RSA-PSS algorithms.
+func rsaHashAlgorithm(alg string) crypto.Hash {
+	switch alg {
+	case AlgRS256, AlgPS256:
+		return crypto.SHA256
+	case AlgRS384, AlgPS384:
+		return crypto.SHA384
+	default:
+		return crypto.SHA512
 	}
-
-	return verifyRSAPKCS1v15(signingInput, signature, rsaKey, alg)
 }
 
-// verifyRSAPSSSignature verifies an RSA-PSS signature.
-func (v *Validator) verifyRSAPSSSignature(signingInput string, signature []byte, key *JSONWebKey, alg string) error {
-	rsaKey, err := key.ToRSAPublicKey()
-	if err != nil {
-		v.logger.Debug("failed to convert key to RSA for PSS verification",
-			zap.String("algorithm", alg),
-			zap.Error(err),
-		)
-		return fmt.Errorf("failed to convert key to RSA: %w", err)
+// ecdsaHashAlgorithm returns the hash algorithm for ECDSA algorithms.
+func ecdsaHashAlgorithm(alg string) crypto.Hash {
+	switch alg {
+	case AlgES256:
+		return crypto.SHA256
+	case AlgES384:
+		return crypto.SHA384
+	default:
+		return crypto.SHA512
 	}
-
-	return verifyRSAPSS(signingInput, signature, rsaKey, alg)
 }
 
-// validateClaims validates the standard claims.
-func (v *Validator) validateClaims(claims *Claims) error {
-	// Validate expiry
-	if !v.skipExpiry && claims.ExpiresAt != nil {
-		if claims.IsExpiredWithSkew(v.clockSkew) {
-			return ErrTokenExpired
-		}
+// hmacHashFunc returns the hash function for HMAC algorithms.
+func hmacHashFunc(alg string) func() hash.Hash {
+	switch alg {
+	case AlgHS256:
+		return sha256.New
+	case AlgHS384:
+		return sha512.New384
+	default:
+		return sha512.New
+	}
+}
+
+// verifyRSA verifies an RSA signature.
+func (v *validator) verifyRSA(key crypto.PublicKey, signingInput string, signature []byte, hashAlg crypto.Hash) error {
+	rsaKey, ok := key.(*rsa.PublicKey)
+	if !ok {
+		return NewValidationError("key is not an RSA public key", ErrInvalidKey)
 	}
 
-	// Validate not before
-	if claims.NotBefore != nil {
-		if claims.IsNotYetValidWithSkew(v.clockSkew) {
-			return ErrTokenNotYetValid
-		}
-	}
+	h := hashAlg.New()
+	h.Write([]byte(signingInput))
+	hashed := h.Sum(nil)
 
-	// Validate issuer
-	if v.issuer != "" && claims.Issuer != v.issuer {
-		return fmt.Errorf("%w: expected %s, got %s", ErrInvalidIssuer, v.issuer, claims.Issuer)
-	}
-
-	// Validate audience
-	if len(v.audiences) > 0 {
-		found := false
-		for _, aud := range v.audiences {
-			if claims.Audience.Contains(aud) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("%w: expected one of %v", ErrInvalidAudience, v.audiences)
-		}
+	if err := rsa.VerifyPKCS1v15(rsaKey, hashAlg, hashed, signature); err != nil {
+		return NewValidationError("RSA signature verification failed", ErrTokenInvalidSignature)
 	}
 
 	return nil
-}
-
-// validateRequiredClaims validates required claims.
-func (v *Validator) validateRequiredClaims(claims *Claims, requiredClaims map[string][]string) error {
-	for claimName, allowedValues := range requiredClaims {
-		value, ok := claims.GetClaim(claimName)
-		if !ok {
-			return fmt.Errorf("%w: %s", ErrMissingClaim, claimName)
-		}
-
-		if len(allowedValues) > 0 {
-			if !v.claimValueMatches(value, allowedValues) {
-				return fmt.Errorf("%w: %s must be one of %v", ErrInvalidClaimValue, claimName, allowedValues)
-			}
-		}
-	}
-
-	return nil
-}
-
-// claimValueMatches checks if a claim value matches any of the allowed values.
-func (v *Validator) claimValueMatches(value interface{}, allowedValues []string) bool {
-	switch val := value.(type) {
-	case string:
-		return v.stringMatchesAny(val, allowedValues)
-	case []interface{}:
-		return v.interfaceSliceMatchesAny(val, allowedValues)
-	case []string:
-		return v.stringSliceMatchesAny(val, allowedValues)
-	}
-	return false
-}
-
-// stringMatchesAny checks if a string matches any of the allowed values using constant-time comparison.
-func (v *Validator) stringMatchesAny(val string, allowedValues []string) bool {
-	for _, allowed := range allowedValues {
-		if subtle.ConstantTimeCompare([]byte(val), []byte(allowed)) == 1 {
-			return true
-		}
-	}
-	return false
-}
-
-// interfaceSliceMatchesAny checks if any string in an interface slice matches the allowed values.
-func (v *Validator) interfaceSliceMatchesAny(val []interface{}, allowedValues []string) bool {
-	for _, item := range val {
-		if str, ok := item.(string); ok {
-			if v.stringMatchesAny(str, allowedValues) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// stringSliceMatchesAny checks if any string in a slice matches the allowed values.
-func (v *Validator) stringSliceMatchesAny(val []string, allowedValues []string) bool {
-	for _, item := range val {
-		if v.stringMatchesAny(item, allowedValues) {
-			return true
-		}
-	}
-	return false
-}
-
-// mergeRequiredClaims merges the validator's required claims with additional claims.
-func (v *Validator) mergeRequiredClaims(additional map[string][]string) map[string][]string {
-	if len(v.requiredClaims) == 0 && len(additional) == 0 {
-		return nil
-	}
-
-	merged := make(map[string][]string)
-
-	for k, vals := range v.requiredClaims {
-		merged[k] = vals
-	}
-
-	for k, vals := range additional {
-		if existing, ok := merged[k]; ok {
-			// Merge values
-			merged[k] = append(existing, vals...)
-		} else {
-			merged[k] = vals
-		}
-	}
-
-	return merged
-}
-
-// StartAutoRefresh starts automatic JWKS refresh.
-func (v *Validator) StartAutoRefresh(ctx context.Context, interval time.Duration) {
-	if v.jwksCache != nil {
-		v.jwksCache.StartAutoRefresh(ctx, interval)
-	}
-}
-
-// Stop stops the validator and releases resources.
-func (v *Validator) Stop() {
-	if v.jwksCache != nil {
-		v.jwksCache.Stop()
-	}
-}
-
-// UpdateLocalJWKS updates the local JWKS.
-func (v *Validator) UpdateLocalJWKS(data []byte) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	if v.localJWKS == nil {
-		localJWKS, err := NewLocalJWKS(data)
-		if err != nil {
-			return err
-		}
-		v.localJWKS = localJWKS
-		return nil
-	}
-
-	return v.localJWKS.Update(data)
-}
-
-// verifyRSAPKCS1v15 verifies an RSA PKCS#1 v1.5 signature.
-func verifyRSAPKCS1v15(signingInput string, signature []byte, key *rsa.PublicKey, alg string) error {
-	var hashFunc string
-	switch alg {
-	case "RS256":
-		hashFunc = hashSHA256
-	case "RS384":
-		hashFunc = hashSHA384
-	case "RS512":
-		hashFunc = hashSHA512
-	default:
-		return fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
-	}
-
-	// Use crypto/rsa for verification
-	return verifyRSASignatureWithHash(signingInput, signature, key, hashFunc)
 }
 
 // verifyRSAPSS verifies an RSA-PSS signature.
-func verifyRSAPSS(signingInput string, signature []byte, key *rsa.PublicKey, alg string) error {
-	var hashFunc string
-	switch alg {
-	case "PS256":
-		hashFunc = hashSHA256
-	case "PS384":
-		hashFunc = hashSHA384
-	case "PS512":
-		hashFunc = hashSHA512
-	default:
-		return fmt.Errorf("%w: %s", ErrInvalidAlgorithm, alg)
+func (v *validator) verifyRSAPSS(
+	key crypto.PublicKey, signingInput string, signature []byte, hashAlg crypto.Hash,
+) error {
+	rsaKey, ok := key.(*rsa.PublicKey)
+	if !ok {
+		return NewValidationError("key is not an RSA public key", ErrInvalidKey)
 	}
 
-	return verifyRSASignatureWithHashPSS(signingInput, signature, key, hashFunc)
+	h := hashAlg.New()
+	h.Write([]byte(signingInput))
+	hashed := h.Sum(nil)
+
+	opts := &rsa.PSSOptions{
+		SaltLength: rsa.PSSSaltLengthEqualsHash,
+		Hash:       hashAlg,
+	}
+
+	if err := rsa.VerifyPSS(rsaKey, hashAlg, hashed, signature, opts); err != nil {
+		return NewValidationError("RSA-PSS signature verification failed", ErrTokenInvalidSignature)
+	}
+
+	return nil
 }
 
-// verifyRSASignatureWithHash verifies an RSA PKCS#1 v1.5 signature with the specified hash.
-func verifyRSASignatureWithHash(signingInput string, signature []byte, key *rsa.PublicKey, hashFunc string) error {
-	hashed, cryptoHash, err := computeHash(signingInput, hashFunc)
-	if err != nil {
+// verifyECDSA verifies an ECDSA signature.
+func (v *validator) verifyECDSA(
+	key crypto.PublicKey, signingInput string, signature []byte, hashFunc crypto.Hash,
+) error {
+	ecdsaKey, ok := key.(*ecdsa.PublicKey)
+	if !ok {
+		return NewValidationError("key is not an ECDSA public key", ErrInvalidKey)
+	}
+
+	h := hashFunc.New()
+	h.Write([]byte(signingInput))
+	hashed := h.Sum(nil)
+
+	// ECDSA signatures in JWT are r || s concatenated
+	keySize := (ecdsaKey.Curve.Params().BitSize + 7) / 8
+	if len(signature) != 2*keySize {
+		return NewValidationError("invalid ECDSA signature length", ErrTokenInvalidSignature)
+	}
+
+	if !ecdsa.VerifyASN1(ecdsaKey, hashed, convertToASN1(signature, keySize)) {
+		return NewValidationError("ECDSA signature verification failed", ErrTokenInvalidSignature)
+	}
+
+	return nil
+}
+
+// convertToASN1 converts a raw ECDSA signature (r || s format) to ASN.1 DER format.
+// The raw signature consists of two big-endian integers r and s, each of keySize bytes.
+// ASN.1 DER format: SEQUENCE { INTEGER r, INTEGER s }
+func convertToASN1(sig []byte, keySize int) []byte {
+	// Extract r and s from the raw signature
+	r := sig[:keySize]
+	s := sig[keySize:]
+
+	// Remove leading zeros but keep at least one byte
+	r = trimLeadingZeros(r)
+	s = trimLeadingZeros(s)
+
+	// If the high bit is set, prepend a zero byte to indicate positive integer
+	if len(r) > 0 && r[0]&0x80 != 0 {
+		r = append([]byte{0x00}, r...)
+	}
+	if len(s) > 0 && s[0]&0x80 != 0 {
+		s = append([]byte{0x00}, s...)
+	}
+
+	// Build ASN.1 DER encoding
+	// INTEGER tag = 0x02
+	rEncoded := make([]byte, 0, 2+len(r))
+	rEncoded = append(rEncoded, 0x02, byte(len(r)))
+	rEncoded = append(rEncoded, r...)
+
+	sEncoded := make([]byte, 0, 2+len(s))
+	sEncoded = append(sEncoded, 0x02, byte(len(s)))
+	sEncoded = append(sEncoded, s...)
+
+	// SEQUENCE tag = 0x30
+	content := make([]byte, 0, len(rEncoded)+len(sEncoded))
+	content = append(content, rEncoded...)
+	content = append(content, sEncoded...)
+
+	result := make([]byte, 0, 2+len(content))
+	result = append(result, 0x30, byte(len(content)))
+	result = append(result, content...)
+	return result
+}
+
+// trimLeadingZeros removes leading zero bytes from a byte slice,
+// but ensures at least one byte remains.
+func trimLeadingZeros(b []byte) []byte {
+	for len(b) > 1 && b[0] == 0 {
+		b = b[1:]
+	}
+	return b
+}
+
+// verifyHMAC verifies an HMAC signature.
+func (v *validator) verifyHMAC(
+	key crypto.PublicKey, signingInput string, signature []byte, hashFunc func() hash.Hash,
+) error {
+	// For HMAC, the key should be a byte slice
+	var keyBytes []byte
+	switch k := key.(type) {
+	case []byte:
+		keyBytes = k
+	default:
+		return NewValidationError("key is not suitable for HMAC", ErrInvalidKey)
+	}
+
+	mac := hmac.New(hashFunc, keyBytes)
+	mac.Write([]byte(signingInput))
+	expected := mac.Sum(nil)
+
+	if !hmac.Equal(signature, expected) {
+		return NewValidationError("HMAC signature verification failed", ErrTokenInvalidSignature)
+	}
+
+	return nil
+}
+
+// verifyEdDSA verifies an Ed25519 signature.
+func (v *validator) verifyEdDSA(key crypto.PublicKey, signingInput string, signature []byte) error {
+	edKey, ok := key.(ed25519.PublicKey)
+	if !ok {
+		return NewValidationError("key is not an Ed25519 public key", ErrInvalidKey)
+	}
+
+	if !ed25519.Verify(edKey, []byte(signingInput), signature) {
+		return NewValidationError("Ed25519 signature verification failed", ErrTokenInvalidSignature)
+	}
+
+	return nil
+}
+
+// validateClaims validates the token claims.
+func (v *validator) validateClaims(claims *Claims, opts ValidationOptions) error {
+	if err := v.validateExpiration(claims, opts); err != nil {
 		return err
 	}
-
-	return rsaVerifyPKCS1v15(key, cryptoHash, hashed, signature)
-}
-
-// verifyRSASignatureWithHashPSS verifies an RSA-PSS signature with the specified hash.
-func verifyRSASignatureWithHashPSS(signingInput string, signature []byte, key *rsa.PublicKey, hashFunc string) error {
-	hashed, cryptoHash, err := computeHash(signingInput, hashFunc)
-	if err != nil {
+	if err := v.validateIssuer(claims, opts); err != nil {
 		return err
 	}
-
-	return rsaVerifyPSS(key, cryptoHash, hashed, signature)
-}
-
-// computeHash computes the hash of the signing input using the specified hash function.
-func computeHash(signingInput string, hashFunc string) ([]byte, crypto.Hash, error) {
-	var hashed []byte
-	var cryptoHash crypto.Hash
-
-	switch hashFunc {
-	case hashSHA256:
-		h := newSHA256()
-		h.Write([]byte(signingInput))
-		hashed = h.Sum(nil)
-		cryptoHash = cryptoSHA256
-	case hashSHA384:
-		h := newSHA384()
-		h.Write([]byte(signingInput))
-		hashed = h.Sum(nil)
-		cryptoHash = cryptoSHA384
-	case hashSHA512:
-		h := newSHA512()
-		h.Write([]byte(signingInput))
-		hashed = h.Sum(nil)
-		cryptoHash = cryptoSHA512
-	default:
-		return nil, 0, fmt.Errorf("unsupported hash function: %s", hashFunc)
+	if err := v.validateAudience(claims, opts); err != nil {
+		return err
 	}
-
-	return hashed, cryptoHash, nil
+	return v.validateRequiredClaims(claims, opts)
 }
+
+// validateExpiration validates the token expiration.
+func (v *validator) validateExpiration(claims *Claims, opts ValidationOptions) error {
+	if opts.SkipExpirationCheck {
+		return nil
+	}
+	if err := claims.ValidWithSkew(opts.ClockSkew); err != nil {
+		return v.createExpirationError(claims, opts.ClockSkew, err)
+	}
+	return nil
+}
+
+// createExpirationError creates an appropriate expiration error.
+func (v *validator) createExpirationError(claims *Claims, clockSkew time.Duration, err error) error {
+	now := time.Now()
+	if claims.ExpiresAt != nil && now.After(claims.ExpiresAt.Time.Add(clockSkew)) {
+		return NewValidationErrorWithClaims("token has expired", ErrTokenExpired, claims)
+	}
+	if claims.NotBefore != nil && now.Before(claims.NotBefore.Time.Add(-clockSkew)) {
+		return NewValidationErrorWithClaims("token is not yet valid", ErrTokenNotYetValid, claims)
+	}
+	return NewValidationErrorWithClaims(err.Error(), err, claims)
+}
+
+// validateIssuer validates the token issuer.
+func (v *validator) validateIssuer(claims *Claims, opts ValidationOptions) error {
+	if opts.SkipIssuerCheck {
+		return nil
+	}
+	allowedIssuers := v.config.GetAllowedIssuers()
+	if len(allowedIssuers) == 0 {
+		return nil
+	}
+	if !v.isIssuerAllowed(claims.Issuer, allowedIssuers) {
+		return NewValidationErrorWithClaims(
+			fmt.Sprintf("issuer %s is not allowed", claims.Issuer),
+			ErrTokenInvalidIssuer,
+			claims,
+		)
+	}
+	return nil
+}
+
+// isIssuerAllowed checks if the issuer is in the allowed list.
+func (v *validator) isIssuerAllowed(issuer string, allowedIssuers []string) bool {
+	for _, iss := range allowedIssuers {
+		if issuer == iss {
+			return true
+		}
+	}
+	return false
+}
+
+// validateAudience validates the token audience.
+func (v *validator) validateAudience(claims *Claims, opts ValidationOptions) error {
+	if opts.SkipAudienceCheck || len(v.config.Audience) == 0 {
+		return nil
+	}
+	if !claims.Audience.ContainsAny(v.config.Audience...) {
+		return NewValidationErrorWithClaims(
+			"token audience does not match",
+			ErrTokenInvalidAudience,
+			claims,
+		)
+	}
+	return nil
+}
+
+// validateRequiredClaims validates that all required claims are present.
+func (v *validator) validateRequiredClaims(claims *Claims, opts ValidationOptions) error {
+	requiredClaims := opts.RequiredClaims
+	if len(requiredClaims) == 0 {
+		requiredClaims = v.config.RequiredClaims
+	}
+	for _, claim := range requiredClaims {
+		if _, ok := claims.GetClaim(claim); !ok {
+			return NewValidationErrorWithClaims(
+				fmt.Sprintf("required claim %s is missing", claim),
+				ErrTokenMissingClaim,
+				claims,
+			)
+		}
+	}
+	return nil
+}
+
+// Ensure validator implements Validator.
+var _ Validator = (*validator)(nil)

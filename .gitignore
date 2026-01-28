@@ -14,8 +14,12 @@ Dockerfile.cross
 *.out
 *.html
 *.out.txt
+coverage/*
 # Go workspace file
 go.work
+.yandex-tank/*
+.yandextank/*
+test/performance/.yandextank
 
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*
@@ -23,6 +27,7 @@ go.work
 # editor, robots, and IDE paraphernalia
 .opencode
 .idea
+.Claude
 .vscode
 *.swp
 *.swo

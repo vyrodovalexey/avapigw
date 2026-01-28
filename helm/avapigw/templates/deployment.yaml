@@ -1,0 +1,258 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "avapigw.fullname" . }}
+  labels:
+    {{- include "avapigw.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "avapigw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "avapigw.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "avapigw.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "-config"
+            - "/app/configs/gateway.yaml"
+            - "-log-level"
+            - "{{ .Values.gateway.logLevel }}"
+            - "-log-format"
+            - "{{ .Values.gateway.logFormat }}"
+          ports:
+            {{- if or (and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled) (and .Values.gateway.listeners.http.tls .Values.gateway.listeners.http.tls.enabled) }}
+            - name: https
+              containerPort: {{ .Values.service.httpsPort | default 8443 }}
+              protocol: TCP
+            {{- else }}
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.gateway.listeners.grpc.enabled }}
+            {{- $grpcTlsEnabled := false }}
+            {{- if and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled }}
+              {{- $grpcPki := .Values.vault.pki.grpc | default dict }}
+              {{- $grpcTlsEnabled = ternary (index $grpcPki "enabled") .Values.vault.pki.enabled (and (hasKey $grpcPki "enabled") (kindIs "bool" (index $grpcPki "enabled"))) }}
+            {{- else if and .Values.gateway.listeners.grpc.tls .Values.gateway.listeners.grpc.tls.enabled }}
+              {{- $grpcTlsEnabled = true }}
+            {{- end }}
+            {{- if $grpcTlsEnabled }}
+            - name: grpcs
+              containerPort: {{ .Values.service.grpcTlsPort | default 9443 }}
+              protocol: TCP
+            {{- else }}
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+              protocol: TCP
+            {{- end }}
+            {{- end }}
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+          env:
+            - name: GATEWAY_CONFIG_PATH
+              value: /app/configs/gateway.yaml
+            - name: GATEWAY_LOG_LEVEL
+              value: {{ .Values.gateway.logLevel | quote }}
+            - name: GATEWAY_LOG_FORMAT
+              value: {{ .Values.gateway.logFormat | quote }}
+            - name: GATEWAY_ENV
+              value: {{ .Values.gateway.environment | quote }}
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_HOST
+              value: {{ include "avapigw.redisHost" . }}
+            - name: REDIS_PORT
+              value: {{ include "avapigw.redisPort" . | quote }}
+            {{- if .Values.redis.auth.enabled }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.redis.auth.existingSecret }}
+                  name: {{ .Values.redis.auth.existingSecret }}
+                  key: {{ .Values.redis.auth.existingSecretPasswordKey }}
+                  {{- else }}
+                  name: {{ .Release.Name }}-redis
+                  key: redis-password
+                  {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.vault.enabled }}
+            - name: VAULT_ADDR
+              value: {{ .Values.vault.address | quote }}
+            - name: VAULT_AUTH_METHOD
+              value: {{ .Values.vault.authMethod | default "kubernetes" | quote }}
+            {{- if eq (.Values.vault.authMethod | default "kubernetes") "token" }}
+            - name: VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "avapigw.fullname" . }}-vault
+                  key: token
+            {{- end }}
+            {{- if eq (.Values.vault.authMethod | default "kubernetes") "kubernetes" }}
+            - name: VAULT_K8S_ROLE
+              value: {{ .Values.vault.role | quote }}
+            - name: VAULT_K8S_MOUNT_PATH
+              value: {{ .Values.vault.kubernetesMountPath | default "kubernetes" | quote }}
+            - name: VAULT_K8S_TOKEN_PATH
+              value: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+            {{- end }}
+            {{- if and .Values.vault.tls .Values.vault.tls.skipVerify }}
+            - name: VAULT_SKIP_VERIFY
+              value: "true"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.keycloak.enabled }}
+            - name: KEYCLOAK_URL
+              value: {{ .Values.keycloak.url | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ .Values.keycloak.realm | quote }}
+            - name: KEYCLOAK_CLIENT_ID
+              value: {{ .Values.keycloak.clientId | quote }}
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.keycloak.existingSecret }}
+                  name: {{ .Values.keycloak.existingSecret }}
+                  key: {{ .Values.keycloak.existingSecretKey }}
+                  {{- else }}
+                  name: {{ include "avapigw.fullname" . }}-keycloak
+                  key: client-secret
+                  {{- end }}
+            {{- end }}
+            {{- if .Values.tls.enabled }}
+            - name: TLS_ENABLED
+              value: "true"
+            {{- if .Values.tls.clientCertSecret }}
+            - name: TLS_CLIENT_CERT_PATH
+              value: {{ .Values.tls.mountPath | default "/app/certs" }}/client
+            {{- end }}
+            {{- if .Values.tls.caCertSecret }}
+            - name: TLS_CA_CERT_PATH
+              value: {{ .Values.tls.mountPath | default "/app/certs" }}/ca
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/configs
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: data
+              mountPath: /app/data
+            - name: logs
+              mountPath: /app/logs
+            {{- if .Values.tls.enabled }}
+            {{- if .Values.tls.clientCertSecret }}
+            - name: client-certs
+              mountPath: {{ .Values.tls.mountPath | default "/app/certs" }}/client
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tls.caCertSecret }}
+            - name: ca-certs
+              mountPath: {{ .Values.tls.mountPath | default "/app/certs" }}/ca
+              readOnly: true
+            {{- end }}
+            {{- range .Values.tls.routeCerts }}
+            - name: route-certs-{{ .name }}
+              mountPath: {{ $.Values.tls.mountPath | default "/app/certs" }}/routes/{{ .name }}
+              readOnly: true
+            {{- if .caSecretName }}
+            - name: route-ca-{{ .name }}
+              mountPath: {{ $.Values.tls.mountPath | default "/app/certs" }}/routes/{{ .name }}/ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "avapigw.configMapName" . }}
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        {{- if .Values.tls.enabled }}
+        {{- if .Values.tls.clientCertSecret }}
+        - name: client-certs
+          secret:
+            secretName: {{ .Values.tls.clientCertSecret }}
+        {{- end }}
+        {{- if .Values.tls.caCertSecret }}
+        - name: ca-certs
+          secret:
+            secretName: {{ .Values.tls.caCertSecret }}
+        {{- end }}
+        {{- range .Values.tls.routeCerts }}
+        - name: route-certs-{{ .name }}
+          secret:
+            secretName: {{ .secretName }}
+        {{- if .caSecretName }}
+        - name: route-ca-{{ .name }}
+          secret:
+            secretName: {{ .caSecretName }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

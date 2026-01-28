@@ -7,6 +7,7 @@ run:
 linters:
   default: none
   enable:
+    # Code correctness
     - govet
     - errcheck
     - staticcheck
@@ -14,28 +15,40 @@ linters:
     - ineffassign
     - bodyclose
     - noctx
+    - sqlclosecheck
+    - nilerr
+    - errorlint
+    - makezero
+    # Security
     - gosec
-    - unconvert
+    - bidichk
+    - nosprintfhostport
+    # Code style
     - goconst
+    - unconvert
     - asciicheck
     - goheader
+    - whitespace
+    - goprintffuncname
+    - misspell
+    - usestdlibvars
+    - predeclared
+    # Complexity
     - gocognit
+    - gocyclo
+    - funlen
+    - nestif
+    # Best practices
     - lll
     - unparam
     - dogsled
     - nakedret
     - prealloc
     - gocritic
-    - whitespace
-    - goprintffuncname
     - testpackage
-    - nestif
-    - sqlclosecheck
-    - gocyclo
-    - funlen
-    - asciicheck
-    - bidichk
-    - bodyclose
+    - revive
+    - contextcheck
+    - reassign
   exclusions:
     generated: lax
     presets:
@@ -49,22 +62,48 @@ linters:
       - third_party
       - ".*generate\\.go$"
     rules:
+      # G201 SQL injection - only exclude where verified safe
       - linters:
           - gosec
-        text: 'G(201):'
-      # Exclude lll for kubebuilder markers and long struct tags
+        text: 'G201:'
+        path: "internal/repository/"
+      # G101 hardcoded credentials - false positives on header constants
+      - linters:
+          - gosec
+        text: 'G101:'
+        path: "internal/(auth|authz)/constants\\.go"
+      # lll for kubebuilder markers
       - linters:
           - lll
         source: "^//\\s*\\+kubebuilder:"
+      # lll for long struct tags
       - linters:
           - lll
-        source: "`json:.*yaml:.*`"
-      # Exclude lll for API types (kubebuilder annotations)
+        source: '`json:.*yaml:.*`'
+      # revive exclusions
+      - linters:
+          - revive
+        text: "stutters|unused-parameter|if-return|context-as-argument"
+      # staticcheck suggestions
+      - linters:
+          - staticcheck
+        text: "QF1008"
+      # gocritic common patterns
+      - linters:
+          - gocritic
+        text: "importShadow|httpNoBody"
+      # var-naming for util package
+      - linters:
+          - revive
+        text: "var-naming: avoid meaningless package names"
+        path: "internal/util/"
   settings:
     errcheck:
       exclude-functions:
         - fmt.Fprintf
         - fmt.Fprint
+        - fmt.Fprintln
+        - (io.Closer).Close
     goconst:
       min-len: 2
       min-occurrences: 3
@@ -84,14 +123,42 @@ linters:
         rangeValCopy:
           sizeThreshold: 512
     funlen:
-      lines: 300
-      statements: 90
+      lines: 200
+      statements: 60
     lll:
       line-length: 120
       tab-width: 4
     nestif:
-      min-complexity: 6
+      min-complexity: 7
     gocyclo:
       min-complexity: 15
     gocognit:
       min-complexity: 20
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id

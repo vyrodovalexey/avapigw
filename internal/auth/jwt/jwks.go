@@ -2,402 +2,636 @@ package jwt
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
-	"math/big"
+	"math"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
-// JWKSCache provides caching for JWKS (JSON Web Key Set) fetched from a remote URL.
-type JWKSCache struct {
-	url        string
-	keys       *JSONWebKeySet
-	mu         sync.RWMutex
-	lastFetch  time.Time
-	ttl        time.Duration
-	httpClient *http.Client
-	logger     *zap.Logger
-	stopCh     chan struct{}
-	stopped    bool
+// JWKS timeout constants.
+const (
+	// DefaultJWKSRefreshTimeout is the default timeout for JWKS refresh operations.
+	DefaultJWKSRefreshTimeout = 30 * time.Second
+
+	// DefaultHTTPClientTimeout is the default timeout for HTTP client operations.
+	DefaultHTTPClientTimeout = 30 * time.Second
+)
+
+// RetryConfig contains configuration for retry with exponential backoff.
+type RetryConfig struct {
+	MaxAttempts     int
+	InitialInterval time.Duration
+	MaxInterval     time.Duration
+	Multiplier      float64
 }
 
-// JSONWebKeySet represents a JSON Web Key Set.
-type JSONWebKeySet struct {
-	Keys []JSONWebKey `json:"keys"`
+// DefaultRetryConfig returns the default retry configuration.
+func DefaultRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxAttempts:     3,
+		InitialInterval: 100 * time.Millisecond,
+		MaxInterval:     5 * time.Second,
+		Multiplier:      2.0,
+	}
 }
 
-// JSONWebKey represents a JSON Web Key.
-type JSONWebKey struct {
-	// Key type (e.g., "RSA", "EC")
-	Kty string `json:"kty"`
-	// Key ID
-	Kid string `json:"kid,omitempty"`
-	// Algorithm
-	Alg string `json:"alg,omitempty"`
-	// Use (e.g., "sig", "enc")
-	Use string `json:"use,omitempty"`
-	// Key operations
-	KeyOps []string `json:"key_ops,omitempty"`
+// KeySet represents a set of cryptographic keys for JWT validation.
+type KeySet interface {
+	// GetKey returns a key by ID.
+	GetKey(ctx context.Context, keyID string) (crypto.PublicKey, error)
 
-	// RSA public key components
-	N string `json:"n,omitempty"` // Modulus
-	E string `json:"e,omitempty"` // Exponent
+	// GetKeyForAlgorithm returns a key suitable for the given algorithm.
+	GetKeyForAlgorithm(ctx context.Context, keyID, algorithm string) (crypto.PublicKey, error)
 
-	// EC public key components
-	Crv string `json:"crv,omitempty"` // Curve
-	X   string `json:"x,omitempty"`   // X coordinate
-	Y   string `json:"y,omitempty"`   // Y coordinate
+	// Refresh refreshes the key set.
+	Refresh(ctx context.Context) error
 
-	// Symmetric key
-	K string `json:"k,omitempty"`
-
-	// X.509 certificate chain
-	X5c []string `json:"x5c,omitempty"`
-	// X.509 certificate SHA-1 thumbprint
-	X5t string `json:"x5t,omitempty"`
-	// X.509 certificate SHA-256 thumbprint
-	X5tS256 string `json:"x5t#S256,omitempty"`
-	// X.509 URL
-	X5u string `json:"x5u,omitempty"`
+	// Close closes the key set.
+	Close() error
 }
 
-// NewJWKSCache creates a new JWKS cache.
-func NewJWKSCache(url string, ttl time.Duration, logger *zap.Logger) *JWKSCache {
-	if ttl <= 0 {
-		ttl = time.Hour
+// JWKSKeySet implements KeySet using a JWKS URL.
+type JWKSKeySet struct {
+	url         string
+	httpClient  *http.Client
+	logger      observability.Logger
+	cacheTTL    time.Duration
+	retryConfig RetryConfig
+
+	mu          sync.RWMutex
+	keys        jwk.Set
+	lastRefresh time.Time
+
+	// Background refresh
+	stopCh    chan struct{}
+	stoppedCh chan struct{}
+	refreshes atomic.Int64
+	errors    atomic.Int64
+}
+
+// JWKSKeySetOption is a functional option for JWKSKeySet.
+type JWKSKeySetOption func(*JWKSKeySet)
+
+// WithHTTPClient sets the HTTP client for JWKS fetching.
+func WithHTTPClient(client *http.Client) JWKSKeySetOption {
+	return func(ks *JWKSKeySet) {
+		ks.httpClient = client
+	}
+}
+
+// WithCacheTTL sets the cache TTL for JWKS.
+func WithCacheTTL(ttl time.Duration) JWKSKeySetOption {
+	return func(ks *JWKSKeySet) {
+		ks.cacheTTL = ttl
+	}
+}
+
+// WithJWKSLogger sets the logger for JWKS operations.
+func WithJWKSLogger(logger observability.Logger) JWKSKeySetOption {
+	return func(ks *JWKSKeySet) {
+		ks.logger = logger
+	}
+}
+
+// WithRetryConfig sets the retry configuration for JWKS fetching.
+func WithRetryConfig(cfg RetryConfig) JWKSKeySetOption {
+	return func(ks *JWKSKeySet) {
+		ks.retryConfig = cfg
+	}
+}
+
+// NewJWKSKeySet creates a new JWKS key set.
+func NewJWKSKeySet(url string, opts ...JWKSKeySetOption) (*JWKSKeySet, error) {
+	if url == "" {
+		return nil, fmt.Errorf("JWKS URL is required")
 	}
 
-	return &JWKSCache{
+	ks := &JWKSKeySet{
 		url: url,
-		ttl: ttl,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: DefaultHTTPClientTimeout,
 		},
-		logger: logger,
-		stopCh: make(chan struct{}),
+		logger:      observability.NopLogger(),
+		cacheTTL:    time.Hour,
+		retryConfig: DefaultRetryConfig(),
+		stopCh:      make(chan struct{}),
+		stoppedCh:   make(chan struct{}),
 	}
+
+	for _, opt := range opts {
+		opt(ks)
+	}
+
+	return ks, nil
 }
 
-// NewJWKSCacheWithClient creates a new JWKS cache with a custom HTTP client.
-func NewJWKSCacheWithClient(url string, ttl time.Duration, client *http.Client, logger *zap.Logger) *JWKSCache {
-	cache := NewJWKSCache(url, ttl, logger)
-	if client != nil {
-		cache.httpClient = client
+// Start starts background refresh of the key set.
+func (ks *JWKSKeySet) Start(ctx context.Context) error {
+	// Initial fetch
+	if err := ks.Refresh(ctx); err != nil {
+		return fmt.Errorf("initial JWKS fetch failed: %w", err)
 	}
-	return cache
+
+	// Start background refresh
+	// The refresh loop runs independently with its own context management
+	go ks.refreshLoop() //nolint:contextcheck // Background goroutine manages its own context lifecycle
+
+	return nil
 }
 
-// GetKey returns the key with the specified key ID.
-func (c *JWKSCache) GetKey(kid string) (*JSONWebKey, error) {
-	c.mu.RLock()
-	keys := c.keys
-	lastFetch := c.lastFetch
-	c.mu.RUnlock()
+// GetKey returns a key by ID.
+func (ks *JWKSKeySet) GetKey(ctx context.Context, keyID string) (crypto.PublicKey, error) {
+	ks.mu.RLock()
+	keys := ks.keys
+	ks.mu.RUnlock()
 
-	// Check if we need to refresh
-	if keys == nil || time.Since(lastFetch) > c.ttl {
-		if err := c.Refresh(context.Background()); err != nil {
-			// If we have cached keys, use them even if refresh failed
-			if keys == nil {
-				return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
-			}
-			c.logger.Warn("failed to refresh JWKS, using cached keys",
-				zap.Error(err),
-				zap.Time("lastFetch", lastFetch),
-			)
+	if keys == nil {
+		if err := ks.Refresh(ctx); err != nil {
+			return nil, err
 		}
-
-		c.mu.RLock()
-		keys = c.keys
-		c.mu.RUnlock()
+		ks.mu.RLock()
+		keys = ks.keys
+		ks.mu.RUnlock()
 	}
 
 	if keys == nil {
-		return nil, errors.New("no JWKS available")
+		return nil, ErrKeyNotFound
 	}
 
-	// Find the key
-	for i := range keys.Keys {
-		if keys.Keys[i].Kid == kid {
-			return &keys.Keys[i], nil
+	key, found := keys.LookupKeyID(keyID)
+	if !found {
+		// Try refreshing and looking again
+		if err := ks.Refresh(ctx); err != nil {
+			return nil, err
+		}
+		ks.mu.RLock()
+		keys = ks.keys
+		ks.mu.RUnlock()
+
+		key, found = keys.LookupKeyID(keyID)
+		if !found {
+			return nil, NewKeyError(keyID, "key not found", ErrKeyNotFound)
 		}
 	}
 
-	// If kid is empty, return the first key (for single-key JWKS)
-	if kid == "" && len(keys.Keys) > 0 {
-		return &keys.Keys[0], nil
+	var rawKey interface{}
+	if err := key.Raw(&rawKey); err != nil {
+		return nil, NewKeyError(keyID, "failed to extract raw key", err)
 	}
 
-	return nil, fmt.Errorf("key with kid %q not found", kid)
+	pubKey, ok := rawKey.(crypto.PublicKey)
+	if !ok {
+		return nil, NewKeyError(keyID, "key is not a public key", ErrInvalidKey)
+	}
+
+	return pubKey, nil
 }
 
-// GetKeys returns all keys in the cache.
-func (c *JWKSCache) GetKeys() ([]JSONWebKey, error) {
-	c.mu.RLock()
-	keys := c.keys
-	lastFetch := c.lastFetch
-	c.mu.RUnlock()
+// GetKeyForAlgorithm returns a key suitable for the given algorithm.
+func (ks *JWKSKeySet) GetKeyForAlgorithm(ctx context.Context, keyID, algorithm string) (crypto.PublicKey, error) {
+	key, err := ks.GetKey(ctx, keyID)
+	if err != nil {
+		return nil, err
+	}
 
-	// Check if we need to refresh
-	if keys == nil || time.Since(lastFetch) > c.ttl {
-		if err := c.Refresh(context.Background()); err != nil {
-			if keys == nil {
-				return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
+	// Validate key type matches algorithm
+	if err := validateKeyAlgorithm(key, algorithm); err != nil {
+		return nil, NewKeyError(keyID, err.Error(), ErrInvalidKey)
+	}
+
+	return key, nil
+}
+
+// Refresh refreshes the key set from the JWKS URL with retry and exponential backoff.
+func (ks *JWKSKeySet) Refresh(ctx context.Context) error {
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
+
+	// Check if refresh is needed
+	if ks.keys != nil && time.Since(ks.lastRefresh) < ks.cacheTTL/2 {
+		return nil
+	}
+
+	var lastErr error
+	interval := ks.retryConfig.InitialInterval
+
+	for attempt := 0; attempt < ks.retryConfig.MaxAttempts; attempt++ {
+		// Check context before each attempt
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Attempt to fetch JWKS
+		err := ks.fetchJWKS(ctx)
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		ks.logger.Warn("JWKS fetch attempt failed",
+			observability.String("url", ks.url),
+			observability.Int("attempt", attempt+1),
+			observability.Int("max_attempts", ks.retryConfig.MaxAttempts),
+			observability.Error(err),
+		)
+
+		// Don't sleep after the last attempt
+		if attempt < ks.retryConfig.MaxAttempts-1 {
+			// Add jitter to prevent thundering herd
+			jitter := time.Duration(float64(interval) * 0.25 * secureRandomFloat())
+			sleepDuration := interval + jitter
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(sleepDuration):
+			}
+
+			// Calculate next interval with exponential backoff
+			interval = time.Duration(float64(interval) * ks.retryConfig.Multiplier)
+			if interval > ks.retryConfig.MaxInterval {
+				interval = ks.retryConfig.MaxInterval
 			}
 		}
-
-		c.mu.RLock()
-		keys = c.keys
-		c.mu.RUnlock()
 	}
 
-	if keys == nil {
-		return nil, errors.New("no JWKS available")
-	}
-
-	return keys.Keys, nil
+	ks.errors.Add(1)
+	return fmt.Errorf("%w after %d attempts: %w", ErrJWKSFetchFailed, ks.retryConfig.MaxAttempts, lastErr)
 }
 
-// Refresh fetches the JWKS from the remote URL.
-func (c *JWKSCache) Refresh(ctx context.Context) error {
-	c.logger.Debug("refreshing JWKS", zap.String("url", c.url))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, http.NoBody)
+// fetchJWKS performs a single JWKS fetch attempt.
+func (ks *JWKSKeySet) fetchJWKS(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ks.url, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := ks.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to fetch JWKS: %w", err)
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("JWKS endpoint returned status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read JWKS response: %w", err)
+		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	var jwks JSONWebKeySet
-	if err := json.Unmarshal(body, &jwks); err != nil {
+	keys, err := jwk.Parse(body)
+	if err != nil {
 		return fmt.Errorf("failed to parse JWKS: %w", err)
 	}
 
-	c.mu.Lock()
-	c.keys = &jwks
-	c.lastFetch = time.Now()
-	c.mu.Unlock()
+	ks.keys = keys
+	ks.lastRefresh = time.Now()
+	ks.refreshes.Add(1)
 
-	c.logger.Info("JWKS refreshed successfully",
-		zap.String("url", c.url),
-		zap.Int("keyCount", len(jwks.Keys)),
+	ks.logger.Debug("JWKS refreshed",
+		observability.String("url", ks.url),
+		observability.Int("key_count", keys.Len()),
 	)
 
 	return nil
 }
 
-// StartAutoRefresh starts automatic JWKS refresh at the specified interval.
-func (c *JWKSCache) StartAutoRefresh(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = c.ttl / 2
+// secureRandomFloat returns a cryptographically secure random float64 between 0 and 1.
+func secureRandomFloat() float64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0.5 // fallback to middle value
 	}
+	return float64(binary.LittleEndian.Uint64(b[:])) / float64(math.MaxUint64)
+}
 
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+// Close closes the key set.
+func (ks *JWKSKeySet) Close() error {
+	close(ks.stopCh)
+	<-ks.stoppedCh
+	return nil
+}
 
-		// Initial fetch
-		if err := c.Refresh(ctx); err != nil {
-			c.logger.Error("initial JWKS fetch failed", zap.Error(err))
+// refreshLoop periodically refreshes the key set.
+func (ks *JWKSKeySet) refreshLoop() {
+	defer close(ks.stoppedCh)
+
+	ticker := time.NewTicker(ks.cacheTTL / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ks.stopCh:
+			return
+		case <-ticker.C:
+			ks.performRefresh()
 		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-c.stopCh:
-				return
-			case <-ticker.C:
-				if err := c.Refresh(ctx); err != nil {
-					c.logger.Error("JWKS refresh failed", zap.Error(err))
-				}
-			}
-		}
-	}()
-}
-
-// Stop stops the auto-refresh goroutine.
-func (c *JWKSCache) Stop() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.stopped {
-		close(c.stopCh)
-		c.stopped = true
 	}
 }
 
-// LastFetch returns the time of the last successful fetch.
-func (c *JWKSCache) LastFetch() time.Time {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.lastFetch
+// performRefresh performs a single JWKS refresh operation with proper context management.
+func (ks *JWKSKeySet) performRefresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultJWKSRefreshTimeout)
+	defer cancel()
+
+	if err := ks.Refresh(ctx); err != nil {
+		ks.logger.Error("failed to refresh JWKS",
+			observability.Error(err),
+			observability.String("url", ks.url),
+		)
+	} else {
+		ks.logger.Debug("JWKS refresh completed successfully",
+			observability.String("url", ks.url),
+		)
+	}
 }
 
-// URL returns the JWKS URL.
-func (c *JWKSCache) URL() string {
-	return c.url
+// Stats returns statistics about the key set.
+func (ks *JWKSKeySet) Stats() JWKSStats {
+	ks.mu.RLock()
+	keyCount := 0
+	if ks.keys != nil {
+		keyCount = ks.keys.Len()
+	}
+	lastRefresh := ks.lastRefresh
+	ks.mu.RUnlock()
+
+	return JWKSStats{
+		URL:         ks.url,
+		KeyCount:    keyCount,
+		LastRefresh: lastRefresh,
+		Refreshes:   ks.refreshes.Load(),
+		Errors:      ks.errors.Load(),
+	}
 }
 
-// ToRSAPublicKey converts a JSONWebKey to an RSA public key.
-func (jwk *JSONWebKey) ToRSAPublicKey() (*rsa.PublicKey, error) {
-	if jwk.Kty != "RSA" {
-		return nil, fmt.Errorf("key type is not RSA: %s", jwk.Kty)
-	}
-
-	// Decode modulus
-	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.N)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode modulus: %w", err)
-	}
-	n := new(big.Int).SetBytes(nBytes)
-
-	// Decode exponent
-	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.E)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode exponent: %w", err)
-	}
-	e := 0
-	for _, b := range eBytes {
-		e = e<<8 + int(b)
-	}
-
-	return &rsa.PublicKey{
-		N: n,
-		E: e,
-	}, nil
+// JWKSStats contains statistics about a JWKS key set.
+type JWKSStats struct {
+	URL         string
+	KeyCount    int
+	LastRefresh time.Time
+	Refreshes   int64
+	Errors      int64
 }
 
-// ParseJWKSFromBytes parses a JWKS from bytes.
-func ParseJWKSFromBytes(data []byte) (*JSONWebKeySet, error) {
-	var jwks JSONWebKeySet
-	if err := json.Unmarshal(data, &jwks); err != nil {
-		return nil, fmt.Errorf("failed to parse JWKS: %w", err)
-	}
-	return &jwks, nil
+// StaticKeySet implements KeySet using static keys.
+type StaticKeySet struct {
+	keys   map[string]crypto.PublicKey
+	logger observability.Logger
 }
 
-// ParseJWKFromBytes parses a single JWK from bytes.
-func ParseJWKFromBytes(data []byte) (*JSONWebKey, error) {
-	var jwk JSONWebKey
-	if err := json.Unmarshal(data, &jwk); err != nil {
-		return nil, fmt.Errorf("failed to parse JWK: %w", err)
-	}
-	return &jwk, nil
-}
-
-// ParseRSAPublicKeyFromPEM parses an RSA public key from PEM-encoded data.
-func ParseRSAPublicKeyFromPEM(pemData []byte) (*rsa.PublicKey, error) {
-	block, _ := pem.Decode(pemData)
-	if block == nil {
-		return nil, errors.New("failed to decode PEM block")
+// NewStaticKeySet creates a new static key set.
+func NewStaticKeySet(keys []StaticKey, logger observability.Logger) (*StaticKeySet, error) {
+	ks := &StaticKeySet{
+		keys:   make(map[string]crypto.PublicKey),
+		logger: logger,
 	}
 
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		// Try parsing as PKCS1
-		rsaPub, err := x509.ParsePKCS1PublicKey(block.Bytes)
+	for _, key := range keys {
+		pubKey, err := parseStaticKey(key)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse public key: %w", err)
+			return nil, fmt.Errorf("failed to parse key %s: %w", key.KeyID, err)
 		}
-		return rsaPub, nil
+		ks.keys[key.KeyID] = pubKey
 	}
 
-	rsaPub, ok := pub.(*rsa.PublicKey)
+	return ks, nil
+}
+
+// GetKey returns a key by ID.
+func (ks *StaticKeySet) GetKey(_ context.Context, keyID string) (crypto.PublicKey, error) {
+	key, ok := ks.keys[keyID]
 	if !ok {
-		return nil, errors.New("not an RSA public key")
+		return nil, NewKeyError(keyID, "key not found", ErrKeyNotFound)
 	}
-
-	return rsaPub, nil
+	return key, nil
 }
 
-// LocalJWKS represents a locally configured JWKS.
-type LocalJWKS struct {
-	keys *JSONWebKeySet
-	mu   sync.RWMutex
-}
-
-// NewLocalJWKS creates a new local JWKS from bytes.
-func NewLocalJWKS(data []byte) (*LocalJWKS, error) {
-	jwks, err := ParseJWKSFromBytes(data)
+// GetKeyForAlgorithm returns a key suitable for the given algorithm.
+func (ks *StaticKeySet) GetKeyForAlgorithm(ctx context.Context, keyID, algorithm string) (crypto.PublicKey, error) {
+	key, err := ks.GetKey(ctx, keyID)
 	if err != nil {
 		return nil, err
 	}
-	return &LocalJWKS{keys: jwks}, nil
-}
 
-// GetKey returns the key with the specified key ID.
-func (l *LocalJWKS) GetKey(kid string) (*JSONWebKey, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	if l.keys == nil {
-		return nil, errors.New("no JWKS configured")
+	if err := validateKeyAlgorithm(key, algorithm); err != nil {
+		return nil, NewKeyError(keyID, err.Error(), ErrInvalidKey)
 	}
 
-	for i := range l.keys.Keys {
-		if l.keys.Keys[i].Kid == kid {
-			return &l.keys.Keys[i], nil
+	return key, nil
+}
+
+// Refresh is a no-op for static keys.
+func (ks *StaticKeySet) Refresh(_ context.Context) error {
+	return nil
+}
+
+// Close is a no-op for static keys.
+func (ks *StaticKeySet) Close() error {
+	return nil
+}
+
+// parseStaticKey parses a static key configuration.
+func parseStaticKey(key StaticKey) (crypto.PublicKey, error) {
+	var keyData []byte
+
+	switch {
+	case key.Key != "":
+		keyData = []byte(key.Key)
+	case key.KeyFile != "":
+		// Read from file - would need to implement file reading
+		return nil, fmt.Errorf("keyFile not yet implemented")
+	default:
+		return nil, fmt.Errorf("key or keyFile is required")
+	}
+
+	// Try to parse as JWK first
+	jwkKey, err := jwk.ParseKey(keyData)
+	if err == nil {
+		var rawKey interface{}
+		if err := jwkKey.Raw(&rawKey); err != nil {
+			return nil, err
+		}
+		if pubKey, ok := rawKey.(crypto.PublicKey); ok {
+			return pubKey, nil
+		}
+		return nil, fmt.Errorf("key is not a public key")
+	}
+
+	// Try to parse as PEM
+	return parsePEMKey(keyData)
+}
+
+// parsePEMKey parses a PEM-encoded key.
+func parsePEMKey(data []byte) (crypto.PublicKey, error) {
+	// Try parsing as JWK JSON first
+	if key, err := parseAsJWK(data); err == nil {
+		return key, nil
+	}
+
+	// Try parsing as PEM-encoded public key
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("unsupported key format")
+	}
+
+	return parsePEMBlock(block)
+}
+
+// parseAsJWK attempts to parse data as a JWK.
+func parseAsJWK(data []byte) (crypto.PublicKey, error) {
+	var jwkData map[string]interface{}
+	if err := json.Unmarshal(data, &jwkData); err != nil {
+		return nil, err
+	}
+
+	key, err := jwk.ParseKey(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var rawKey interface{}
+	if err := key.Raw(&rawKey); err != nil {
+		return nil, err
+	}
+
+	if pubKey, ok := rawKey.(crypto.PublicKey); ok {
+		return pubKey, nil
+	}
+	return nil, fmt.Errorf("key is not a public key")
+}
+
+// parsePEMBlock parses a PEM block into a public key.
+func parsePEMBlock(block *pem.Block) (crypto.PublicKey, error) {
+	switch block.Type {
+	case "PUBLIC KEY":
+		return parsePKIXPublicKey(block.Bytes)
+	case "RSA PUBLIC KEY":
+		return x509.ParsePKCS1PublicKey(block.Bytes)
+	case "EC PUBLIC KEY":
+		return parsePKIXPublicKey(block.Bytes)
+	case "CERTIFICATE":
+		return parsePublicKeyFromCertificate(block.Bytes)
+	default:
+		return nil, fmt.Errorf("unsupported PEM block type: %s", block.Type)
+	}
+}
+
+// parsePKIXPublicKey parses a PKIX-encoded public key.
+func parsePKIXPublicKey(data []byte) (crypto.PublicKey, error) {
+	pubKey, err := x509.ParsePKIXPublicKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKIX public key: %w", err)
+	}
+	if pk, ok := pubKey.(crypto.PublicKey); ok {
+		return pk, nil
+	}
+	return nil, fmt.Errorf("parsed key is not a public key")
+}
+
+// parsePublicKeyFromCertificate extracts the public key from a certificate.
+func parsePublicKeyFromCertificate(data []byte) (crypto.PublicKey, error) {
+	cert, err := x509.ParseCertificate(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+	return cert.PublicKey, nil
+}
+
+// validateKeyAlgorithm validates that a key is suitable for an algorithm.
+func validateKeyAlgorithm(key crypto.PublicKey, algorithm string) error {
+	switch algorithm {
+	case AlgRS256, AlgRS384, AlgRS512, AlgPS256, AlgPS384, AlgPS512:
+		if _, ok := key.(*rsa.PublicKey); !ok {
+			return fmt.Errorf("algorithm %s requires RSA key", algorithm)
+		}
+	case AlgES256, AlgES384, AlgES512:
+		if _, ok := key.(*ecdsa.PublicKey); !ok {
+			return fmt.Errorf("algorithm %s requires ECDSA key", algorithm)
+		}
+	case AlgEdDSA, AlgEd25519:
+		if _, ok := key.(ed25519.PublicKey); !ok {
+			return fmt.Errorf("algorithm %s requires Ed25519 key", algorithm)
 		}
 	}
-
-	// If kid is empty, return the first key
-	if kid == "" && len(l.keys.Keys) > 0 {
-		return &l.keys.Keys[0], nil
-	}
-
-	return nil, fmt.Errorf("key with kid %q not found", kid)
-}
-
-// GetKeys returns all keys.
-func (l *LocalJWKS) GetKeys() []JSONWebKey {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	if l.keys == nil {
-		return nil
-	}
-
-	return l.keys.Keys
-}
-
-// Update updates the JWKS.
-func (l *LocalJWKS) Update(data []byte) error {
-	jwks, err := ParseJWKSFromBytes(data)
-	if err != nil {
-		return err
-	}
-
-	l.mu.Lock()
-	l.keys = jwks
-	l.mu.Unlock()
-
 	return nil
+}
+
+// CompositeKeySet combines multiple key sets.
+type CompositeKeySet struct {
+	keySets []KeySet
+	logger  observability.Logger
+}
+
+// NewCompositeKeySet creates a new composite key set.
+func NewCompositeKeySet(keySets []KeySet, logger observability.Logger) *CompositeKeySet {
+	return &CompositeKeySet{
+		keySets: keySets,
+		logger:  logger,
+	}
+}
+
+// GetKey returns a key by ID from any of the key sets.
+func (ks *CompositeKeySet) GetKey(ctx context.Context, keyID string) (crypto.PublicKey, error) {
+	for _, keySet := range ks.keySets {
+		key, err := keySet.GetKey(ctx, keyID)
+		if err == nil {
+			return key, nil
+		}
+	}
+	return nil, NewKeyError(keyID, "key not found in any key set", ErrKeyNotFound)
+}
+
+// GetKeyForAlgorithm returns a key suitable for the given algorithm.
+func (ks *CompositeKeySet) GetKeyForAlgorithm(ctx context.Context, keyID, algorithm string) (crypto.PublicKey, error) {
+	for _, keySet := range ks.keySets {
+		key, err := keySet.GetKeyForAlgorithm(ctx, keyID, algorithm)
+		if err == nil {
+			return key, nil
+		}
+	}
+	return nil, NewKeyError(keyID, "key not found in any key set", ErrKeyNotFound)
+}
+
+// Refresh refreshes all key sets.
+func (ks *CompositeKeySet) Refresh(ctx context.Context) error {
+	var lastErr error
+	for _, keySet := range ks.keySets {
+		if err := keySet.Refresh(ctx); err != nil {
+			lastErr = err
+			ks.logger.Error("failed to refresh key set", observability.Error(err))
+		}
+	}
+	return lastErr
+}
+
+// Close closes all key sets.
+func (ks *CompositeKeySet) Close() error {
+	var lastErr error
+	for _, keySet := range ks.keySets {
+		if err := keySet.Close(); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
 }

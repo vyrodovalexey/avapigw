@@ -2,740 +2,750 @@ package apikey
 
 import (
 	"context"
-	"errors"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
-func TestAPIKey_IsExpired(t *testing.T) {
-	t.Parallel()
+// mockStore is a mock implementation of Store for testing.
+type mockStore struct {
+	keys map[string]*StaticKey
+}
 
-	tests := []struct {
-		name      string
-		expiresAt *time.Time
-		expected  bool
-	}{
-		{
-			name:      "Not expired",
-			expiresAt: timePtr(time.Now().Add(time.Hour)),
-			expected:  false,
-		},
-		{
-			name:      "Expired",
-			expiresAt: timePtr(time.Now().Add(-time.Hour)),
-			expected:  true,
-		},
-		{
-			name:      "No expiry",
-			expiresAt: nil,
-			expected:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key := &APIKey{ExpiresAt: tt.expiresAt}
-			assert.Equal(t, tt.expected, key.IsExpired())
-		})
+func newMockStore() *mockStore {
+	return &mockStore{
+		keys: make(map[string]*StaticKey),
 	}
 }
 
-func TestAPIKey_IsValid(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		enabled   bool
-		expiresAt *time.Time
-		expected  bool
-	}{
-		{
-			name:      "Valid - enabled and not expired",
-			enabled:   true,
-			expiresAt: timePtr(time.Now().Add(time.Hour)),
-			expected:  true,
-		},
-		{
-			name:      "Invalid - disabled",
-			enabled:   false,
-			expiresAt: timePtr(time.Now().Add(time.Hour)),
-			expected:  false,
-		},
-		{
-			name:      "Invalid - expired",
-			enabled:   true,
-			expiresAt: timePtr(time.Now().Add(-time.Hour)),
-			expected:  false,
-		},
-		{
-			name:      "Valid - enabled with no expiry",
-			enabled:   true,
-			expiresAt: nil,
-			expected:  true,
-		},
+func (m *mockStore) Get(_ context.Context, key string) (*StaticKey, error) {
+	storedKey, ok := m.keys[key]
+	if !ok {
+		return nil, ErrAPIKeyNotFound
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key := &APIKey{
-				Enabled:   tt.enabled,
-				ExpiresAt: tt.expiresAt,
-			}
-			assert.Equal(t, tt.expected, key.IsValid())
-		})
-	}
+	return storedKey, nil
 }
 
-func TestAPIKey_HasScope(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		scopes   []string
-		scope    string
-		expected bool
-	}{
-		{
-			name:     "Has scope",
-			scopes:   []string{"read", "write", "admin"},
-			scope:    "write",
-			expected: true,
-		},
-		{
-			name:     "Does not have scope",
-			scopes:   []string{"read", "write"},
-			scope:    "admin",
-			expected: false,
-		},
-		{
-			name:     "Wildcard scope",
-			scopes:   []string{"*"},
-			scope:    "anything",
-			expected: true,
-		},
-		{
-			name:     "Empty scopes",
-			scopes:   []string{},
-			scope:    "read",
-			expected: false,
-		},
+func (m *mockStore) GetByID(_ context.Context, id string) (*StaticKey, error) {
+	for _, key := range m.keys {
+		if key.ID == id {
+			return key, nil
+		}
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key := &APIKey{Scopes: tt.scopes}
-			assert.Equal(t, tt.expected, key.HasScope(tt.scope))
-		})
-	}
+	return nil, ErrAPIKeyNotFound
 }
 
-func TestAPIKey_HasAnyScope(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		scopes   []string
-		check    []string
-		expected bool
-	}{
-		{
-			name:     "Has one of the scopes",
-			scopes:   []string{"read", "write"},
-			check:    []string{"admin", "write"},
-			expected: true,
-		},
-		{
-			name:     "Has none of the scopes",
-			scopes:   []string{"read", "write"},
-			check:    []string{"admin", "delete"},
-			expected: false,
-		},
-		{
-			name:     "Empty check scopes",
-			scopes:   []string{"read", "write"},
-			check:    []string{},
-			expected: false,
-		},
+func (m *mockStore) List(_ context.Context) ([]*StaticKey, error) {
+	keys := make([]*StaticKey, 0, len(m.keys))
+	for _, key := range m.keys {
+		keys = append(keys, key)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key := &APIKey{Scopes: tt.scopes}
-			assert.Equal(t, tt.expected, key.HasAnyScope(tt.check...))
-		})
-	}
+	return keys, nil
 }
 
-func TestAPIKey_HasAllScopes(t *testing.T) {
-	t.Parallel()
+func (m *mockStore) Close() error {
+	return nil
+}
 
-	tests := []struct {
-		name     string
-		scopes   []string
-		check    []string
-		expected bool
-	}{
-		{
-			name:     "Has all scopes",
-			scopes:   []string{"read", "write", "admin"},
-			check:    []string{"read", "write"},
-			expected: true,
-		},
-		{
-			name:     "Missing one scope",
-			scopes:   []string{"read", "write"},
-			check:    []string{"read", "write", "admin"},
-			expected: false,
-		},
-		{
-			name:     "Empty check scopes",
-			scopes:   []string{"read", "write"},
-			check:    []string{},
-			expected: true,
-		},
-		{
-			name:     "Wildcard covers all",
-			scopes:   []string{"*"},
-			check:    []string{"read", "write", "admin"},
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key := &APIKey{Scopes: tt.scopes}
-			assert.Equal(t, tt.expected, key.HasAllScopes(tt.check...))
-		})
-	}
+func (m *mockStore) AddKey(key *StaticKey) {
+	m.keys[key.Key] = key
 }
 
 func TestNewValidator(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore()
-
 	tests := []struct {
-		name   string
-		store  Store
-		logger *zap.Logger
+		name    string
+		config  *Config
+		opts    []ValidatorOption
+		wantErr bool
 	}{
 		{
-			name:   "With store and logger",
-			store:  store,
-			logger: zap.NewNop(),
+			name:    "nil config",
+			config:  nil,
+			wantErr: true,
 		},
 		{
-			name:   "With nil logger",
-			store:  store,
-			logger: nil,
+			name: "valid config with mock store",
+			config: &Config{
+				Enabled:       true,
+				HashAlgorithm: "sha256",
+			},
+			opts: []ValidatorOption{
+				WithStore(newMockStore()),
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid config with memory store",
+			config: &Config{
+				Enabled:       true,
+				HashAlgorithm: "sha256",
+				Store: &StoreConfig{
+					Type: "memory",
+					Keys: []StaticKey{
+						{
+							ID:      "key1",
+							Key:     "test-api-key",
+							Enabled: true,
+						},
+					},
+				},
+			},
+			wantErr: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			validator := NewValidator(tt.store, tt.logger)
-			assert.NotNil(t, validator)
-			assert.NotNil(t, validator.hasher)
+
+			validator, err := NewValidator(tt.config, tt.opts...)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, validator)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, validator)
+			}
 		})
 	}
 }
 
-func TestNewValidatorWithConfig(t *testing.T) {
+func TestValidator_Validate_EmptyKey(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore()
-
-	tests := []struct {
-		name   string
-		config *ValidatorConfig
-	}{
-		{
-			name: "With all config",
-			config: &ValidatorConfig{
-				Store:  store,
-				Hasher: &SHA256Hasher{},
-				Logger: zap.NewNop(),
-			},
-		},
-		{
-			name: "With nil logger",
-			config: &ValidatorConfig{
-				Store:  store,
-				Hasher: &SHA256Hasher{},
-				Logger: nil,
-			},
-		},
-		{
-			name: "With nil hasher",
-			config: &ValidatorConfig{
-				Store:  store,
-				Hasher: nil,
-				Logger: zap.NewNop(),
-			},
-		},
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			validator := NewValidatorWithConfig(tt.config)
-			assert.NotNil(t, validator)
-			assert.NotNil(t, validator.hasher)
-			assert.NotNil(t, validator.logger)
-		})
-	}
+	validator, err := NewValidator(config,
+		WithStore(newMockStore()),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), "")
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
+	assert.ErrorIs(t, err, ErrEmptyAPIKey)
 }
 
-func TestValidator_Validate(t *testing.T) {
+func TestValidator_Validate_KeyNotFound(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore()
-	hasher := &SHA256Hasher{}
-
-	// Create a valid API key
-	validKey := "valid-api-key-12345"
-	validKeyHash := hasher.Hash(validKey)
-	store.keys[validKeyHash] = &APIKey{
-		ID:        "key-1",
-		Name:      "Test Key",
-		KeyHash:   validKeyHash,
-		Enabled:   true,
-		CreatedAt: time.Now(),
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
 	}
 
-	// Create a disabled API key
-	disabledKey := "disabled-api-key"
-	disabledKeyHash := hasher.Hash(disabledKey)
-	store.keys[disabledKeyHash] = &APIKey{
-		ID:        "key-2",
-		Name:      "Disabled Key",
-		KeyHash:   disabledKeyHash,
-		Enabled:   false,
-		CreatedAt: time.Now(),
+	validator, err := NewValidator(config,
+		WithStore(newMockStore()),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), "nonexistent-key")
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
+	assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+}
+
+func TestValidator_Validate_SHA256(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
 	}
 
-	// Create an expired API key
-	expiredKey := "expired-api-key"
-	expiredKeyHash := hasher.Hash(expiredKey)
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Name:    "Test Key",
+		Enabled: true,
+		Scopes:  []string{"read", "write"},
+		Roles:   []string{"admin"},
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+	assert.Equal(t, "key1", keyInfo.ID)
+	assert.Equal(t, "Test Key", keyInfo.Name)
+	assert.Equal(t, []string{"read", "write"}, keyInfo.Scopes)
+	assert.Equal(t, []string{"admin"}, keyInfo.Roles)
+}
+
+func TestValidator_Validate_SHA256_WithHash(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+	hash := sha256.Sum256([]byte(apiKey))
+	hashStr := hex.EncodeToString(hash[:])
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Hash:    hashStr,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+	assert.Equal(t, "key1", keyInfo.ID)
+}
+
+func TestValidator_Validate_SHA512(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha512",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+	assert.Equal(t, "key1", keyInfo.ID)
+}
+
+func TestValidator_Validate_SHA512_WithHash(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+	hash := sha512.Sum512([]byte(apiKey))
+	hashStr := hex.EncodeToString(hash[:])
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha512",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Hash:    hashStr,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+}
+
+func TestValidator_Validate_Bcrypt(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+	hash, err := bcrypt.GenerateFromPassword([]byte(apiKey), bcrypt.DefaultCost)
+	require.NoError(t, err)
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "bcrypt",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Hash:    string(hash),
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+	assert.Equal(t, "key1", keyInfo.ID)
+}
+
+func TestValidator_Validate_Bcrypt_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+	hash, err := bcrypt.GenerateFromPassword([]byte(apiKey), bcrypt.DefaultCost)
+	require.NoError(t, err)
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "bcrypt",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Hash:    string(hash),
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), "wrong-api-key")
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
+}
+
+func TestValidator_Validate_Plaintext(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "plaintext",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+	assert.Equal(t, "key1", keyInfo.ID)
+}
+
+func TestValidator_Validate_Plaintext_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "plaintext",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// When the key is not found in the store, it returns ErrAPIKeyNotFound
+	keyInfo, err := validator.Validate(context.Background(), "wrong-api-key")
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
+	assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+}
+
+func TestValidator_Validate_DisabledKey(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: false, // Disabled
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
+	assert.ErrorIs(t, err, ErrAPIKeyDisabled)
+}
+
+func TestValidator_Validate_ExpiredKey(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
 	expiredTime := time.Now().Add(-time.Hour)
-	store.keys[expiredKeyHash] = &APIKey{
-		ID:        "key-3",
-		Name:      "Expired Key",
-		KeyHash:   expiredKeyHash,
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:        "key1",
+		Key:       apiKey,
 		Enabled:   true,
 		ExpiresAt: &expiredTime,
-		CreatedAt: time.Now(),
-	}
+	})
 
-	validator := NewValidator(store, zap.NewNop())
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
 
-	tests := []struct {
-		name          string
-		key           string
-		expectedError error
-	}{
-		{
-			name:          "Valid key",
-			key:           validKey,
-			expectedError: nil,
-		},
-		{
-			name:          "Empty key",
-			key:           "",
-			expectedError: ErrMissingKey,
-		},
-		{
-			name:          "Non-existent key",
-			key:           "non-existent-key",
-			expectedError: ErrKeyNotFound,
-		},
-		{
-			name:          "Disabled key",
-			key:           disabledKey,
-			expectedError: ErrKeyDisabled,
-		},
-		{
-			name:          "Expired key",
-			key:           expiredKey,
-			expectedError: ErrKeyExpired,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			apiKey, err := validator.Validate(context.Background(), tt.key)
-
-			if tt.expectedError != nil {
-				assert.ErrorIs(t, err, tt.expectedError)
-				assert.Nil(t, apiKey)
-			} else {
-				require.NoError(t, err)
-				assert.NotNil(t, apiKey)
-			}
-		})
-	}
-}
-
-func TestValidator_ValidateWithScopes(t *testing.T) {
-	t.Parallel()
-
-	store := NewMemoryStore()
-	hasher := &SHA256Hasher{}
-
-	// Create an API key with scopes
-	key := "scoped-api-key"
-	keyHash := hasher.Hash(key)
-	store.keys[keyHash] = &APIKey{
-		ID:        "key-1",
-		Name:      "Scoped Key",
-		KeyHash:   keyHash,
-		Scopes:    []string{"read", "write"},
-		Enabled:   true,
-		CreatedAt: time.Now(),
-	}
-
-	validator := NewValidator(store, zap.NewNop())
-
-	tests := []struct {
-		name           string
-		key            string
-		requiredScopes []string
-		expectedError  error
-	}{
-		{
-			name:           "Has required scopes",
-			key:            key,
-			requiredScopes: []string{"read"},
-			expectedError:  nil,
-		},
-		{
-			name:           "Has all required scopes",
-			key:            key,
-			requiredScopes: []string{"read", "write"},
-			expectedError:  nil,
-		},
-		{
-			name:           "Missing required scope",
-			key:            key,
-			requiredScopes: []string{"read", "admin"},
-			expectedError:  ErrInsufficientScope,
-		},
-		{
-			name:           "No required scopes",
-			key:            key,
-			requiredScopes: []string{},
-			expectedError:  nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			apiKey, err := validator.ValidateWithScopes(context.Background(), tt.key, tt.requiredScopes...)
-
-			if tt.expectedError != nil {
-				assert.ErrorIs(t, err, tt.expectedError)
-			} else {
-				require.NoError(t, err)
-				assert.NotNil(t, apiKey)
-			}
-		})
-	}
-}
-
-func TestValidator_Validate_StoreError(t *testing.T) {
-	t.Parallel()
-
-	// Create a mock store that returns an error
-	mockStore := &mockStore{
-		getErr: errors.New("database connection failed"),
-	}
-
-	validator := NewValidator(mockStore, zap.NewNop())
-
-	_, err := validator.Validate(context.Background(), "any-key")
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "database connection failed")
+	assert.Nil(t, keyInfo)
+	assert.ErrorIs(t, err, ErrAPIKeyExpired)
 }
 
-func TestSHA256Hasher_Hash(t *testing.T) {
+func TestValidator_Validate_ValidExpiration(t *testing.T) {
 	t.Parallel()
 
-	hasher := &SHA256Hasher{}
+	apiKey := "test-api-key-12345"
+	futureTime := time.Now().Add(time.Hour)
 
-	tests := []struct {
-		name  string
-		input string
-	}{
-		{
-			name:  "Simple string",
-			input: "test-api-key",
-		},
-		{
-			name:  "Empty string",
-			input: "",
-		},
-		{
-			name:  "Long string",
-			input: "this-is-a-very-long-api-key-that-should-still-be-hashed-correctly-12345678901234567890",
-		},
-		{
-			name:  "Special characters",
-			input: "key-with-special-chars!@#$%^&*()",
-		},
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			hash := hasher.Hash(tt.input)
-
-			// SHA256 produces 64 hex characters
-			assert.Len(t, hash, 64)
-
-			// Same input should produce same hash
-			hash2 := hasher.Hash(tt.input)
-			assert.Equal(t, hash, hash2)
-		})
-	}
-}
-
-func TestSHA256Hasher_Compare(t *testing.T) {
-	t.Parallel()
-
-	hasher := &SHA256Hasher{}
-
-	tests := []struct {
-		name     string
-		key      string
-		hash     string
-		expected bool
-	}{
-		{
-			name:     "Matching key and hash",
-			key:      "test-api-key",
-			hash:     hasher.Hash("test-api-key"),
-			expected: true,
-		},
-		{
-			name:     "Non-matching key and hash",
-			key:      "test-api-key",
-			hash:     hasher.Hash("different-key"),
-			expected: false,
-		},
-		{
-			name:     "Empty key",
-			key:      "",
-			hash:     hasher.Hash(""),
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			result := hasher.Compare(tt.key, tt.hash)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestGetAPIKeyFromContext(t *testing.T) {
-	t.Parallel()
-
-	apiKey := &APIKey{
-		ID:   "key-1",
-		Name: "Test Key",
-	}
-
-	tests := []struct {
-		name     string
-		ctx      context.Context
-		expected *APIKey
-		found    bool
-	}{
-		{
-			name:     "Key in context",
-			ctx:      ContextWithAPIKey(context.Background(), apiKey),
-			expected: apiKey,
-			found:    true,
-		},
-		{
-			name:     "No key in context",
-			ctx:      context.Background(),
-			expected: nil,
-			found:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key, found := GetAPIKeyFromContext(tt.ctx)
-			assert.Equal(t, tt.found, found)
-			assert.Equal(t, tt.expected, key)
-		})
-	}
-}
-
-func TestContextWithAPIKey(t *testing.T) {
-	t.Parallel()
-
-	apiKey := &APIKey{
-		ID:   "key-1",
-		Name: "Test Key",
-	}
-
-	ctx := ContextWithAPIKey(context.Background(), apiKey)
-	assert.NotNil(t, ctx)
-
-	// Verify the key can be retrieved
-	key, found := GetAPIKeyFromContext(ctx)
-	assert.True(t, found)
-	assert.Equal(t, apiKey, key)
-}
-
-// Test error variables
-func TestErrorVariables(t *testing.T) {
-	t.Parallel()
-
-	assert.NotNil(t, ErrKeyNotFound)
-	assert.NotNil(t, ErrKeyExpired)
-	assert.NotNil(t, ErrKeyDisabled)
-	assert.NotNil(t, ErrKeyInvalid)
-	assert.NotNil(t, ErrInvalidHash)
-	assert.NotNil(t, ErrMissingKey)
-	assert.NotNil(t, ErrInsufficientScope)
-
-	// Verify error messages
-	assert.Equal(t, "API key not found", ErrKeyNotFound.Error())
-	assert.Equal(t, "API key has expired", ErrKeyExpired.Error())
-	assert.Equal(t, "API key is disabled", ErrKeyDisabled.Error())
-	assert.Equal(t, "invalid API key", ErrKeyInvalid.Error())
-	assert.Equal(t, "invalid key hash", ErrInvalidHash.Error())
-	assert.Equal(t, "missing API key", ErrMissingKey.Error())
-	assert.Equal(t, "insufficient scope", ErrInsufficientScope.Error())
-}
-
-// Helper function to create time pointer
-func timePtr(t time.Time) *time.Time {
-	return &t
-}
-
-// Mock store for testing error scenarios
-type mockStore struct {
-	getErr error
-}
-
-func (m *mockStore) Get(ctx context.Context, keyHash string) (*APIKey, error) {
-	if m.getErr != nil {
-		return nil, m.getErr
-	}
-	return nil, ErrKeyNotFound
-}
-
-func (m *mockStore) List(ctx context.Context) ([]*APIKey, error) {
-	return nil, nil
-}
-
-func (m *mockStore) Create(ctx context.Context, key *APIKey) error {
-	return nil
-}
-
-func (m *mockStore) Delete(ctx context.Context, keyHash string) error {
-	return nil
-}
-
-func (m *mockStore) Validate(ctx context.Context, keyHash string) (bool, error) {
-	return false, nil
-}
-
-// Benchmark tests
-func BenchmarkSHA256Hasher_Hash(b *testing.B) {
-	hasher := &SHA256Hasher{}
-	key := "test-api-key-12345"
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		hasher.Hash(key)
-	}
-}
-
-func BenchmarkSHA256Hasher_Compare(b *testing.B) {
-	hasher := &SHA256Hasher{}
-	key := "test-api-key-12345"
-	hash := hasher.Hash(key)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		hasher.Compare(key, hash)
-	}
-}
-
-func BenchmarkValidator_Validate(b *testing.B) {
-	store := NewMemoryStore()
-	hasher := &SHA256Hasher{}
-
-	key := "benchmark-api-key"
-	keyHash := hasher.Hash(key)
-	store.keys[keyHash] = &APIKey{
-		ID:        "key-1",
-		Name:      "Benchmark Key",
-		KeyHash:   keyHash,
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:        "key1",
+		Key:       apiKey,
 		Enabled:   true,
-		CreatedAt: time.Now(),
-	}
+		ExpiresAt: &futureTime,
+	})
 
-	validator := NewValidator(store, zap.NewNop())
-	ctx := context.Background()
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		validator.Validate(ctx, key)
-	}
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+	assert.Equal(t, "key1", keyInfo.ID)
 }
 
-// Test concurrent validation
-func TestValidator_ConcurrentValidation(t *testing.T) {
+func TestValidator_Validate_WithMetadata(t *testing.T) {
 	t.Parallel()
 
-	store := NewMemoryStore()
-	hasher := &SHA256Hasher{}
+	apiKey := "test-api-key-12345"
 
-	key := "concurrent-api-key"
-	keyHash := hasher.Hash(key)
-	store.keys[keyHash] = &APIKey{
-		ID:        "key-1",
-		Name:      "Concurrent Key",
-		KeyHash:   keyHash,
-		Enabled:   true,
-		CreatedAt: time.Now(),
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
 	}
 
-	validator := NewValidator(store, zap.NewNop())
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: true,
+		Metadata: map[string]string{
+			"tenant": "acme",
+			"env":    "production",
+		},
+	})
 
-	done := make(chan bool)
-	for i := 0; i < 10; i++ {
-		go func() {
-			for j := 0; j < 100; j++ {
-				_, _ = validator.Validate(context.Background(), key)
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	require.NoError(t, err)
+	assert.NotNil(t, keyInfo)
+	assert.Equal(t, "acme", keyInfo.Metadata["tenant"])
+	assert.Equal(t, "production", keyInfo.Metadata["env"])
+}
+
+func TestKeyInfo_IsExpired(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		expiresAt *time.Time
+		expected  bool
+	}{
+		{
+			name:      "no expiration",
+			expiresAt: nil,
+			expected:  false,
+		},
+		{
+			name:      "future expiration",
+			expiresAt: func() *time.Time { t := time.Now().Add(time.Hour); return &t }(),
+			expected:  false,
+		},
+		{
+			name:      "past expiration",
+			expiresAt: func() *time.Time { t := time.Now().Add(-time.Hour); return &t }(),
+			expected:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			keyInfo := &KeyInfo{
+				ID:        "key1",
+				ExpiresAt: tt.expiresAt,
 			}
-			done <- true
-		}()
+
+			assert.Equal(t, tt.expected, keyInfo.IsExpired())
+		})
+	}
+}
+
+func TestHashKey(t *testing.T) {
+	t.Parallel()
+
+	key := "test-api-key"
+
+	tests := []struct {
+		name      string
+		algorithm string
+		wantErr   bool
+	}{
+		{
+			name:      "sha256",
+			algorithm: "sha256",
+			wantErr:   false,
+		},
+		{
+			name:      "sha512",
+			algorithm: "sha512",
+			wantErr:   false,
+		},
+		{
+			name:      "bcrypt",
+			algorithm: "bcrypt",
+			wantErr:   false,
+		},
+		{
+			name:      "plaintext",
+			algorithm: "plaintext",
+			wantErr:   false,
+		},
+		{
+			name:      "invalid algorithm",
+			algorithm: "invalid",
+			wantErr:   true,
+		},
 	}
 
-	for i := 0; i < 10; i++ {
-		<-done
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			hash, err := HashKey(key, tt.algorithm)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Empty(t, hash)
+			} else {
+				assert.NoError(t, err)
+				assert.NotEmpty(t, hash)
+
+				// Verify hash is correct for deterministic algorithms
+				switch tt.algorithm {
+				case "sha256":
+					expected := sha256.Sum256([]byte(key))
+					assert.Equal(t, hex.EncodeToString(expected[:]), hash)
+				case "sha512":
+					expected := sha512.Sum512([]byte(key))
+					assert.Equal(t, hex.EncodeToString(expected[:]), hash)
+				case "plaintext":
+					assert.Equal(t, key, hash)
+				case "bcrypt":
+					// Verify bcrypt hash is valid
+					err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(key))
+					assert.NoError(t, err)
+				}
+			}
+		})
 	}
+}
+
+func TestValidatorOptions(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
+	}
+
+	store := newMockStore()
+	logger := observability.NopLogger()
+	metrics := NewMetrics("test")
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(logger),
+		WithValidatorMetrics(metrics),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, validator)
+}
+
+func TestValidator_Validate_UnsupportedAlgorithm(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "unsupported",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), apiKey)
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
+	assert.Contains(t, err.Error(), "unsupported hash algorithm")
+}
+
+func TestValidator_Validate_SHA256_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+	wrongKey := "wrong-api-key"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha256",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), wrongKey)
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
+}
+
+func TestValidator_Validate_SHA512_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "test-api-key-12345"
+	wrongKey := "wrong-api-key"
+
+	config := &Config{
+		Enabled:       true,
+		HashAlgorithm: "sha512",
+	}
+
+	store := newMockStore()
+	store.AddKey(&StaticKey{
+		ID:      "key1",
+		Key:     apiKey,
+		Enabled: true,
+	})
+
+	validator, err := NewValidator(config,
+		WithStore(store),
+		WithValidatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	keyInfo, err := validator.Validate(context.Background(), wrongKey)
+	assert.Error(t, err)
+	assert.Nil(t, keyInfo)
 }

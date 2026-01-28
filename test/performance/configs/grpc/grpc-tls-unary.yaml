@@ -1,0 +1,69 @@
+# gRPC Performance Test Configuration: Unary RPC with TLS
+# Purpose: Measure throughput for unary gRPC calls over TLS
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000+ RPS
+# Tool: ghz (https://ghz.sh)
+
+# Test metadata
+name: grpc-tls-unary-throughput
+description: Unary RPC throughput test with TLS through API Gateway
+
+# Target configuration
+target:
+  host: "127.0.0.1"
+  port: 9443  # TLS-enabled gRPC port
+  
+# Call configuration
+call:
+  service: "api.v1.TestService"
+  method: "Echo"
+  reflection: true
+
+# Request data
+data:
+  message: "Performance test message for TLS unary RPC throughput measurement"
+  timestamp: "2024-01-01T00:00:00Z"
+
+# Load configuration
+load:
+  total: 600000
+  concurrency: 100
+  rps: 2000
+  duration: "5m"
+
+# Connection configuration
+connection:
+  timeout: "15s"  # Slightly higher for TLS handshake
+  keepalive:
+    time: "30s"
+    timeout: "10s"
+  
+  # TLS settings
+  insecure: false
+  
+  # Skip TLS verification for self-signed certs in test environment
+  # In production, use proper CA certificates
+  skipVerify: true
+  
+  # Optional: Specify CA certificate
+  # cacert: "/etc/gateway/certs/ca.crt"
+  
+  # Optional: Client certificate for mTLS
+  # cert: "/etc/gateway/certs/client.crt"
+  # key: "/etc/gateway/certs/client.key"
+  
+  connections: 20
+
+# Metadata (headers)
+metadata:
+  "x-perf-test": "grpc-tls-unary"
+  "x-request-id": "{{.RequestNumber}}"
+
+# Output configuration
+output:
+  format: "json"
+
+# Advanced options
+options:
+  binary: false
+  skipTLSVerify: true

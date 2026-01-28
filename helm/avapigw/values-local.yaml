@@ -1,0 +1,353 @@
+# Local Kubernetes deployment values for avapigw
+# Uses Docker Desktop K8s with docker-compose backends on host network
+#
+# NAMESPACE: avapigw-test (REQUIRED)
+# Deploy with: helm upgrade --install avapigw helm/avapigw/ -f helm/avapigw/values-local.yaml -n avapigw-test --create-namespace
+#
+# TLS Configuration:
+#   - HTTP listener: HTTPS on port 8443 via Vault PKI (TLS enabled)
+#   - gRPC listener: gRPC TLS on port 9443 via Vault PKI (TLS enabled)
+#   - Vault running in Docker Compose at http://host.docker.internal:8200
+#   - Vault Kubernetes auth with role "avapigw" bound to SA "avapigw"
+#   - Vault PKI engine with role "test-role"
+#
+# Vault must be configured with:
+#   - PKI engine enabled with test-role (allows localhost, *.local, *.test, avapigw.local)
+#   - Kubernetes auth method with role avapigw bound to SA avapigw in namespace avapigw-test
+#   - Policy avapigw granting PKI issue, KV read, Transit operations
+#
+# Setup scripts:
+#   - ./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test
+#   - ./test/performance/scripts/run-k8s-test.sh --namespace=avapigw-test
+
+# Explicit namespace configuration for local testing
+# This ensures consistent namespace usage across all test scripts
+namespace: avapigw-test
+
+replicaCount: 1
+
+image:
+  repository: avapigw
+  pullPolicy: Never
+  tag: "test"
+
+service:
+  type: NodePort
+  httpPort: 8080
+  httpsPort: 8443
+  grpcPort: 9000
+  grpcTlsPort: 9443
+  metricsPort: 9090
+
+# Relax security for local testing
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+gateway:
+  logLevel: info
+  logFormat: json
+  environment: local-k8s
+
+  listeners:
+    http:
+      enabled: true
+      port: 8080
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+    grpc:
+      enabled: true
+      port: 9000
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+      maxConcurrentStreams: 100
+      maxRecvMsgSize: 4194304
+      maxSendMsgSize: 4194304
+      reflection: true
+      healthCheck: true
+
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy"}'
+        headers:
+          Content-Type: application/json
+
+    - name: items-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+          weight: 50
+        - destination:
+            host: host.docker.internal
+            port: 8802
+          weight: 50
+      timeout: 30s
+
+    - name: websocket
+      match:
+        - uri:
+            exact: /ws
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+      timeout: 0s
+
+    - name: backend-health
+      match:
+        - uri:
+            prefix: /backend/health
+          methods:
+            - GET
+      rewrite:
+        uri: /health
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+
+  backends:
+    - name: backend-service-1
+      hosts:
+        - address: host.docker.internal
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+    - name: backend-service-2
+      hosts:
+        - address: host.docker.internal
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  grpcRoutes:
+    - name: test-service-route
+      match:
+        - service:
+            exact: api.v1.TestService
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8803
+          weight: 50
+        - destination:
+            host: host.docker.internal
+            port: 8804
+          weight: 50
+      timeout: 30s
+
+    - name: catch-all-grpc
+      match:
+        - service:
+            prefix: "/"
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8803
+
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: host.docker.internal
+          port: 8803
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 10s
+        timeout: 5s
+      connectionPool:
+        maxConnections: 100
+        connectTimeout: 5s
+
+    - name: grpc-backend-2
+      hosts:
+        - address: host.docker.internal
+          port: 8804
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 10s
+        timeout: 5s
+      connectionPool:
+        maxConnections: 100
+        connectTimeout: 5s
+
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+    halfOpenRequests: 3
+
+  security:
+    enabled: true
+    headers:
+      enabled: true
+      xFrameOptions: "DENY"
+      xContentTypeOptions: "nosniff"
+      xXSSProtection: "1; mode=block"
+    hsts:
+      enabled: false
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 86400
+    allowCredentials: false
+
+  audit:
+    enabled: true
+    output: stdout
+    format: json
+    level: info
+    events:
+      authentication: true
+      authorization: true
+      request: false
+      response: false
+      configuration: true
+      security: true
+    skipPaths:
+      - /health
+      - /metrics
+      - /ready
+      - /live
+    redactFields:
+      - password
+      - secret
+      - token
+      - authorization
+      - cookie
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+      samplingRate: 1.0
+      otlpEndpoint: ""
+      serviceName: avapigw
+    logging:
+      level: info
+      format: json
+
+vault:
+  enabled: true
+  address: "http://host.docker.internal:8200"
+  authMethod: kubernetes
+  role: avapigw
+  pki:
+    enabled: true
+    pkiMount: "pki"
+    role: "test-role"
+    commonName: "avapigw.local"
+    altNames:
+      - "localhost"
+      - "avapigw.local"
+      - "*.avapigw.local"
+    ttl: "24h"
+    renewBefore: "1h"
+    grpc:
+      enabled: true

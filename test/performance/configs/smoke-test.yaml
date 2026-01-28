@@ -1,0 +1,57 @@
+# Yandex Tank Configuration: Quick Smoke Test
+# Purpose: Verify performance test infrastructure is working
+# Duration: 30 seconds total (10s warmup + 15s sustain + 5s cooldown)
+# Target: Basic endpoints to verify gateway connectivity
+# Use this test to quickly validate the setup before running longer tests
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Very short test for smoke testing
+    # Warmup: 10s ramp from 10 to 100 RPS
+    # Sustain: 15s at 100 RPS
+    # Cooldown: 5s ramp down
+    schedule: line(10, 100, 10s) const(100, 15s) line(100, 10, 5s)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 5s
+
+  # Instance settings - low concurrency for smoke test
+  instances: 100
+  threads: 2
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/SmokeTest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: smoke-test]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 20% for 10 seconds
+    - http(5xx,20%,10s)
+    # Stop if total network errors exceed 10% for 10 seconds
+    - http(net,10%,10s)
