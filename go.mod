@@ -1,6 +1,6 @@
 module github.com/vyrodovalexey/avapigw
 
-go 1.25
+go 1.25.6
 
 require (
 	github.com/alicebob/miniredis/v2 v2.36.1

@@ -143,12 +143,14 @@ func createSampler(rate float64) sdktrace.Sampler {
 
 // buildOTLPExporterOptions builds OTLP gRPC exporter options with retry configuration.
 func buildOTLPExporterOptions(cfg TracerConfig) []otlptracegrpc.Option {
-	opts := []otlptracegrpc.Option{
+	// Preallocate with capacity for all options (4 base + 1 retry)
+	opts := make([]otlptracegrpc.Option, 0, 5)
+	opts = append(opts,
 		otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
 		otlptracegrpc.WithInsecure(),
 		otlptracegrpc.WithTimeout(DefaultOTLPTimeout),
 		otlptracegrpc.WithReconnectionPeriod(DefaultOTLPReconnectionPeriod),
-	}
+	)
 
 	// Configure retry with exponential backoff
 	retryConfig := buildRetryConfig(cfg.RetryConfig)
