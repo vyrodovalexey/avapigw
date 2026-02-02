@@ -144,14 +144,15 @@ func NewGRPCListener(
 		grpcCfg = config.DefaultGRPCListenerConfig()
 	}
 
-	// Build server options
-	serverOpts := []grpcserver.Option{
+	// Build server options (preallocate with capacity for base options + potential TLS options)
+	serverOpts := make([]grpcserver.Option, 0, 8)
+	serverOpts = append(serverOpts,
 		grpcserver.WithLogger(l.logger),
 		grpcserver.WithAddress(l.Address()),
 		grpcserver.WithUnaryInterceptors(unaryInterceptors...),
 		grpcserver.WithStreamInterceptors(streamInterceptors...),
 		grpcserver.WithUnknownServiceHandler(l.proxy.StreamHandler()),
-	}
+	)
 
 	// Configure TLS
 	tlsOpts, err := l.buildTLSOptions(grpcCfg)
