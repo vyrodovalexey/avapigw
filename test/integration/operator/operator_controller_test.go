@@ -58,10 +58,11 @@ func TestIntegration_Controller_APIRoute_Reconcile(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -95,10 +96,11 @@ func TestIntegration_Controller_APIRoute_Reconcile(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -139,10 +141,11 @@ func TestIntegration_Controller_APIRoute_Reconcile(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -192,10 +195,11 @@ func TestIntegration_Controller_Backend_Reconcile(t *testing.T) {
 			Build()
 
 		reconciler := &controller.BackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -255,10 +259,11 @@ func TestIntegration_Controller_GRPCRoute_Reconcile(t *testing.T) {
 			Build()
 
 		reconciler := &controller.GRPCRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -314,10 +319,11 @@ func TestIntegration_Controller_GRPCBackend_Reconcile(t *testing.T) {
 			Build()
 
 		reconciler := &controller.GRPCBackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -370,10 +376,11 @@ func TestIntegration_Controller_StatusUpdate(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -437,10 +444,11 @@ func TestIntegration_Controller_EventRecording(t *testing.T) {
 
 		recorder := record.NewFakeRecorder(10)
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   recorder,
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      recorder,
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
@@ -495,10 +503,11 @@ func TestIntegration_Controller_RequeueOnError(t *testing.T) {
 
 		// Use nil gRPC server to simulate error
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: nil, // This will cause reconcile to succeed (no-op)
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    nil, // This will cause reconcile to succeed (no-op)
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		ctx := context.Background()
