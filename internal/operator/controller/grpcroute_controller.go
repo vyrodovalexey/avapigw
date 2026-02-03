@@ -47,6 +47,11 @@ func (r *GRPCRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling GRPCRoute", "name", req.Name, "namespace", req.Namespace)
 
+	// Initialize StatusUpdater if not set (for direct Reconcile calls without SetupWithManager)
+	if r.StatusUpdater == nil {
+		r.StatusUpdater = NewStatusUpdater(r.Client)
+	}
+
 	// Fetch the GRPCRoute instance
 	grpcRoute := &avapigwv1alpha1.GRPCRoute{}
 	if err := r.Get(ctx, req.NamespacedName, grpcRoute); err != nil {

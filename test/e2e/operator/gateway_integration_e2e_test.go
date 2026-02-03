@@ -53,10 +53,11 @@ func TestE2E_GatewayIntegration_ConfigPush(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -114,10 +115,11 @@ func TestE2E_GatewayIntegration_ConfigPush(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -198,10 +200,11 @@ func TestE2E_GatewayIntegration_ConfigPush(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -303,28 +306,32 @@ func TestE2E_GatewayIntegration_ConfigSync(t *testing.T) {
 
 		// Create reconcilers
 		apiRouteReconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 		backendReconciler := &controller.BackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 		grpcRouteReconciler := &controller.GRPCRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 		grpcBackendReconciler := &controller.GRPCBackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile all
@@ -420,10 +427,11 @@ func TestE2E_GatewayIntegration_ConcurrentUpdates(t *testing.T) {
 		client := builder.Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(100),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(100),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile all routes concurrently
@@ -517,10 +525,11 @@ func TestE2E_GatewayIntegration_HotReload(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -603,10 +612,11 @@ func TestE2E_GatewayIntegration_FailureRecovery(t *testing.T) {
 
 		// Create reconciler with nil gRPC server
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: nil, // Nil server
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    nil, // Nil server
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -631,10 +641,11 @@ func TestE2E_GatewayIntegration_FailureRecovery(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -695,10 +706,11 @@ func TestE2E_GatewayIntegration_ScaleTest(t *testing.T) {
 		client := builder.Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(200),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(200),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile all routes

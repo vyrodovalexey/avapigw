@@ -47,6 +47,11 @@ func (r *BackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling Backend", "name", req.Name, "namespace", req.Namespace)
 
+	// Initialize StatusUpdater if not set (for direct Reconcile calls without SetupWithManager)
+	if r.StatusUpdater == nil {
+		r.StatusUpdater = NewStatusUpdater(r.Client)
+	}
+
 	// Fetch the Backend instance
 	backend := &avapigwv1alpha1.Backend{}
 	if err := r.Get(ctx, req.NamespacedName, backend); err != nil {

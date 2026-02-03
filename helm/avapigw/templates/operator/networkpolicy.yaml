@@ -1,0 +1,27 @@
+{{- if and .Values.operator.enabled .Values.operator.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "avapigw.operator.fullname" . }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "avapigw.operator.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- if .Values.operator.networkPolicy.ingress }}
+    - Ingress
+    {{- end }}
+    {{- if .Values.operator.networkPolicy.egress }}
+    - Egress
+    {{- end }}
+  {{- with .Values.operator.networkPolicy.ingress }}
+  ingress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.operator.networkPolicy.egress }}
+  egress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

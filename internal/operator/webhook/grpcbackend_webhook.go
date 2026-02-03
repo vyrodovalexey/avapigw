@@ -81,7 +81,7 @@ func (v *GRPCBackendValidator) ValidateDelete(
 
 // validate performs validation on the GRPCBackend spec.
 //
-//nolint:gocognit,gocyclo // Validation logic requires checking multiple fields
+//nolint:gocognit,gocyclo // Validation requires checking hosts, TLS, connection pool, and auth
 func (v *GRPCBackendValidator) validate(grpcBackend *avapigwv1alpha1.GRPCBackend) (admission.Warnings, error) {
 	var warnings admission.Warnings
 	var errs []string

@@ -82,7 +82,7 @@ func (v *GRPCRouteValidator) ValidateDelete(
 
 // validate performs validation on the GRPCRoute spec.
 //
-//nolint:gocognit,gocyclo,unparam // Validation requires multiple field checks; warnings for interface
+//nolint:gocognit,gocyclo,unparam // Validation requires checking matches, routes, policies; warnings for interface
 func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (admission.Warnings, error) {
 	var warnings admission.Warnings
 	var errs []string
@@ -178,7 +178,7 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 
 // validateMatches validates gRPC route match conditions.
 //
-//nolint:gocognit // Match validation requires checking multiple nested conditions
+//nolint:gocognit // Match validation requires checking service, method, authority, and metadata
 func (v *GRPCRouteValidator) validateMatches(matches []avapigwv1alpha1.GRPCRouteMatch) error {
 	for i, match := range matches {
 		// Validate service match
@@ -289,7 +289,7 @@ func (v *GRPCRouteValidator) validateGRPCRetryPolicy(policy *avapigwv1alpha1.GRP
 	}
 
 	if policy.RetryOn != "" {
-		//nolint:misspell // "cancelled" is the correct gRPC status code spelling
+		//nolint:misspell // "cancelled" is the correct gRPC status code spelling per gRPC specification
 		validConditions := map[string]bool{
 			"cancelled": true, "deadline-exceeded": true, "internal": true,
 			"resource-exhausted": true, "unavailable": true,

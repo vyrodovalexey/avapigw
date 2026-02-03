@@ -1230,11 +1230,25 @@ jobs:
             --set ingress.enabled=true \
             --set serviceMonitor.enabled=true
 
+      - name: Helm template with operator enabled
+        run: |
+          echo "==> Validating Helm templates with operator enabled..."
+          helm template avapigw helm/avapigw \
+            --set operator.enabled=true \
+            --set operator.webhook.enabled=false > /dev/null
+          echo "Operator template validation successful!"
+
       - name: Validate Kubernetes manifests
         run: |
           echo "==> Validating generated Kubernetes manifests..."
           helm template avapigw helm/avapigw | kubectl apply --dry-run=client -f -
           echo "Kubernetes manifest validation successful!"
+
+      - name: Validate Kubernetes manifests with operator
+        run: |
+          echo "==> Validating generated Kubernetes manifests with operator..."
+          helm template avapigw helm/avapigw --set operator.enabled=true --set operator.webhook.enabled=false | kubectl apply --dry-run=client -f -
+          echo "Kubernetes manifest validation with operator successful!"
 
   # ===========================================================================
   # Helm Chart Install Test (TAG - Full Install)

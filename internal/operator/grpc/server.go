@@ -20,6 +20,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/operator/cert"
+	"github.com/vyrodovalexey/avapigw/internal/operator/keys"
 	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
@@ -196,19 +197,19 @@ func NewServer(config *ServerConfig) (*Server, error) {
 	}
 
 	if config.Port <= 0 {
-		config.Port = 9444
+		config.Port = DefaultPort
 	}
 
 	if config.MaxConcurrentStreams == 0 {
-		config.MaxConcurrentStreams = 100
+		config.MaxConcurrentStreams = DefaultMaxConcurrentStreams
 	}
 
 	if config.MaxRecvMsgSize == 0 {
-		config.MaxRecvMsgSize = 4 * 1024 * 1024 // 4MB
+		config.MaxRecvMsgSize = DefaultMaxMessageSize
 	}
 
 	if config.MaxSendMsgSize == 0 {
-		config.MaxSendMsgSize = 4 * 1024 * 1024 // 4MB
+		config.MaxSendMsgSize = DefaultMaxMessageSize
 	}
 
 	// Initialize retry configuration
@@ -265,14 +266,14 @@ func (s *Server) Start(ctx context.Context) error {
 		grpc.MaxRecvMsgSize(s.config.MaxRecvMsgSize),
 		grpc.MaxSendMsgSize(s.config.MaxSendMsgSize),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			MaxConnectionIdle:     5 * time.Minute,
-			MaxConnectionAge:      30 * time.Minute,
-			MaxConnectionAgeGrace: 5 * time.Second,
-			Time:                  30 * time.Second,
-			Timeout:               10 * time.Second,
+			MaxConnectionIdle:     DefaultMaxConnectionIdle,
+			MaxConnectionAge:      DefaultMaxConnectionAge,
+			MaxConnectionAgeGrace: DefaultMaxConnectionAgeGrace,
+			Time:                  DefaultKeepaliveTime,
+			Timeout:               DefaultKeepaliveTimeout,
 		}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             10 * time.Second,
+			MinTime:             DefaultMinKeepaliveTime,
 			PermitWithoutStream: true,
 		}),
 	}
@@ -393,37 +394,16 @@ func (s *Server) ApplyAPIRoute(ctx context.Context, name, namespace string, conf
 
 // applyAPIRouteInternal performs the actual API route application with mutex handling.
 func (s *Server) applyAPIRouteInternal(ctx context.Context, name, namespace string, config []byte) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-		// Check context again after acquiring lock
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		s.apiRoutes[key] = config
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.apiRoutes[key] = config
+
+	return nil
 }
 
 // DeleteAPIRoute deletes an API route configuration.
@@ -455,33 +435,16 @@ func (s *Server) DeleteAPIRoute(ctx context.Context, name, namespace string) err
 
 // deleteAPIRouteInternal performs the actual API route deletion with mutex handling.
 func (s *Server) deleteAPIRouteInternal(ctx context.Context, name, namespace string) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		delete(s.apiRoutes, key)
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.apiRoutes, key)
+
+	return nil
 }
 
 // ApplyGRPCRoute applies a gRPC route configuration.
@@ -513,33 +476,16 @@ func (s *Server) ApplyGRPCRoute(ctx context.Context, name, namespace string, con
 
 // applyGRPCRouteInternal performs the actual gRPC route application with mutex handling.
 func (s *Server) applyGRPCRouteInternal(ctx context.Context, name, namespace string, config []byte) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		s.grpcRoutes[key] = config
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.grpcRoutes[key] = config
+
+	return nil
 }
 
 // DeleteGRPCRoute deletes a gRPC route configuration.
@@ -571,33 +517,16 @@ func (s *Server) DeleteGRPCRoute(ctx context.Context, name, namespace string) er
 
 // deleteGRPCRouteInternal performs the actual gRPC route deletion with mutex handling.
 func (s *Server) deleteGRPCRouteInternal(ctx context.Context, name, namespace string) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		delete(s.grpcRoutes, key)
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.grpcRoutes, key)
+
+	return nil
 }
 
 // ApplyBackend applies a backend configuration.
@@ -629,33 +558,16 @@ func (s *Server) ApplyBackend(ctx context.Context, name, namespace string, confi
 
 // applyBackendInternal performs the actual backend application with mutex handling.
 func (s *Server) applyBackendInternal(ctx context.Context, name, namespace string, config []byte) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		s.backends[key] = config
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.backends[key] = config
+
+	return nil
 }
 
 // DeleteBackend deletes a backend configuration.
@@ -687,33 +599,16 @@ func (s *Server) DeleteBackend(ctx context.Context, name, namespace string) erro
 
 // deleteBackendInternal performs the actual backend deletion with mutex handling.
 func (s *Server) deleteBackendInternal(ctx context.Context, name, namespace string) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		delete(s.backends, key)
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.backends, key)
+
+	return nil
 }
 
 // ApplyGRPCBackend applies a gRPC backend configuration.
@@ -745,33 +640,16 @@ func (s *Server) ApplyGRPCBackend(ctx context.Context, name, namespace string, c
 
 // applyGRPCBackendInternal performs the actual gRPC backend application with mutex handling.
 func (s *Server) applyGRPCBackendInternal(ctx context.Context, name, namespace string, config []byte) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		s.grpcBackends[key] = config
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.grpcBackends[key] = config
+
+	return nil
 }
 
 // DeleteGRPCBackend deletes a gRPC backend configuration.
@@ -803,33 +681,16 @@ func (s *Server) DeleteGRPCBackend(ctx context.Context, name, namespace string) 
 
 // deleteGRPCBackendInternal performs the actual gRPC backend deletion with mutex handling.
 func (s *Server) deleteGRPCBackendInternal(ctx context.Context, name, namespace string) error {
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return ctx.Err()
-	case <-lockAcquired:
-		defer s.mu.Unlock()
-
-		key := fmt.Sprintf("%s/%s", namespace, name)
-		delete(s.grpcBackends, key)
-
-		return nil
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.grpcBackends, key)
+
+	return nil
 }
 
 // GetAllConfigs returns all configurations as JSON.
@@ -852,7 +713,7 @@ func (s *Server) RegisterGateway(name, namespace string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := fmt.Sprintf("%s/%s", namespace, name)
+	key := keys.ResourceKey(namespace, name)
 	s.gateways[key] = &gatewayConnection{
 		name:        name,
 		namespace:   namespace,
@@ -872,7 +733,7 @@ func (s *Server) UnregisterGateway(name, namespace string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := fmt.Sprintf("%s/%s", namespace, name)
+	key := keys.ResourceKey(namespace, name)
 	delete(s.gateways, key)
 
 	s.metrics.activeGateways.Set(float64(len(s.gateways)))
@@ -887,7 +748,7 @@ func (s *Server) UpdateGatewayHeartbeat(name, namespace string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := fmt.Sprintf("%s/%s", namespace, name)
+	key := keys.ResourceKey(namespace, name)
 	if gw, ok := s.gateways[key]; ok {
 		gw.lastSeen = time.Now()
 	}
@@ -961,4 +822,45 @@ func (s *Server) recordCanceledOperation(operation string, err error) {
 		observability.String("reason", reason),
 		observability.Error(err),
 	)
+}
+
+// withContextLock acquires the mutex with context cancellation support.
+// Returns a cleanup function that must be called to release the lock, or an error
+// if the context was canceled before or during lock acquisition.
+//
+// This helper encapsulates the context-aware locking pattern to avoid code duplication
+// and ensure consistent behavior across all operations that need mutex protection.
+func (s *Server) withContextLock(ctx context.Context) (unlock func(), err error) {
+	// Check context first to fail fast
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// Use channels to signal completion for context-aware mutex acquisition
+	lockAcquired := make(chan struct{})
+	lockFailed := make(chan struct{})
+
+	go func() {
+		s.mu.Lock()
+		select {
+		case <-lockFailed:
+			// Context was canceled while waiting for lock, release it
+			s.mu.Unlock()
+		default:
+			close(lockAcquired)
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		close(lockFailed)
+		return nil, ctx.Err()
+	case <-lockAcquired:
+		// Check context again after acquiring lock
+		if err := ctx.Err(); err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		return s.mu.Unlock, nil
+	}
 }

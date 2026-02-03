@@ -128,7 +128,7 @@ func validateRouteTLS(tls *avapigwv1alpha1.RouteTLSConfig) error {
 
 // validateBackendTLS validates backend TLS configuration.
 //
-//nolint:gocognit,gocyclo // TLS validation requires checking multiple configuration options
+//nolint:gocognit,gocyclo // TLS validation requires checking mode, version, and mTLS settings
 func validateBackendTLS(tls *avapigwv1alpha1.BackendTLSConfig) error {
 	if !tls.Enabled {
 		return nil
@@ -414,7 +414,7 @@ func validateMTLSAuth(mtls *avapigwv1alpha1.BackendMTLSAuthConfig) error {
 
 // validateAuthentication validates route-level authentication configuration.
 //
-//nolint:gocognit,gocyclo // Authentication validation requires checking multiple nested configurations
+//nolint:gocognit,gocyclo // Authentication validation requires checking JWT, API key, mTLS, and OIDC
 func validateAuthentication(auth *avapigwv1alpha1.AuthenticationConfig) error {
 	if !auth.Enabled {
 		return nil
@@ -550,7 +550,7 @@ func validateRouteOIDCAuth(oidc *avapigwv1alpha1.OIDCAuthConfig) error {
 
 // validateAuthorization validates route-level authorization configuration.
 //
-//nolint:gocognit,gocyclo // Authorization validation requires checking multiple nested configurations
+//nolint:gocognit,gocyclo // Authorization validation requires checking RBAC, ABAC, and external authz
 func validateAuthorization(authz *avapigwv1alpha1.AuthorizationConfig) error {
 	if !authz.Enabled {
 		return nil

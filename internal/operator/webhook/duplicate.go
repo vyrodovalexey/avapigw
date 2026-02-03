@@ -12,6 +12,7 @@ import (
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/operator/keys"
 )
 
 // DuplicateCheckerOption is a functional option for configuring DuplicateChecker.
@@ -40,6 +41,14 @@ func WithCacheTTL(ttl time.Duration) DuplicateCheckerOption {
 	}
 }
 
+// WithCleanupInterval sets the interval for automatic cache cleanup.
+// The cleanup goroutine removes entries older than 2x TTL.
+func WithCleanupInterval(interval time.Duration) DuplicateCheckerOption {
+	return func(dc *DuplicateChecker) {
+		dc.cleanupInterval = interval
+	}
+}
+
 // DuplicateDetectionScope defines the scope for duplicate detection.
 type DuplicateDetectionScope string
 
@@ -53,7 +62,14 @@ const (
 
 // Default cache configuration.
 const (
+	// defaultCacheTTL is the default time-to-live for cached entries.
 	defaultCacheTTL = 30 * time.Second
+
+	// defaultCleanupInterval is the default interval for cache cleanup.
+	defaultCleanupInterval = 1 * time.Minute
+
+	// cacheExpirationMultiplier determines when entries are considered stale (TTL * multiplier).
+	cacheExpirationMultiplier = 2
 )
 
 // resourceCache holds cached resources for efficient duplicate detection.
@@ -84,19 +100,29 @@ type DuplicateChecker struct {
 	namespaceScoped bool // If true, only check for duplicates within the same namespace
 	cacheEnabled    bool
 	cacheTTL        time.Duration
+	cleanupInterval time.Duration
 	cache           *resourceCache
+
+	// Cleanup goroutine lifecycle
+	stopCleanup chan struct{}
+	cleanupDone chan struct{}
 }
 
 // NewDuplicateChecker creates a new DuplicateChecker.
 // By default, it checks for duplicates within the same namespace only (namespace-scoped).
 // Use WithNamespaceScoped(false) to check across all namespaces.
+// When caching is enabled, a background cleanup goroutine is started automatically.
+// Call Stop() to gracefully shutdown the cleanup goroutine.
 func NewDuplicateChecker(c client.Client, opts ...DuplicateCheckerOption) *DuplicateChecker {
 	dc := &DuplicateChecker{
 		client:          c,
 		namespaceScoped: true, // Default to namespace-scoped for better performance
 		cacheEnabled:    false,
 		cacheTTL:        defaultCacheTTL,
+		cleanupInterval: defaultCleanupInterval,
 		cache:           newResourceCache(),
+		stopCleanup:     make(chan struct{}),
+		cleanupDone:     make(chan struct{}),
 		logger: observability.GetGlobalLogger().With(
 			observability.String("component", "duplicate-checker"),
 		),
@@ -104,6 +130,11 @@ func NewDuplicateChecker(c client.Client, opts ...DuplicateCheckerOption) *Dupli
 
 	for _, opt := range opts {
 		opt(dc)
+	}
+
+	// Start background cleanup goroutine if caching is enabled
+	if dc.cacheEnabled {
+		go dc.runCleanupLoop()
 	}
 
 	return dc
@@ -158,6 +189,72 @@ func (c *DuplicateChecker) InvalidateCache() {
 	c.cache.lastRefresh = make(map[string]time.Time)
 }
 
+// Stop gracefully shuts down the cache cleanup goroutine.
+// This should be called when the DuplicateChecker is no longer needed.
+func (c *DuplicateChecker) Stop() {
+	if !c.cacheEnabled {
+		return
+	}
+
+	close(c.stopCleanup)
+	<-c.cleanupDone
+
+	c.logger.Info("duplicate checker cache cleanup stopped")
+}
+
+// runCleanupLoop runs the background cache cleanup loop.
+// It periodically removes cache entries older than 2x TTL.
+func (c *DuplicateChecker) runCleanupLoop() {
+	defer close(c.cleanupDone)
+
+	ticker := time.NewTicker(c.cleanupInterval)
+	defer ticker.Stop()
+
+	c.logger.Info("starting cache cleanup loop",
+		observability.Duration("interval", c.cleanupInterval),
+		observability.Duration("ttl", c.cacheTTL),
+	)
+
+	for {
+		select {
+		case <-c.stopCleanup:
+			c.logger.Debug("cache cleanup loop stopping")
+			return
+		case <-ticker.C:
+			c.cleanupExpiredEntries()
+		}
+	}
+}
+
+// cleanupExpiredEntries removes cache entries older than 2x TTL.
+func (c *DuplicateChecker) cleanupExpiredEntries() {
+	c.cache.mu.Lock()
+	defer c.cache.mu.Unlock()
+
+	expirationThreshold := c.cacheTTL * cacheExpirationMultiplier
+	now := time.Now()
+	cleanedCount := 0
+
+	for key, lastRefresh := range c.cache.lastRefresh {
+		if now.Sub(lastRefresh) <= expirationThreshold {
+			continue
+		}
+		// Remove from all cache maps
+		delete(c.cache.apiRoutes, key)
+		delete(c.cache.grpcRoutes, key)
+		delete(c.cache.backends, key)
+		delete(c.cache.grpcBackends, key)
+		delete(c.cache.lastRefresh, key)
+		cleanedCount++
+	}
+
+	if cleanedCount > 0 {
+		c.logger.Debug("cleaned expired cache entries",
+			observability.Int("count", cleanedCount),
+		)
+	}
+}
+
 // CheckAPIRouteDuplicate checks if an APIRoute with the same route match exists.
 // If namespaceScoped is true, only checks within the same namespace for better performance.
 func (c *DuplicateChecker) CheckAPIRouteDuplicate(
@@ -209,13 +306,13 @@ func (c *DuplicateChecker) CheckAPIRouteDuplicate(
 
 		// Check for overlapping routes
 		if c.routesOverlap(route, existing) {
-			conflicts = append(conflicts, fmt.Sprintf("%s/%s", existing.Namespace, existing.Name))
+			conflicts = append(conflicts, keys.ResourceKey(existing.Namespace, existing.Name))
 		}
 	}
 
 	if len(conflicts) > 0 {
 		c.logger.Warn("duplicate APIRoute detected",
-			observability.String("new_route", fmt.Sprintf("%s/%s", route.Namespace, route.Name)),
+			observability.String("new_route", keys.ResourceKey(route.Namespace, route.Name)),
 			observability.Any("conflicting_routes", conflicts),
 		)
 		return fmt.Errorf(
@@ -285,16 +382,16 @@ func (c *DuplicateChecker) CheckBackendDuplicate(
 
 		// Check for same host:port combination
 		if c.backendsConflict(backend, existing) {
-			conflicts = append(conflicts, fmt.Sprintf("%s/%s", existing.Namespace, existing.Name))
+			conflicts = append(conflicts, keys.ResourceKey(existing.Namespace, existing.Name))
 		}
 	}
 
 	if len(conflicts) > 0 {
 		c.logger.Warn("duplicate Backend detected",
-			observability.String("new_backend", fmt.Sprintf("%s/%s", backend.Namespace, backend.Name)),
+			observability.String("new_backend", keys.ResourceKey(backend.Namespace, backend.Name)),
 			observability.Any("conflicting_backends", conflicts),
 		)
-		//nolint:staticcheck // error message is intentionally capitalized for resource name
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
 		return fmt.Errorf(
 			"backend %s/%s conflicts with existing backend(s) %s: same host:port combination",
 			backend.Namespace, backend.Name, strings.Join(conflicts, ", "))
@@ -352,13 +449,13 @@ func (c *DuplicateChecker) CheckGRPCRouteDuplicate(
 		}
 
 		if c.grpcRoutesOverlap(route, existing) {
-			conflicts = append(conflicts, fmt.Sprintf("%s/%s", existing.Namespace, existing.Name))
+			conflicts = append(conflicts, keys.ResourceKey(existing.Namespace, existing.Name))
 		}
 	}
 
 	if len(conflicts) > 0 {
 		c.logger.Warn("duplicate GRPCRoute detected",
-			observability.String("new_route", fmt.Sprintf("%s/%s", route.Namespace, route.Name)),
+			observability.String("new_route", keys.ResourceKey(route.Namespace, route.Name)),
 			observability.Any("conflicting_routes", conflicts),
 		)
 		return fmt.Errorf(
@@ -418,13 +515,13 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 		}
 
 		if c.grpcBackendsConflict(backend, existing) {
-			conflicts = append(conflicts, fmt.Sprintf("%s/%s", existing.Namespace, existing.Name))
+			conflicts = append(conflicts, keys.ResourceKey(existing.Namespace, existing.Name))
 		}
 	}
 
 	if len(conflicts) > 0 {
 		c.logger.Warn("duplicate GRPCBackend detected",
-			observability.String("new_backend", fmt.Sprintf("%s/%s", backend.Namespace, backend.Name)),
+			observability.String("new_backend", keys.ResourceKey(backend.Namespace, backend.Name)),
 			observability.Any("conflicting_backends", conflicts),
 		)
 		return fmt.Errorf(
@@ -458,7 +555,7 @@ func (c *DuplicateChecker) routesOverlap(a, b *avapigwv1alpha1.APIRoute) bool {
 
 // matchConditionsOverlap checks if two RouteMatch conditions overlap.
 //
-//nolint:gocyclo // URI matching requires checking multiple conditions
+//nolint:gocyclo // URI matching requires checking multiple conditions for exact, prefix, and regex patterns
 func (c *DuplicateChecker) matchConditionsOverlap(a, b *avapigwv1alpha1.RouteMatch) bool {
 	if a.URI == nil || b.URI == nil {
 		return false
@@ -558,7 +655,7 @@ func (c *DuplicateChecker) grpcRoutesOverlap(a, b *avapigwv1alpha1.GRPCRoute) bo
 
 // grpcMatchConditionsOverlap checks if two GRPCRouteMatch conditions overlap.
 //
-//nolint:gocognit // gRPC matching requires checking multiple nested conditions
+//nolint:gocognit // gRPC matching requires checking multiple nested conditions for service and method patterns
 func (c *DuplicateChecker) grpcMatchConditionsOverlap(
 	a, b *avapigwv1alpha1.GRPCRouteMatch,
 ) bool {

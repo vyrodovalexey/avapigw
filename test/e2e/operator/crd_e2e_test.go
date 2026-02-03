@@ -69,10 +69,11 @@ func TestE2E_CRD_APIRoute_CRUD(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -127,10 +128,11 @@ func TestE2E_CRD_APIRoute_CRUD(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -197,10 +199,11 @@ func TestE2E_CRD_APIRoute_CRUD(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -277,10 +280,11 @@ func TestE2E_CRD_Backend_CRUD(t *testing.T) {
 			Build()
 
 		reconciler := &controller.BackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -328,10 +332,11 @@ func TestE2E_CRD_Backend_CRUD(t *testing.T) {
 			Build()
 
 		reconciler := &controller.BackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -422,10 +427,11 @@ func TestE2E_CRD_GRPCRoute_CRUD(t *testing.T) {
 			Build()
 
 		reconciler := &controller.GRPCRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -502,10 +508,11 @@ func TestE2E_CRD_GRPCBackend_CRUD(t *testing.T) {
 			Build()
 
 		reconciler := &controller.GRPCBackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -584,10 +591,11 @@ func TestE2E_CRD_NamespaceIsolation(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile both routes
@@ -693,10 +701,11 @@ func TestE2E_CRD_ComplexRouteMatching(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -779,10 +788,11 @@ func TestE2E_CRD_AdvancedFeatures(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -855,10 +865,11 @@ func TestE2E_CRD_AdvancedFeatures(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -927,10 +938,11 @@ func TestE2E_CRD_BatchOperations(t *testing.T) {
 		client := builder.Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(50),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(50),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile all routes

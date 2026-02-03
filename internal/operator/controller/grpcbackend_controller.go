@@ -47,6 +47,11 @@ func (r *GRPCBackendReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling GRPCBackend", "name", req.Name, "namespace", req.Namespace)
 
+	// Initialize StatusUpdater if not set (for direct Reconcile calls without SetupWithManager)
+	if r.StatusUpdater == nil {
+		r.StatusUpdater = NewStatusUpdater(r.Client)
+	}
+
 	// Fetch the GRPCBackend instance
 	grpcBackend := &avapigwv1alpha1.GRPCBackend{}
 	if err := r.Get(ctx, req.NamespacedName, grpcBackend); err != nil {

@@ -47,6 +47,11 @@ func (r *APIRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling APIRoute", "name", req.Name, "namespace", req.Namespace)
 
+	// Initialize StatusUpdater if not set (for direct Reconcile calls without SetupWithManager)
+	if r.StatusUpdater == nil {
+		r.StatusUpdater = NewStatusUpdater(r.Client)
+	}
+
 	// Fetch the APIRoute instance
 	apiRoute := &avapigwv1alpha1.APIRoute{}
 	if err := r.Get(ctx, req.NamespacedName, apiRoute); err != nil {

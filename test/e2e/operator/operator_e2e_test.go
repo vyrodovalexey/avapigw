@@ -53,10 +53,11 @@ func TestE2E_Operator_Lifecycle(t *testing.T) {
 
 		// Create reconciler
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile the route
@@ -114,28 +115,32 @@ func TestE2E_Operator_Lifecycle(t *testing.T) {
 
 		// Create reconcilers
 		apiRouteReconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 		backendReconciler := &controller.BackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 		grpcRouteReconciler := &controller.GRPCRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 		grpcBackendReconciler := &controller.GRPCBackendReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile all resources (twice each for finalizer + apply)
@@ -224,10 +229,11 @@ func TestE2E_Operator_Lifecycle(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -271,10 +277,11 @@ func TestE2E_Operator_StatusManagement(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -321,10 +328,11 @@ func TestE2E_Operator_StatusManagement(t *testing.T) {
 			Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(10),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(10),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -370,10 +378,11 @@ func TestE2E_Operator_EventRecording(t *testing.T) {
 
 		recorder := record.NewFakeRecorder(10)
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   recorder,
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      recorder,
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		req := ctrl.Request{
@@ -457,10 +466,11 @@ func TestE2E_Operator_ConcurrentReconciliation(t *testing.T) {
 		client := builder.Build()
 
 		reconciler := &controller.APIRouteReconciler{
-			Client:     client,
-			Scheme:     scheme,
-			Recorder:   record.NewFakeRecorder(100),
-			GRPCServer: grpcServer,
+			Client:        client,
+			Scheme:        scheme,
+			Recorder:      record.NewFakeRecorder(100),
+			GRPCServer:    grpcServer,
+			StatusUpdater: controller.NewStatusUpdater(client),
 		}
 
 		// Reconcile all routes concurrently

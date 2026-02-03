@@ -78,7 +78,7 @@ func (v *BackendValidator) ValidateDelete(_ context.Context, _ *avapigwv1alpha1.
 
 // validate performs validation on the Backend spec.
 //
-//nolint:gocognit,gocyclo // Validation logic requires checking multiple fields
+//nolint:gocognit,gocyclo // Validation requires checking hosts, TLS, auth, and rate limiting
 func (v *BackendValidator) validate(backend *avapigwv1alpha1.Backend) (admission.Warnings, error) {
 	var warnings admission.Warnings
 	var errs []string

@@ -80,7 +80,7 @@ func (v *APIRouteValidator) ValidateDelete(_ context.Context, _ *avapigwv1alpha1
 
 // validate performs validation on the APIRoute spec.
 //
-//nolint:gocognit,gocyclo // Validation logic requires checking multiple fields
+//nolint:gocognit,gocyclo // Validation requires checking multiple fields: matches, routes, redirects, policies
 func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admission.Warnings, error) {
 	var warnings admission.Warnings
 	var errs []string
@@ -198,7 +198,7 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 
 // validateMatches validates route match conditions.
 //
-//nolint:gocognit,gocyclo // Match validation requires checking multiple nested conditions
+//nolint:gocognit,gocyclo // Match validation requires checking URI, methods, headers, and query params
 func (v *APIRouteValidator) validateMatches(matches []avapigwv1alpha1.RouteMatch) error {
 	for i, match := range matches {
 		// Validate URI match

@@ -136,7 +136,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Observability](#-observability)
 - [Development](#-development)
 - [Kubernetes & Helm](#️-kubernetes--helm)
-- [AVAPIGW Operator](#-avapigw-operator)
+- [AVAPIGW Operator](#️-avapigw-operator)
 - [Docker](#-docker)
 - [CI/CD](#-cicd)
 - [Performance Testing](#-performance-testing)
@@ -146,8 +146,10 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.25 (for building from source)
+- Go 1.25.6 (for building from source)
 - Docker (for containerized deployment)
+- Kubernetes 1.23+ (for operator deployment)
+- Helm 3.0+ (for Kubernetes deployment)
 - HashiCorp Vault (optional, for TLS certificate management)
 - Keycloak (optional, for OIDC authentication)
 
