@@ -617,7 +617,7 @@ jobs:
             "-Dsonar.organization=${{ github.repository_owner }}"
             "-Dsonar.go.coverage.reportPaths=coverage/unit.out,coverage/functional.out,coverage/integration.out,coverage/e2e.out"
             "-Dsonar.sources=."
-            "-Dsonar.exclusions=**/vendor/**,**/test/**,**/*_test.go,**/mocks/**,**/testdata/**,**/bin/**,**/coverage/**,**/helm/**"
+            "-Dsonar.exclusions=**/vendor/**,**/test/**,**/*_test.go,**/mocks/**,**/testdata/**,**/bin/**,**/coverage/**,**/helm/**,**/api/**,**/proto/**"
             "-Dsonar.tests=."
             "-Dsonar.test.inclusions=**/*_test.go"
             "-Dsonar.qualitygate.wait=${{ !startsWith(github.ref, 'refs/tags/') }}"
