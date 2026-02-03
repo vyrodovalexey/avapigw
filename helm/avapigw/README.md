@@ -1,6 +1,12 @@
 # Ava API Gateway Helm Chart
 
-High-performance API Gateway built with Go and gin-gonic.
+High-performance API Gateway built with Go and gin-gonic, with optional Kubernetes operator for CRD-based configuration management.
+
+## Features
+
+- **Gateway**: High-performance HTTP/gRPC API Gateway
+- **Operator** (optional): Kubernetes operator for managing gateway configuration through CRDs
+- **CRDs**: APIRoute, GRPCRoute, Backend, GRPCBackend custom resources
 
 ## Prerequisites
 
@@ -236,6 +242,35 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `networkPolicy.enabled` | Enable NetworkPolicy | `false` |
 | `networkPolicy.ingress` | Ingress rules | `[]` |
 | `networkPolicy.egress` | Egress rules | `[]` |
+
+### Operator Configuration
+
+The operator enables Kubernetes-native configuration management through CRDs. When enabled, you can manage routes and backends using APIRoute, GRPCRoute, Backend, and GRPCBackend custom resources.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `operator.enabled` | Enable the avapigw operator | `false` |
+| `operator.replicaCount` | Number of operator replicas | `1` |
+| `operator.image.repository` | Operator image repository | `ghcr.io/vyrodovalexey/avapigw-operator` |
+| `operator.image.tag` | Operator image tag | `""` (uses appVersion) |
+| `operator.image.pullPolicy` | Operator image pull policy | `IfNotPresent` |
+| `operator.leaderElection.enabled` | Enable leader election | `true` |
+| `operator.leaderElection.resourceName` | Leader election resource name | `some_id.avapigw.io` |
+| `operator.grpc.port` | gRPC server port | `9444` |
+| `operator.grpc.tls.mode` | gRPC TLS mode (selfsigned, vault) | `selfsigned` |
+| `operator.webhook.enabled` | Enable admission webhooks | `true` |
+| `operator.webhook.port` | Webhook server port | `9443` |
+| `operator.webhook.tls.mode` | Webhook TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |
+| `operator.metrics.enabled` | Enable Prometheus metrics | `true` |
+| `operator.metrics.port` | Metrics server port | `8080` |
+| `operator.health.port` | Health probe port | `8081` |
+| `operator.resources.limits.cpu` | CPU limit | `500m` |
+| `operator.resources.limits.memory` | Memory limit | `256Mi` |
+| `operator.resources.requests.cpu` | CPU request | `100m` |
+| `operator.resources.requests.memory` | Memory request | `128Mi` |
+| `operator.serviceAccount.create` | Create operator service account | `true` |
+| `operator.podDisruptionBudget.enabled` | Enable operator PDB | `false` |
+| `operator.serviceMonitor.enabled` | Enable operator ServiceMonitor | `false` |
 
 ## Examples
 
@@ -506,6 +541,76 @@ helm upgrade --install avapigw helm/avapigw/ \
 make perf-test-k8s
 ```
 
+### Enable Operator with CRD-based Configuration
+
+```yaml
+# Enable the operator for CRD-based configuration management
+operator:
+  enabled: true
+  replicaCount: 1
+  
+  # Webhook validation (optional)
+  webhook:
+    enabled: true
+    tls:
+      mode: selfsigned
+  
+  # Leader election for HA
+  leaderElection:
+    enabled: true
+    resourceName: some_id.avapigw.io
+  
+  # Resources
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+```
+
+After deploying with operator enabled, you can create CRDs:
+
+```yaml
+# Example APIRoute CRD
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: example-route
+spec:
+  match:
+    - uri:
+        prefix: /api/v1
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: backend-service
+        port: 8080
+  timeout: 30s
+```
+
+```yaml
+# Example Backend CRD
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: example-backend
+spec:
+  hosts:
+    - address: backend-service.default.svc.cluster.local
+      port: 8080
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+  loadBalancer:
+    algorithm: roundRobin
+```
+
 ### Production Configuration
 
 ```yaml
@@ -577,6 +682,17 @@ Added new features and improvements:
 - **Helm chart fixes** - Fixed .helmignore excluding test hooks, fixed wget in test-connection.yaml for read-only filesystem
 
 ### To 0.3.0
+
+**Major Changes:**
+- **Operator Consolidation**: The `avapigw-operator` chart has been merged into the main `avapigw` chart
+- Operator is now an optional feature controlled by `operator.enabled` (default: `false`)
+- CRDs are included in the chart and installed when operator is enabled
+- All operator templates are now in `templates/operator/` directory
+
+**Migration from separate operator chart:**
+1. Uninstall the old operator chart: `helm uninstall avapigw-operator -n <namespace>`
+2. Update to the new unified chart with `operator.enabled: true`
+3. CRDs will be automatically installed
 
 Added improvements:
 - Enhanced timer leak prevention in configuration watcher

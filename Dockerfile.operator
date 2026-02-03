@@ -1,0 +1,96 @@
+# ==============================================================================
+# Build stage
+# ==============================================================================
+FROM golang:1.25.6-alpine AS builder
+
+# Target architecture for cross-compilation (set by Docker buildx)
+ARG TARGETARCH
+ARG TARGETOS=linux
+
+# Install build dependencies (sorted alphanumerically)
+RUN apk add --no-cache \
+    ca-certificates \
+    git \
+    tzdata
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download && go mod verify
+
+# Copy source code
+COPY . .
+
+# Build arguments for version information
+ARG VERSION=dev
+ARG BUILD_TIME
+ARG GIT_COMMIT=unknown
+
+# Build the operator binary with optimizations
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} go build \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.gitCommit=${GIT_COMMIT}" \
+    -trimpath \
+    -o /operator \
+    ./cmd/operator
+
+# ==============================================================================
+# Runtime stage
+# ==============================================================================
+FROM alpine:3.23
+
+# Build arguments for dynamic OCI labels
+ARG VERSION=dev
+ARG BUILD_TIME
+ARG GIT_COMMIT=unknown
+
+# OCI Labels (static and dynamic)
+LABEL org.opencontainers.image.title="avapigw-operator" \
+      org.opencontainers.image.description="Kubernetes operator for avapigw API Gateway" \
+      org.opencontainers.image.vendor="avapigw" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/vyrodovalexey/avapigw" \
+      org.opencontainers.image.documentation="https://github.com/vyrodovalexey/avapigw/blob/main/README.md" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIME}"
+
+# Install runtime dependencies (sorted alphanumerically)
+RUN apk add --no-cache \
+    ca-certificates \
+    curl \
+    tzdata
+
+# Create non-root user and group
+RUN addgroup -g 65532 -S operator && \
+    adduser -u 65532 -S -G operator -h /app -s /sbin/nologin operator
+
+# Set working directory
+WORKDIR /app
+
+# Copy the binary from builder to /operator (matches Helm template command)
+COPY --from=builder --chown=operator:operator /operator /operator
+
+# Create directories for runtime data
+RUN mkdir -p /app/tmp && \
+    chown -R operator:operator /app
+
+# Switch to non-root user
+USER operator
+
+# Expose ports
+# 8080 - Metrics
+# 8081 - Health probes
+# 9443 - Webhook server
+# 9444 - gRPC server
+EXPOSE 8080 8081 9443 9444
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8081/healthz || exit 1
+
+# Set entrypoint
+ENTRYPOINT ["/operator"]

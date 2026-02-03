@@ -1,0 +1,98 @@
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: full-grpc-route
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.UserService
+      method:
+        exact: GetUser
+      metadata:
+        - name: x-tenant-id
+          present: true
+        - name: x-api-version
+          exact: "v1"
+      authority:
+        exact: grpc.example.com
+  route:
+    - destination:
+        host: grpc-backend-primary
+        port: 9000
+      weight: 80
+    - destination:
+        host: grpc-backend-canary
+        port: 9000
+      weight: 20
+  timeout: 30s
+  retries:
+    attempts: 3
+    perTryTimeout: 10s
+    retryOn: "unavailable,resource-exhausted"
+    backoffBaseInterval: 100ms
+    backoffMaxInterval: 1s
+  headers:
+    request:
+      set:
+        x-gateway: avapigw
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+  transform:
+    fieldMask:
+      paths:
+        - user.id
+        - user.name
+        - user.email
+    metadata:
+      static:
+        x-source: gateway
+      dynamic:
+        x-request-id: "{{.RequestID}}"
+  cors:
+    allowOrigins:
+      - "https://example.com"
+    allowMethods:
+      - POST
+    allowHeaders:
+      - Content-Type
+      - Authorization
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: https://auth.example.com
+      jwksUrl: https://auth.example.com/.well-known/jwks.json
+  authorization:
+    enabled: true
+    defaultPolicy: deny
+    rbac:
+      enabled: true
+      policies:
+        - name: service-policy
+          roles:
+            - service
+          resources:
+            - /api.v1.*
+          actions:
+            - "*"
+          effect: allow
+  maxSessions:
+    enabled: true
+    maxConcurrent: 500
+    queueSize: 50
+    queueTimeout: 10s
+  requestLimits:
+    maxBodySize: 4194304
+    maxHeaderSize: 65536
+  tls:
+    sniHosts:
+      - grpc.example.com
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: grpc-route
+      commonName: grpc.example.com
+      ttl: 24h

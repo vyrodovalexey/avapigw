@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: avapigw-operator-webhook-service
+  namespace: avapigw-system
+  labels:
+    app.kubernetes.io/name: avapigw-operator
+    app.kubernetes.io/component: webhook
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 9443
+  selector:
+    app.kubernetes.io/name: avapigw-operator
+    app.kubernetes.io/component: manager

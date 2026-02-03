@@ -1,0 +1,18 @@
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: basic-backend
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: 10.0.1.10
+      port: 8080
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin

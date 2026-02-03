@@ -1,0 +1,102 @@
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: full-backend
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: 10.0.1.10
+      port: 8080
+      weight: 50
+    - address: 10.0.1.11
+      port: 8080
+      weight: 30
+    - address: 10.0.1.12
+      port: 8080
+      weight: 20
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: weighted
+  tls:
+    enabled: true
+    mode: MUTUAL
+    caFile: /certs/backend/ca.crt
+    certFile: /certs/backend/client.crt
+    keyFile: /certs/backend/client.key
+    serverName: backend.internal
+    minVersion: TLS12
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: backend-client
+      commonName: gateway-client
+      ttl: 24h
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+    halfOpenRequests: 3
+  maxSessions:
+    enabled: true
+    maxConcurrent: 500
+    queueSize: 50
+    queueTimeout: 10s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+  authentication:
+    type: jwt
+    jwt:
+      enabled: true
+      tokenSource: oidc
+      oidc:
+        issuerUrl: https://keycloak.example.com/realms/myrealm
+        clientId: gateway-client
+        clientSecretRef:
+          name: keycloak-secret
+          key: client-secret
+        scopes:
+          - openid
+          - profile
+        tokenCacheTTL: 5m
+      headerName: Authorization
+      headerPrefix: Bearer
+  requestLimits:
+    maxBodySize: 10485760
+    maxHeaderSize: 1048576
+  transform:
+    request:
+      template: |
+        {"wrapped": {{.Body}}}
+      headers:
+        set:
+          X-Backend-Request: "true"
+    response:
+      allowFields:
+        - id
+        - name
+        - status
+      denyFields:
+        - password
+        - secret
+      fieldMappings:
+        created_at: createdAt
+  cache:
+    enabled: true
+    ttl: 5m
+    keyComponents:
+      - path
+      - query
+    type: memory
+  encoding:
+    request:
+      contentType: application/json
+    response:
+      contentType: application/json
+      compression: gzip

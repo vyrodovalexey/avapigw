@@ -1,0 +1,9 @@
+namespace: avapigw-system
+
+namePrefix: avapigw-
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
+- ../webhook

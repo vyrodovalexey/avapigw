@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: avapigw-operator-leader-election-rolebinding
+  namespace: avapigw-system
+  labels:
+    app.kubernetes.io/name: avapigw-operator
+    app.kubernetes.io/component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: avapigw-operator-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: avapigw-operator
+  namespace: avapigw-system

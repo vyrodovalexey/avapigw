@@ -1,0 +1,149 @@
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: full-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        exact: /api/v1/users
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+      headers:
+        - name: Authorization
+          present: true
+        - name: X-API-Version
+          exact: "v1"
+      queryParams:
+        - name: version
+          exact: "v1"
+        - name: debug
+          present: true
+  route:
+    - destination:
+        host: backend-service-primary
+        port: 8080
+      weight: 70
+    - destination:
+        host: backend-service-canary
+        port: 8080
+      weight: 30
+  timeout: 30s
+  retries:
+    attempts: 3
+    perTryTimeout: 10s
+    retryOn: "5xx,reset,connect-failure"
+  headers:
+    request:
+      set:
+        X-Gateway: avapigw
+      add:
+        X-Request-ID: "{{.RequestID}}"
+      remove:
+        - X-Internal-Header
+    response:
+      set:
+        X-Response-Time: "{{.ResponseTime}}"
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+  maxSessions:
+    enabled: true
+    maxConcurrent: 1000
+    queueSize: 100
+    queueTimeout: 10s
+  requestLimits:
+    maxBodySize: 10485760
+    maxHeaderSize: 1048576
+  cors:
+    allowOrigins:
+      - "https://example.com"
+      - "https://app.example.com"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: true
+  security:
+    enabled: true
+    headers:
+      enabled: true
+      xFrameOptions: DENY
+      xContentTypeOptions: nosniff
+      xXSSProtection: "1; mode=block"
+  transform:
+    request:
+      template: |
+        {"wrapped": {{.Body}}}
+    response:
+      allowFields:
+        - id
+        - name
+        - email
+      denyFields:
+        - password
+        - secret
+      fieldMappings:
+        created_at: createdAt
+        updated_at: updatedAt
+  cache:
+    enabled: true
+    ttl: 5m
+    keyComponents:
+      - path
+      - query
+    staleWhileRevalidate: 1m
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: https://auth.example.com
+      audience:
+        - api.example.com
+      jwksUrl: https://auth.example.com/.well-known/jwks.json
+      algorithm: RS256
+      claimMapping:
+        roles: roles
+        permissions: permissions
+        email: email
+  authorization:
+    enabled: true
+    defaultPolicy: deny
+    rbac:
+      enabled: true
+      policies:
+        - name: admin-policy
+          roles:
+            - admin
+          resources:
+            - /api/v1/*
+          actions:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+          effect: allow
+  tls:
+    sniHosts:
+      - api.example.com
+    minVersion: TLS12
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: api-route
+      commonName: api.example.com
+      ttl: 24h

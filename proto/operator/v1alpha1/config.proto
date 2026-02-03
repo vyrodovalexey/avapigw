@@ -1,0 +1,357 @@
+// Copyright 2026 The avapigw Authors.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package avapigw.operator.v1alpha1;
+
+option go_package = "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1;operatorv1alpha1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+// ConfigurationService provides configuration management for API gateways.
+// The operator pushes configuration updates to connected gateways via streaming.
+service ConfigurationService {
+  // RegisterGateway registers a gateway instance with the operator.
+  // Returns the initial configuration snapshot.
+  rpc RegisterGateway(RegisterGatewayRequest) returns (RegisterGatewayResponse);
+
+  // StreamConfiguration establishes a server-side streaming connection
+  // for receiving configuration updates from the operator.
+  rpc StreamConfiguration(StreamConfigurationRequest) returns (stream ConfigurationUpdate);
+
+  // GetConfiguration returns the current configuration snapshot.
+  rpc GetConfiguration(GetConfigurationRequest) returns (ConfigurationSnapshot);
+
+  // Heartbeat sends a keep-alive signal to the operator.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // AcknowledgeConfiguration acknowledges receipt and application of a configuration update.
+  rpc AcknowledgeConfiguration(AcknowledgeConfigurationRequest) returns (AcknowledgeConfigurationResponse);
+}
+
+// RegisterGatewayRequest contains gateway registration information.
+message RegisterGatewayRequest {
+  // Gateway information.
+  GatewayInfo gateway = 1;
+  
+  // Capabilities supported by this gateway.
+  GatewayCapabilities capabilities = 2;
+}
+
+// RegisterGatewayResponse contains the registration result.
+message RegisterGatewayResponse {
+  // Whether registration was successful.
+  bool success = 1;
+  
+  // Error message if registration failed.
+  string error_message = 2;
+  
+  // Session ID for this gateway connection.
+  string session_id = 3;
+  
+  // Initial configuration snapshot.
+  ConfigurationSnapshot initial_config = 4;
+  
+  // Recommended heartbeat interval.
+  google.protobuf.Duration heartbeat_interval = 5;
+}
+
+// StreamConfigurationRequest initiates configuration streaming.
+message StreamConfigurationRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Last known configuration version (for resumption).
+  string last_config_version = 3;
+  
+  // Namespaces to watch (empty = all namespaces).
+  repeated string namespaces = 4;
+  
+  // Resource types to watch (empty = all types).
+  repeated ResourceType resource_types = 5;
+}
+
+// GetConfigurationRequest requests the current configuration snapshot.
+message GetConfigurationRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Namespaces to include (empty = all namespaces).
+  repeated string namespaces = 3;
+  
+  // Resource types to include (empty = all types).
+  repeated ResourceType resource_types = 4;
+}
+
+// HeartbeatRequest contains heartbeat information.
+message HeartbeatRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Current gateway status.
+  GatewayStatus status = 3;
+  
+  // Last applied configuration version.
+  string last_applied_version = 4;
+}
+
+// HeartbeatResponse contains heartbeat acknowledgment.
+message HeartbeatResponse {
+  // Whether the heartbeat was acknowledged.
+  bool acknowledged = 1;
+  
+  // Server timestamp.
+  google.protobuf.Timestamp server_time = 2;
+  
+  // Whether the gateway should reconnect (e.g., for config refresh).
+  bool should_reconnect = 3;
+  
+  // Message from the operator.
+  string message = 4;
+}
+
+// AcknowledgeConfigurationRequest acknowledges a configuration update.
+message AcknowledgeConfigurationRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Configuration version being acknowledged.
+  string config_version = 3;
+  
+  // Whether the configuration was applied successfully.
+  bool success = 4;
+  
+  // Error message if application failed.
+  string error_message = 5;
+  
+  // Time taken to apply the configuration.
+  google.protobuf.Duration apply_duration = 6;
+}
+
+// AcknowledgeConfigurationResponse contains acknowledgment result.
+message AcknowledgeConfigurationResponse {
+  // Whether the acknowledgment was received.
+  bool received = 1;
+  
+  // Server timestamp.
+  google.protobuf.Timestamp server_time = 2;
+}
+
+// GatewayInfo contains information about a gateway instance.
+message GatewayInfo {
+  // Gateway name.
+  string name = 1;
+  
+  // Gateway namespace.
+  string namespace = 2;
+  
+  // Gateway version.
+  string version = 3;
+  
+  // Gateway pod name (if running in K8s).
+  string pod_name = 4;
+  
+  // Gateway node name (if running in K8s).
+  string node_name = 5;
+  
+  // Gateway labels.
+  map<string, string> labels = 6;
+  
+  // Gateway annotations.
+  map<string, string> annotations = 7;
+}
+
+// GatewayCapabilities describes what features a gateway supports.
+message GatewayCapabilities {
+  // Supports HTTP routes.
+  bool http_routes = 1;
+  
+  // Supports gRPC routes.
+  bool grpc_routes = 2;
+  
+  // Supports WebSocket.
+  bool websocket = 3;
+  
+  // Supports TLS termination.
+  bool tls_termination = 4;
+  
+  // Supports mTLS.
+  bool mtls = 5;
+  
+  // Supports rate limiting.
+  bool rate_limiting = 6;
+  
+  // Supports circuit breaker.
+  bool circuit_breaker = 7;
+  
+  // Supports caching.
+  bool caching = 8;
+  
+  // Maximum configuration size in bytes.
+  int64 max_config_size = 9;
+}
+
+// GatewayStatus contains the current status of a gateway.
+message GatewayStatus {
+  // Gateway health state.
+  HealthState health = 1;
+  
+  // Number of active connections.
+  int64 active_connections = 2;
+  
+  // Requests per second.
+  double requests_per_second = 3;
+  
+  // Error rate (0-1).
+  double error_rate = 4;
+  
+  // Memory usage in bytes.
+  int64 memory_bytes = 5;
+  
+  // CPU usage (0-1).
+  double cpu_usage = 6;
+  
+  // Uptime duration.
+  google.protobuf.Duration uptime = 7;
+  
+  // Last configuration applied timestamp.
+  google.protobuf.Timestamp last_config_applied = 8;
+}
+
+// HealthState represents the health state of a gateway.
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_HEALTHY = 1;
+  HEALTH_STATE_DEGRADED = 2;
+  HEALTH_STATE_UNHEALTHY = 3;
+}
+
+// ResourceType represents the type of configuration resource.
+enum ResourceType {
+  RESOURCE_TYPE_UNSPECIFIED = 0;
+  RESOURCE_TYPE_API_ROUTE = 1;
+  RESOURCE_TYPE_GRPC_ROUTE = 2;
+  RESOURCE_TYPE_BACKEND = 3;
+  RESOURCE_TYPE_GRPC_BACKEND = 4;
+}
+
+// ConfigurationUpdate contains a configuration change notification.
+message ConfigurationUpdate {
+  // Update type.
+  UpdateType type = 1;
+  
+  // Configuration version (monotonically increasing).
+  string version = 2;
+  
+  // Timestamp of the update.
+  google.protobuf.Timestamp timestamp = 3;
+  
+  // Resource that was updated.
+  ConfigurationResource resource = 4;
+  
+  // Full snapshot (for FULL_SYNC type).
+  ConfigurationSnapshot snapshot = 5;
+  
+  // Sequence number for ordering.
+  int64 sequence = 6;
+  
+  // Whether this is the last update in a batch.
+  bool is_last_in_batch = 7;
+}
+
+// UpdateType represents the type of configuration update.
+enum UpdateType {
+  UPDATE_TYPE_UNSPECIFIED = 0;
+  
+  // A resource was added.
+  UPDATE_TYPE_ADDED = 1;
+  
+  // A resource was modified.
+  UPDATE_TYPE_MODIFIED = 2;
+  
+  // A resource was deleted.
+  UPDATE_TYPE_DELETED = 3;
+  
+  // Full configuration sync.
+  UPDATE_TYPE_FULL_SYNC = 4;
+  
+  // Heartbeat/keep-alive message.
+  UPDATE_TYPE_HEARTBEAT = 5;
+}
+
+// ConfigurationResource represents a single configuration resource.
+message ConfigurationResource {
+  // Resource type.
+  ResourceType type = 1;
+  
+  // Resource name.
+  string name = 2;
+  
+  // Resource namespace.
+  string namespace = 3;
+  
+  // Resource version (Kubernetes resource version).
+  string resource_version = 4;
+  
+  // Resource generation.
+  int64 generation = 5;
+  
+  // Resource UID.
+  string uid = 6;
+  
+  // Resource labels.
+  map<string, string> labels = 7;
+  
+  // Resource annotations.
+  map<string, string> annotations = 8;
+  
+  // Resource spec as JSON.
+  bytes spec_json = 9;
+  
+  // Resource status as JSON.
+  bytes status_json = 10;
+  
+  // Creation timestamp.
+  google.protobuf.Timestamp creation_timestamp = 11;
+}
+
+// ConfigurationSnapshot contains the complete configuration state.
+message ConfigurationSnapshot {
+  // Snapshot version.
+  string version = 1;
+  
+  // Timestamp when the snapshot was created.
+  google.protobuf.Timestamp timestamp = 2;
+  
+  // API routes.
+  repeated ConfigurationResource api_routes = 3;
+  
+  // gRPC routes.
+  repeated ConfigurationResource grpc_routes = 4;
+  
+  // HTTP backends.
+  repeated ConfigurationResource backends = 5;
+  
+  // gRPC backends.
+  repeated ConfigurationResource grpc_backends = 6;
+  
+  // Total number of resources.
+  int32 total_resources = 7;
+  
+  // Checksum of the configuration (for validation).
+  string checksum = 8;
+}

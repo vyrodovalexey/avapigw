@@ -1,0 +1,94 @@
+{{- if and .Values.operator.enabled .Values.operator.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "avapigw.operator.fullname" . }}-validating-webhook
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+  annotations:
+    # This annotation is used by cert-manager to inject the CA bundle
+    {{- if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "avapigw.operator.fullname" . }}-webhook-cert
+    {{- end }}
+webhooks:
+  - name: vapiroute.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-apiroute
+    failurePolicy: Fail
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - apiroutes
+    sideEffects: None
+  - name: vgrpcroute.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-grpcroute
+    failurePolicy: Fail
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - grpcroutes
+    sideEffects: None
+  - name: vbackend.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-backend
+    failurePolicy: Fail
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - backends
+    sideEffects: None
+  - name: vgrpcbackend.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-grpcbackend
+    failurePolicy: Fail
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - grpcbackends
+    sideEffects: None
+{{- end }}

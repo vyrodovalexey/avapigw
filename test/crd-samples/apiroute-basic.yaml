@@ -1,0 +1,19 @@
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: hello-world
+  namespace: default
+  labels:
+    app: hello-app
+    version: v1
+spec:
+  match:
+    - uri:
+        prefix: /hello
+      methods:
+        - GET
+  route:
+    - destination:
+        host: hello-service
+        port: 8080
+  timeout: 30s

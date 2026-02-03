@@ -1,0 +1,48 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: avapigw-operator-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - avapigw.io
+  resources:
+  - apiroutes
+  - backends
+  - grpcbackends
+  - grpcroutes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - avapigw.io
+  resources:
+  - apiroutes/finalizers
+  - backends/finalizers
+  - grpcbackends/finalizers
+  - grpcroutes/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - avapigw.io
+  resources:
+  - apiroutes/status
+  - backends/status
+  - grpcbackends/status
+  - grpcroutes/status
+  verbs:
+  - get
+  - patch
+  - update

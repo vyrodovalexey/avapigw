@@ -1,0 +1,6 @@
+[Host: localhost]
+[User-Agent: YandexTank/OperatorScaleTest]
+[Accept: text/plain]
+[Connection: keep-alive]
+[X-Perf-Test: operator-metrics]
+/metrics

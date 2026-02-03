@@ -3,14 +3,14 @@ kind: Deployment
 metadata:
   name: {{ include "avapigw.fullname" . }}
   labels:
-    {{- include "avapigw.labels" . | nindent 4 }}
+    {{- include "avapigw.gateway.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "avapigw.selectorLabels" . | nindent 6 }}
+      {{- include "avapigw.gateway.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -19,7 +19,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "avapigw.labels" . | nindent 8 }}
+        {{- include "avapigw.gateway.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

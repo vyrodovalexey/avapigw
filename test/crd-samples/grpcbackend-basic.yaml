@@ -1,0 +1,19 @@
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: basic-grpc-backend
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: grpc-service.default.svc.cluster.local
+      port: 9000
+      weight: 1
+  healthCheck:
+    enabled: true
+    service: ""
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin

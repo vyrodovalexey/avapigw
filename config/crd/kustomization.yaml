@@ -1,0 +1,5 @@
+resources:
+- bases/avapigw.io_apiroutes.yaml
+- bases/avapigw.io_grpcroutes.yaml
+- bases/avapigw.io_backends.yaml
+- bases/avapigw.io_grpcbackends.yaml

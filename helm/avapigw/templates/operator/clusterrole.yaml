@@ -1,0 +1,86 @@
+{{- if .Values.operator.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "avapigw.operator.clusterRoleName" . }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+rules:
+  # CRD management
+  - apiGroups:
+      - avapigw.io
+    resources:
+      - apiroutes
+      - grpcroutes
+      - backends
+      - grpcbackends
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - avapigw.io
+    resources:
+      - apiroutes/status
+      - grpcroutes/status
+      - backends/status
+      - grpcbackends/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - avapigw.io
+    resources:
+      - apiroutes/finalizers
+      - grpcroutes/finalizers
+      - backends/finalizers
+      - grpcbackends/finalizers
+    verbs:
+      - update
+  # Core resources
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Admission webhook configuration
+  {{- if .Values.operator.webhook.enabled }}
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingwebhookconfigurations
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  {{- end }}
+{{- end }}

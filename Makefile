@@ -52,6 +52,12 @@ COVERAGE_INTEGRATION := $(COVERAGE_DIR)/integration.out
 COVERAGE_E2E := $(COVERAGE_DIR)/e2e.out
 COVERAGE_MERGED := $(COVERAGE_DIR)/merged.out
 
+# Operator variables
+OPERATOR_BINARY_NAME := operator
+OPERATOR_CMD_DIR := cmd/operator
+OPERATOR_DOCKER_IMAGE ?= $(DOCKER_REGISTRY)/avapigw/avapigw-operator
+CONTROLLER_GEN := $(shell which controller-gen 2>/dev/null || echo "$(shell go env GOPATH)/bin/controller-gen")
+
 .PHONY: all build build-linux build-darwin build-windows build-all \
         test test-unit test-coverage test-functional test-integration test-e2e test-all \
         test-grpc-unit test-grpc-integration test-grpc-e2e \
@@ -65,7 +71,10 @@ COVERAGE_MERGED := $(COVERAGE_DIR)/merged.out
         perf-generate-ammo perf-generate-charts perf-analyze \
         perf-start-gateway perf-stop-gateway perf-setup-infra \
         perf-setup-vault-k8s perf-verify-vault-k8s \
-        ci help version
+        ci help version \
+        build-operator operator-generate operator-manifests operator-install-crds \
+        operator-docker-build operator-docker-push operator-deploy operator-undeploy \
+        test-operator-unit test-operator-functional test-operator-integration
 
 # ==============================================================================
 # Default target
@@ -275,10 +284,11 @@ vuln:
 # Docker targets
 # ==============================================================================
 
-## docker-build: Build Docker image
+## docker-build: Build Docker image for gateway
 docker-build:
 	@echo "==> Building Docker image..."
 	docker build \
+		-f Dockerfile.gateway \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
@@ -368,11 +378,11 @@ generate:
 proto-generate:
 	@echo "==> Generating gRPC code from proto files..."
 	@if command -v protoc > /dev/null 2>&1; then \
-		find . -name "*.proto" -exec dirname {} \; | sort -u | while read dir; do \
-			protoc --go_out=. --go_opt=paths=source_relative \
-				--go-grpc_out=. --go-grpc_opt=paths=source_relative \
-				$$dir/*.proto; \
-		done; \
+		export PATH="$$PATH:$$(go env GOPATH)/bin"; \
+		protoc --go_out=proto --go_opt=paths=source_relative \
+			--go-grpc_out=proto --go-grpc_opt=paths=source_relative \
+			-I proto \
+			proto/operator/v1alpha1/config.proto; \
 		echo "==> Proto generation completed"; \
 	else \
 		echo "==> protoc not installed, skipping proto generation"; \
@@ -704,3 +714,275 @@ help:
 	@echo "  DOCKER_REGISTRY            Docker registry (default: ghcr.io)"
 	@echo "  DOCKER_IMAGE               Docker image name"
 	@echo "  DOCKER_TAG                 Docker image tag (default: VERSION)"
+	@echo ""
+	@echo "Helm chart targets:"
+	@echo "  helm-lint                  Lint Helm chart"
+	@echo "  helm-template              Template Helm chart (gateway only)"
+	@echo "  helm-template-with-operator Template Helm chart with operator"
+	@echo "  helm-template-local        Template Helm chart with local values"
+	@echo "  helm-package               Package Helm chart"
+	@echo "  helm-install               Install gateway to local K8s"
+	@echo "  helm-install-with-operator Install gateway with operator to local K8s"
+	@echo "  helm-uninstall             Uninstall from local K8s"
+	@echo "  helm-test                  Run Helm tests"
+	@echo "  helm-upgrade               Upgrade in local K8s"
+	@echo "  helm-upgrade-with-operator Upgrade with operator in local K8s"
+	@echo ""
+	@echo "Operator targets:"
+	@echo "  build-operator             Build the operator binary"
+	@echo "  operator-generate          Generate DeepCopy methods"
+	@echo "  operator-manifests         Generate CRD and RBAC manifests"
+	@echo "  operator-install-crds      Install CRDs into the cluster"
+	@echo "  operator-docker-build      Build operator Docker image"
+	@echo "  operator-docker-push       Push operator Docker image"
+	@echo "  operator-deploy            Deploy operator to cluster"
+	@echo "  operator-undeploy          Remove operator from cluster"
+	@echo "  test-operator-unit         Run operator unit tests"
+	@echo "  test-operator-functional   Run operator functional tests"
+	@echo "  test-operator-integration  Run operator integration tests"
+	@echo ""
+	@echo "Operator performance test targets:"
+	@echo "  perf-test-operator              Run all operator performance tests"
+	@echo "  perf-test-operator-local        Run local operator performance tests"
+	@echo "  perf-test-operator-reconciliation Run reconciliation performance tests"
+	@echo "  perf-test-operator-grpc         Run gRPC performance tests"
+	@echo "  perf-test-operator-config-push  Run config push performance tests"
+	@echo "  perf-test-operator-k8s          Run K8s operator performance tests"
+	@echo "  perf-test-operator-benchmarks   Run operator Go benchmarks"
+	@echo "  perf-analyze-operator           Analyze operator performance results"
+	@echo "  perf-analyze-operator-charts    Generate charts from results"
+	@echo "  perf-analyze-operator-export    Export results to JSON"
+
+# ==============================================================================
+# Operator targets
+# ==============================================================================
+
+## build-operator: Build the operator binary for current platform
+build-operator:
+	@echo "==> Building $(OPERATOR_BINARY_NAME)..."
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(OPERATOR_BINARY_NAME) ./$(OPERATOR_CMD_DIR)
+	@echo "==> Binary built: $(BUILD_DIR)/$(OPERATOR_BINARY_NAME)"
+
+## operator-generate: Generate DeepCopy methods for CRD types
+operator-generate:
+	@echo "==> Generating DeepCopy methods..."
+	$(CONTROLLER_GEN) object paths="./api/..."
+	@echo "==> DeepCopy methods generated"
+
+## operator-manifests: Generate CRD and RBAC manifests
+operator-manifests: operator-generate
+	@echo "==> Generating CRD manifests..."
+	@mkdir -p config/crd/bases
+	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config/crd/bases
+	@echo "==> Generating RBAC manifests..."
+	@mkdir -p config/rbac
+	$(CONTROLLER_GEN) rbac:roleName=avapigw-operator-role paths="./internal/operator/controller/..." output:rbac:artifacts:config=config/rbac
+	@echo "==> Manifests generated"
+
+## operator-install-crds: Install CRDs into the cluster
+operator-install-crds: operator-manifests
+	@echo "==> Installing CRDs..."
+	kubectl apply -f config/crd/bases/
+	@echo "==> CRDs installed"
+
+## operator-docker-build: Build operator Docker image
+operator-docker-build:
+	@echo "==> Building operator Docker image..."
+	docker build -f Dockerfile.operator -t $(OPERATOR_DOCKER_IMAGE):$(DOCKER_TAG) .
+	@echo "==> Docker image built: $(OPERATOR_DOCKER_IMAGE):$(DOCKER_TAG)"
+
+## operator-docker-push: Push operator Docker image
+operator-docker-push: operator-docker-build
+	@echo "==> Pushing operator Docker image..."
+	docker push $(OPERATOR_DOCKER_IMAGE):$(DOCKER_TAG)
+	@echo "==> Docker image pushed"
+
+## operator-deploy: Deploy operator to cluster
+operator-deploy: operator-manifests
+	@echo "==> Deploying operator..."
+	kubectl apply -k config/default/
+	@echo "==> Operator deployed"
+
+## operator-undeploy: Remove operator from cluster
+operator-undeploy:
+	@echo "==> Removing operator..."
+	kubectl delete -k config/default/ --ignore-not-found
+	@echo "==> Operator removed"
+
+## test-operator-unit: Run operator unit tests
+test-operator-unit:
+	@echo "==> Running operator unit tests..."
+	$(GO) test -v -race -coverprofile=$(COVERAGE_DIR)/operator-unit.out ./internal/operator/...
+	@echo "==> Operator unit tests completed"
+
+## test-operator-functional: Run operator functional tests
+test-operator-functional:
+	@echo "==> Running operator functional tests..."
+	$(GO) test -v -race -tags=functional -coverprofile=$(COVERAGE_DIR)/operator-functional.out ./internal/operator/...
+	@echo "==> Operator functional tests completed"
+
+## test-operator-integration: Run operator integration tests
+test-operator-integration:
+	@echo "==> Running operator integration tests..."
+	$(GO) test -v -race -tags=integration -coverprofile=$(COVERAGE_DIR)/operator-integration.out ./internal/operator/...
+	@echo "==> Operator integration tests completed"
+
+# ==============================================================================
+# Helm chart targets (unified chart with optional operator)
+# ==============================================================================
+
+HELM := helm
+CHART_DIR := helm/avapigw
+CHART_NAME := avapigw
+TEST_NAMESPACE := avapigw-test
+
+## helm-lint: Lint Helm chart
+helm-lint:
+	@echo "==> Linting Helm chart..."
+	$(HELM) lint $(CHART_DIR)
+	@echo "==> Helm chart linting completed"
+
+## helm-template: Template Helm chart (gateway only)
+helm-template:
+	@echo "==> Templating Helm chart..."
+	$(HELM) template $(CHART_NAME) $(CHART_DIR) --namespace $(TEST_NAMESPACE)
+	@echo "==> Helm chart templating completed"
+
+## helm-template-with-operator: Template Helm chart with operator enabled
+helm-template-with-operator:
+	@echo "==> Templating Helm chart with operator..."
+	$(HELM) template $(CHART_NAME) $(CHART_DIR) \
+		--set operator.enabled=true \
+		--namespace $(TEST_NAMESPACE)
+	@echo "==> Helm chart templating completed"
+
+## helm-template-local: Template Helm chart with local values
+helm-template-local:
+	@echo "==> Templating Helm chart with local values..."
+	$(HELM) template $(CHART_NAME) $(CHART_DIR) \
+		-f $(CHART_DIR)/values-local.yaml \
+		--namespace $(TEST_NAMESPACE)
+	@echo "==> Helm chart templating completed"
+
+## helm-package: Package Helm chart
+helm-package:
+	@echo "==> Packaging Helm chart..."
+	$(HELM) package $(CHART_DIR) -d $(BUILD_DIR)
+	@echo "==> Helm chart packaged to $(BUILD_DIR)"
+
+## helm-install: Install gateway to local K8s (without operator)
+helm-install:
+	@echo "==> Installing Helm chart..."
+	$(HELM) upgrade --install $(CHART_NAME) $(CHART_DIR) \
+		-f $(CHART_DIR)/values-local.yaml \
+		--namespace $(TEST_NAMESPACE) \
+		--create-namespace \
+		--wait --timeout 120s
+	@echo "==> Helm chart installed"
+
+## helm-install-with-operator: Install gateway with operator to local K8s
+helm-install-with-operator: operator-install-crds
+	@echo "==> Installing Helm chart with operator..."
+	$(HELM) upgrade --install $(CHART_NAME) $(CHART_DIR) \
+		-f $(CHART_DIR)/values-local.yaml \
+		--set operator.enabled=true \
+		--namespace $(TEST_NAMESPACE) \
+		--create-namespace \
+		--wait --timeout 120s
+	@echo "==> Helm chart with operator installed"
+
+## helm-uninstall: Uninstall from local K8s
+helm-uninstall:
+	@echo "==> Uninstalling Helm chart..."
+	$(HELM) uninstall $(CHART_NAME) --namespace $(TEST_NAMESPACE) --ignore-not-found
+	@echo "==> Helm chart uninstalled"
+
+## helm-test: Run Helm tests
+helm-test:
+	@echo "==> Running Helm tests..."
+	$(HELM) test $(CHART_NAME) --namespace $(TEST_NAMESPACE)
+	@echo "==> Helm tests completed"
+
+## helm-upgrade: Upgrade in local K8s
+helm-upgrade:
+	@echo "==> Upgrading Helm chart..."
+	$(HELM) upgrade $(CHART_NAME) $(CHART_DIR) \
+		-f $(CHART_DIR)/values-local.yaml \
+		--namespace $(TEST_NAMESPACE) \
+		--wait --timeout 120s
+	@echo "==> Helm chart upgraded"
+
+## helm-upgrade-with-operator: Upgrade with operator in local K8s
+helm-upgrade-with-operator:
+	@echo "==> Upgrading Helm chart with operator..."
+	$(HELM) upgrade $(CHART_NAME) $(CHART_DIR) \
+		-f $(CHART_DIR)/values-local.yaml \
+		--set operator.enabled=true \
+		--namespace $(TEST_NAMESPACE) \
+		--wait --timeout 120s
+	@echo "==> Helm chart with operator upgraded"
+
+# Legacy aliases for backward compatibility
+helm-lint-operator: helm-lint
+helm-template-operator: helm-template-with-operator
+helm-template-operator-local: helm-template-local
+helm-package-operator: helm-package
+helm-install-operator: helm-install-with-operator
+helm-uninstall-operator: helm-uninstall
+helm-test-operator: helm-test
+helm-upgrade-operator: helm-upgrade-with-operator
+
+# ==============================================================================
+# Operator Performance Test targets
+# ==============================================================================
+
+## perf-test-operator: Run all operator performance tests
+perf-test-operator: build-operator
+	@echo "==> Running all operator performance tests..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh all
+
+## perf-test-operator-local: Run local operator performance tests
+perf-test-operator-local: build-operator
+	@echo "==> Running local operator performance tests..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh local
+
+## perf-test-operator-reconciliation: Run operator reconciliation performance tests
+perf-test-operator-reconciliation: build-operator
+	@echo "==> Running operator reconciliation performance tests..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh reconciliation
+
+## perf-test-operator-grpc: Run operator gRPC performance tests
+perf-test-operator-grpc: build-operator
+	@echo "==> Running operator gRPC performance tests..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh grpc
+
+## perf-test-operator-config-push: Run operator config push performance tests
+perf-test-operator-config-push: build-operator
+	@echo "==> Running operator config push performance tests..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh config-push
+
+## perf-test-operator-k8s: Run Kubernetes-based operator performance tests
+perf-test-operator-k8s: build-operator
+	@echo "==> Running K8s operator performance tests..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh k8s
+
+## perf-test-operator-benchmarks: Run operator Go benchmarks
+perf-test-operator-benchmarks: build-operator
+	@echo "==> Running operator benchmarks..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh benchmarks
+
+## perf-analyze-operator: Analyze operator performance test results
+perf-analyze-operator:
+	@echo "==> Analyzing operator performance test results..."
+	@$(PERF_SCRIPTS)/analyze-operator-results.sh --detailed
+
+## perf-analyze-operator-charts: Generate charts from operator performance results
+perf-analyze-operator-charts:
+	@echo "==> Generating operator performance charts..."
+	@$(PERF_SCRIPTS)/analyze-operator-results.sh --charts
+
+## perf-analyze-operator-export: Export operator performance results to JSON
+perf-analyze-operator-export:
+	@echo "==> Exporting operator performance results..."
+	@$(PERF_SCRIPTS)/analyze-operator-results.sh --export=json

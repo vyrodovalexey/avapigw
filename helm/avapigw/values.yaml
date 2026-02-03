@@ -790,3 +790,298 @@ networkPolicy:
   ingress: []
   # -- Egress rules
   egress: []
+
+# =============================================================================
+# Operator Configuration
+# =============================================================================
+# The operator enables Kubernetes-native configuration management through CRDs.
+# When enabled, you can manage routes and backends using APIRoute, GRPCRoute,
+# Backend, and GRPCBackend custom resources instead of ConfigMaps.
+
+operator:
+  # -- Enable the avapigw operator
+  enabled: false
+
+  # -- Number of replicas for the operator deployment
+  replicaCount: 1
+
+  image:
+    # -- Operator container image repository
+    repository: ghcr.io/vyrodovalexey/avapigw-operator
+    # -- Operator image pull policy
+    pullPolicy: IfNotPresent
+    # -- Operator image tag (defaults to chart appVersion)
+    tag: ""
+
+  # -- Image pull secrets for private registries (operator-specific)
+  imagePullSecrets: []
+
+  # Leader election configuration
+  leaderElection:
+    # -- Enable leader election for controller manager
+    enabled: true
+    # -- Lease duration for leader election
+    leaseDuration: 15s
+    # -- Renew deadline for leader election
+    renewDeadline: 10s
+    # -- Retry period for leader election
+    retryPeriod: 2s
+    # -- Resource name for leader election lease
+    resourceName: avapigw-operator-leader.avapigw.io
+
+  # gRPC server configuration
+  grpc:
+    # -- gRPC server port for gateway communication
+    port: 9444
+    # -- TLS configuration for gRPC server
+    tls:
+      # -- TLS mode (selfsigned, vault)
+      mode: selfsigned
+      # -- Self-signed certificate configuration
+      selfsigned:
+        # -- Certificate validity duration
+        validity: 8760h
+      # -- Vault PKI configuration
+      vault:
+        # -- Vault PKI mount path
+        pkiMount: pki
+        # -- Vault PKI role name
+        role: ""
+        # -- Common name for certificate requests
+        commonName: ""
+        # -- Subject alternative names
+        altNames: []
+        # -- Certificate TTL
+        ttl: 24h
+
+  # Webhook configuration
+  webhook:
+    # -- Enable admission webhooks
+    enabled: true
+    # -- Webhook server port
+    port: 9443
+    # -- TLS configuration for webhook server
+    tls:
+      # -- TLS mode (selfsigned, vault, cert-manager)
+      mode: selfsigned
+      # -- Self-signed certificate configuration
+      selfsigned:
+        # -- Certificate validity duration
+        validity: 8760h
+      # -- Vault PKI configuration
+      vault:
+        # -- Vault PKI mount path
+        pkiMount: pki
+        # -- Vault PKI role name
+        role: ""
+        # -- Common name for certificate requests
+        commonName: ""
+        # -- Subject alternative names
+        altNames: []
+        # -- Certificate TTL
+        ttl: 24h
+      # -- cert-manager configuration
+      certManager:
+        # -- Issuer reference
+        issuerRef:
+          # -- Issuer name
+          name: ""
+          # -- Issuer kind (Issuer or ClusterIssuer)
+          kind: ClusterIssuer
+
+  # Vault integration configuration (operator-specific)
+  vault:
+    # -- Enable Vault integration for operator
+    enabled: false
+    # -- Vault server address
+    address: ""
+    # -- Vault authentication method (token, kubernetes, approle)
+    authMethod: kubernetes
+    # -- Vault role for Kubernetes auth
+    role: ""
+    # -- Vault Kubernetes auth mount path
+    kubernetesMountPath: kubernetes
+    # -- Vault token (use only for development)
+    token: ""
+
+  # Metrics configuration
+  metrics:
+    # -- Enable Prometheus metrics
+    enabled: true
+    # -- Metrics server port
+    port: 8080
+
+  # Health probes configuration
+  health:
+    # -- Health probe bind address port
+    port: 8081
+
+  # Service configuration
+  service:
+    # -- Service type
+    type: ClusterIP
+    # -- Annotations to add to the service
+    annotations: {}
+
+  # Resource limits and requests
+  resources:
+    limits:
+      # -- CPU limit
+      cpu: 500m
+      # -- Memory limit
+      memory: 256Mi
+    requests:
+      # -- CPU request
+      cpu: 100m
+      # -- Memory request
+      memory: 128Mi
+
+  # Liveness probe configuration
+  livenessProbe:
+    httpGet:
+      # -- Liveness probe path
+      path: /healthz
+      # -- Liveness probe port
+      port: health
+    # -- Initial delay before liveness probe starts
+    initialDelaySeconds: 15
+    # -- Period between liveness probes
+    periodSeconds: 20
+    # -- Timeout for liveness probe
+    timeoutSeconds: 5
+    # -- Number of failures before pod is restarted
+    failureThreshold: 3
+    # -- Number of successes before pod is considered healthy
+    successThreshold: 1
+
+  # Readiness probe configuration
+  readinessProbe:
+    httpGet:
+      # -- Readiness probe path
+      path: /readyz
+      # -- Readiness probe port
+      port: health
+    # -- Initial delay before readiness probe starts
+    initialDelaySeconds: 5
+    # -- Period between readiness probes
+    periodSeconds: 10
+    # -- Timeout for readiness probe
+    timeoutSeconds: 5
+    # -- Number of failures before pod is marked unready
+    failureThreshold: 3
+    # -- Number of successes before pod is considered ready
+    successThreshold: 1
+
+  # Pod security context
+  podSecurityContext:
+    # -- Run as non-root user
+    runAsNonRoot: true
+    # -- Run as user ID
+    runAsUser: 65532
+    # -- Run as group ID
+    runAsGroup: 65532
+    # -- Filesystem group ID
+    fsGroup: 65532
+    # -- Seccomp profile
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Container security context
+  securityContext:
+    # -- Allow privilege escalation
+    allowPrivilegeEscalation: false
+    # -- Read-only root filesystem
+    readOnlyRootFilesystem: true
+    # -- Run as non-root user
+    runAsNonRoot: true
+    # -- Run as user ID
+    runAsUser: 65532
+    # -- Run as group ID
+    runAsGroup: 65532
+    # -- Drop all capabilities
+    capabilities:
+      drop:
+        - ALL
+
+  # ServiceAccount configuration
+  serviceAccount:
+    # -- Specifies whether a service account should be created
+    create: true
+    # -- Automatically mount a ServiceAccount's API credentials
+    automount: true
+    # -- Annotations to add to the service account
+    annotations: {}
+    # -- The name of the service account to use
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+
+  # -- Annotations to add to the operator pod
+  podAnnotations: {}
+
+  # -- Labels to add to the operator pod
+  podLabels: {}
+
+  # Pod disruption budget
+  podDisruptionBudget:
+    # -- Enable pod disruption budget
+    enabled: false
+    # -- Minimum available pods (can be number or percentage)
+    minAvailable: 1
+    # -- Maximum unavailable pods (can be number or percentage)
+    # maxUnavailable: 1
+
+  # -- Additional volumes for the operator pod
+  volumes: []
+
+  # -- Additional volume mounts for the operator container
+  volumeMounts: []
+
+  # -- Node selector for operator pod scheduling
+  nodeSelector: {}
+
+  # -- Tolerations for operator pod scheduling
+  tolerations: []
+
+  # -- Affinity rules for operator pod scheduling
+  affinity: {}
+
+  # -- Topology spread constraints for operator pod scheduling
+  topologySpreadConstraints: []
+
+  # -- Extra environment variables for operator
+  extraEnv: []
+    # - name: EXAMPLE_VAR
+    #   value: "example-value"
+
+  # -- Extra environment variables from secrets or configmaps for operator
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: my-secret
+    # - configMapRef:
+    #     name: my-configmap
+
+  # ServiceMonitor for Prometheus Operator
+  serviceMonitor:
+    # -- Enable ServiceMonitor for Prometheus Operator
+    enabled: false
+    # -- Namespace for ServiceMonitor (defaults to release namespace)
+    namespace: ""
+    # -- Labels for ServiceMonitor
+    labels: {}
+    # -- Scrape interval
+    interval: 30s
+    # -- Scrape timeout
+    scrapeTimeout: 10s
+    # -- Metric relabeling configs
+    metricRelabelings: []
+    # -- Relabeling configs
+    relabelings: []
+
+  # Network policies for operator
+  networkPolicy:
+    # -- Enable network policies for operator
+    enabled: false
+    # -- Ingress rules
+    ingress: []
+    # -- Egress rules
+    egress: []

@@ -1,0 +1,69 @@
+# Yandex Tank Configuration: Operator API Throughput Test
+# Purpose: Measure operator API throughput and response times under load
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: Operator gRPC API endpoint
+
+# Test metadata
+name: operator-throughput
+description: Operator API throughput test measuring reconciliation performance
+
+# Note: This configuration is for testing the operator's HTTP metrics/health endpoints
+# For gRPC performance testing, use the Go-based tests in test/performance/operator/
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 100 to 1000 RPS
+    # Sustain: 3 min at 1000 RPS (main measurement phase)
+    # Cooldown: 1 min ramp down
+    schedule: line(100, 1000, 1m) const(1000, 3m) line(1000, 100, 1m)
+
+  ammofile: /var/loadtest/ammo/operator-health.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 5s
+
+  # Instance settings
+  instances: 500
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/OperatorPerftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: operator-throughput]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 5% for 30 seconds
+    - http(5xx,5%,30s)
+    # Stop if 50% of requests exceed 1000ms for 30 seconds
+    - time(1000,50%,30s)
+    # Stop if total network errors exceed 5% for 30 seconds
+    - http(net,5%,30s)
+
+# Performance targets for operator
+# - P99 latency: < 100ms
+# - Throughput: > 1000 reconciles/second
+# - Error rate: < 0.1%

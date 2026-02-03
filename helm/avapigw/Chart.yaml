@@ -1,10 +1,11 @@
 apiVersion: v2
 name: avapigw
-description: High-performance API Gateway built with Go and gin-gonic
+description: High-performance API Gateway built with Go and gin-gonic, with optional Kubernetes operator for CRD-based configuration
 type: application
-version: 0.2.0
+version: 0.3.0
 appVersion: "1.0.0"
 kubeVersion: ">=1.23.0-0"
+icon: https://raw.githubusercontent.com/vyrodovalexey/avapigw/main/docs/images/logo.png
 home: https://github.com/vyrodovalexey/avapigw
 sources:
   - https://github.com/vyrodovalexey/avapigw
@@ -19,6 +20,10 @@ keywords:
   - http
   - go
   - gin
+  - operator
+  - kubernetes
+  - crd
+  - controller
 annotations:
   artifacthub.io/license: MIT
   artifacthub.io/links: |
@@ -26,6 +31,47 @@ annotations:
       url: https://github.com/vyrodovalexey/avapigw/blob/main/README.md
     - name: Source
       url: https://github.com/vyrodovalexey/avapigw
+  artifacthub.io/crds: |
+    - kind: APIRoute
+      version: v1alpha1
+      name: apiroutes.avapigw.io
+      displayName: API Route
+      description: HTTP route configuration for the API Gateway
+    - kind: GRPCRoute
+      version: v1alpha1
+      name: grpcroutes.avapigw.io
+      displayName: gRPC Route
+      description: gRPC route configuration for the API Gateway
+    - kind: Backend
+      version: v1alpha1
+      name: backends.avapigw.io
+      displayName: Backend
+      description: HTTP backend configuration for the API Gateway
+    - kind: GRPCBackend
+      version: v1alpha1
+      name: grpcbackends.avapigw.io
+      displayName: gRPC Backend
+      description: gRPC backend configuration for the API Gateway
+  artifacthub.io/crdsExamples: |
+    - apiVersion: avapigw.io/v1alpha1
+      kind: APIRoute
+      metadata:
+        name: example-route
+      spec:
+        match:
+          - uri:
+              prefix: /api/v1
+            methods:
+              - GET
+              - POST
+        route:
+          - destination:
+              host: backend-service
+              port: 8080
+        timeout: 30s
+  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Basic Install
 
 dependencies:
   - name: redis

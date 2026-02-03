@@ -1,0 +1,1132 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: apiroutes.avapigw.io
+spec:
+  group: avapigw.io
+  names:
+    kind: APIRoute
+    listKind: APIRouteList
+    plural: apiroutes
+    shortNames:
+    - ar
+    singular: apiroute
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: APIRoute is the Schema for the apiroutes API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: APIRouteSpec defines the desired state of APIRoute.
+            properties:
+              authentication:
+                description: Authentication configures route-level authentication.
+                properties:
+                  allowAnonymous:
+                    description: AllowAnonymous allows anonymous access when no credentials
+                      are provided.
+                    type: boolean
+                  apiKey:
+                    description: APIKey configures API key authentication.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables API key authentication.
+                        type: boolean
+                      hashAlgorithm:
+                        description: HashAlgorithm is the hash algorithm for stored
+                          keys.
+                        enum:
+                        - sha256
+                        - sha512
+                        - bcrypt
+                        type: string
+                      header:
+                        default: X-API-Key
+                        description: Header is the header name for API key.
+                        type: string
+                      query:
+                        description: Query is the query parameter name for API key.
+                        type: string
+                      vaultPath:
+                        description: VaultPath is the Vault path for API keys.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  enabled:
+                    default: false
+                    description: Enabled enables authentication.
+                    type: boolean
+                  jwt:
+                    description: JWT configures JWT authentication.
+                    properties:
+                      algorithm:
+                        description: Algorithm is the expected signing algorithm.
+                        enum:
+                        - HS256
+                        - HS384
+                        - HS512
+                        - RS256
+                        - RS384
+                        - RS512
+                        - ES256
+                        - ES384
+                        - ES512
+                        type: string
+                      audience:
+                        description: Audience is the expected token audience.
+                        items:
+                          type: string
+                        type: array
+                      claimMapping:
+                        description: ClaimMapping maps JWT claims to identity fields.
+                        properties:
+                          email:
+                            description: Email is the claim containing email.
+                            type: string
+                          groups:
+                            description: Groups is the claim containing groups.
+                            type: string
+                          name:
+                            description: Name is the claim containing name.
+                            type: string
+                          permissions:
+                            description: Permissions is the claim containing permissions.
+                            type: string
+                          roles:
+                            description: Roles is the claim containing roles.
+                            type: string
+                          scopes:
+                            description: Scopes is the claim containing scopes.
+                            type: string
+                        type: object
+                      enabled:
+                        default: false
+                        description: Enabled enables JWT authentication.
+                        type: boolean
+                      issuer:
+                        description: Issuer is the expected token issuer.
+                        type: string
+                      jwksUrl:
+                        description: JWKSURL is the URL to fetch JWKS from.
+                        type: string
+                      publicKey:
+                        description: PublicKey is the public key for RSA/ECDSA algorithms.
+                        type: string
+                      secret:
+                        description: Secret is the secret for HMAC algorithms.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  mtls:
+                    description: MTLS configures mTLS authentication.
+                    properties:
+                      allowedCNs:
+                        description: AllowedCNs is a list of allowed common names.
+                        items:
+                          type: string
+                        type: array
+                      allowedOUs:
+                        description: AllowedOUs is a list of allowed organizational
+                          units.
+                        items:
+                          type: string
+                        type: array
+                      caFile:
+                        description: CAFile is the path to the CA certificate.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled enables mTLS authentication.
+                        type: boolean
+                      extractIdentity:
+                        description: ExtractIdentity specifies how to extract identity
+                          from certificate.
+                        enum:
+                        - cn
+                        - san
+                        - ou
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  oidc:
+                    description: OIDC configures OIDC authentication.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables OIDC authentication.
+                        type: boolean
+                      providers:
+                        description: Providers is a list of OIDC providers.
+                        items:
+                          description: OIDCProviderConfig configures an OIDC provider.
+                          properties:
+                            clientId:
+                              description: ClientID is the OIDC client ID.
+                              minLength: 1
+                              type: string
+                            clientSecret:
+                              description: ClientSecret is the OIDC client secret.
+                              type: string
+                            clientSecretRef:
+                              description: ClientSecretRef references a Kubernetes
+                                secret containing the client secret.
+                              properties:
+                                key:
+                                  description: Key is the key in the secret.
+                                  minLength: 1
+                                  type: string
+                                name:
+                                  description: Name is the name of the secret.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - key
+                              - name
+                              type: object
+                            issuerUrl:
+                              description: IssuerURL is the OIDC issuer URL.
+                              minLength: 1
+                              type: string
+                            name:
+                              description: Name is the provider name.
+                              minLength: 1
+                              type: string
+                            scopes:
+                              description: Scopes is the list of scopes to request.
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - clientId
+                          - issuerUrl
+                          - name
+                          type: object
+                        type: array
+                    required:
+                    - enabled
+                    type: object
+                  skipPaths:
+                    description: SkipPaths is a list of paths to skip authentication.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - enabled
+                type: object
+              authorization:
+                description: Authorization configures route-level authorization.
+                properties:
+                  abac:
+                    description: ABAC configures attribute-based access control.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables ABAC.
+                        type: boolean
+                      policies:
+                        description: Policies is a list of ABAC policies.
+                        items:
+                          description: ABACPolicyConfig configures an ABAC policy.
+                          properties:
+                            actions:
+                              description: Actions is a list of actions this policy
+                                applies to.
+                              items:
+                                type: string
+                              type: array
+                            effect:
+                              default: allow
+                              description: Effect is the policy effect (allow or deny).
+                              enum:
+                              - allow
+                              - deny
+                              type: string
+                            expression:
+                              description: Expression is the CEL expression for the
+                                policy.
+                              minLength: 1
+                              type: string
+                            name:
+                              description: Name is the policy name.
+                              minLength: 1
+                              type: string
+                            priority:
+                              description: Priority is the policy priority.
+                              minimum: 0
+                              type: integer
+                            resources:
+                              description: Resources is a list of resources this policy
+                                applies to.
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - expression
+                          - name
+                          type: object
+                        type: array
+                    required:
+                    - enabled
+                    type: object
+                  cache:
+                    description: Cache configures authorization decision caching.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables caching.
+                        type: boolean
+                      maxSize:
+                        description: MaxSize is the maximum number of entries.
+                        minimum: 1
+                        type: integer
+                      ttl:
+                        description: TTL is the cache TTL.
+                        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                        type: string
+                      type:
+                        default: memory
+                        description: Type is the cache type (memory, redis).
+                        enum:
+                        - memory
+                        - redis
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  defaultPolicy:
+                    default: deny
+                    description: DefaultPolicy is the default policy when no rules
+                      match.
+                    enum:
+                    - allow
+                    - deny
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enabled enables authorization.
+                    type: boolean
+                  external:
+                    description: External configures external authorization.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables external authorization.
+                        type: boolean
+                      failOpen:
+                        description: FailOpen allows requests when external authorization
+                          fails.
+                        type: boolean
+                      opa:
+                        description: OPA configures OPA authorization.
+                        properties:
+                          headers:
+                            additionalProperties:
+                              type: string
+                            description: Headers are additional headers to send to
+                              OPA.
+                            type: object
+                          policy:
+                            description: Policy is the OPA policy path.
+                            type: string
+                          url:
+                            description: URL is the OPA server URL.
+                            minLength: 1
+                            type: string
+                        required:
+                        - url
+                        type: object
+                      timeout:
+                        description: Timeout is the timeout for external authorization
+                          requests.
+                        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  rbac:
+                    description: RBAC configures role-based access control.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables RBAC.
+                        type: boolean
+                      policies:
+                        description: Policies is a list of RBAC policies.
+                        items:
+                          description: RBACPolicyConfig configures an RBAC policy.
+                          properties:
+                            actions:
+                              description: Actions is a list of actions this policy
+                                allows.
+                              items:
+                                type: string
+                              type: array
+                            effect:
+                              default: allow
+                              description: Effect is the policy effect (allow or deny).
+                              enum:
+                              - allow
+                              - deny
+                              type: string
+                            name:
+                              description: Name is the policy name.
+                              minLength: 1
+                              type: string
+                            priority:
+                              description: Priority is the policy priority.
+                              minimum: 0
+                              type: integer
+                            resources:
+                              description: Resources is a list of resources this policy
+                                applies to.
+                              items:
+                                type: string
+                              type: array
+                            roles:
+                              description: Roles is a list of roles that match this
+                                policy.
+                              items:
+                                type: string
+                              type: array
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      roleHierarchy:
+                        additionalProperties:
+                          items:
+                            type: string
+                          type: array
+                        description: RoleHierarchy defines role inheritance.
+                        type: object
+                    required:
+                    - enabled
+                    type: object
+                  skipPaths:
+                    description: SkipPaths is a list of paths to skip authorization.
+                    items:
+                      type: string
+                    type: array
+                required:
+                - enabled
+                type: object
+              cache:
+                description: Cache contains caching configuration.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables caching.
+                    type: boolean
+                  keyComponents:
+                    description: KeyComponents are the components used to generate
+                      the cache key.
+                    items:
+                      type: string
+                    type: array
+                  staleWhileRevalidate:
+                    description: StaleWhileRevalidate allows serving stale content
+                      while revalidating.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                  ttl:
+                    description: TTL is the cache time-to-live.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                required:
+                - enabled
+                type: object
+              cors:
+                description: CORS configures CORS for this route.
+                properties:
+                  allowCredentials:
+                    description: AllowCredentials allows credentials.
+                    type: boolean
+                  allowHeaders:
+                    description: AllowHeaders is the list of allowed headers.
+                    items:
+                      type: string
+                    type: array
+                  allowMethods:
+                    description: AllowMethods is the list of allowed HTTP methods.
+                    items:
+                      type: string
+                    type: array
+                  allowOrigins:
+                    description: AllowOrigins is the list of allowed origins.
+                    items:
+                      type: string
+                    type: array
+                  exposeHeaders:
+                    description: ExposeHeaders is the list of headers to expose.
+                    items:
+                      type: string
+                    type: array
+                  maxAge:
+                    description: MaxAge is the maximum age for preflight cache in
+                      seconds.
+                    type: integer
+                type: object
+              directResponse:
+                description: DirectResponse contains direct response configuration.
+                properties:
+                  body:
+                    description: Body is the response body.
+                    type: string
+                  headers:
+                    additionalProperties:
+                      type: string
+                    description: Headers are the response headers.
+                    type: object
+                  status:
+                    description: Status is the HTTP status code.
+                    maximum: 599
+                    minimum: 100
+                    type: integer
+                required:
+                - status
+                type: object
+              encoding:
+                description: Encoding contains encoding configuration.
+                properties:
+                  request:
+                    description: Request contains request encoding configuration.
+                    properties:
+                      contentType:
+                        description: ContentType is the content type.
+                        type: string
+                    type: object
+                  response:
+                    description: Response contains response encoding configuration.
+                    properties:
+                      contentType:
+                        description: ContentType is the content type.
+                        type: string
+                    type: object
+                type: object
+              fault:
+                description: Fault contains fault injection configuration.
+                properties:
+                  abort:
+                    description: Abort contains abort fault injection configuration.
+                    properties:
+                      httpStatus:
+                        description: HTTPStatus is the HTTP status code to return.
+                        maximum: 599
+                        minimum: 100
+                        type: integer
+                      percentage:
+                        default: 100
+                        description: Percentage is the percentage of requests to abort
+                          (0-100).
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                    required:
+                    - httpStatus
+                    type: object
+                  delay:
+                    description: Delay contains delay fault injection configuration.
+                    properties:
+                      fixedDelay:
+                        description: FixedDelay is the fixed delay duration.
+                        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                        type: string
+                      percentage:
+                        default: 100
+                        description: Percentage is the percentage of requests to delay
+                          (0-100).
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                    required:
+                    - fixedDelay
+                    type: object
+                type: object
+              headers:
+                description: Headers contains header manipulation configuration.
+                properties:
+                  request:
+                    description: Request contains request header operations.
+                    properties:
+                      add:
+                        additionalProperties:
+                          type: string
+                        description: Add appends header values.
+                        type: object
+                      remove:
+                        description: Remove removes headers.
+                        items:
+                          type: string
+                        type: array
+                      set:
+                        additionalProperties:
+                          type: string
+                        description: Set replaces header values.
+                        type: object
+                    type: object
+                  response:
+                    description: Response contains response header operations.
+                    properties:
+                      add:
+                        additionalProperties:
+                          type: string
+                        description: Add appends header values.
+                        type: object
+                      remove:
+                        description: Remove removes headers.
+                        items:
+                          type: string
+                        type: array
+                      set:
+                        additionalProperties:
+                          type: string
+                        description: Set replaces header values.
+                        type: object
+                    type: object
+                type: object
+              match:
+                description: Match contains the matching conditions for this route.
+                items:
+                  description: RouteMatch represents matching conditions for a route.
+                  properties:
+                    headers:
+                      description: Headers contains header matching conditions.
+                      items:
+                        description: HeaderMatch represents header matching configuration.
+                        properties:
+                          absent:
+                            description: Absent matches if the header is NOT present.
+                            type: boolean
+                          exact:
+                            description: Exact matches the header value exactly.
+                            type: string
+                          name:
+                            description: Name is the header name.
+                            minLength: 1
+                            type: string
+                          prefix:
+                            description: Prefix matches header values starting with
+                              this prefix.
+                            type: string
+                          present:
+                            description: Present matches if the header is present
+                              (regardless of value).
+                            type: boolean
+                          regex:
+                            description: Regex matches header values using a regular
+                              expression.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    methods:
+                      description: Methods is the list of HTTP methods to match.
+                      items:
+                        type: string
+                      type: array
+                    queryParams:
+                      description: QueryParams contains query parameter matching conditions.
+                      items:
+                        description: QueryParamMatch represents query parameter matching
+                          configuration.
+                        properties:
+                          exact:
+                            description: Exact matches the parameter value exactly.
+                            type: string
+                          name:
+                            description: Name is the query parameter name.
+                            minLength: 1
+                            type: string
+                          present:
+                            description: Present matches if the parameter is present
+                              (regardless of value).
+                            type: boolean
+                          regex:
+                            description: Regex matches parameter values using a regular
+                              expression.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    uri:
+                      description: URI contains URI matching configuration.
+                      properties:
+                        exact:
+                          description: Exact matches the URI exactly.
+                          type: string
+                        prefix:
+                          description: Prefix matches URIs starting with this prefix.
+                          type: string
+                        regex:
+                          description: Regex matches URIs using a regular expression.
+                          type: string
+                      type: object
+                  type: object
+                type: array
+              maxSessions:
+                description: MaxSessions configures maximum concurrent sessions for
+                  this route.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables max sessions limiting.
+                    type: boolean
+                  maxConcurrent:
+                    description: MaxConcurrent is the maximum number of concurrent
+                      sessions.
+                    minimum: 1
+                    type: integer
+                  queueSize:
+                    description: QueueSize is the size of the waiting queue (0 = reject
+                      immediately).
+                    type: integer
+                  queueTimeout:
+                    description: QueueTimeout is the maximum time to wait in queue.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                required:
+                - enabled
+                - maxConcurrent
+                type: object
+              mirror:
+                description: Mirror contains traffic mirroring configuration.
+                properties:
+                  destination:
+                    description: Destination is the mirror destination.
+                    properties:
+                      host:
+                        description: Host is the backend host (service name or IP).
+                        minLength: 1
+                        type: string
+                      port:
+                        description: Port is the backend port.
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    required:
+                    - host
+                    - port
+                    type: object
+                  percentage:
+                    default: 100
+                    description: Percentage is the percentage of traffic to mirror
+                      (0-100).
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                required:
+                - destination
+                type: object
+              rateLimit:
+                description: RateLimit contains route-level rate limiting configuration.
+                properties:
+                  burst:
+                    description: Burst is the maximum burst size.
+                    minimum: 1
+                    type: integer
+                  enabled:
+                    default: false
+                    description: Enabled enables rate limiting.
+                    type: boolean
+                  perClient:
+                    description: PerClient enables per-client rate limiting.
+                    type: boolean
+                  requestsPerSecond:
+                    description: RequestsPerSecond is the maximum requests per second.
+                    minimum: 1
+                    type: integer
+                required:
+                - burst
+                - enabled
+                - requestsPerSecond
+                type: object
+              redirect:
+                description: Redirect contains HTTP redirect configuration.
+                properties:
+                  code:
+                    default: 302
+                    description: Code is the HTTP redirect status code.
+                    enum:
+                    - 301
+                    - 302
+                    - 303
+                    - 307
+                    - 308
+                    type: integer
+                  host:
+                    description: Host is the redirect host.
+                    type: string
+                  port:
+                    description: Port is the redirect port.
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  scheme:
+                    description: Scheme is the redirect scheme (http or https).
+                    enum:
+                    - http
+                    - https
+                    type: string
+                  stripQuery:
+                    description: StripQuery removes query parameters from the redirect.
+                    type: boolean
+                  uri:
+                    description: URI is the redirect URI.
+                    type: string
+                type: object
+              requestLimits:
+                description: RequestLimits configures request size limits for this
+                  route.
+                properties:
+                  maxBodySize:
+                    description: MaxBodySize is the maximum allowed request body size
+                      in bytes.
+                    format: int64
+                    type: integer
+                  maxHeaderSize:
+                    description: MaxHeaderSize is the maximum allowed total header
+                      size in bytes.
+                    format: int64
+                    type: integer
+                type: object
+              retries:
+                description: Retries contains retry policy configuration.
+                properties:
+                  attempts:
+                    default: 3
+                    description: Attempts is the maximum number of retry attempts.
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  perTryTimeout:
+                    description: PerTryTimeout is the timeout for each retry attempt.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                  retryOn:
+                    description: |-
+                      RetryOn is a comma-separated list of conditions to retry on.
+                      For HTTP: 5xx, reset, connect-failure, retriable-4xx, refused-stream, etc.
+                      For gRPC: canceled, deadline-exceeded, internal, resource-exhausted, unavailable.
+                    type: string
+                required:
+                - attempts
+                type: object
+              rewrite:
+                description: Rewrite contains URL rewrite configuration.
+                properties:
+                  authority:
+                    description: Authority is the rewritten authority (host).
+                    type: string
+                  uri:
+                    description: URI is the rewritten URI.
+                    type: string
+                type: object
+              route:
+                description: Route contains the destination(s) for matched requests.
+                items:
+                  description: RouteDestination represents a destination with weight
+                    for routing.
+                  properties:
+                    destination:
+                      description: Destination is the backend destination.
+                      properties:
+                        host:
+                          description: Host is the backend host (service name or IP).
+                          minLength: 1
+                          type: string
+                        port:
+                          description: Port is the backend port.
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                      required:
+                      - host
+                      - port
+                      type: object
+                    weight:
+                      default: 100
+                      description: Weight is the traffic weight for this destination
+                        (0-100).
+                      maximum: 100
+                      minimum: 0
+                      type: integer
+                  required:
+                  - destination
+                  type: object
+                type: array
+              security:
+                description: Security configures security headers for this route.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables security features.
+                    type: boolean
+                  headers:
+                    description: Headers configures security headers.
+                    properties:
+                      contentSecurityPolicy:
+                        description: ContentSecurityPolicy sets the Content-Security-Policy
+                          header.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled enables security headers.
+                        type: boolean
+                      strictTransportSecurity:
+                        description: StrictTransportSecurity sets the Strict-Transport-Security
+                          header.
+                        type: string
+                      xContentTypeOptions:
+                        description: XContentTypeOptions sets the X-Content-Type-Options
+                          header.
+                        type: string
+                      xFrameOptions:
+                        description: XFrameOptions sets the X-Frame-Options header.
+                        type: string
+                      xXSSProtection:
+                        description: XXSSProtection sets the X-XSS-Protection header.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                required:
+                - enabled
+                type: object
+              timeout:
+                description: Timeout is the request timeout for this route.
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                type: string
+              tls:
+                description: TLS configures route-level TLS certificate override.
+                properties:
+                  certFile:
+                    description: CertFile is the path to the route-specific certificate
+                      file (PEM format).
+                    type: string
+                  cipherSuites:
+                    description: CipherSuites is the list of allowed cipher suites.
+                    items:
+                      type: string
+                    type: array
+                  clientValidation:
+                    description: ClientValidation configures client certificate validation.
+                    properties:
+                      allowedCNs:
+                        description: AllowedCNs is the list of allowed Common Names
+                          for client certificates.
+                        items:
+                          type: string
+                        type: array
+                      allowedSANs:
+                        description: AllowedSANs is the list of allowed Subject Alternative
+                          Names.
+                        items:
+                          type: string
+                        type: array
+                      caFile:
+                        description: CAFile is the path to the CA certificate file
+                          for client validation.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled enables client certificate validation.
+                        type: boolean
+                      requireClientCert:
+                        description: RequireClientCert requires client certificate.
+                        type: boolean
+                    required:
+                    - enabled
+                    type: object
+                  keyFile:
+                    description: KeyFile is the path to the route-specific private
+                      key file (PEM format).
+                    type: string
+                  maxVersion:
+                    description: MaxVersion is the maximum TLS version.
+                    enum:
+                    - TLS12
+                    - TLS13
+                    type: string
+                  minVersion:
+                    description: MinVersion is the minimum TLS version (TLS12, TLS13).
+                    enum:
+                    - TLS12
+                    - TLS13
+                    type: string
+                  sniHosts:
+                    description: SNIHosts is the list of SNI hostnames this certificate
+                      should be used for.
+                    items:
+                      type: string
+                    type: array
+                  vault:
+                    description: Vault configures Vault-based certificate management.
+                    properties:
+                      altNames:
+                        description: AltNames for certificate requests.
+                        items:
+                          type: string
+                        type: array
+                      commonName:
+                        description: CommonName for certificate requests.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled enables Vault integration.
+                        type: boolean
+                      pkiMount:
+                        description: PKIMount is the Vault PKI mount path.
+                        type: string
+                      role:
+                        description: Role is the Vault PKI role name.
+                        type: string
+                      ttl:
+                        description: TTL for certificate requests.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                type: object
+              transform:
+                description: Transform contains transformation configuration.
+                properties:
+                  request:
+                    description: Request contains request transformation configuration.
+                    properties:
+                      template:
+                        description: Template is a Go template for transforming the
+                          request body.
+                        type: string
+                    type: object
+                  response:
+                    description: Response contains response transformation configuration.
+                    properties:
+                      allowFields:
+                        description: AllowFields is the list of fields to allow in
+                          the response.
+                        items:
+                          type: string
+                        type: array
+                      denyFields:
+                        description: DenyFields is the list of fields to deny in the
+                          response.
+                        items:
+                          type: string
+                        type: array
+                      fieldMappings:
+                        additionalProperties:
+                          type: string
+                        description: FieldMappings maps field names.
+                        type: object
+                    type: object
+                type: object
+            type: object
+          status:
+            description: APIRouteStatus defines the observed state of APIRoute.
+            properties:
+              appliedGateways:
+                description: AppliedGateways is the list of gateways where this route
+                  has been applied.
+                items:
+                  description: AppliedGateway represents a gateway where the configuration
+                    has been applied.
+                  properties:
+                    lastApplied:
+                      description: LastApplied is the timestamp when the configuration
+                        was last applied.
+                      format: date-time
+                      type: string
+                    name:
+                      description: Name of the gateway.
+                      type: string
+                    namespace:
+                      description: Namespace of the gateway.
+                      type: string
+                  required:
+                  - lastApplied
+                  - name
+                  - namespace
+                  type: object
+                type: array
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the APIRoute's state.
+                items:
+                  description: Condition represents a condition of a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time the condition
+                        transitioned from one status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable message indicating
+                        details about the transition.
+                      type: string
+                    observedGeneration:
+                      description: ObservedGeneration represents the .metadata.generation
+                        that the condition was set based upon.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: Reason for the condition's last transition.
+                      type: string
+                    status:
+                      description: Status of the condition (True, False, Unknown).
+                      type: string
+                    type:
+                      description: Type of condition.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

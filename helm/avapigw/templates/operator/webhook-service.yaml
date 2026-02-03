@@ -1,0 +1,17 @@
+{{- if and .Values.operator.enabled .Values.operator.webhook.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "avapigw.operator.webhookServiceName" . }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 443
+      targetPort: webhook
+      protocol: TCP
+      name: https
+  selector:
+    {{- include "avapigw.operator.selectorLabels" . | nindent 4 }}
+{{- end }}

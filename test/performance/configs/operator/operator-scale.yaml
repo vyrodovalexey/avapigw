@@ -1,0 +1,105 @@
+# Yandex Tank Configuration: Operator Scale Test
+# Purpose: Test operator performance with many CRDs and measure resource consumption
+# Duration: 10 minutes total (2m warmup + 6m sustain + 2m cooldown)
+# Target: Operator metrics endpoint to monitor resource usage
+
+# Test metadata
+name: operator-scale
+description: Operator scale test with many CRDs measuring resource consumption
+
+# Note: This configuration tests the operator's ability to handle scale
+# The actual CRD creation is done via kubectl/Go tests
+# This monitors the operator's metrics endpoint during the scale test
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 2 min ramp from 50 to 500 RPS
+    # Sustain: 6 min at 500 RPS (main measurement phase)
+    # Cooldown: 2 min ramp down
+    schedule: line(50, 500, 2m) const(500, 6m) line(500, 50, 2m)
+
+  ammofile: /var/loadtest/ammo/operator-metrics.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings - moderate concurrency for scale testing
+  instances: 200
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/OperatorScaleTest]"
+    - "[Accept: text/plain]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: operator-scale]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: true
+  config: |
+    [global_tags]
+      test = "operator-scale"
+    
+    [agent]
+      interval = "1s"
+      round_interval = true
+      metric_batch_size = 1000
+      metric_buffer_limit = 10000
+      collection_jitter = "0s"
+      flush_interval = "1s"
+      flush_jitter = "0s"
+      precision = ""
+      hostname = ""
+      omit_hostname = false
+    
+    [[inputs.cpu]]
+      percpu = true
+      totalcpu = true
+      collect_cpu_time = false
+      report_active = false
+    
+    [[inputs.mem]]
+    
+    [[inputs.net]]
+    
+    [[inputs.netstat]]
+    
+    [[inputs.processes]]
+    
+    [[outputs.influxdb]]
+      urls = ["http://localhost:8086"]
+      database = "telegraf"
+      skip_database_creation = true
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 10% for 60 seconds
+    - http(5xx,10%,60s)
+    # Stop if 50% of requests exceed 2000ms for 60 seconds
+    - time(2000,50%,60s)
+    # Stop if total network errors exceed 10% for 60 seconds
+    - http(net,10%,60s)
+
+# Scale test targets:
+# - Handle 500+ CRDs without degradation
+# - Memory usage < 256MB
+# - CPU usage < 500m
+# - Reconciliation queue depth < 100

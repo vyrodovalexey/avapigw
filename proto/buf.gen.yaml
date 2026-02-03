@@ -1,0 +1,11 @@
+# buf.gen.yaml - Code generation configuration
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.32.0
+    out: .
+    opt:
+      - paths=source_relative
+  - remote: buf.build/grpc/go:v1.3.0
+    out: .
+    opt:
+      - paths=source_relative
