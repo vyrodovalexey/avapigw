@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -31,6 +33,9 @@ import (
 	operatorwebhook "github.com/vyrodovalexey/avapigw/internal/operator/webhook"
 )
 
+// envValueTrue is the string value used for boolean true in environment variables.
+const envValueTrue = "true"
+
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
@@ -39,6 +44,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(avapigwv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(networkingv1.AddToScheme(scheme))
 }
 
 // Config holds the operator configuration.
@@ -105,6 +111,15 @@ type Config struct {
 
 	// CertNamespace is the namespace for generating default DNS names.
 	CertNamespace string
+
+	// EnableIngressController enables the Kubernetes Ingress controller.
+	EnableIngressController bool
+
+	// IngressClassName is the IngressClass name this controller handles.
+	IngressClassName string
+
+	// IngressLBAddress is the load balancer address (IP or hostname) to set on Ingress status.
+	IngressLBAddress string
 }
 
 func main() {
@@ -156,7 +171,7 @@ func run() error {
 	}
 
 	// Setup controllers
-	if err := setupControllers(mgr, grpcServer); err != nil {
+	if err := setupControllers(mgr, grpcServer, cfg); err != nil {
 		return fmt.Errorf("unable to setup controllers: %w", err)
 	}
 
@@ -245,7 +260,7 @@ func setupWebhooksIfEnabled(mgr ctrl.Manager, cfg *Config) error {
 	if !cfg.EnableWebhooks {
 		return nil
 	}
-	if err := setupWebhooks(mgr); err != nil {
+	if err := setupWebhooks(mgr, cfg); err != nil {
 		return fmt.Errorf("unable to setup webhooks: %w", err)
 	}
 	return nil
@@ -326,6 +341,12 @@ func defineFlags(cfg *Config) {
 		"The service name for generating default certificate DNS names.")
 	flag.StringVar(&cfg.CertNamespace, "cert-namespace", "avapigw-system",
 		"The namespace for generating default certificate DNS names.")
+	flag.BoolVar(&cfg.EnableIngressController, "enable-ingress-controller", false,
+		"Enable the Kubernetes Ingress controller.")
+	flag.StringVar(&cfg.IngressClassName, "ingress-class-name", controller.DefaultIngressClassName,
+		"The IngressClass name this controller handles.")
+	flag.StringVar(&cfg.IngressLBAddress, "ingress-lb-address", "",
+		"The load balancer address (IP or hostname) to set on Ingress status.")
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -357,7 +378,7 @@ func applyEnvOverrides(cfg *Config) {
 	applyCertDNSNamesEnv(cfg)
 
 	// Bool overrides
-	if os.Getenv("LEADER_ELECT") == "true" {
+	if os.Getenv("LEADER_ELECT") == envValueTrue {
 		cfg.EnableLeaderElection = true
 	}
 	if os.Getenv("ENABLE_WEBHOOKS") == "false" {
@@ -366,9 +387,14 @@ func applyEnvOverrides(cfg *Config) {
 	if os.Getenv("ENABLE_GRPC_SERVER") == "false" {
 		cfg.EnableGRPCServer = false
 	}
-	if os.Getenv("ENABLE_TRACING") == "true" {
+	if os.Getenv("ENABLE_TRACING") == envValueTrue {
 		cfg.EnableTracing = true
 	}
+	if os.Getenv("ENABLE_INGRESS_CONTROLLER") == envValueTrue {
+		cfg.EnableIngressController = true
+	}
+	applyStringEnv(&cfg.IngressClassName, "INGRESS_CLASS_NAME")
+	applyStringEnv(&cfg.IngressLBAddress, "INGRESS_LB_ADDRESS")
 }
 
 func applyStringEnv(target *string, envKey string) {
@@ -413,8 +439,8 @@ func applyCertDNSNamesEnv(cfg *Config) {
 // splitAndTrim splits a string by separator and trims whitespace from each part.
 func splitAndTrim(s, sep string) []string {
 	parts := make([]string, 0)
-	for _, part := range splitString(s, sep) {
-		trimmed := trimSpace(part)
+	for _, part := range strings.Split(s, sep) {
+		trimmed := strings.TrimSpace(part)
 		if trimmed != "" {
 			parts = append(parts, trimmed)
 		}
@@ -422,48 +448,10 @@ func splitAndTrim(s, sep string) []string {
 	return parts
 }
 
-// splitString splits a string by separator without using strings package.
-func splitString(s, sep string) []string {
-	if s == "" {
-		return nil
-	}
-	if sep == "" {
-		return []string{s}
-	}
-
-	var result []string
-	start := 0
-	for i := 0; i <= len(s)-len(sep); i++ {
-		if s[i:i+len(sep)] == sep {
-			result = append(result, s[start:i])
-			start = i + len(sep)
-			i += len(sep) - 1
-		}
-	}
-	result = append(result, s[start:])
-	return result
-}
-
-// trimSpace trims leading and trailing whitespace from a string.
-func trimSpace(s string) string {
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
-		end--
-	}
-	return s[start:end]
-}
-
 func parseIntEnv(s string, v *int) error {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return fmt.Errorf("invalid integer: %s", s)
-		}
-		n = n*10 + int(c-'0')
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("invalid integer: %s", s)
 	}
 	*v = n
 	return nil
@@ -514,9 +502,8 @@ func setupSignalHandler(cancel context.CancelFunc) {
 		setupLog.Info("received signal, shutting down", "signal", sig.String())
 		cancel()
 
-		// Give some time for graceful shutdown
-		time.Sleep(5 * time.Second)
-
+		// Wait for a second signal to force shutdown; context cancellation
+		// drives graceful shutdown so no fixed sleep is needed.
 		sig = <-sigCh
 		setupLog.Info("received second signal, forcing shutdown", "signal", sig.String())
 		os.Exit(1)
@@ -622,7 +609,7 @@ func setupGRPCServer(ctx context.Context, cfg *Config, certManager cert.Manager)
 	})
 }
 
-func setupControllers(mgr ctrl.Manager, grpcServer *operatorgrpc.Server) error {
+func setupControllers(mgr ctrl.Manager, grpcServer *operatorgrpc.Server, cfg *Config) error {
 	// Setup APIRoute controller
 	if err := (&controller.APIRouteReconciler{
 		Client: mgr.GetClient(),
@@ -667,10 +654,41 @@ func setupControllers(mgr ctrl.Manager, grpcServer *operatorgrpc.Server) error {
 		return err
 	}
 
+	// Setup Ingress controller if enabled
+	if cfg.EnableIngressController {
+		if err := setupIngressController(mgr, grpcServer, cfg); err != nil {
+			return fmt.Errorf("unable to setup Ingress controller: %w", err)
+		}
+	}
+
 	return nil
 }
 
-func setupWebhooks(mgr ctrl.Manager) error {
+func setupIngressController(
+	mgr ctrl.Manager,
+	grpcServer *operatorgrpc.Server,
+	cfg *Config,
+) error {
+	setupLog.Info("setting up Ingress controller",
+		"ingress_class", cfg.IngressClassName,
+		"lb_address", cfg.IngressLBAddress,
+	)
+
+	statusUpdater := controller.NewIngressStatusUpdater(mgr.GetClient(), cfg.IngressLBAddress)
+
+	return (&controller.IngressReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+		Recorder:            mgr.GetEventRecorderFor("ingress-controller"),
+		GRPCServer:          grpcServer,
+		IngressStatusUpdate: statusUpdater,
+		Converter:           controller.NewIngressConverter(),
+		IngressClassName:    cfg.IngressClassName,
+	}).SetupWithManager(mgr)
+}
+
+func setupWebhooks(mgr ctrl.Manager, cfg *Config) error {
 	// Setup APIRoute webhook
 	if err := operatorwebhook.SetupAPIRouteWebhook(mgr); err != nil {
 		return err
@@ -689,6 +707,16 @@ func setupWebhooks(mgr ctrl.Manager) error {
 	// Setup GRPCBackend webhook
 	if err := operatorwebhook.SetupGRPCBackendWebhook(mgr); err != nil {
 		return err
+	}
+
+	// Setup Ingress webhook if Ingress controller is enabled
+	if cfg.EnableIngressController {
+		setupLog.Info("setting up Ingress validating webhook",
+			"ingress_class", cfg.IngressClassName,
+		)
+		if err := operatorwebhook.SetupIngressWebhook(mgr, cfg.IngressClassName); err != nil {
+			return err
+		}
 	}
 
 	return nil

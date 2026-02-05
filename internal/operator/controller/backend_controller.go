@@ -6,15 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
@@ -42,135 +39,66 @@ type BackendReconciler struct {
 
 // Reconcile handles reconciliation of Backend resources.
 func (r *BackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	timer := NewReconcileTimer("backend")
-	metrics := GetControllerMetrics()
-	logger := log.FromContext(ctx)
-	logger.Info("reconciling Backend", "name", req.Name, "namespace", req.Namespace)
-
-	// Initialize StatusUpdater if not set (for direct Reconcile calls without SetupWithManager)
-	if r.StatusUpdater == nil {
-		r.StatusUpdater = NewStatusUpdater(r.Client)
-	}
-
-	// Fetch the Backend instance
-	backend := &avapigwv1alpha1.Backend{}
-	if err := r.Get(ctx, req.NamespacedName, backend); err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("Backend not found, ignoring", "name", req.Name)
-			// Clean up metrics for deleted resource
-			metrics.DeleteResourceConditionMetrics("Backend", req.Name, req.Namespace)
-			timer.RecordSuccess()
-			return ctrl.Result{}, nil
-		}
-		logger.Error(err, "failed to get Backend")
-		timer.RecordError()
-		return ctrl.Result{}, err
-	}
-
-	// Check if the object is being deleted
-	if !backend.ObjectMeta.DeletionTimestamp.IsZero() {
-		result, err := r.handleDeletion(ctx, backend)
-		if err != nil {
-			timer.RecordError()
-		} else {
-			// Clean up metrics for deleted resource
-			metrics.DeleteResourceConditionMetrics("Backend", backend.Name, backend.Namespace)
-			timer.RecordSuccess()
-		}
-		return result, err
-	}
-
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(backend, BackendFinalizerName) {
-		controllerutil.AddFinalizer(backend, BackendFinalizerName)
-		if err := r.Update(ctx, backend); err != nil {
-			logger.Error(err, "failed to add finalizer")
-			timer.RecordError()
-			return ctrl.Result{}, err
-		}
-		metrics.RecordFinalizerOperation("backend", OperationAdd)
-		timer.RecordRequeue()
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Reconcile the Backend
-	if err := r.reconcileBackend(ctx, backend); err != nil {
-		logger.Error(err, "failed to reconcile Backend")
-		reason := string(avapigwv1alpha1.ReasonReconcileFailed)
-		totalHosts := len(backend.Spec.Hosts)
-		statusErr := r.StatusUpdater.UpdateBackendStatus(
-			ctx, backend, false, false, reason, err.Error(), totalHosts,
-		)
-		if statusErr != nil {
-			logger.Error(statusErr, "failed to update status after reconcile failure")
-		}
-		r.Recorder.Event(backend, "Warning", EventReasonReconcileFailed, err.Error())
-		// Update condition metrics
-		metrics.SetResourceCondition("Backend", backend.Name, backend.Namespace, "Ready", 0)
-		metrics.SetResourceCondition("Backend", backend.Name, backend.Namespace, "Healthy", 0)
-		timer.RecordError()
-		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, err
-	}
-
-	// Update status
-	reason := string(avapigwv1alpha1.ReasonReconciled)
-	totalHosts := len(backend.Spec.Hosts)
-	statusErr := r.StatusUpdater.UpdateBackendStatus(
-		ctx, backend, true, true, reason, MessageBackendApplied, totalHosts,
-	)
-	if statusErr != nil {
-		// Status update failed, requeue to retry. Return nil error to avoid exponential backoff
-		// since this is a transient issue that will be resolved on the next reconcile.
-		logger.Error(statusErr, "failed to update status, will retry")
-		timer.RecordRequeue()
-		return ctrl.Result{RequeueAfter: RequeueAfterStatusUpdateFailure}, nil
-	}
-	r.Recorder.Event(backend, "Normal", EventReasonReconciled, MessageBackendApplied)
-
-	// Update condition metrics
-	metrics.SetResourceCondition("Backend", backend.Name, backend.Namespace, "Ready", 1)
-	metrics.SetResourceCondition("Backend", backend.Name, backend.Namespace, "Healthy", 1)
-	timer.RecordSuccess()
-
-	return ctrl.Result{}, nil
+	return BaseReconcile(ctx, r.Client, r.StatusUpdater, r.Recorder, req, r.callbacks())
 }
 
-// handleDeletion handles the deletion of a Backend.
-func (r *BackendReconciler) handleDeletion(ctx context.Context, backend *avapigwv1alpha1.Backend) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	metrics := GetControllerMetrics()
-
-	if controllerutil.ContainsFinalizer(backend, BackendFinalizerName) {
-		// Perform cleanup
-		if err := r.cleanupBackend(ctx, backend); err != nil {
-			logger.Error(err, "failed to cleanup Backend")
-			r.Recorder.Event(backend, "Warning", EventReasonCleanupFailed, err.Error())
-			return ctrl.Result{RequeueAfter: RequeueAfterCleanupFailure}, err
-		}
-
-		// Remove finalizer
-		controllerutil.RemoveFinalizer(backend, BackendFinalizerName)
-		if err := r.Update(ctx, backend); err != nil {
-			logger.Error(err, "failed to remove finalizer")
-			return ctrl.Result{}, err
-		}
-
-		metrics.RecordFinalizerOperation("backend", OperationRemove)
-		r.Recorder.Event(backend, "Normal", EventReasonDeleted, MessageBackendDeleted)
+// callbacks returns the resource-specific callbacks for the base reconciler.
+func (r *BackendReconciler) callbacks() *ReconcileCallbacks {
+	return &ReconcileCallbacks{
+		ResourceKind:   "Backend",
+		ControllerName: "backend",
+		FinalizerName:  BackendFinalizerName,
+		NewResource: func() Reconcilable {
+			return &avapigwv1alpha1.Backend{}
+		},
+		Reconcile: func(ctx context.Context, resource Reconcilable) error {
+			return r.reconcileBackend(ctx, resource.(*avapigwv1alpha1.Backend))
+		},
+		Cleanup: func(ctx context.Context, resource Reconcilable) error {
+			return r.cleanupBackend(ctx, resource.(*avapigwv1alpha1.Backend))
+		},
+		UpdateStatus: func(ctx context.Context, updater *StatusUpdater, resource Reconcilable) error {
+			backend := resource.(*avapigwv1alpha1.Backend)
+			reason := string(avapigwv1alpha1.ReasonReconciled)
+			totalHosts := len(backend.Spec.Hosts)
+			return updater.UpdateBackendStatus(
+				ctx, backend, true, true, reason, MessageBackendApplied, totalHosts,
+			)
+		},
+		UpdateFailureStatus: func(
+			ctx context.Context, updater *StatusUpdater, resource Reconcilable, reconcileErr error,
+		) error {
+			backend := resource.(*avapigwv1alpha1.Backend)
+			reason := string(avapigwv1alpha1.ReasonReconcileFailed)
+			totalHosts := len(backend.Spec.Hosts)
+			return updater.UpdateBackendStatus(
+				ctx, backend, false, false, reason, reconcileErr.Error(), totalHosts,
+			)
+		},
+		RecordSuccessEvent: func(recorder record.EventRecorder, resource Reconcilable) {
+			recorder.Event(resource, "Normal", EventReasonReconciled, MessageBackendApplied)
+		},
+		RecordFailureEvent: func(recorder record.EventRecorder, resource Reconcilable, err error) {
+			recorder.Event(resource, "Warning", EventReasonReconcileFailed, err.Error())
+		},
+		SetSuccessMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
+			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Ready", 1)
+			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Healthy", 1)
+		},
+		SetFailureMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
+			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Ready", 0)
+			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Healthy", 0)
+		},
 	}
-
-	return ctrl.Result{}, nil
 }
 
 // reconcileBackend reconciles the Backend configuration.
 func (r *BackendReconciler) reconcileBackend(ctx context.Context, backend *avapigwv1alpha1.Backend) error {
-	// Convert Backend spec to JSON
 	configJSON, err := json.Marshal(backend.Spec)
 	if err != nil {
 		return fmt.Errorf("failed to marshal Backend spec: %w", err)
 	}
 
-	// Apply configuration to gRPC server
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.ApplyBackend(ctx, backend.Name, backend.Namespace, configJSON); err != nil {
 			return fmt.Errorf("failed to apply Backend to gateway: %w", err)
@@ -182,7 +110,6 @@ func (r *BackendReconciler) reconcileBackend(ctx context.Context, backend *avapi
 
 // cleanupBackend cleans up the Backend configuration.
 func (r *BackendReconciler) cleanupBackend(ctx context.Context, backend *avapigwv1alpha1.Backend) error {
-	// Delete configuration from gRPC server
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.DeleteBackend(ctx, backend.Name, backend.Namespace); err != nil {
 			return fmt.Errorf("failed to delete Backend from gateway: %w", err)
@@ -194,7 +121,7 @@ func (r *BackendReconciler) cleanupBackend(ctx context.Context, backend *avapigw
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BackendReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Initialize StatusUpdater if not already set
+	// Initialize StatusUpdater if not already set (Task B2: only in SetupWithManager)
 	if r.StatusUpdater == nil {
 		r.StatusUpdater = NewStatusUpdater(r.Client)
 	}

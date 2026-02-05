@@ -742,3 +742,148 @@ func (c *DuplicateChecker) grpcBackendsConflict(a, b *avapigwv1alpha1.GRPCBacken
 	}
 	return false
 }
+
+// ============================================================================
+// Cross-CRD Conflict Detection
+// ============================================================================
+
+// CheckBackendCrossConflicts checks if a Backend has host:port conflicts with existing GRPCBackends.
+// This prevents two different backend types from pointing to the same upstream endpoint.
+func (c *DuplicateChecker) CheckBackendCrossConflicts(
+	ctx context.Context,
+	backend *avapigwv1alpha1.Backend,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	cacheKey := c.buildCacheKey("grpcbackend", backend.Namespace)
+	var grpcBackends *avapigwv1alpha1.GRPCBackendList
+
+	// Try to use cached data
+	if c.isCacheValid(cacheKey) {
+		c.cache.mu.RLock()
+		grpcBackends = c.cache.grpcBackends[cacheKey]
+		c.cache.mu.RUnlock()
+	}
+
+	// Fetch from API if cache miss or invalid
+	if grpcBackends == nil {
+		grpcBackends = &avapigwv1alpha1.GRPCBackendList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped {
+			listOpts = append(listOpts, client.InNamespace(backend.Namespace))
+		}
+		if err := c.client.List(ctx, grpcBackends, listOpts...); err != nil {
+			return fmt.Errorf("failed to list GRPCBackends for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.grpcBackends[cacheKey] = grpcBackends
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for host:port conflicts between Backend and GRPCBackends
+	var conflicts []string
+	for i := range grpcBackends.Items {
+		existing := &grpcBackends.Items[i]
+		if c.backendAndGRPCBackendConflict(backend.Spec.Hosts, existing.Spec.Hosts) {
+			conflicts = append(conflicts, keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		c.logger.Warn("cross-CRD Backend/GRPCBackend conflict detected",
+			observability.String("backend", keys.ResourceKey(backend.Namespace, backend.Name)),
+			observability.Any("conflicting_grpcbackends", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"Backend %s/%s has host:port conflict with GRPCBackend(s) %s",
+			backend.Namespace, backend.Name, strings.Join(conflicts, ", "))
+	}
+
+	return nil
+}
+
+// CheckGRPCBackendCrossConflicts checks if a GRPCBackend has host:port conflicts with existing Backends.
+// This prevents two different backend types from pointing to the same upstream endpoint.
+func (c *DuplicateChecker) CheckGRPCBackendCrossConflicts(
+	ctx context.Context,
+	grpcBackend *avapigwv1alpha1.GRPCBackend,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	cacheKey := c.buildCacheKey("backend", grpcBackend.Namespace)
+	var backends *avapigwv1alpha1.BackendList
+
+	// Try to use cached data
+	if c.isCacheValid(cacheKey) {
+		c.cache.mu.RLock()
+		backends = c.cache.backends[cacheKey]
+		c.cache.mu.RUnlock()
+	}
+
+	// Fetch from API if cache miss or invalid
+	if backends == nil {
+		backends = &avapigwv1alpha1.BackendList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped {
+			listOpts = append(listOpts, client.InNamespace(grpcBackend.Namespace))
+		}
+		if err := c.client.List(ctx, backends, listOpts...); err != nil {
+			return fmt.Errorf("failed to list Backends for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.backends[cacheKey] = backends
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for host:port conflicts between GRPCBackend and Backends
+	var conflicts []string
+	for i := range backends.Items {
+		existing := &backends.Items[i]
+		if c.backendAndGRPCBackendConflict(existing.Spec.Hosts, grpcBackend.Spec.Hosts) {
+			conflicts = append(conflicts, keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		c.logger.Warn("cross-CRD GRPCBackend/Backend conflict detected",
+			observability.String("grpcbackend", keys.ResourceKey(grpcBackend.Namespace, grpcBackend.Name)),
+			observability.Any("conflicting_backends", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"GRPCBackend %s/%s has host:port conflict with Backend(s) %s",
+			grpcBackend.Namespace, grpcBackend.Name, strings.Join(conflicts, ", "))
+	}
+
+	return nil
+}
+
+// backendAndGRPCBackendConflict checks if Backend hosts and GRPCBackend hosts share
+// the same address:port combination.
+func (c *DuplicateChecker) backendAndGRPCBackendConflict(
+	backendHosts, grpcBackendHosts []avapigwv1alpha1.BackendHost,
+) bool {
+	for _, hostA := range backendHosts {
+		for _, hostB := range grpcBackendHosts {
+			if hostA.Address == hostB.Address && hostA.Port == hostB.Port {
+				return true
+			}
+		}
+	}
+	return false
+}

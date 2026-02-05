@@ -491,6 +491,14 @@ operator:
   tolerations: []
   affinity: {}
 
+  # Ingress controller - disabled by default for local testing
+  # Enable to test Ingress-based route configuration
+  ingressController:
+    enabled: false
+    className: avapigw
+    isDefaultClass: false
+    lbAddress: ""
+
   # ServiceMonitor - disabled for local testing
   serviceMonitor:
     enabled: false

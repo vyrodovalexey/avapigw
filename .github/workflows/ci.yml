@@ -939,6 +939,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # Required for Cosign keyless signing
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       image-tag: ${{ steps.meta.outputs.version }}
@@ -988,6 +989,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign container image with Cosign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
+
       - name: Generate SBOM
         uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.22.1
         with:
@@ -1012,6 +1027,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # Required for Cosign keyless signing
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       image-tag: ${{ steps.meta.outputs.version }}
@@ -1061,6 +1077,34 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign container image with Cosign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
+
+      - name: Generate SBOM for operator
+        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.22.1
+        with:
+          image: ${{ env.DOCKER_IMAGE_OPERATOR }}:${{ steps.meta.outputs.version }}
+          artifact-name: sbom-operator-${{ steps.meta.outputs.version }}.spdx.json
+          output-file: ./sbom-operator.spdx.json
+          upload-release-assets: false
+
+      - name: Upload operator SBOM artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-operator
+          path: ./sbom-operator.spdx.json
+          retention-days: 90
 
   trivy-scan:
     name: Trivy Security Scan
@@ -1237,6 +1281,21 @@ jobs:
             --set operator.enabled=true \
             --set operator.webhook.enabled=false > /dev/null
           echo "Operator template validation successful!"
+
+      - name: Helm template with ingress controller enabled
+        run: |
+          echo "==> Validating Helm templates with ingress controller enabled..."
+          helm template avapigw helm/avapigw \
+            --set operator.enabled=true \
+            --set operator.ingressController.enabled=true \
+            --set operator.webhook.enabled=false > /dev/null
+          echo "Ingress controller template validation successful!"
+
+      - name: Validate Kubernetes manifests with ingress controller
+        run: |
+          echo "==> Validating generated Kubernetes manifests with ingress controller..."
+          helm template avapigw helm/avapigw --set operator.enabled=true --set operator.ingressController.enabled=true --set operator.webhook.enabled=false | kubectl apply --dry-run=client -f -
+          echo "Kubernetes manifest validation with ingress controller successful!"
 
       - name: Validate Kubernetes manifests
         run: |

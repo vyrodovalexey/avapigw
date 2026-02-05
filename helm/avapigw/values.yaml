@@ -864,6 +864,11 @@ operator:
     tls:
       # -- TLS mode (selfsigned, vault, cert-manager)
       mode: selfsigned
+      # -- Base64-encoded CA bundle for webhook validation (used with selfsigned and vault modes).
+      # For cert-manager mode, the CA bundle is injected automatically via annotation.
+      # For selfsigned mode, the operator populates this at startup.
+      # For vault mode, set this to the Vault PKI CA certificate (base64-encoded PEM).
+      caBundle: ""
       # -- Self-signed certificate configuration
       selfsigned:
         # -- Certificate validity duration
@@ -1059,6 +1064,20 @@ operator:
     #     name: my-secret
     # - configMapRef:
     #     name: my-configmap
+
+  # Ingress controller configuration
+  # When enabled, the operator watches networking.k8s.io/v1 Ingress resources
+  # and converts them to gateway configuration using avapigw annotations.
+  ingressController:
+    # -- Enable the Kubernetes Ingress controller
+    enabled: false
+    # -- IngressClass name this controller handles
+    className: avapigw
+    # -- Set this IngressClass as the default cluster IngressClass
+    isDefaultClass: false
+    # -- Load balancer address (IP or hostname) to set on Ingress status.
+    # If empty, Ingress status will not be updated with a load balancer address.
+    lbAddress: ""
 
   # ServiceMonitor for Prometheus Operator
   serviceMonitor:

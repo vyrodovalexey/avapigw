@@ -1,0 +1,56 @@
+# Full-featured Ingress resource with all avapigw annotations
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: full-ingress
+  namespace: avapigw-test
+  annotations:
+    avapigw.io/timeout: "60s"
+    avapigw.io/retries: "3"
+    avapigw.io/retry-on: "5xx,reset"
+    avapigw.io/rate-limit-rps: "100"
+    avapigw.io/rate-limit-burst: "200"
+    avapigw.io/cors-allow-origins: "https://example.com,https://app.example.com"
+    avapigw.io/cors-allow-methods: "GET,POST,PUT,DELETE"
+    avapigw.io/cors-allow-headers: "Content-Type,Authorization"
+    avapigw.io/circuit-breaker-threshold: "5"
+    avapigw.io/circuit-breaker-timeout: "30s"
+    avapigw.io/load-balancer: "round-robin"
+    avapigw.io/health-check-path: "/health"
+    avapigw.io/health-check-interval: "10s"
+    avapigw.io/strip-prefix: "true"
+    avapigw.io/websocket: "true"
+    avapigw.io/max-body-size: "10485760"
+    avapigw.io/request-headers-add: "X-Gateway:avapigw,X-Request-ID:${request_id}"
+    avapigw.io/response-headers-add: "X-Served-By:avapigw"
+    avapigw.io/request-headers-remove: "X-Internal-Token"
+spec:
+  ingressClassName: avapigw
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api/v1/users
+            pathType: Prefix
+            backend:
+              service:
+                name: users-service
+                port:
+                  number: 8080
+          - path: /api/v1/orders
+            pathType: Prefix
+            backend:
+              service:
+                name: orders-service
+                port:
+                  number: 8080
+    - host: admin.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: admin-service
+                port:
+                  number: 8080

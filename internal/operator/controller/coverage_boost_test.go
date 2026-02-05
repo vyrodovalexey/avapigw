@@ -1088,9 +1088,9 @@ func TestAPIRouteReconciler_reconcileAPIRoute_ContextCanceled(t *testing.T) {
 	cancel()
 
 	err := reconciler.reconcileAPIRoute(ctx, apiRoute)
-	// The error should be context.Canceled
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("reconcileAPIRoute() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("reconcileAPIRoute() with canceled context should return error, got nil")
 	}
 }
 
@@ -1119,9 +1119,9 @@ func TestAPIRouteReconciler_cleanupAPIRoute_ContextCanceled(t *testing.T) {
 	cancel()
 
 	err := reconciler.cleanupAPIRoute(ctx, apiRoute)
-	// The error should be context.Canceled
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("cleanupAPIRoute() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("cleanupAPIRoute() with canceled context should return error, got nil")
 	}
 }
 
@@ -1154,8 +1154,9 @@ func TestGRPCRouteReconciler_reconcileGRPCRoute_ContextCanceled(t *testing.T) {
 	cancel()
 
 	err := reconciler.reconcileGRPCRoute(ctx, grpcRoute)
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("reconcileGRPCRoute() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("reconcileGRPCRoute() with canceled context should return error, got nil")
 	}
 }
 
@@ -1184,8 +1185,9 @@ func TestGRPCRouteReconciler_cleanupGRPCRoute_ContextCanceled(t *testing.T) {
 	cancel()
 
 	err := reconciler.cleanupGRPCRoute(ctx, grpcRoute)
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("cleanupGRPCRoute() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("cleanupGRPCRoute() with canceled context should return error, got nil")
 	}
 }
 
@@ -1218,8 +1220,9 @@ func TestBackendReconciler_reconcileBackend_ContextCanceled(t *testing.T) {
 	cancel()
 
 	err := reconciler.reconcileBackend(ctx, backend)
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("reconcileBackend() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("reconcileBackend() with canceled context should return error, got nil")
 	}
 }
 
@@ -1252,8 +1255,9 @@ func TestBackendReconciler_cleanupBackend_ContextCanceled(t *testing.T) {
 	cancel()
 
 	err := reconciler.cleanupBackend(ctx, backend)
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("cleanupBackend() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("cleanupBackend() with canceled context should return error, got nil")
 	}
 }
 
@@ -1286,8 +1290,9 @@ func TestGRPCBackendReconciler_reconcileGRPCBackend_ContextCanceled(t *testing.T
 	cancel()
 
 	err := reconciler.reconcileGRPCBackend(ctx, grpcBackend)
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("reconcileGRPCBackend() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("reconcileGRPCBackend() with canceled context should return error, got nil")
 	}
 }
 
@@ -1320,8 +1325,9 @@ func TestGRPCBackendReconciler_cleanupGRPCBackend_ContextCanceled(t *testing.T) 
 	cancel()
 
 	err := reconciler.cleanupGRPCBackend(ctx, grpcBackend)
+	// The gRPC server returns an error when the context is canceled
 	if err == nil {
-		t.Log("cleanupGRPCBackend() with canceled context returned nil (gRPC server handles gracefully)")
+		t.Error("cleanupGRPCBackend() with canceled context should return error, got nil")
 	}
 }
 
@@ -1366,13 +1372,11 @@ func TestAPIRouteReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
 
 	// This should return an error due to context deadline exceeded
 	result, err := reconciler.Reconcile(ctx, req)
-	// The reconciler should handle the error gracefully
-	if err != nil {
-		t.Logf("Reconcile() with deadline exceeded context returned error: %v", err)
+	// With a deadline-exceeded context, the fake client's Get() returns context.DeadlineExceeded
+	if err == nil {
+		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
 	}
-	if result.RequeueAfter > 0 {
-		t.Logf("Reconcile() requested requeue after: %v", result.RequeueAfter)
-	}
+	_ = result
 }
 
 func TestGRPCRouteReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
@@ -1411,12 +1415,10 @@ func TestGRPCRouteReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
-	if err != nil {
-		t.Logf("Reconcile() with deadline exceeded context returned error: %v", err)
+	if err == nil {
+		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
 	}
-	if result.RequeueAfter > 0 {
-		t.Logf("Reconcile() requested requeue after: %v", result.RequeueAfter)
-	}
+	_ = result
 }
 
 func TestBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
@@ -1455,12 +1457,10 @@ func TestBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
-	if err != nil {
-		t.Logf("Reconcile() with deadline exceeded context returned error: %v", err)
+	if err == nil {
+		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
 	}
-	if result.RequeueAfter > 0 {
-		t.Logf("Reconcile() requested requeue after: %v", result.RequeueAfter)
-	}
+	_ = result
 }
 
 func TestGRPCBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
@@ -1499,10 +1499,153 @@ func TestGRPCBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) 
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
-	if err != nil {
-		t.Logf("Reconcile() with deadline exceeded context returned error: %v", err)
+	if err == nil {
+		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
 	}
-	if result.RequeueAfter > 0 {
-		t.Logf("Reconcile() requested requeue after: %v", result.RequeueAfter)
+	_ = result
+}
+
+// ============================================================================
+// isResourceReady Tests
+// ============================================================================
+
+func TestIsResourceReady(t *testing.T) {
+	tests := []struct {
+		name       string
+		conditions []avapigwv1alpha1.Condition
+		generation int64
+		want       bool
+	}{
+		{
+			name: "Ready=True with matching generation",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:               avapigwv1alpha1.ConditionType("Ready"),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+				},
+			},
+			generation: 1,
+			want:       true,
+		},
+		{
+			name: "Ready=True with non-matching generation",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:               avapigwv1alpha1.ConditionType("Ready"),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+				},
+			},
+			generation: 2,
+			want:       false,
+		},
+		{
+			name: "Ready=False",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:               avapigwv1alpha1.ConditionType("Ready"),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 1,
+				},
+			},
+			generation: 1,
+			want:       false,
+		},
+		{
+			name:       "no conditions",
+			conditions: nil,
+			generation: 1,
+			want:       false,
+		},
+		{
+			name: "Ready=Unknown",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:               avapigwv1alpha1.ConditionType("Ready"),
+					Status:             metav1.ConditionUnknown,
+					ObservedGeneration: 1,
+				},
+			},
+			generation: 1,
+			want:       false,
+		},
+		{
+			name: "different condition type only",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:               avapigwv1alpha1.ConditionType("Progressing"),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 1,
+				},
+			},
+			generation: 1,
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resource := &avapigwv1alpha1.APIRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-route",
+					Namespace:  "default",
+					Generation: tt.generation,
+				},
+			}
+			resource.SetConditions(tt.conditions)
+
+			got := isResourceReady(resource)
+			if got != tt.want {
+				t.Errorf("isResourceReady() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// deletionMessage Tests
+// ============================================================================
+
+func TestDeletionMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		kind string
+		want string
+	}{
+		{
+			name: "Backend kind",
+			kind: "Backend",
+			want: MessageBackendDeleted,
+		},
+		{
+			name: "GRPCBackend kind",
+			kind: "GRPCBackend",
+			want: MessageBackendDeleted,
+		},
+		{
+			name: "APIRoute kind",
+			kind: "APIRoute",
+			want: MessageRouteDeleted,
+		},
+		{
+			name: "GRPCRoute kind",
+			kind: "GRPCRoute",
+			want: MessageRouteDeleted,
+		},
+		{
+			name: "Unknown kind",
+			kind: "Unknown",
+			want: MessageRouteDeleted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deletionMessage(tt.kind)
+			if got != tt.want {
+				t.Errorf("deletionMessage(%q) = %q, want %q", tt.kind, got, tt.want)
+			}
+		})
 	}
 }

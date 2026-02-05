@@ -2431,6 +2431,13 @@ func (e *testErrorStatusWriter) Update(ctx context.Context, obj client.Object, o
 	return e.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
+func (e *testErrorStatusWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+	if e.err != nil {
+		return e.err
+	}
+	return e.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+}
+
 // TestAPIRouteReconciler_Reconcile_GetError tests error handling when Get fails
 func TestAPIRouteReconciler_Reconcile_GetError(t *testing.T) {
 	scheme := newTestScheme()

@@ -7,6 +7,12 @@ metadata:
   labels:
     {{- include "avapigw.operator.labels" . | nindent 4 }}
 rules:
+  # ==========================================================================
+  # Leader Election Resources (namespace-scoped)
+  # ==========================================================================
+  
+  # ConfigMaps - legacy leader election mechanism
+  # Used by controller-runtime for leader election when Leases are not available
   - apiGroups:
       - ""
     resources:
@@ -19,6 +25,9 @@ rules:
       - update
       - patch
       - delete
+  
+  # Leases - preferred leader election mechanism (coordination.k8s.io/v1)
+  # Used by controller-runtime for leader election in HA deployments
   - apiGroups:
       - coordination.k8s.io
     resources:
@@ -31,6 +40,8 @@ rules:
       - update
       - patch
       - delete
+  
+  # Events - for recording leader election events
   - apiGroups:
       - ""
     resources:
@@ -38,4 +49,15 @@ rules:
     verbs:
       - create
       - patch
+  
+  # Secrets - for reading TLS certificates in the operator namespace
+  # Required for: webhook TLS certificates, CA bundles
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
 {{- end }}

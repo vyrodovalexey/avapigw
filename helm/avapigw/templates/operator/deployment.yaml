@@ -53,10 +53,20 @@ spec:
             {{- if .Values.operator.webhook.enabled }}
             - --webhook-port={{ .Values.operator.webhook.port }}
             - --enable-webhooks=true
+            - --cert-provider={{ .Values.operator.webhook.tls.mode | default "selfsigned" }}
+            - --cert-service-name={{ include "avapigw.operator.webhookServiceName" . }}
+            - --cert-namespace={{ .Release.Namespace }}
             {{- else }}
             - --enable-webhooks=false
             {{- end }}
             - --grpc-port={{ .Values.operator.grpc.port }}
+            {{- if .Values.operator.ingressController.enabled }}
+            - --enable-ingress-controller=true
+            - --ingress-class-name={{ .Values.operator.ingressController.className | default "avapigw" }}
+            {{- if .Values.operator.ingressController.lbAddress }}
+            - --ingress-lb-address={{ .Values.operator.ingressController.lbAddress }}
+            {{- end }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -117,7 +127,9 @@ spec:
             {{- if .Values.operator.webhook.enabled }}
             - name: webhook-cert
               mountPath: /tmp/k8s-webhook-server/serving-certs
+              {{- if ne .Values.operator.webhook.tls.mode "selfsigned" }}
               readOnly: true
+              {{- end }}
             {{- end }}
             - name: tmp
               mountPath: /tmp
@@ -127,9 +139,15 @@ spec:
       volumes:
         {{- if .Values.operator.webhook.enabled }}
         - name: webhook-cert
+          {{- if eq .Values.operator.webhook.tls.mode "selfsigned" }}
+          # For self-signed mode, use emptyDir so the operator can generate certificates at runtime
+          emptyDir: {}
+          {{- else }}
+          # For cert-manager or vault modes, mount the certificate secret
           secret:
             secretName: {{ include "avapigw.operator.webhookCertSecretName" . }}
             defaultMode: 420
+          {{- end }}
         {{- end }}
         - name: tmp
           emptyDir: {}

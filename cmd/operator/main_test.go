@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,6 +26,7 @@ func TestParseIntEnv_ValidInput(t *testing.T) {
 		{"four digit", "9443", 9443},
 		{"zero", "0", 0},
 		{"large number", "65535", 65535},
+		{"negative", "-5", -5},
 	}
 
 	for _, tt := range tests {
@@ -48,7 +50,6 @@ func TestParseIntEnv_InvalidInput(t *testing.T) {
 	}{
 		{"letters", "abc"},
 		{"mixed", "123abc"},
-		{"negative", "-5"},
 		{"decimal", "3.14"},
 		{"space", " "},
 		{"special chars", "!@#"},
@@ -237,6 +238,9 @@ func TestDefineFlags_DefaultValues(t *testing.T) {
 		{"EnableTracing", cfg.EnableTracing, false},
 		{"OTLPEndpoint", cfg.OTLPEndpoint, ""},
 		{"TracingSamplingRate", cfg.TracingSamplingRate, 1.0},
+		{"EnableIngressController", cfg.EnableIngressController, false},
+		{"IngressClassName", cfg.IngressClassName, "avapigw"},
+		{"IngressLBAddress", cfg.IngressLBAddress, ""},
 	}
 
 	for _, tt := range tests {
@@ -271,6 +275,9 @@ func TestDefineFlags_CustomValues(t *testing.T) {
 		"-enable-tracing=true",
 		"-otlp-endpoint=localhost:4317",
 		"-tracing-sampling-rate=0.5",
+		"-enable-ingress-controller=true",
+		"-ingress-class-name=custom-class",
+		"-ingress-lb-address=10.0.0.100",
 	}
 
 	err := flag.CommandLine.Parse(args)
@@ -321,6 +328,15 @@ func TestDefineFlags_CustomValues(t *testing.T) {
 	if cfg.TracingSamplingRate != 0.5 {
 		t.Errorf("TracingSamplingRate = %f, want %f", cfg.TracingSamplingRate, 0.5)
 	}
+	if !cfg.EnableIngressController {
+		t.Error("EnableIngressController should be true")
+	}
+	if cfg.IngressClassName != "custom-class" {
+		t.Errorf("IngressClassName = %q, want %q", cfg.IngressClassName, "custom-class")
+	}
+	if cfg.IngressLBAddress != "10.0.0.100" {
+		t.Errorf("IngressLBAddress = %q, want %q", cfg.IngressLBAddress, "10.0.0.100")
+	}
 }
 
 // ============================================================================
@@ -340,6 +356,8 @@ func TestApplyEnvOverrides_StringOverrides(t *testing.T) {
 		"LOG_LEVEL":                 "debug",
 		"LOG_FORMAT":                "console",
 		"OTLP_ENDPOINT":             "localhost:4317",
+		"INGRESS_CLASS_NAME":        "custom-ingress",
+		"INGRESS_LB_ADDRESS":        "192.168.1.100",
 	}
 
 	for k, v := range envVars {
@@ -393,6 +411,12 @@ func TestApplyEnvOverrides_StringOverrides(t *testing.T) {
 	if cfg.OTLPEndpoint != "localhost:4317" {
 		t.Errorf("OTLPEndpoint = %q, want %q", cfg.OTLPEndpoint, "localhost:4317")
 	}
+	if cfg.IngressClassName != "custom-ingress" {
+		t.Errorf("IngressClassName = %q, want %q", cfg.IngressClassName, "custom-ingress")
+	}
+	if cfg.IngressLBAddress != "192.168.1.100" {
+		t.Errorf("IngressLBAddress = %q, want %q", cfg.IngressLBAddress, "192.168.1.100")
+	}
 }
 
 func TestApplyEnvOverrides_IntOverrides(t *testing.T) {
@@ -439,10 +463,12 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 		initialEnableWebhooks  bool
 		initialEnableGRPC      bool
 		initialEnableTracing   bool
+		initialEnableIngress   bool
 		expectedLeaderElect    bool
 		expectedEnableWebhooks bool
 		expectedEnableGRPC     bool
 		expectedEnableTracing  bool
+		expectedEnableIngress  bool
 	}{
 		{
 			name: "enable leader election",
@@ -453,10 +479,12 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			initialEnableWebhooks:  true,
 			initialEnableGRPC:      true,
 			initialEnableTracing:   false,
+			initialEnableIngress:   false,
 			expectedLeaderElect:    true,
 			expectedEnableWebhooks: true,
 			expectedEnableGRPC:     true,
 			expectedEnableTracing:  false,
+			expectedEnableIngress:  false,
 		},
 		{
 			name: "disable webhooks",
@@ -467,10 +495,12 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			initialEnableWebhooks:  true,
 			initialEnableGRPC:      true,
 			initialEnableTracing:   false,
+			initialEnableIngress:   false,
 			expectedLeaderElect:    false,
 			expectedEnableWebhooks: false,
 			expectedEnableGRPC:     true,
 			expectedEnableTracing:  false,
+			expectedEnableIngress:  false,
 		},
 		{
 			name: "disable grpc server",
@@ -481,10 +511,12 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			initialEnableWebhooks:  true,
 			initialEnableGRPC:      true,
 			initialEnableTracing:   false,
+			initialEnableIngress:   false,
 			expectedLeaderElect:    false,
 			expectedEnableWebhooks: true,
 			expectedEnableGRPC:     false,
 			expectedEnableTracing:  false,
+			expectedEnableIngress:  false,
 		},
 		{
 			name: "enable tracing",
@@ -495,27 +527,64 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			initialEnableWebhooks:  true,
 			initialEnableGRPC:      true,
 			initialEnableTracing:   false,
+			initialEnableIngress:   false,
 			expectedLeaderElect:    false,
 			expectedEnableWebhooks: true,
 			expectedEnableGRPC:     true,
 			expectedEnableTracing:  true,
+			expectedEnableIngress:  false,
 		},
 		{
-			name: "all bool overrides",
+			name: "enable ingress controller",
 			envVars: map[string]string{
-				"LEADER_ELECT":       "true",
-				"ENABLE_WEBHOOKS":    "false",
-				"ENABLE_GRPC_SERVER": "false",
-				"ENABLE_TRACING":     "true",
+				"ENABLE_INGRESS_CONTROLLER": "true",
 			},
 			initialLeaderElect:     false,
 			initialEnableWebhooks:  true,
 			initialEnableGRPC:      true,
 			initialEnableTracing:   false,
+			initialEnableIngress:   false,
+			expectedLeaderElect:    false,
+			expectedEnableWebhooks: true,
+			expectedEnableGRPC:     true,
+			expectedEnableTracing:  false,
+			expectedEnableIngress:  true,
+		},
+		{
+			name: "all bool overrides",
+			envVars: map[string]string{
+				"LEADER_ELECT":              "true",
+				"ENABLE_WEBHOOKS":           "false",
+				"ENABLE_GRPC_SERVER":        "false",
+				"ENABLE_TRACING":            "true",
+				"ENABLE_INGRESS_CONTROLLER": "true",
+			},
+			initialLeaderElect:     false,
+			initialEnableWebhooks:  true,
+			initialEnableGRPC:      true,
+			initialEnableTracing:   false,
+			initialEnableIngress:   false,
 			expectedLeaderElect:    true,
 			expectedEnableWebhooks: false,
 			expectedEnableGRPC:     false,
 			expectedEnableTracing:  true,
+			expectedEnableIngress:  true,
+		},
+		{
+			name: "ingress controller not enabled with non-true value",
+			envVars: map[string]string{
+				"ENABLE_INGRESS_CONTROLLER": "yes",
+			},
+			initialLeaderElect:     false,
+			initialEnableWebhooks:  true,
+			initialEnableGRPC:      true,
+			initialEnableTracing:   false,
+			initialEnableIngress:   false,
+			expectedLeaderElect:    false,
+			expectedEnableWebhooks: true,
+			expectedEnableGRPC:     true,
+			expectedEnableTracing:  false,
+			expectedEnableIngress:  false,
 		},
 	}
 
@@ -526,6 +595,7 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			os.Unsetenv("ENABLE_WEBHOOKS")
 			os.Unsetenv("ENABLE_GRPC_SERVER")
 			os.Unsetenv("ENABLE_TRACING")
+			os.Unsetenv("ENABLE_INGRESS_CONTROLLER")
 
 			// Set test env vars
 			for k, v := range tt.envVars {
@@ -534,10 +604,11 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			}
 
 			cfg := &Config{
-				EnableLeaderElection: tt.initialLeaderElect,
-				EnableWebhooks:       tt.initialEnableWebhooks,
-				EnableGRPCServer:     tt.initialEnableGRPC,
-				EnableTracing:        tt.initialEnableTracing,
+				EnableLeaderElection:    tt.initialLeaderElect,
+				EnableWebhooks:          tt.initialEnableWebhooks,
+				EnableGRPCServer:        tt.initialEnableGRPC,
+				EnableTracing:           tt.initialEnableTracing,
+				EnableIngressController: tt.initialEnableIngress,
 			}
 
 			applyEnvOverrides(cfg)
@@ -553,6 +624,9 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			}
 			if cfg.EnableTracing != tt.expectedEnableTracing {
 				t.Errorf("EnableTracing = %v, want %v", cfg.EnableTracing, tt.expectedEnableTracing)
+			}
+			if cfg.EnableIngressController != tt.expectedEnableIngress {
+				t.Errorf("EnableIngressController = %v, want %v", cfg.EnableIngressController, tt.expectedEnableIngress)
 			}
 		})
 	}
@@ -740,23 +814,26 @@ func TestStartGRPCServerBackground_NilServer(t *testing.T) {
 
 func TestConfig_Fields(t *testing.T) {
 	cfg := &Config{
-		MetricsAddr:          ":8080",
-		ProbeAddr:            ":8081",
-		EnableLeaderElection: true,
-		LeaderElectionID:     "test-leader",
-		WebhookPort:          9443,
-		GRPCPort:             9444,
-		CertProvider:         "selfsigned",
-		VaultAddr:            "http://vault:8200",
-		VaultPKIMount:        "pki",
-		VaultPKIRole:         "operator",
-		LogLevel:             "info",
-		LogFormat:            "json",
-		EnableWebhooks:       true,
-		EnableGRPCServer:     true,
-		EnableTracing:        false,
-		OTLPEndpoint:         "localhost:4317",
-		TracingSamplingRate:  0.5,
+		MetricsAddr:             ":8080",
+		ProbeAddr:               ":8081",
+		EnableLeaderElection:    true,
+		LeaderElectionID:        "test-leader",
+		WebhookPort:             9443,
+		GRPCPort:                9444,
+		CertProvider:            "selfsigned",
+		VaultAddr:               "http://vault:8200",
+		VaultPKIMount:           "pki",
+		VaultPKIRole:            "operator",
+		LogLevel:                "info",
+		LogFormat:               "json",
+		EnableWebhooks:          true,
+		EnableGRPCServer:        true,
+		EnableTracing:           false,
+		OTLPEndpoint:            "localhost:4317",
+		TracingSamplingRate:     0.5,
+		EnableIngressController: true,
+		IngressClassName:        "avapigw",
+		IngressLBAddress:        "10.0.0.1",
 	}
 
 	// Verify all fields are set correctly
@@ -811,6 +888,15 @@ func TestConfig_Fields(t *testing.T) {
 	if cfg.TracingSamplingRate != 0.5 {
 		t.Errorf("TracingSamplingRate = %f, want %f", cfg.TracingSamplingRate, 0.5)
 	}
+	if !cfg.EnableIngressController {
+		t.Error("EnableIngressController should be true")
+	}
+	if cfg.IngressClassName != "avapigw" {
+		t.Errorf("IngressClassName = %q, want %q", cfg.IngressClassName, "avapigw")
+	}
+	if cfg.IngressLBAddress != "10.0.0.1" {
+		t.Errorf("IngressLBAddress = %q, want %q", cfg.IngressLBAddress, "10.0.0.1")
+	}
 }
 
 // ============================================================================
@@ -828,11 +914,12 @@ func TestParseIntEnv_TableDriven(t *testing.T) {
 		{"valid single digit", "5", 5, false},
 		{"valid port", "8080", 8080, false},
 		{"valid max port", "65535", 65535, false},
+		{"valid negative", "-1", -1, false},
 		{"invalid letters", "abc", 0, true},
 		{"invalid mixed", "123abc", 0, true},
-		{"invalid negative", "-1", 0, true},
 		{"invalid decimal", "3.14", 0, true},
 		{"invalid space", " ", 0, true},
+		{"invalid empty", "", 0, true},
 	}
 
 	for _, tt := range tests {
@@ -953,16 +1040,7 @@ func TestSetupCertManager_TableDriven(t *testing.T) {
 
 // containsString checks if s contains substr.
 func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, substr)
 }
 
 // ============================================================================
@@ -980,6 +1058,7 @@ func TestParseFlags_ReturnsConfig(t *testing.T) {
 		"LOG_LEVEL", "LOG_FORMAT", "OTLP_ENDPOINT", "WEBHOOK_PORT", "GRPC_PORT",
 		"TRACING_SAMPLING_RATE", "LEADER_ELECT", "ENABLE_WEBHOOKS",
 		"ENABLE_GRPC_SERVER", "ENABLE_TRACING",
+		"ENABLE_INGRESS_CONTROLLER", "INGRESS_CLASS_NAME", "INGRESS_LB_ADDRESS",
 	}
 	for _, env := range envVars {
 		os.Unsetenv(env)
@@ -1101,6 +1180,7 @@ func TestApplyEnvOverrides_NoEnvVars(t *testing.T) {
 		"LOG_LEVEL", "LOG_FORMAT", "OTLP_ENDPOINT", "WEBHOOK_PORT", "GRPC_PORT",
 		"TRACING_SAMPLING_RATE", "LEADER_ELECT", "ENABLE_WEBHOOKS",
 		"ENABLE_GRPC_SERVER", "ENABLE_TRACING",
+		"ENABLE_INGRESS_CONTROLLER", "INGRESS_CLASS_NAME", "INGRESS_LB_ADDRESS",
 	}
 	for _, env := range envVars {
 		os.Unsetenv(env)
@@ -1166,12 +1246,9 @@ func TestApplyFloat64Env_NegativeValue(t *testing.T) {
 func TestParseIntEnv_EmptyString(t *testing.T) {
 	var result int
 	err := parseIntEnv("", &result)
-	// Empty string should be valid (result = 0)
-	if err != nil {
-		t.Errorf("parseIntEnv(\"\") error = %v, want nil", err)
-	}
-	if result != 0 {
-		t.Errorf("parseIntEnv(\"\") = %d, want 0", result)
+	// Empty string is invalid for strconv.Atoi
+	if err == nil {
+		t.Error("parseIntEnv(\"\") should return error")
 	}
 }
 
@@ -1356,6 +1433,7 @@ func TestApplyEnvOverrides_AllTypes(t *testing.T) {
 				"LOG_LEVEL", "LOG_FORMAT", "OTLP_ENDPOINT", "WEBHOOK_PORT", "GRPC_PORT",
 				"TRACING_SAMPLING_RATE", "LEADER_ELECT", "ENABLE_WEBHOOKS",
 				"ENABLE_GRPC_SERVER", "ENABLE_TRACING",
+				"ENABLE_INGRESS_CONTROLLER", "INGRESS_CLASS_NAME", "INGRESS_LB_ADDRESS",
 			}
 			for _, env := range allEnvVars {
 				os.Unsetenv(env)
@@ -1415,6 +1493,9 @@ func TestDefineFlags_AllFlags(t *testing.T) {
 		"enable-tracing",
 		"otlp-endpoint",
 		"tracing-sampling-rate",
+		"enable-ingress-controller",
+		"ingress-class-name",
+		"ingress-lb-address",
 	}
 
 	for _, flagName := range expectedFlags {
@@ -1509,16 +1590,19 @@ func TestConfig_AllFieldTypes(t *testing.T) {
 		LogLevel:         "info",
 		LogFormat:        "json",
 		OTLPEndpoint:     "localhost:4317",
+		IngressClassName: "avapigw",
+		IngressLBAddress: "10.0.0.1",
 
 		// Int fields
 		WebhookPort: 9443,
 		GRPCPort:    9444,
 
 		// Bool fields
-		EnableLeaderElection: true,
-		EnableWebhooks:       true,
-		EnableGRPCServer:     true,
-		EnableTracing:        true,
+		EnableLeaderElection:    true,
+		EnableWebhooks:          true,
+		EnableGRPCServer:        true,
+		EnableTracing:           true,
+		EnableIngressController: true,
 
 		// Float fields
 		TracingSamplingRate: 0.5,
@@ -1600,16 +1684,19 @@ func TestApplyEnvOverrides_BoolEnvVarNotExactMatch(t *testing.T) {
 	os.Setenv("ENABLE_WEBHOOKS", "FALSE")
 	os.Setenv("ENABLE_GRPC_SERVER", "no")
 	os.Setenv("ENABLE_TRACING", "yes")
+	os.Setenv("ENABLE_INGRESS_CONTROLLER", "YES")
 	defer os.Unsetenv("LEADER_ELECT")
 	defer os.Unsetenv("ENABLE_WEBHOOKS")
 	defer os.Unsetenv("ENABLE_GRPC_SERVER")
 	defer os.Unsetenv("ENABLE_TRACING")
+	defer os.Unsetenv("ENABLE_INGRESS_CONTROLLER")
 
 	cfg := &Config{
-		EnableLeaderElection: false,
-		EnableWebhooks:       true,
-		EnableGRPCServer:     true,
-		EnableTracing:        false,
+		EnableLeaderElection:    false,
+		EnableWebhooks:          true,
+		EnableGRPCServer:        true,
+		EnableTracing:           false,
+		EnableIngressController: false,
 	}
 
 	applyEnvOverrides(cfg)
@@ -1626,6 +1713,9 @@ func TestApplyEnvOverrides_BoolEnvVarNotExactMatch(t *testing.T) {
 	}
 	if cfg.EnableTracing {
 		t.Error("EnableTracing should remain false (yes != true)")
+	}
+	if cfg.EnableIngressController {
+		t.Error("EnableIngressController should remain false (YES != true)")
 	}
 }
 
@@ -1787,6 +1877,8 @@ func TestDefineFlags_FlagDefaults(t *testing.T) {
 		"vault-pki-role":            "operator",
 		"log-level":                 "info",
 		"log-format":                "json",
+		"ingress-class-name":        "avapigw",
+		"ingress-lb-address":        "",
 	}
 
 	for flagName, expectedDefault := range flagDefaults {
@@ -1986,27 +2078,30 @@ func TestSetupCertManager_VaultWithInvalidAddress(t *testing.T) {
 
 func TestConfig_AllBoolCombinations(t *testing.T) {
 	tests := []struct {
-		name                 string
-		enableLeaderElection bool
-		enableWebhooks       bool
-		enableGRPCServer     bool
-		enableTracing        bool
+		name                    string
+		enableLeaderElection    bool
+		enableWebhooks          bool
+		enableGRPCServer        bool
+		enableTracing           bool
+		enableIngressController bool
 	}{
-		{"all false", false, false, false, false},
-		{"all true", true, true, true, true},
-		{"leader only", true, false, false, false},
-		{"webhooks only", false, true, false, false},
-		{"grpc only", false, false, true, false},
-		{"tracing only", false, false, false, true},
+		{"all false", false, false, false, false, false},
+		{"all true", true, true, true, true, true},
+		{"leader only", true, false, false, false, false},
+		{"webhooks only", false, true, false, false, false},
+		{"grpc only", false, false, true, false, false},
+		{"tracing only", false, false, false, true, false},
+		{"ingress only", false, false, false, false, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{
-				EnableLeaderElection: tt.enableLeaderElection,
-				EnableWebhooks:       tt.enableWebhooks,
-				EnableGRPCServer:     tt.enableGRPCServer,
-				EnableTracing:        tt.enableTracing,
+				EnableLeaderElection:    tt.enableLeaderElection,
+				EnableWebhooks:          tt.enableWebhooks,
+				EnableGRPCServer:        tt.enableGRPCServer,
+				EnableTracing:           tt.enableTracing,
+				EnableIngressController: tt.enableIngressController,
 			}
 
 			// Verify values are set correctly
@@ -2021,6 +2116,9 @@ func TestConfig_AllBoolCombinations(t *testing.T) {
 			}
 			if cfg.EnableTracing != tt.enableTracing {
 				t.Errorf("EnableTracing = %v, want %v", cfg.EnableTracing, tt.enableTracing)
+			}
+			if cfg.EnableIngressController != tt.enableIngressController {
+				t.Errorf("EnableIngressController = %v, want %v", cfg.EnableIngressController, tt.enableIngressController)
 			}
 		})
 	}
@@ -2105,5 +2203,465 @@ func TestSetupLogger_AllCombinations(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// ============================================================================
+// splitAndTrim Tests
+// ============================================================================
+
+func TestSplitAndTrim(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		sep  string
+		want []string
+	}{
+		{
+			name: "comma separated",
+			s:    "a,b,c",
+			sep:  ",",
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "with spaces",
+			s:    " a , b , c ",
+			sep:  ",",
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "empty parts filtered",
+			s:    "a,,b,,c",
+			sep:  ",",
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "all empty",
+			s:    ",,,",
+			sep:  ",",
+			want: []string{},
+		},
+		{
+			name: "single value",
+			s:    "single",
+			sep:  ",",
+			want: []string{"single"},
+		},
+		{
+			name: "empty string",
+			s:    "",
+			sep:  ",",
+			want: []string{},
+		},
+		{
+			name: "only spaces",
+			s:    "  ,  ,  ",
+			sep:  ",",
+			want: []string{},
+		},
+		{
+			name: "mixed empty and values",
+			s:    "a, ,b, ,c",
+			sep:  ",",
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "different separator",
+			s:    "a;b;c",
+			sep:  ";",
+			want: []string{"a", "b", "c"},
+		},
+		{
+			name: "dns names",
+			s:    "svc.ns.svc.cluster.local, svc.ns, svc",
+			sep:  ",",
+			want: []string{"svc.ns.svc.cluster.local", "svc.ns", "svc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitAndTrim(tt.s, tt.sep)
+			if len(got) != len(tt.want) {
+				t.Errorf("splitAndTrim(%q, %q) returned %d items, want %d", tt.s, tt.sep, len(got), len(tt.want))
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("splitAndTrim(%q, %q)[%d] = %q, want %q", tt.s, tt.sep, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// ============================================================================
+// defaultCertDNSNames Tests
+// ============================================================================
+
+func TestDefaultCertDNSNames(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceName string
+		namespace   string
+		want        []string
+	}{
+		{
+			name:        "standard names",
+			serviceName: "avapigw-operator",
+			namespace:   "avapigw-system",
+			want: []string{
+				"avapigw-operator",
+				"avapigw-operator.avapigw-system",
+				"avapigw-operator.avapigw-system.svc",
+				"avapigw-operator.avapigw-system.svc.cluster.local",
+			},
+		},
+		{
+			name:        "custom names",
+			serviceName: "my-service",
+			namespace:   "my-namespace",
+			want: []string{
+				"my-service",
+				"my-service.my-namespace",
+				"my-service.my-namespace.svc",
+				"my-service.my-namespace.svc.cluster.local",
+			},
+		},
+		{
+			name:        "default namespace",
+			serviceName: "svc",
+			namespace:   "default",
+			want: []string{
+				"svc",
+				"svc.default",
+				"svc.default.svc",
+				"svc.default.svc.cluster.local",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := defaultCertDNSNames(tt.serviceName, tt.namespace)
+			if len(got) != len(tt.want) {
+				t.Errorf("defaultCertDNSNames(%q, %q) returned %d items, want %d",
+					tt.serviceName, tt.namespace, len(got), len(tt.want))
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("defaultCertDNSNames(%q, %q)[%d] = %q, want %q",
+						tt.serviceName, tt.namespace, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// ============================================================================
+// getCertDNSNames Tests
+// ============================================================================
+
+func TestGetCertDNSNames(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want []string
+	}{
+		{
+			name: "custom DNS names configured",
+			cfg: &Config{
+				CertDNSNames:    []string{"custom1.example.com", "custom2.example.com"},
+				CertServiceName: "avapigw-operator",
+				CertNamespace:   "avapigw-system",
+			},
+			want: []string{"custom1.example.com", "custom2.example.com"},
+		},
+		{
+			name: "no custom DNS names uses defaults",
+			cfg: &Config{
+				CertDNSNames:    nil,
+				CertServiceName: "avapigw-operator",
+				CertNamespace:   "avapigw-system",
+			},
+			want: []string{
+				"avapigw-operator",
+				"avapigw-operator.avapigw-system",
+				"avapigw-operator.avapigw-system.svc",
+				"avapigw-operator.avapigw-system.svc.cluster.local",
+			},
+		},
+		{
+			name: "empty slice uses defaults",
+			cfg: &Config{
+				CertDNSNames:    []string{},
+				CertServiceName: "my-svc",
+				CertNamespace:   "my-ns",
+			},
+			want: []string{
+				"my-svc",
+				"my-svc.my-ns",
+				"my-svc.my-ns.svc",
+				"my-svc.my-ns.svc.cluster.local",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getCertDNSNames(tt.cfg)
+			if len(got) != len(tt.want) {
+				t.Errorf("getCertDNSNames() returned %d items, want %d", len(got), len(tt.want))
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("getCertDNSNames()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// ============================================================================
+// applyDurationEnv Tests
+// ============================================================================
+
+func TestApplyDurationEnv_WithValidValue(t *testing.T) {
+	envKey := "TEST_DURATION_VALID"
+	os.Setenv(envKey, "30s")
+	defer os.Unsetenv(envKey)
+
+	target := 10 * time.Second
+	applyDurationEnv(&target, envKey)
+
+	if target != 30*time.Second {
+		t.Errorf("applyDurationEnv() target = %v, want %v", target, 30*time.Second)
+	}
+}
+
+func TestApplyDurationEnv_WithInvalidValue(t *testing.T) {
+	envKey := "TEST_DURATION_INVALID"
+	os.Setenv(envKey, "invalid")
+	defer os.Unsetenv(envKey)
+
+	target := 10 * time.Second
+	applyDurationEnv(&target, envKey)
+
+	// Should keep original value when parsing fails
+	if target != 10*time.Second {
+		t.Errorf("applyDurationEnv() target = %v, want %v (original)", target, 10*time.Second)
+	}
+}
+
+func TestApplyDurationEnv_EmptyValue(t *testing.T) {
+	envKey := "TEST_DURATION_EMPTY"
+	os.Unsetenv(envKey)
+
+	target := 10 * time.Second
+	applyDurationEnv(&target, envKey)
+
+	if target != 10*time.Second {
+		t.Errorf("applyDurationEnv() target = %v, want %v", target, 10*time.Second)
+	}
+}
+
+func TestApplyDurationEnv_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		initial  time.Duration
+		want     time.Duration
+	}{
+		{
+			name:     "valid seconds",
+			envValue: "30s",
+			initial:  10 * time.Second,
+			want:     30 * time.Second,
+		},
+		{
+			name:     "valid minutes",
+			envValue: "5m",
+			initial:  1 * time.Minute,
+			want:     5 * time.Minute,
+		},
+		{
+			name:     "valid hours",
+			envValue: "2h",
+			initial:  1 * time.Hour,
+			want:     2 * time.Hour,
+		},
+		{
+			name:     "valid milliseconds",
+			envValue: "500ms",
+			initial:  100 * time.Millisecond,
+			want:     500 * time.Millisecond,
+		},
+		{
+			name:     "complex duration",
+			envValue: "1h30m",
+			initial:  1 * time.Hour,
+			want:     90 * time.Minute,
+		},
+		{
+			name:     "invalid keeps original",
+			envValue: "not-a-duration",
+			initial:  10 * time.Second,
+			want:     10 * time.Second,
+		},
+		{
+			name:     "empty keeps original",
+			envValue: "",
+			initial:  10 * time.Second,
+			want:     10 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envKey := "TEST_DURATION_" + tt.name
+			if tt.envValue != "" {
+				os.Setenv(envKey, tt.envValue)
+				defer os.Unsetenv(envKey)
+			} else {
+				os.Unsetenv(envKey)
+			}
+
+			target := tt.initial
+			applyDurationEnv(&target, envKey)
+
+			if target != tt.want {
+				t.Errorf("applyDurationEnv() target = %v, want %v", target, tt.want)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// applyCertDNSNamesEnv Tests
+// ============================================================================
+
+func TestApplyCertDNSNamesEnv_WithValue(t *testing.T) {
+	os.Setenv("CERT_DNS_NAMES", "svc.ns.svc.cluster.local,svc.ns,svc")
+	defer os.Unsetenv("CERT_DNS_NAMES")
+
+	cfg := &Config{}
+	applyCertDNSNamesEnv(cfg)
+
+	want := []string{"svc.ns.svc.cluster.local", "svc.ns", "svc"}
+	if len(cfg.CertDNSNames) != len(want) {
+		t.Errorf("applyCertDNSNamesEnv() got %d items, want %d", len(cfg.CertDNSNames), len(want))
+		return
+	}
+	for i := range cfg.CertDNSNames {
+		if cfg.CertDNSNames[i] != want[i] {
+			t.Errorf("applyCertDNSNamesEnv()[%d] = %q, want %q", i, cfg.CertDNSNames[i], want[i])
+		}
+	}
+}
+
+func TestApplyCertDNSNamesEnv_EmptyValue(t *testing.T) {
+	os.Unsetenv("CERT_DNS_NAMES")
+
+	cfg := &Config{
+		CertDNSNames: []string{"existing"},
+	}
+	applyCertDNSNamesEnv(cfg)
+
+	// Should keep existing value when env is not set
+	if len(cfg.CertDNSNames) != 1 || cfg.CertDNSNames[0] != "existing" {
+		t.Errorf("applyCertDNSNamesEnv() should not modify when env is not set")
+	}
+}
+
+func TestApplyCertDNSNamesEnv_WithSpaces(t *testing.T) {
+	os.Setenv("CERT_DNS_NAMES", " svc1 , svc2 , svc3 ")
+	defer os.Unsetenv("CERT_DNS_NAMES")
+
+	cfg := &Config{}
+	applyCertDNSNamesEnv(cfg)
+
+	want := []string{"svc1", "svc2", "svc3"}
+	if len(cfg.CertDNSNames) != len(want) {
+		t.Errorf("applyCertDNSNamesEnv() got %d items, want %d", len(cfg.CertDNSNames), len(want))
+		return
+	}
+	for i := range cfg.CertDNSNames {
+		if cfg.CertDNSNames[i] != want[i] {
+			t.Errorf("applyCertDNSNamesEnv()[%d] = %q, want %q", i, cfg.CertDNSNames[i], want[i])
+		}
+	}
+}
+
+func TestApplyCertDNSNamesEnv_SingleValue(t *testing.T) {
+	os.Setenv("CERT_DNS_NAMES", "single-dns-name")
+	defer os.Unsetenv("CERT_DNS_NAMES")
+
+	cfg := &Config{}
+	applyCertDNSNamesEnv(cfg)
+
+	if len(cfg.CertDNSNames) != 1 || cfg.CertDNSNames[0] != "single-dns-name" {
+		t.Errorf("applyCertDNSNamesEnv() = %v, want [single-dns-name]", cfg.CertDNSNames)
+	}
+}
+
+// ============================================================================
+// Additional Edge Cases for Improved Coverage
+// ============================================================================
+
+func TestApplyEnvOverrides_DurationOverride(t *testing.T) {
+	os.Setenv("VAULT_INIT_TIMEOUT", "1m30s")
+	defer os.Unsetenv("VAULT_INIT_TIMEOUT")
+
+	cfg := &Config{
+		VaultInitTimeout: 30 * time.Second,
+	}
+
+	applyEnvOverrides(cfg)
+
+	if cfg.VaultInitTimeout != 90*time.Second {
+		t.Errorf("VaultInitTimeout = %v, want %v", cfg.VaultInitTimeout, 90*time.Second)
+	}
+}
+
+func TestApplyEnvOverrides_CertDNSNamesOverride(t *testing.T) {
+	os.Setenv("CERT_DNS_NAMES", "custom1.example.com,custom2.example.com")
+	defer os.Unsetenv("CERT_DNS_NAMES")
+
+	cfg := &Config{}
+
+	applyEnvOverrides(cfg)
+
+	want := []string{"custom1.example.com", "custom2.example.com"}
+	if len(cfg.CertDNSNames) != len(want) {
+		t.Errorf("CertDNSNames got %d items, want %d", len(cfg.CertDNSNames), len(want))
+		return
+	}
+	for i := range cfg.CertDNSNames {
+		if cfg.CertDNSNames[i] != want[i] {
+			t.Errorf("CertDNSNames[%d] = %q, want %q", i, cfg.CertDNSNames[i], want[i])
+		}
+	}
+}
+
+func TestApplyEnvOverrides_CertServiceNameAndNamespace(t *testing.T) {
+	os.Setenv("CERT_SERVICE_NAME", "custom-service")
+	os.Setenv("CERT_NAMESPACE", "custom-namespace")
+	defer os.Unsetenv("CERT_SERVICE_NAME")
+	defer os.Unsetenv("CERT_NAMESPACE")
+
+	cfg := &Config{
+		CertServiceName: "default-service",
+		CertNamespace:   "default-namespace",
+	}
+
+	applyEnvOverrides(cfg)
+
+	if cfg.CertServiceName != "custom-service" {
+		t.Errorf("CertServiceName = %q, want %q", cfg.CertServiceName, "custom-service")
+	}
+	if cfg.CertNamespace != "custom-namespace" {
+		t.Errorf("CertNamespace = %q, want %q", cfg.CertNamespace, "custom-namespace")
 	}
 }

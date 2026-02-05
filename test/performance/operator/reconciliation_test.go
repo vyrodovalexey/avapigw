@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -212,12 +213,12 @@ func runReconciliationLatencyTest(t *testing.T, crdCount int, duration time.Dura
 	defer cancel()
 
 	// Create fake client and reconciler
-	client, reconciler := setupTestReconciler(t, crdCount)
+	kit := setupTestReconciler(t, crdCount)
 
 	// Create CRDs
 	crds := createTestAPIRoutes(crdCount)
 	for _, crd := range crds {
-		if err := client.Create(ctx, crd); err != nil {
+		if err := kit.FakeClient.Create(ctx, crd); err != nil {
 			t.Fatalf("Failed to create CRD: %v", err)
 		}
 	}
@@ -240,7 +241,7 @@ func runReconciliationLatencyTest(t *testing.T, crdCount int, duration time.Dura
 			}
 
 			start := time.Now()
-			_, err := reconciler.Reconcile(ctx, req)
+			_, err := kit.Reconciler.Reconcile(ctx, req)
 			elapsed := time.Since(start)
 
 			mu.Lock()
@@ -273,11 +274,11 @@ func runReconciliationThroughputTest(t *testing.T, crdCount int, duration time.D
 	ctx, cancel := context.WithTimeout(context.Background(), duration+10*time.Second)
 	defer cancel()
 
-	client, reconciler := setupTestReconciler(t, crdCount)
+	kit := setupTestReconciler(t, crdCount)
 
 	crds := createTestAPIRoutes(crdCount)
 	for _, crd := range crds {
-		if err := client.Create(ctx, crd); err != nil {
+		if err := kit.FakeClient.Create(ctx, crd); err != nil {
 			t.Fatalf("Failed to create CRD: %v", err)
 		}
 	}
@@ -298,7 +299,7 @@ func runReconciliationThroughputTest(t *testing.T, crdCount int, duration time.D
 				},
 			}
 
-			_, err := reconciler.Reconcile(ctx, req)
+			_, err := kit.Reconciler.Reconcile(ctx, req)
 			atomic.AddInt64(&totalReconciles, 1)
 
 			if err != nil {
@@ -330,11 +331,11 @@ func runConcurrentReconciliationTest(t *testing.T, crdCount, concurrency int, du
 	ctx, cancel := context.WithTimeout(context.Background(), duration+10*time.Second)
 	defer cancel()
 
-	client, reconciler := setupTestReconciler(t, crdCount)
+	kit := setupTestReconciler(t, crdCount)
 
 	crds := createTestAPIRoutes(crdCount)
 	for _, crd := range crds {
-		if err := client.Create(ctx, crd); err != nil {
+		if err := kit.FakeClient.Create(ctx, crd); err != nil {
 			t.Fatalf("Failed to create CRD: %v", err)
 		}
 	}
@@ -365,7 +366,7 @@ func runConcurrentReconciliationTest(t *testing.T, crdCount, concurrency int, du
 					}
 
 					start := time.Now()
-					_, err := reconciler.Reconcile(ctx, req)
+					_, err := kit.Reconciler.Reconcile(ctx, req)
 					elapsed := time.Since(start)
 
 					mu.Lock()
@@ -407,11 +408,11 @@ func runMemoryUsageTest(t *testing.T, crdCount int, duration time.Duration) Perf
 	var memStatsBefore runtime.MemStats
 	runtime.ReadMemStats(&memStatsBefore)
 
-	client, reconciler := setupTestReconciler(t, crdCount)
+	kit := setupTestReconciler(t, crdCount)
 
 	crds := createTestAPIRoutes(crdCount)
 	for _, crd := range crds {
-		if err := client.Create(ctx, crd); err != nil {
+		if err := kit.FakeClient.Create(ctx, crd); err != nil {
 			t.Fatalf("Failed to create CRD: %v", err)
 		}
 	}
@@ -432,7 +433,7 @@ func runMemoryUsageTest(t *testing.T, crdCount int, duration time.Duration) Perf
 				},
 			}
 
-			_, _ = reconciler.Reconcile(ctx, req)
+			_, _ = kit.Reconciler.Reconcile(ctx, req)
 			atomic.AddInt64(&totalReconciles, 1)
 		}
 
@@ -464,8 +465,14 @@ func runMemoryUsageTest(t *testing.T, crdCount int, duration time.Duration) Perf
 	}
 }
 
+// reconcilerTestKit holds the fake client and reconciler for performance tests.
+type reconcilerTestKit struct {
+	FakeClient ctrlclient.Client
+	Reconciler *controller.APIRouteReconciler
+}
+
 // setupTestReconciler creates a test reconciler with fake client.
-func setupTestReconciler(t *testing.T, _ int) (*fake.ClientBuilder, *controller.APIRouteReconciler) {
+func setupTestReconciler(t *testing.T, _ int) reconcilerTestKit {
 	t.Helper()
 
 	// Create gRPC server for testing
@@ -476,8 +483,7 @@ func setupTestReconciler(t *testing.T, _ int) (*fake.ClientBuilder, *controller.
 		t.Fatalf("Failed to create gRPC server: %v", err)
 	}
 
-	clientBuilder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
-	fakeClient := clientBuilder.Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 
 	reconciler := &controller.APIRouteReconciler{
 		Client:     fakeClient,
@@ -485,7 +491,10 @@ func setupTestReconciler(t *testing.T, _ int) (*fake.ClientBuilder, *controller.
 		GRPCServer: grpcServer,
 	}
 
-	return clientBuilder, reconciler
+	return reconcilerTestKit{
+		FakeClient: fakeClient,
+		Reconciler: reconciler,
+	}
 }
 
 // createTestAPIRoutes creates test APIRoute CRDs.
@@ -517,7 +526,7 @@ func createTestAPIRoutes(count int) []*avapigwv1alpha1.APIRoute {
 						Weight: 100,
 					},
 				},
-				Timeout: &metav1.Duration{Duration: 30 * time.Second},
+				Timeout: avapigwv1alpha1.Duration("30s"),
 			},
 		}
 	}

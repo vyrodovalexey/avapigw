@@ -132,7 +132,8 @@ type BackendStatusUpdatable interface {
 }
 
 // UpdateRouteStatus updates the status of a route resource (APIRoute or GRPCRoute).
-// It updates the Ready condition and observed generation.
+// It updates the Ready condition and observed generation using a merge patch
+// to reduce conflicts from concurrent updates.
 func (u *StatusUpdater) UpdateRouteStatus(
 	ctx context.Context,
 	route RouteStatusUpdatable,
@@ -140,6 +141,9 @@ func (u *StatusUpdater) UpdateRouteStatus(
 	reason, message string,
 ) error {
 	logger := log.FromContext(ctx)
+
+	// Capture the base state before modifications for the merge patch
+	patch := client.MergeFrom(route.DeepCopyObject().(client.Object))
 
 	// Update Ready condition
 	conditions := UpdateCondition(
@@ -149,21 +153,22 @@ func (u *StatusUpdater) UpdateRouteStatus(
 	route.SetConditions(conditions)
 	route.SetObservedGeneration(route.GetGeneration())
 
-	// Update status
-	if err := u.client.Status().Update(ctx, route); err != nil {
-		logger.Error(err, "failed to update route status",
+	// Patch status using merge patch to reduce conflicts
+	if err := u.client.Status().Patch(ctx, route, patch); err != nil {
+		logger.Error(err, "failed to patch route status",
 			"kind", route.GetObjectKind().GroupVersionKind().Kind,
 			"name", route.GetName(),
 			"namespace", route.GetNamespace(),
 		)
-		return fmt.Errorf("failed to update route status: %w", err)
+		return fmt.Errorf("failed to patch route status: %w", err)
 	}
 
 	return nil
 }
 
 // UpdateBackendStatus updates the status of a backend resource (Backend or GRPCBackend).
-// It updates the Ready and Healthy conditions, observed generation, and health information.
+// It updates the Ready and Healthy conditions, observed generation, and health information
+// using a merge patch to reduce conflicts from concurrent updates.
 func (u *StatusUpdater) UpdateBackendStatus(
 	ctx context.Context,
 	backend BackendStatusUpdatable,
@@ -172,6 +177,9 @@ func (u *StatusUpdater) UpdateBackendStatus(
 	totalHosts int,
 ) error {
 	logger := log.FromContext(ctx)
+
+	// Capture the base state before modifications for the merge patch
+	patch := client.MergeFrom(backend.DeepCopyObject().(client.Object))
 
 	// Update Ready condition
 	conditions := UpdateCondition(
@@ -196,14 +204,14 @@ func (u *StatusUpdater) UpdateBackendStatus(
 	}
 	backend.SetHealthInfo(totalHosts, healthyHosts, &now)
 
-	// Update status
-	if err := u.client.Status().Update(ctx, backend); err != nil {
-		logger.Error(err, "failed to update backend status",
+	// Patch status using merge patch to reduce conflicts
+	if err := u.client.Status().Patch(ctx, backend, patch); err != nil {
+		logger.Error(err, "failed to patch backend status",
 			"kind", backend.GetObjectKind().GroupVersionKind().Kind,
 			"name", backend.GetName(),
 			"namespace", backend.GetNamespace(),
 		)
-		return fmt.Errorf("failed to update backend status: %w", err)
+		return fmt.Errorf("failed to patch backend status: %w", err)
 	}
 
 	return nil

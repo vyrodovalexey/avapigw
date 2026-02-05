@@ -14,16 +14,18 @@ The AVAPIGW Operator includes comprehensive admission webhooks that validate Cus
 
 ## Overview
 
-The admission webhooks provide three main types of validation:
+The admission webhooks provide four main types of validation:
 
 1. **Schema Validation** - Ensures all required fields are present and have valid values
-2. **Duplicate Detection** - Prevents conflicting route configurations
-3. **Cross-Reference Validation** - Ensures referenced resources exist
+2. **Cross-CRD Duplicate Detection** - Prevents conflicting route configurations across Backend vs GRPCBackend
+3. **Ingress Webhook Validation** - Validates Ingress resources when ingress controller is enabled
+4. **Cross-Reference Validation** - Ensures referenced resources exist
 
 ### Webhook Types
 
 - **ValidatingAdmissionWebhook** - Validates CRD specifications before creation/update
 - **MutatingAdmissionWebhook** - Sets default values and normalizes configurations
+- **Ingress ValidatingAdmissionWebhook** - Validates standard Kubernetes Ingress resources
 
 ## Validation Rules
 
@@ -147,9 +149,9 @@ healthCheck:
   timeout: "5s"
 ```
 
-## Duplicate Detection
+## Cross-CRD Duplicate Detection
 
-The webhook prevents duplicate route configurations that could cause conflicts:
+The webhook prevents duplicate route configurations that could cause conflicts across different CRD types:
 
 ### HTTP Route Conflicts
 
@@ -158,19 +160,48 @@ Routes are considered duplicates if they have:
 - Overlapping HTTP methods
 - Same header constraints
 
+This validation now works across Backend vs GRPCBackend to prevent conflicts:
+
 ```yaml
 # This would be rejected as a duplicate:
-# Route 1
+# APIRoute 1
 match:
   - uri:
       prefix: "/api/v1"
     methods: ["GET", "POST"]
 
-# Route 2 (DUPLICATE - same prefix and overlapping methods)
+# APIRoute 2 (DUPLICATE - same prefix and overlapping methods)
 match:
   - uri:
       prefix: "/api/v1"
     methods: ["GET", "PUT"]
+```
+
+### Cross-CRD Backend Conflicts
+
+The webhook also detects conflicts between Backend and GRPCBackend resources:
+
+```yaml
+# Backend CRD
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: api-backend
+spec:
+  hosts:
+    - address: api.example.com
+      port: 8080
+
+---
+# This would be rejected as a duplicate:
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: api-grpc-backend
+spec:
+  hosts:
+    - address: api.example.com  # CONFLICT - same address as Backend
+      port: 8080                # CONFLICT - same port as Backend
 ```
 
 ### gRPC Route Conflicts
@@ -204,6 +235,58 @@ When routes have overlapping patterns, the webhook uses priority rules:
 1. **Exact matches** have higher priority than prefix or regex
 2. **More specific patterns** have higher priority
 3. **Routes with more constraints** (headers, methods) have higher priority
+
+## Ingress Webhook Validation
+
+When the ingress controller is enabled, the webhook also validates standard Kubernetes Ingress resources:
+
+### Ingress Validation Rules
+
+- **IngressClass Validation** - Ensures the IngressClass exists and is managed by avapigw
+- **Path Validation** - Validates path patterns and path types
+- **Service Validation** - Ensures referenced services exist
+- **Annotation Validation** - Validates avapigw-specific annotations
+- **TLS Validation** - Validates TLS configuration and secret references
+
+### Example Ingress Validation
+
+```yaml
+# This Ingress would be validated:
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-ingress
+  annotations:
+    avapigw.io/timeout: "30s"        # Validated format
+    avapigw.io/retries: "3"          # Validated range
+    avapigw.io/rate-limit-rps: "100" # Validated positive number
+spec:
+  ingressClassName: avapigw           # Validated IngressClass exists
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix             # Validated path type
+        backend:
+          service:
+            name: api-service        # Validated service exists
+            port:
+              number: 8080           # Validated port range
+```
+
+### Ingress Annotation Validation
+
+The webhook validates all avapigw-specific annotations:
+
+| Annotation | Validation Rule | Example |
+|------------|----------------|---------|
+| `avapigw.io/timeout` | Valid duration format | `30s`, `5m`, `1h` |
+| `avapigw.io/retries` | Integer 1-10 | `3` |
+| `avapigw.io/rate-limit-rps` | Positive integer | `100` |
+| `avapigw.io/cors-allow-origins` | Valid origin format | `https://example.com` |
+| `avapigw.io/circuit-breaker-threshold` | Integer 1-100 | `5` |
+| `avapigw.io/load-balancer` | Valid algorithm | `round-robin`, `least-conn` |
 
 ## Cross-Reference Validation
 

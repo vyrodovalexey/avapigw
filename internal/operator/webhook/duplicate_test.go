@@ -1520,3 +1520,491 @@ func TestDuplicateChecker_GRPCRoutesOverlap_EmptyMatch(t *testing.T) {
 		t.Error("grpcRoutesOverlap() should return false when match is empty")
 	}
 }
+
+// ============================================================================
+// Cross-CRD Conflict Detection Tests
+// ============================================================================
+
+func TestDuplicateChecker_CheckBackendCrossConflicts_NilClient(t *testing.T) {
+	checker := &DuplicateChecker{client: nil}
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 8080},
+			},
+		},
+	}
+
+	err := checker.CheckBackendCrossConflicts(context.Background(), backend)
+	if err != nil {
+		t.Errorf("CheckBackendCrossConflicts() with nil client error = %v, want nil", err)
+	}
+}
+
+func TestDuplicateChecker_CheckBackendCrossConflicts_NoConflicts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	// Create a GRPCBackend with different host:port
+	existingGRPCBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "grpc-host", Port: 50051},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGRPCBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "http-host", Port: 8080},
+			},
+		},
+	}
+
+	err := checker.CheckBackendCrossConflicts(context.Background(), backend)
+	if err != nil {
+		t.Errorf("CheckBackendCrossConflicts() no conflict error = %v, want nil", err)
+	}
+}
+
+func TestDuplicateChecker_CheckBackendCrossConflicts_ConflictDetected(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	// Create a GRPCBackend with same host:port
+	existingGRPCBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 8080},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGRPCBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 8080},
+			},
+		},
+	}
+
+	err := checker.CheckBackendCrossConflicts(context.Background(), backend)
+	if err == nil {
+		t.Error("CheckBackendCrossConflicts() should return error for conflict, got nil")
+	}
+}
+
+func TestDuplicateChecker_CheckBackendCrossConflicts_ClusterScoped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	// Create a GRPCBackend in a different namespace with same host:port
+	existingGRPCBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-grpc-backend",
+			Namespace: "other-ns",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 8080},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGRPCBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient, WithNamespaceScoped(false))
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 8080},
+			},
+		},
+	}
+
+	err := checker.CheckBackendCrossConflicts(context.Background(), backend)
+	if err == nil {
+		t.Error("CheckBackendCrossConflicts() cluster-scoped should detect cross-namespace conflict, got nil")
+	}
+}
+
+func TestDuplicateChecker_CheckBackendCrossConflicts_WithCache(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingGRPCBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 8080},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGRPCBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient,
+		WithCacheEnabled(true),
+		WithCacheTTL(10*time.Second),
+	)
+	t.Cleanup(func() { checker.Stop() })
+
+	backend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 8080},
+			},
+		},
+	}
+
+	// First call populates cache
+	err := checker.CheckBackendCrossConflicts(context.Background(), backend)
+	if err == nil {
+		t.Error("CheckBackendCrossConflicts() first call should detect conflict, got nil")
+	}
+
+	// Second call should use cache
+	err = checker.CheckBackendCrossConflicts(context.Background(), backend)
+	if err == nil {
+		t.Error("CheckBackendCrossConflicts() cached call should detect conflict, got nil")
+	}
+}
+
+func TestDuplicateChecker_CheckGRPCBackendCrossConflicts_NilClient(t *testing.T) {
+	checker := &DuplicateChecker{client: nil}
+	grpcBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 50051},
+			},
+		},
+	}
+
+	err := checker.CheckGRPCBackendCrossConflicts(context.Background(), grpcBackend)
+	if err != nil {
+		t.Errorf("CheckGRPCBackendCrossConflicts() with nil client error = %v, want nil", err)
+	}
+}
+
+func TestDuplicateChecker_CheckGRPCBackendCrossConflicts_NoConflicts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "http-host", Port: 8080},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	grpcBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "grpc-host", Port: 50051},
+			},
+		},
+	}
+
+	err := checker.CheckGRPCBackendCrossConflicts(context.Background(), grpcBackend)
+	if err != nil {
+		t.Errorf("CheckGRPCBackendCrossConflicts() no conflict error = %v, want nil", err)
+	}
+}
+
+func TestDuplicateChecker_CheckGRPCBackendCrossConflicts_ConflictDetected(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 50051},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	grpcBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 50051},
+			},
+		},
+	}
+
+	err := checker.CheckGRPCBackendCrossConflicts(context.Background(), grpcBackend)
+	if err == nil {
+		t.Error("CheckGRPCBackendCrossConflicts() should return error for conflict, got nil")
+	}
+}
+
+func TestDuplicateChecker_CheckGRPCBackendCrossConflicts_ClusterScoped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-backend",
+			Namespace: "other-ns",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 50051},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient, WithNamespaceScoped(false))
+
+	grpcBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 50051},
+			},
+		},
+	}
+
+	err := checker.CheckGRPCBackendCrossConflicts(context.Background(), grpcBackend)
+	if err == nil {
+		t.Error("CheckGRPCBackendCrossConflicts() cluster-scoped should detect cross-namespace conflict, got nil")
+	}
+}
+
+func TestDuplicateChecker_CheckGRPCBackendCrossConflicts_WithCache(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 50051},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingBackend).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient,
+		WithCacheEnabled(true),
+		WithCacheTTL(10*time.Second),
+	)
+	t.Cleanup(func() { checker.Stop() })
+
+	grpcBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-host", Port: 50051},
+			},
+		},
+	}
+
+	// First call populates cache
+	err := checker.CheckGRPCBackendCrossConflicts(context.Background(), grpcBackend)
+	if err == nil {
+		t.Error("CheckGRPCBackendCrossConflicts() first call should detect conflict, got nil")
+	}
+
+	// Second call should use cache
+	err = checker.CheckGRPCBackendCrossConflicts(context.Background(), grpcBackend)
+	if err == nil {
+		t.Error("CheckGRPCBackendCrossConflicts() cached call should detect conflict, got nil")
+	}
+}
+
+// ============================================================================
+// backendAndGRPCBackendConflict Tests
+// ============================================================================
+
+func TestDuplicateChecker_BackendAndGRPCBackendConflict(t *testing.T) {
+	checker := &DuplicateChecker{}
+
+	tests := []struct {
+		name             string
+		backendHosts     []avapigwv1alpha1.BackendHost
+		grpcBackendHosts []avapigwv1alpha1.BackendHost
+		want             bool
+	}{
+		{
+			name: "same host and port",
+			backendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 8080},
+			},
+			grpcBackendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 8080},
+			},
+			want: true,
+		},
+		{
+			name: "different host same port",
+			backendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 8080},
+			},
+			grpcBackendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host2", Port: 8080},
+			},
+			want: false,
+		},
+		{
+			name: "same host different port",
+			backendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 8080},
+			},
+			grpcBackendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 50051},
+			},
+			want: false,
+		},
+		{
+			name:             "empty backend hosts",
+			backendHosts:     []avapigwv1alpha1.BackendHost{},
+			grpcBackendHosts: []avapigwv1alpha1.BackendHost{{Address: "host1", Port: 8080}},
+			want:             false,
+		},
+		{
+			name:             "empty grpc backend hosts",
+			backendHosts:     []avapigwv1alpha1.BackendHost{{Address: "host1", Port: 8080}},
+			grpcBackendHosts: []avapigwv1alpha1.BackendHost{},
+			want:             false,
+		},
+		{
+			name: "multiple hosts with one match",
+			backendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 8080},
+				{Address: "host2", Port: 9090},
+			},
+			grpcBackendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host3", Port: 50051},
+				{Address: "host2", Port: 9090},
+			},
+			want: true,
+		},
+		{
+			name: "multiple hosts no match",
+			backendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host1", Port: 8080},
+				{Address: "host2", Port: 9090},
+			},
+			grpcBackendHosts: []avapigwv1alpha1.BackendHost{
+				{Address: "host3", Port: 50051},
+				{Address: "host4", Port: 50052},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := checker.backendAndGRPCBackendConflict(tt.backendHosts, tt.grpcBackendHosts)
+			if got != tt.want {
+				t.Errorf("backendAndGRPCBackendConflict() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

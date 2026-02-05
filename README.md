@@ -137,6 +137,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Development](#-development)
 - [Kubernetes & Helm](#️-kubernetes--helm)
 - [AVAPIGW Operator](#️-avapigw-operator)
+- [Ingress Controller](#-ingress-controller)
 - [Docker](#-docker)
 - [CI/CD](#-cicd)
 - [Performance Testing](#-performance-testing)
@@ -5334,9 +5335,16 @@ The AVAPIGW Operator is a Kubernetes operator that manages API Gateway configura
 
 - **Declarative Configuration** - Manage routes and backends using Kubernetes CRDs
 - **Hot Configuration Updates** - Apply configuration changes without gateway restarts
+- **Base Reconciler Pattern** - Extracted common reconciliation logic to reduce code duplication
+- **Efficient Status Updates** - Status updates now use Patch instead of Update for better performance
+- **Generation-based Reconciliation** - Skip unnecessary reconciliation when resources haven't changed
+- **Thread-safe StatusUpdater** - Improved initialization and concurrent access handling
 - **gRPC Communication** - Secure mTLS communication between operator and gateway
-- **Vault PKI Integration** - Automated certificate management for secure communication
-- **Enhanced Admission Webhooks** - Validate configuration and detect duplicates before applying
+- **Automated Certificate Management** - Webhook certificate provisioning supporting self-signed, Vault PKI, and cert-manager modes
+- **Enhanced Admission Webhooks** - Cross-CRD duplicate detection, ingress validation, and cross-reference validation
+- **Comprehensive RBAC** - Least-privilege RBAC permissions for Ingress, IngressClass, Leases, Secrets, Services, ConfigMaps, and ValidatingWebhookConfigurations
+- **Webhook CA Injection** - Automated CA injection into ValidatingWebhookConfigurations for seamless certificate rotation
+- **Ingress Controller Support** - Convert standard Kubernetes Ingress to gateway configuration
 - **Status Reporting** - Real-time status updates and condition reporting
 - **Multi-Gateway Support** - Manage multiple gateway instances from a single operator
 - **Consolidated Deployment** - Single Helm chart with optional operator mode
@@ -5432,6 +5440,70 @@ The operator manages four types of Custom Resource Definitions:
 | `backends` | `Backend` | HTTP backend configuration |
 | `grpcbackends` | `GRPCBackend` | gRPC backend configuration |
 
+### RBAC Permissions
+
+The operator requires comprehensive RBAC permissions for full functionality:
+
+#### Core Resources
+- **Events** - Recording reconciliation events and status changes
+- **Secrets** - TLS certificates and sensitive data access (read-only)
+- **ConfigMaps** - Configuration storage and management
+- **Services/Endpoints** - Backend service discovery and health checking
+
+#### CRD Management
+- **APIRoute, GRPCRoute, Backend, GRPCBackend** - Full CRUD operations and status updates
+- **Cross-reference validation** - Ensuring referenced backends exist
+
+#### Ingress Support (when ingress controller enabled)
+- **Ingress** - Reading and converting standard Kubernetes Ingress resources
+- **IngressClass** - Managing IngressClass resources for opt-in behavior
+
+#### Coordination and Security
+- **Leases** - Leader election for high availability deployments
+- **ValidatingWebhookConfigurations** - Webhook CA injection for certificate rotation
+
+### Certificate Management
+
+The operator supports three certificate management modes for webhook validation:
+
+#### Self-Signed Mode (Default)
+```yaml
+operator:
+  webhook:
+    tls:
+      mode: selfsigned
+```
+- Automatically generates self-signed certificates
+- Handles certificate rotation and CA injection
+- No external dependencies required
+
+#### Vault PKI Mode
+```yaml
+operator:
+  webhook:
+    tls:
+      mode: vault
+vault:
+  enabled: true
+  address: "https://vault.example.com:8200"
+  authMethod: kubernetes
+  role: avapigw-operator
+```
+- Integrates with HashiCorp Vault PKI
+- Automatic certificate issuance and renewal
+- Enterprise-grade certificate management
+
+#### Cert-Manager Mode
+```yaml
+operator:
+  webhook:
+    tls:
+      mode: cert-manager
+```
+- Integrates with cert-manager for certificate lifecycle
+- Supports various certificate issuers
+- Kubernetes-native certificate management
+
 ### Documentation
 
 For comprehensive operator documentation, see:
@@ -5487,6 +5559,374 @@ Complete examples are available in the [test/crd-samples/](test/crd-samples/) di
 - [GRPCRoute example](test/crd-samples/grpcroute-basic.yaml)
 - [Backend with health checks](test/crd-samples/backend-basic.yaml)
 - [GRPCBackend example](test/crd-samples/grpcbackend-basic.yaml)
+
+## 🌐 Ingress Controller
+
+The AVAPIGW Ingress Controller enables the operator to watch standard Kubernetes `networking.k8s.io/v1` Ingress resources and automatically translate them into internal APIRoute/Backend configuration. This provides a familiar Kubernetes-native way to configure the gateway using standard Ingress resources.
+
+### Key Features
+
+- **Standard Ingress Support** - Works with standard `networking.k8s.io/v1` Ingress resources
+- **IngressClass Integration** - Uses `avapigw` IngressClass for opt-in behavior
+- **Rich Annotations** - Extensive annotation support for advanced gateway features
+- **Path Type Support** - Supports Exact, Prefix, and ImplementationSpecific path types
+- **TLS Termination** - Automatic TLS configuration from Ingress TLS section
+- **Default Backend** - Support for catch-all routing via default backend
+- **Status Updates** - Updates Ingress status with LoadBalancer IP/hostname
+- **Hot Configuration** - Changes are applied immediately without restart
+
+### Quick Start
+
+#### Prerequisites
+
+- Kubernetes 1.23+
+- AVAPIGW operator deployed with ingress controller enabled
+- Standard Kubernetes Ingress resources
+
+#### Enable Ingress Controller
+
+The ingress controller is an optional feature that must be explicitly enabled:
+
+```bash
+# Enable via Helm values
+helm install avapigw ./helm/avapigw \
+  --set operator.enabled=true \
+  --set operator.ingressController.enabled=true \
+  -n avapigw \
+  --create-namespace
+
+# Or enable via environment variable
+kubectl set env deployment/avapigw-operator \
+  ENABLE_INGRESS_CONTROLLER=true \
+  -n avapigw
+
+# Or enable via command line flag
+kubectl patch deployment avapigw-operator \
+  --patch '{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":["--enable-ingress-controller"]}]}}}}' \
+  -n avapigw
+```
+
+#### Create Your First Ingress
+
+```yaml
+# Create IngressClass (automatically created by Helm chart)
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: avapigw
+spec:
+  controller: avapigw.io/ingress-controller
+
+---
+# Create Ingress resource
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-ingress
+  annotations:
+    avapigw.io/timeout: "30s"
+    avapigw.io/retries: "3"
+    avapigw.io/rate-limit-rps: "100"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+  tls:
+  - hosts:
+    - api.example.com
+    secretName: api-tls
+```
+
+### Supported Annotations
+
+The ingress controller supports a comprehensive set of annotations for configuring advanced gateway features:
+
+| Annotation | Description | Example |
+|------------|-------------|---------|
+| `avapigw.io/timeout` | Request timeout | `30s` |
+| `avapigw.io/retries` | Number of retries | `3` |
+| `avapigw.io/retry-on` | Retry conditions | `5xx,reset` |
+| `avapigw.io/rate-limit-rps` | Rate limit requests/sec | `100` |
+| `avapigw.io/rate-limit-burst` | Rate limit burst | `200` |
+| `avapigw.io/cors-allow-origins` | CORS allowed origins | `https://example.com` |
+| `avapigw.io/cors-allow-methods` | CORS allowed methods | `GET,POST,PUT` |
+| `avapigw.io/cors-allow-headers` | CORS allowed headers | `Content-Type,Authorization` |
+| `avapigw.io/circuit-breaker-threshold` | Circuit breaker threshold | `5` |
+| `avapigw.io/circuit-breaker-timeout` | Circuit breaker timeout | `30s` |
+| `avapigw.io/load-balancer` | Load balancing algorithm | `round-robin` |
+| `avapigw.io/health-check-path` | Health check path | `/health` |
+| `avapigw.io/health-check-interval` | Health check interval | `10s` |
+| `avapigw.io/strip-prefix` | Strip path prefix | `true` |
+| `avapigw.io/rewrite-path` | Rewrite path | `/new-path` |
+| `avapigw.io/websocket` | Enable WebSocket | `true` |
+| `avapigw.io/max-body-size` | Max request body size | `10485760` |
+| `avapigw.io/request-headers-add` | Add request headers | `X-Gateway:avapigw` |
+| `avapigw.io/response-headers-add` | Add response headers | `X-Served-By:avapigw` |
+| `avapigw.io/request-headers-remove` | Remove request headers | `X-Internal-Token` |
+| `avapigw.io/response-headers-remove` | Remove response headers | `X-Debug` |
+
+### Path Type Support
+
+The ingress controller supports all standard Kubernetes path types:
+
+#### Exact Path Matching
+```yaml
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /api/v1/users
+        pathType: Exact
+        backend:
+          service:
+            name: user-service
+            port:
+              number: 8080
+```
+
+#### Prefix Path Matching
+```yaml
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+#### Implementation Specific (Regex)
+```yaml
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /users/[0-9]+
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: user-service
+            port:
+              number: 8080
+```
+
+### TLS Configuration
+
+The ingress controller automatically configures TLS based on the Ingress TLS section:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tls-example
+spec:
+  ingressClassName: avapigw
+  tls:
+  - hosts:
+    - secure.example.com
+    - api.example.com
+    secretName: example-tls
+  rules:
+  - host: secure.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: secure-service
+            port:
+              number: 8080
+```
+
+### Default Backend
+
+Configure a default backend for catch-all routing:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: default-backend-example
+spec:
+  ingressClassName: avapigw
+  defaultBackend:
+    service:
+      name: default-service
+      port:
+        number: 8080
+  rules:
+  - host: example.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+### Advanced Configuration Examples
+
+#### Rate Limiting and Circuit Breaker
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rate-limited-api
+  annotations:
+    avapigw.io/rate-limit-rps: "100"
+    avapigw.io/rate-limit-burst: "200"
+    avapigw.io/circuit-breaker-threshold: "5"
+    avapigw.io/circuit-breaker-timeout: "30s"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+#### CORS Configuration
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cors-enabled-api
+  annotations:
+    avapigw.io/cors-allow-origins: "https://app.example.com,https://admin.example.com"
+    avapigw.io/cors-allow-methods: "GET,POST,PUT,DELETE,OPTIONS"
+    avapigw.io/cors-allow-headers: "Content-Type,Authorization,X-Requested-With"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+#### Header Manipulation
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: header-manipulation
+  annotations:
+    avapigw.io/request-headers-add: "X-Gateway:avapigw,X-Version:v1"
+    avapigw.io/response-headers-add: "X-Served-By:avapigw"
+    avapigw.io/request-headers-remove: "X-Internal-Token"
+    avapigw.io/response-headers-remove: "X-Debug-Info"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+### Helm Chart Configuration
+
+Configure the ingress controller through Helm values:
+
+```yaml
+operator:
+  enabled: true
+  ingressController:
+    enabled: true              # Enable ingress controller
+    className: "avapigw"       # IngressClass name
+    isDefaultClass: false      # Set as default IngressClass
+    lbAddress: ""              # LoadBalancer address for status updates
+```
+
+### Monitoring
+
+Monitor ingress controller operations through metrics and logs:
+
+```bash
+# Check ingress controller logs
+kubectl logs -n avapigw deployment/avapigw-operator -c manager
+
+# Monitor ingress resources
+kubectl get ingress --all-namespaces
+kubectl describe ingress example-ingress
+
+# Check generated APIRoutes and Backends
+kubectl get apiroutes
+kubectl get backends
+```
+
+### Troubleshooting
+
+#### Common Issues
+
+1. **Ingress not processed**
+   - Verify IngressClass is set to `avapigw`
+   - Check that ingress controller is enabled
+   - Verify operator is running
+
+2. **Annotations not applied**
+   - Ensure annotations use `avapigw.io/` prefix
+   - Check annotation syntax and values
+   - Review operator logs for validation errors
+
+3. **TLS not working**
+   - Verify TLS secret exists and is valid
+   - Check certificate format and content
+   - Ensure hosts match certificate SANs
+
+#### Debug Commands
+
+```bash
+# Check IngressClass
+kubectl get ingressclass avapigw -o yaml
+
+# Verify operator configuration
+kubectl get deployment avapigw-operator -o yaml | grep -A5 -B5 ingress
+
+# Check generated resources
+kubectl get apiroutes,backends -o wide
+
+# Monitor events
+kubectl get events --field-selector involvedObject.kind=Ingress
+```
+
+For more detailed troubleshooting, see the [operator documentation](docs/operator/troubleshooting.md).
 
 ## 🐳 Docker
 
@@ -5641,37 +6081,118 @@ volumes:
 
 ### GitHub Actions
 
-The project includes a comprehensive CI/CD pipeline:
+The project includes a comprehensive CI/CD pipeline with enhanced security features including image signing and SBOM generation:
 
 ```yaml
 # .github/workflows/ci.yml
 name: CI
 on: [push, pull_request]
+
+env:
+  GO_VERSION: '1.25.6'
+  GOLANGCI_LINT_VERSION: 'v2.8.0'
+
 jobs:
-  test:
+  # Parallel quality checks
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
-      - run: make ci
-  
-  docker:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v9.2.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+  unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: make docker-build
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go test -race -coverprofile=coverage.out ./internal/... ./cmd/...
+      - uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.out
+          flags: unit
+
+  # Enhanced build and security
+  build:
+    needs: [lint, unit-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - run: make build-all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: bin/
+
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ghcr.io/${{ github.repository }}:latest
 ```
 
-### Pipeline Stages
+### Enhanced Pipeline Stages
 
-1. **Lint** - Code quality checks
-2. **Test** - Unit and functional tests
-3. **Security** - Vulnerability scanning
-4. **Build** - Multi-platform builds
-5. **Docker** - Container image build
-6. **Deploy** - Automated deployment (on release)
+1. **Parallel Quality Checks**
+   - **Lint** - Code quality checks with golangci-lint v2.8.0
+   - **Vulnerability Check** - Security scanning with govulncheck
+   - **Unit Tests** - Comprehensive test suite with 90%+ coverage
+   - **Functional Tests** - End-to-end testing with enhanced coverage
+
+2. **Build & Security**
+   - **Build Binaries** - Multi-platform builds (Linux, macOS, Windows)
+   - **Docker Images** - Multi-architecture containers (amd64, arm64)
+   - **Security Scan** - Container vulnerability scanning
+   - **Image Signing** - Cosign-based image signing for supply chain security
+   - **SBOM Generation** - Software Bill of Materials for transparency
+
+3. **Enhanced Validation**
+   - **Operator Validation** - CRD validation, webhook testing, certificate management
+   - **Ingress Controller Validation** - Standard Kubernetes Ingress support testing
+   - **Helm Chart Validation** - Chart linting and template validation
+
+4. **Release & Publish**
+   - **Create Release** - Automated GitHub releases with artifacts
+   - **Publish Images** - Signed container images to GitHub Container Registry
+
+### Security Features
+
+#### Image Signing with Cosign
+All container images are signed using Cosign for supply chain security:
+
+```bash
+# Verify signed images
+cosign verify ghcr.io/vyrodovalexey/avapigw:latest \
+  --certificate-identity-regexp="https://github.com/vyrodovalexey/avapigw" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+```
+
+#### SBOM Generation
+Software Bill of Materials (SBOM) is generated for all releases:
+
+```bash
+# Download SBOM from release
+gh release download --pattern="*sbom*" --repo vyrodovalexey/avapigw
+```
+
+#### Enhanced Security Scanning
+- Multi-layer vulnerability scanning
+- Critical vulnerability blocking
+- Continuous security monitoring
+- Compliance reporting
 
 ### Running Integration Tests
 

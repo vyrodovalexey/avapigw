@@ -236,7 +236,15 @@ func authenticateWithRetry(
 }
 
 // GetCertificate returns a certificate for the given request.
+// It checks the cache first and issues a new certificate from Vault if needed.
+// Automatic rotation is triggered when a cached certificate is expiring within
+// the configured RotateBefore duration.
 func (p *vaultProvider) GetCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
+	// Check context cancellation at the start
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled: %w", err)
+	}
+
 	if p.closed {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
@@ -253,12 +261,21 @@ func (p *vaultProvider) GetCertificate(ctx context.Context, req *CertificateRequ
 		return cert, nil
 	}
 
-	// Issue new certificate from Vault
+	// Check context again before expensive Vault operation
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled before certificate issuance: %w", err)
+	}
+
+	// Issue new certificate from Vault (handles both initial issuance and auto-rotation)
 	return p.issueCertificate(ctx, req)
 }
 
-// GetCA returns the CA certificate pool.
+// GetCA returns the CA certificate pool from Vault PKI.
 func (p *vaultProvider) GetCA(ctx context.Context) (*x509.CertPool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled: %w", err)
+	}
+
 	if p.closed {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
@@ -267,7 +284,13 @@ func (p *vaultProvider) GetCA(ctx context.Context) (*x509.CertPool, error) {
 }
 
 // RotateCertificate rotates the certificate for the given request.
+// Unlike GetCertificate, this always issues a new certificate regardless of cache state.
 func (p *vaultProvider) RotateCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
+	// Check context cancellation at the start
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled: %w", err)
+	}
+
 	if p.closed {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}

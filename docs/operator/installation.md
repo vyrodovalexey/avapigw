@@ -40,12 +40,28 @@ The installer needs cluster-admin permissions to:
 
 #### Quick Installation
 
-The operator is now part of the main Helm chart and can be enabled optionally:
+The operator is now part of the main Helm chart and can be enabled optionally. The chart supports 3 deployment modes:
+
+1. **Gateway-only mode** (default) - Just the API Gateway
+2. **With-operator mode** - Gateway + Operator for CRD-based configuration
+3. **With-ingress mode** - Gateway + Operator + Ingress Controller for standard Ingress support
 
 ```bash
-# Install gateway with operator enabled
+# Mode 1: Gateway-only (default)
+helm install avapigw ./helm/avapigw \
+  --namespace avapigw \
+  --create-namespace
+
+# Mode 2: Gateway with operator enabled
 helm install avapigw ./helm/avapigw \
   --set operator.enabled=true \
+  --namespace avapigw \
+  --create-namespace
+
+# Mode 3: Gateway with operator and ingress controller
+helm install avapigw ./helm/avapigw \
+  --set operator.enabled=true \
+  --set operator.ingressController.enabled=true \
   --namespace avapigw \
   --create-namespace
 
@@ -59,7 +75,7 @@ kubectl get crd | grep avapigw.io
 ```bash
 # Create values file for production
 cat > production-values.yaml <<EOF
-# Enable operator
+# Enable operator with ingress controller
 operator:
   enabled: true
   replicaCount: 2
@@ -89,6 +105,13 @@ operator:
     tls:
       mode: vault
 
+  # Enable ingress controller for standard Ingress support
+  ingressController:
+    enabled: true
+    className: avapigw
+    isDefaultClass: false
+    lbAddress: "192.168.1.100"  # LoadBalancer IP for status updates
+
 # Gateway configuration
 gateway:
   replicaCount: 3
@@ -98,24 +121,27 @@ vault:
   address: "https://vault.example.com:8200"
   authMethod: kubernetes
   role: avapigw
-    vault:
-      pkiMount: pki
-      role: operator-server
-      commonName: avapigw-operator.avapigw-system.svc
-      ttl: 24h
+  pki:
+    enabled: true
+    pkiMount: pki
+    role: operator-server
+    commonName: avapigw-operator.avapigw-system.svc
+    ttl: 24h
 
-webhook:
-  tls:
-    mode: vault
-    vault:
-      pkiMount: pki
-      role: webhook
-      commonName: avapigw-operator-webhook.avapigw-system.svc
-      ttl: 24h
+# Webhook configuration with Vault PKI
+operator:
+  webhook:
+    tls:
+      mode: vault
+      vault:
+        pkiMount: pki
+        role: webhook
+        commonName: avapigw-operator-webhook.avapigw-system.svc
+        ttl: 24h
 EOF
 
 # Install with production values
-helm install avapigw-operator ./helm/avapigw-operator \
+helm install avapigw ./helm/avapigw \
   --namespace avapigw-system \
   --create-namespace \
   --values production-values.yaml

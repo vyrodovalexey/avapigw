@@ -1,0 +1,9 @@
+# IngressClass for avapigw ingress controller
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: avapigw
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "false"
+spec:
+  controller: avapigw.io/ingress-controller

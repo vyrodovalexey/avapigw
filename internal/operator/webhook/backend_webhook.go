@@ -40,10 +40,14 @@ func (v *BackendValidator) ValidateCreate(
 		return warnings, err
 	}
 
-	// Check for duplicates
 	if v.DuplicateChecker != nil {
+		// Check for duplicates within the same CRD type
 		if dupErr := v.DuplicateChecker.CheckBackendDuplicate(ctx, obj); dupErr != nil {
 			return warnings, dupErr
+		}
+		// Check for cross-CRD host:port conflicts with GRPCBackends
+		if crossErr := v.DuplicateChecker.CheckBackendCrossConflicts(ctx, obj); crossErr != nil {
+			return warnings, crossErr
 		}
 	}
 
@@ -60,10 +64,14 @@ func (v *BackendValidator) ValidateUpdate(
 		return warnings, err
 	}
 
-	// Check for duplicates (excluding self)
 	if v.DuplicateChecker != nil {
+		// Check for duplicates within the same CRD type (excluding self)
 		if dupErr := v.DuplicateChecker.CheckBackendDuplicate(ctx, newObj); dupErr != nil {
 			return warnings, dupErr
+		}
+		// Check for cross-CRD host:port conflicts with GRPCBackends
+		if crossErr := v.DuplicateChecker.CheckBackendCrossConflicts(ctx, newObj); crossErr != nil {
+			return warnings, crossErr
 		}
 	}
 

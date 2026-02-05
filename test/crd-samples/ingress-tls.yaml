@@ -1,0 +1,38 @@
+# Ingress with TLS termination
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tls-ingress
+  namespace: avapigw-test
+  annotations:
+    avapigw.io/timeout: "30s"
+spec:
+  ingressClassName: avapigw
+  tls:
+    - hosts:
+        - secure.example.com
+      secretName: tls-secret
+    - hosts:
+        - api.example.com
+      secretName: api-tls-secret
+  rules:
+    - host: secure.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: secure-service
+                port:
+                  number: 8443
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8080

@@ -121,16 +121,22 @@ func TestIntegration_TLS_MutualMode(t *testing.T) {
 				if err := tlsConn.Handshake(); err != nil {
 					return
 				}
+				// Read the request first before responding
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
 				state := tlsConn.ConnectionState()
 				if len(state.PeerCertificates) > 0 {
-					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 				} else {
-					_, _ = c.Write([]byte("HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\n\r\nForbidden"))
+					_, _ = c.Write([]byte("HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: close\r\n\r\nForbidden"))
 				}
 			}(conn)
 		}
 	}()
 	<-serverReady
+
+	// Give the server a moment to be fully ready
+	time.Sleep(50 * time.Millisecond)
 
 	t.Run("with client certificate", func(t *testing.T) {
 		// Create client with certificate
@@ -202,16 +208,22 @@ func TestIntegration_TLS_OptionalMutualMode(t *testing.T) {
 				if err := tlsConn.Handshake(); err != nil {
 					return
 				}
+				// Read the request first before responding
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
 				state := tlsConn.ConnectionState()
 				if len(state.PeerCertificates) > 0 {
-					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nAuthenticated"))
+					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nAuthenticated"))
 				} else {
-					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nAnonymous"))
+					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nAnonymous"))
 				}
 			}(conn)
 		}
 	}()
 	<-serverReady
+
+	// Give the server a moment to be fully ready
+	time.Sleep(50 * time.Millisecond)
 
 	t.Run("with client certificate", func(t *testing.T) {
 		clientTLSConfig, err := certs.GetClientMTLSConfig()
@@ -645,11 +657,17 @@ func TestIntegration_TLS_ClientCertValidation(t *testing.T) {
 				if err := tlsConn.Handshake(); err != nil {
 					return
 				}
-				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"))
+				// Read the request first before responding
+				buf := make([]byte, 1024)
+				_, _ = c.Read(buf)
+				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"))
 			}(conn)
 		}
 	}()
 	<-serverReady
+
+	// Give the server a moment to be fully ready
+	time.Sleep(50 * time.Millisecond)
 
 	t.Run("valid client certificate", func(t *testing.T) {
 		clientTLSConfig, err := certs.GetClientMTLSConfig()

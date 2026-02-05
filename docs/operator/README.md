@@ -74,15 +74,17 @@ graph TB
 
 ### Components
 
-#### 1. Operator Controller
-- **APIRoute Controller** - Manages HTTP route configuration
-- **GRPCRoute Controller** - Manages gRPC route configuration  
-- **Backend Controller** - Manages HTTP backend configuration
-- **GRPCBackend Controller** - Manages gRPC backend configuration
+#### 1. Operator Controllers
+- **APIRoute Controller** - Manages HTTP route configuration with base reconciler pattern
+- **GRPCRoute Controller** - Manages gRPC route configuration with base reconciler pattern
+- **Backend Controller** - Manages HTTP backend configuration with base reconciler pattern
+- **GRPCBackend Controller** - Manages gRPC backend configuration with base reconciler pattern
+- **Ingress Controller** - Converts standard Kubernetes Ingress resources to gateway routes
 
-#### 2. Admission Webhooks
+#### 2. Enhanced Admission Webhooks
 - **Validating Webhooks** - Validate CRD specifications before creation/update
-- **Duplicate Detection** - Prevent conflicting route configurations
+- **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations across Backend vs GRPCBackend
+- **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
 - **Cross-Reference Validation** - Ensure referenced backends exist
 
 #### 3. gRPC Communication
@@ -122,6 +124,33 @@ spec:
     perTryTimeout: 10s
 ```
 
+### Ingress Controller Support
+
+Convert standard Kubernetes Ingress resources to gateway configuration:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-ingress
+  annotations:
+    avapigw.io/timeout: "30s"
+    avapigw.io/retries: "3"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
 ### Hot Configuration Updates
 
 Configuration changes are applied immediately without gateway restarts:
@@ -135,7 +164,7 @@ kubectl patch apiroute api-v1 --type='merge' -p='{"spec":{"timeout":"60s"}}'
 
 ### Status Reporting
 
-Real-time status updates show configuration state:
+Real-time status updates show configuration state with improved status handling:
 
 ```bash
 kubectl get apiroutes
@@ -149,7 +178,11 @@ kubectl describe apiroute api-v1
 #     Status:  True
 #     Reason:  Reconciled
 #     Message: Route successfully applied to 2 gateways
+#     Last Transition Time: 2026-02-05T10:30:00Z
+#     Generation: 2
 ```
+
+Status updates now use Patch instead of Update for better performance and reduced conflicts.
 
 ### Admission Webhooks
 

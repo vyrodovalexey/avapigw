@@ -291,18 +291,34 @@ make test-functional
 # Run all tests (requires test backends)
 make test-all
 
+# Run operator tests
+make test-operator-unit
+make test-operator-functional
+make test-operator-integration
+
+# Run ingress controller tests
+make test-ingress-unit
+make test-ingress-functional
+
 # Generate coverage report
 make test-coverage
+
+# Test Helm chart with different modes
+make helm-template                # Gateway-only
+make helm-template-with-operator  # With operator
+make helm-template-ingress        # With ingress controller
 ```
 
 ## Testing Requirements
 
 ### Test Coverage Requirements
 
-- **Minimum coverage**: 90% for new code
+- **Minimum coverage**: 93%+ for new code (current project standard)
 - **Unit tests**: Required for all new functions and methods
 - **Integration tests**: Required for new features that interact with external systems
 - **End-to-end tests**: Required for new API endpoints or major features
+- **Cross-CRD tests**: Required for features that interact between different CRD types
+- **Ingress controller tests**: Required for ingress-related functionality
 
 ### Test Categories
 
@@ -328,6 +344,15 @@ make test-coverage
 - Test the full system including configuration loading
 - Require all external dependencies
 - Longest execution time acceptable
+
+#### 5. Operator Tests
+- **Unit tests** (`make test-operator-unit`) - Test operator controllers in isolation
+- **Functional tests** (`make test-operator-functional`) - Test operator functionality with minimal dependencies
+- **Integration tests** (`make test-operator-integration`) - Test operator with real Kubernetes API
+
+#### 6. Ingress Controller Tests
+- **Unit tests** (`make test-ingress-unit`) - Test ingress controller logic
+- **Functional tests** (`make test-ingress-functional`) - Test ingress resource conversion
 
 ### Writing Tests
 

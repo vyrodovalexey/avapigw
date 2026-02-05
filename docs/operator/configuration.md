@@ -316,6 +316,90 @@ extraEnv:
     value: "None"                  # Webhook side effects
 ```
 
+## Ingress Controller Configuration
+
+Configure the ingress controller for standard Kubernetes Ingress support:
+
+```yaml
+ingressController:
+  enabled: false                   # Enable ingress controller
+  className: avapigw              # IngressClass name
+  isDefaultClass: false           # Set as default IngressClass
+  lbAddress: ""                   # LoadBalancer address for status updates
+  
+  # Ingress controller behavior
+  watchNamespaces: []             # Namespaces to watch (empty = all)
+  resyncPeriod: 30s               # Resync period for Ingress resources
+  
+  # Status update configuration
+  statusUpdate:
+    enabled: true                 # Enable status updates
+    loadBalancer:
+      ip: ""                      # Static LoadBalancer IP
+      hostname: ""                # Static LoadBalancer hostname
+```
+
+### Ingress Controller Advanced Configuration
+
+```yaml
+extraEnv:
+  # Ingress controller settings
+  - name: ENABLE_INGRESS_CONTROLLER
+    value: "true"                 # Enable ingress controller
+  - name: INGRESS_CLASS_NAME
+    value: "avapigw"              # IngressClass name
+  - name: INGRESS_DEFAULT_CLASS
+    value: "false"                # Set as default IngressClass
+  - name: INGRESS_LB_ADDRESS
+    value: "192.168.1.100"        # LoadBalancer address
+  - name: INGRESS_WATCH_NAMESPACES
+    value: "default,production"   # Comma-separated namespaces
+  - name: INGRESS_RESYNC_PERIOD
+    value: "30s"                  # Resync period
+```
+
+### Ingress Controller Examples
+
+#### Basic Ingress Controller Setup
+
+```yaml
+# Enable ingress controller with default settings
+ingressController:
+  enabled: true
+  className: avapigw
+```
+
+#### Production Ingress Controller Setup
+
+```yaml
+# Production setup with LoadBalancer and specific namespaces
+ingressController:
+  enabled: true
+  className: avapigw
+  isDefaultClass: false
+  lbAddress: "192.168.1.100"
+  watchNamespaces:
+    - production
+    - staging
+  statusUpdate:
+    enabled: true
+    loadBalancer:
+      ip: "192.168.1.100"
+```
+
+#### Multi-tenant Ingress Controller
+
+```yaml
+# Multi-tenant setup with hostname-based LoadBalancer
+ingressController:
+  enabled: true
+  className: avapigw-tenant1
+  statusUpdate:
+    enabled: true
+    loadBalancer:
+      hostname: "gateway.tenant1.example.com"
+```
+
 ## Vault Integration
 
 Configure HashiCorp Vault integration for certificate management:

@@ -120,7 +120,7 @@ func TestGRPCBackendReconciler_SetupWithManager_StatusUpdaterInit(t *testing.T) 
 // Reconcile Error Path Tests - Cleanup Failure
 // ============================================================================
 
-func TestAPIRouteReconciler_handleDeletion_CleanupFailure(t *testing.T) {
+func TestAPIRouteReconciler_Deletion_ViaReconcile(t *testing.T) {
 	scheme := newTestScheme()
 
 	now := metav1.Now()
@@ -142,17 +142,24 @@ func TestAPIRouteReconciler_handleDeletion_CleanupFailure(t *testing.T) {
 
 	reconciler := newAPIRouteReconciler(t, fakeClient, scheme, newFakeRecorder())
 
-	// Test handleDeletion directly
-	result, err := reconciler.handleDeletion(context.Background(), apiRoute)
+	// Test deletion via Reconcile which internally calls baseHandleDeletion
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Errorf("handleDeletion() error = %v, want nil", err)
+		t.Errorf("Reconcile() during deletion error = %v, want nil", err)
 	}
 	if result.Requeue || result.RequeueAfter > 0 {
-		t.Error("handleDeletion() should not requeue on success")
+		t.Error("Reconcile() during deletion should not requeue on success")
 	}
 }
 
-func TestGRPCRouteReconciler_handleDeletion_CleanupFailure(t *testing.T) {
+func TestGRPCRouteReconciler_Deletion_ViaReconcile(t *testing.T) {
 	scheme := newTestScheme()
 
 	now := metav1.Now()
@@ -174,16 +181,24 @@ func TestGRPCRouteReconciler_handleDeletion_CleanupFailure(t *testing.T) {
 
 	reconciler := newGRPCRouteReconciler(t, fakeClient, scheme, newFakeRecorder())
 
-	result, err := reconciler.handleDeletion(context.Background(), grpcRoute)
+	// Test deletion via Reconcile which internally calls baseHandleDeletion
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-grpc-route",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Errorf("handleDeletion() error = %v, want nil", err)
+		t.Errorf("Reconcile() during deletion error = %v, want nil", err)
 	}
 	if result.Requeue || result.RequeueAfter > 0 {
-		t.Error("handleDeletion() should not requeue on success")
+		t.Error("Reconcile() during deletion should not requeue on success")
 	}
 }
 
-func TestBackendReconciler_handleDeletion_CleanupFailure(t *testing.T) {
+func TestBackendReconciler_Deletion_ViaReconcile(t *testing.T) {
 	scheme := newTestScheme()
 
 	now := metav1.Now()
@@ -209,16 +224,24 @@ func TestBackendReconciler_handleDeletion_CleanupFailure(t *testing.T) {
 
 	reconciler := newBackendReconciler(t, fakeClient, scheme, newFakeRecorder())
 
-	result, err := reconciler.handleDeletion(context.Background(), backend)
+	// Test deletion via Reconcile which internally calls baseHandleDeletion
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Errorf("handleDeletion() error = %v, want nil", err)
+		t.Errorf("Reconcile() during deletion error = %v, want nil", err)
 	}
 	if result.Requeue || result.RequeueAfter > 0 {
-		t.Error("handleDeletion() should not requeue on success")
+		t.Error("Reconcile() during deletion should not requeue on success")
 	}
 }
 
-func TestGRPCBackendReconciler_handleDeletion_CleanupFailure(t *testing.T) {
+func TestGRPCBackendReconciler_Deletion_ViaReconcile(t *testing.T) {
 	scheme := newTestScheme()
 
 	now := metav1.Now()
@@ -244,12 +267,20 @@ func TestGRPCBackendReconciler_handleDeletion_CleanupFailure(t *testing.T) {
 
 	reconciler := newGRPCBackendReconciler(t, fakeClient, scheme, newFakeRecorder())
 
-	result, err := reconciler.handleDeletion(context.Background(), grpcBackend)
+	// Test deletion via Reconcile which internally calls baseHandleDeletion
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
-		t.Errorf("handleDeletion() error = %v, want nil", err)
+		t.Errorf("Reconcile() during deletion error = %v, want nil", err)
 	}
 	if result.Requeue || result.RequeueAfter > 0 {
-		t.Error("handleDeletion() should not requeue on success")
+		t.Error("Reconcile() during deletion should not requeue on success")
 	}
 }
 

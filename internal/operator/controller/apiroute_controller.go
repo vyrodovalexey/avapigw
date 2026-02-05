@@ -6,15 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
@@ -42,118 +39,49 @@ type APIRouteReconciler struct {
 
 // Reconcile handles reconciliation of APIRoute resources.
 func (r *APIRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	timer := NewReconcileTimer("apiroute")
-	metrics := GetControllerMetrics()
-	logger := log.FromContext(ctx)
-	logger.Info("reconciling APIRoute", "name", req.Name, "namespace", req.Namespace)
-
-	// Initialize StatusUpdater if not set (for direct Reconcile calls without SetupWithManager)
-	if r.StatusUpdater == nil {
-		r.StatusUpdater = NewStatusUpdater(r.Client)
-	}
-
-	// Fetch the APIRoute instance
-	apiRoute := &avapigwv1alpha1.APIRoute{}
-	if err := r.Get(ctx, req.NamespacedName, apiRoute); err != nil {
-		if errors.IsNotFound(err) {
-			// Object not found, return without error
-			logger.Info("APIRoute not found, ignoring", "name", req.Name)
-			// Clean up metrics for deleted resource
-			metrics.DeleteResourceConditionMetrics("APIRoute", req.Name, req.Namespace)
-			timer.RecordSuccess()
-			return ctrl.Result{}, nil
-		}
-		logger.Error(err, "failed to get APIRoute")
-		timer.RecordError()
-		return ctrl.Result{}, err
-	}
-
-	// Check if the object is being deleted
-	if !apiRoute.ObjectMeta.DeletionTimestamp.IsZero() {
-		result, err := r.handleDeletion(ctx, apiRoute)
-		if err != nil {
-			timer.RecordError()
-		} else {
-			// Clean up metrics for deleted resource
-			metrics.DeleteResourceConditionMetrics("APIRoute", apiRoute.Name, apiRoute.Namespace)
-			timer.RecordSuccess()
-		}
-		return result, err
-	}
-
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(apiRoute, APIRouteFinalizerName) {
-		controllerutil.AddFinalizer(apiRoute, APIRouteFinalizerName)
-		if err := r.Update(ctx, apiRoute); err != nil {
-			logger.Error(err, "failed to add finalizer")
-			timer.RecordError()
-			return ctrl.Result{}, err
-		}
-		metrics.RecordFinalizerOperation("apiroute", OperationAdd)
-		timer.RecordRequeue()
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// Reconcile the APIRoute
-	if err := r.reconcileAPIRoute(ctx, apiRoute); err != nil {
-		logger.Error(err, "failed to reconcile APIRoute")
-		reason := string(avapigwv1alpha1.ReasonReconcileFailed)
-		if statusErr := r.StatusUpdater.UpdateRouteStatus(ctx, apiRoute, false, reason, err.Error()); statusErr != nil {
-			logger.Error(statusErr, "failed to update status after reconcile failure")
-		}
-		r.Recorder.Event(apiRoute, "Warning", EventReasonReconcileFailed, err.Error())
-		// Update condition metric
-		metrics.SetResourceCondition("APIRoute", apiRoute.Name, apiRoute.Namespace, "Ready", 0)
-		timer.RecordError()
-		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, err
-	}
-
-	// Update status
-	reason := string(avapigwv1alpha1.ReasonReconciled)
-	if err := r.StatusUpdater.UpdateRouteStatus(ctx, apiRoute, true, reason, MessageRouteApplied); err != nil {
-		// Status update failed, requeue to retry. Return nil error to avoid exponential backoff
-		// since this is a transient issue that will be resolved on the next reconcile.
-		logger.Error(err, "failed to update status, will retry")
-		timer.RecordRequeue()
-		return ctrl.Result{RequeueAfter: RequeueAfterStatusUpdateFailure}, nil
-	}
-	r.Recorder.Event(apiRoute, "Normal", EventReasonReconciled, MessageRouteApplied)
-
-	// Update condition metric
-	metrics.SetResourceCondition("APIRoute", apiRoute.Name, apiRoute.Namespace, "Ready", 1)
-	timer.RecordSuccess()
-
-	return ctrl.Result{}, nil
+	return BaseReconcile(ctx, r.Client, r.StatusUpdater, r.Recorder, req, r.callbacks())
 }
 
-// handleDeletion handles the deletion of an APIRoute.
-func (r *APIRouteReconciler) handleDeletion(
-	ctx context.Context,
-	apiRoute *avapigwv1alpha1.APIRoute,
-) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	metrics := GetControllerMetrics()
-
-	if controllerutil.ContainsFinalizer(apiRoute, APIRouteFinalizerName) {
-		// Perform cleanup
-		if err := r.cleanupAPIRoute(ctx, apiRoute); err != nil {
-			logger.Error(err, "failed to cleanup APIRoute")
-			r.Recorder.Event(apiRoute, "Warning", EventReasonCleanupFailed, err.Error())
-			return ctrl.Result{RequeueAfter: RequeueAfterCleanupFailure}, err
-		}
-
-		// Remove finalizer
-		controllerutil.RemoveFinalizer(apiRoute, APIRouteFinalizerName)
-		if err := r.Update(ctx, apiRoute); err != nil {
-			logger.Error(err, "failed to remove finalizer")
-			return ctrl.Result{}, err
-		}
-
-		metrics.RecordFinalizerOperation("apiroute", OperationRemove)
-		r.Recorder.Event(apiRoute, "Normal", EventReasonDeleted, MessageRouteDeleted)
+// callbacks returns the resource-specific callbacks for the base reconciler.
+func (r *APIRouteReconciler) callbacks() *ReconcileCallbacks {
+	return &ReconcileCallbacks{
+		ResourceKind:   "APIRoute",
+		ControllerName: "apiroute",
+		FinalizerName:  APIRouteFinalizerName,
+		NewResource: func() Reconcilable {
+			return &avapigwv1alpha1.APIRoute{}
+		},
+		Reconcile: func(ctx context.Context, resource Reconcilable) error {
+			return r.reconcileAPIRoute(ctx, resource.(*avapigwv1alpha1.APIRoute))
+		},
+		Cleanup: func(ctx context.Context, resource Reconcilable) error {
+			return r.cleanupAPIRoute(ctx, resource.(*avapigwv1alpha1.APIRoute))
+		},
+		UpdateStatus: func(ctx context.Context, updater *StatusUpdater, resource Reconcilable) error {
+			reason := string(avapigwv1alpha1.ReasonReconciled)
+			return updater.UpdateRouteStatus(ctx, resource.(RouteStatusUpdatable), true, reason, MessageRouteApplied)
+		},
+		UpdateFailureStatus: func(
+			ctx context.Context, updater *StatusUpdater, resource Reconcilable, reconcileErr error,
+		) error {
+			reason := string(avapigwv1alpha1.ReasonReconcileFailed)
+			return updater.UpdateRouteStatus(
+				ctx, resource.(RouteStatusUpdatable), false, reason, reconcileErr.Error(),
+			)
+		},
+		RecordSuccessEvent: func(recorder record.EventRecorder, resource Reconcilable) {
+			recorder.Event(resource, "Normal", EventReasonReconciled, MessageRouteApplied)
+		},
+		RecordFailureEvent: func(recorder record.EventRecorder, resource Reconcilable, err error) {
+			recorder.Event(resource, "Warning", EventReasonReconcileFailed, err.Error())
+		},
+		SetSuccessMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
+			metrics.SetResourceCondition("APIRoute", resource.GetName(), resource.GetNamespace(), "Ready", 1)
+		},
+		SetFailureMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
+			metrics.SetResourceCondition("APIRoute", resource.GetName(), resource.GetNamespace(), "Ready", 0)
+		},
 	}
-
-	return ctrl.Result{}, nil
 }
 
 // reconcileAPIRoute reconciles the APIRoute configuration.
@@ -188,7 +116,7 @@ func (r *APIRouteReconciler) cleanupAPIRoute(ctx context.Context, apiRoute *avap
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *APIRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Initialize StatusUpdater if not already set
+	// Initialize StatusUpdater if not already set (Task B2: only in SetupWithManager)
 	if r.StatusUpdater == nil {
 		r.StatusUpdater = NewStatusUpdater(r.Client)
 	}

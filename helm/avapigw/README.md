@@ -6,7 +6,16 @@ High-performance API Gateway built with Go and gin-gonic, with optional Kubernet
 
 - **Gateway**: High-performance HTTP/gRPC API Gateway
 - **Operator** (optional): Kubernetes operator for managing gateway configuration through CRDs
+- **Ingress Controller** (optional): Standard Kubernetes Ingress support with rich annotations
 - **CRDs**: APIRoute, GRPCRoute, Backend, GRPCBackend custom resources
+
+## Deployment Modes
+
+This chart supports three deployment modes:
+
+1. **Gateway-only** (default) - Just the API Gateway without operator
+2. **With-operator** - Gateway + Operator for CRD-based configuration management
+3. **With-ingress** - Gateway + Operator + Ingress Controller for standard Kubernetes Ingress support
 
 ## Prerequisites
 
@@ -25,13 +34,31 @@ helm repo update
 ### Install the chart
 
 ```bash
+# Gateway-only mode (default)
 helm install my-gateway avapigw/avapigw
+
+# With operator enabled
+helm install my-gateway avapigw/avapigw --set operator.enabled=true
+
+# With ingress controller enabled
+helm install my-gateway avapigw/avapigw \
+  --set operator.enabled=true \
+  --set operator.ingressController.enabled=true
 ```
 
 ### Install from local directory
 
 ```bash
+# Gateway-only mode
 helm install my-gateway ./helm/avapigw
+
+# With operator enabled
+helm install my-gateway ./helm/avapigw --set operator.enabled=true
+
+# With ingress controller enabled
+helm install my-gateway ./helm/avapigw \
+  --set operator.enabled=true \
+  --set operator.ingressController.enabled=true
 ```
 
 ### Install with custom values
@@ -245,7 +272,7 @@ The following table lists the configurable parameters of the avapigw chart and t
 
 ### Operator Configuration
 
-The operator enables Kubernetes-native configuration management through CRDs. When enabled, you can manage routes and backends using APIRoute, GRPCRoute, Backend, and GRPCBackend custom resources.
+The operator enables Kubernetes-native configuration management through CRDs with comprehensive RBAC permissions, automated certificate management, and enhanced webhook validation. When enabled, you can manage routes and backends using APIRoute, GRPCRoute, Backend, and GRPCBackend custom resources.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -255,12 +282,15 @@ The operator enables Kubernetes-native configuration management through CRDs. Wh
 | `operator.image.tag` | Operator image tag | `""` (uses appVersion) |
 | `operator.image.pullPolicy` | Operator image pull policy | `IfNotPresent` |
 | `operator.leaderElection.enabled` | Enable leader election | `true` |
-| `operator.leaderElection.resourceName` | Leader election resource name | `some_id.avapigw.io` |
+| `operator.leaderElection.resourceName` | Leader election resource name | `avapigw-operator-leader` |
 | `operator.grpc.port` | gRPC server port | `9444` |
-| `operator.grpc.tls.mode` | gRPC TLS mode (selfsigned, vault) | `selfsigned` |
+| `operator.grpc.tls.mode` | gRPC TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |
 | `operator.webhook.enabled` | Enable admission webhooks | `true` |
 | `operator.webhook.port` | Webhook server port | `9443` |
 | `operator.webhook.tls.mode` | Webhook TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |
+| `operator.webhook.failurePolicy` | Webhook failure policy (Fail, Ignore) | `Fail` |
+| `operator.webhook.caInjection.enabled` | Enable automatic CA injection | `true` |
+| `operator.webhook.caInjection.refreshInterval` | CA injection refresh interval | `1h` |
 | `operator.metrics.enabled` | Enable Prometheus metrics | `true` |
 | `operator.metrics.port` | Metrics server port | `8080` |
 | `operator.health.port` | Health probe port | `8081` |
@@ -269,8 +299,58 @@ The operator enables Kubernetes-native configuration management through CRDs. Wh
 | `operator.resources.requests.cpu` | CPU request | `100m` |
 | `operator.resources.requests.memory` | Memory request | `128Mi` |
 | `operator.serviceAccount.create` | Create operator service account | `true` |
+| `operator.serviceAccount.name` | Operator service account name | `""` (auto-generated) |
+| `operator.rbac.create` | Create RBAC resources | `true` |
+| `operator.rbac.clusterRole` | Create ClusterRole for operator | `true` |
 | `operator.podDisruptionBudget.enabled` | Enable operator PDB | `false` |
 | `operator.serviceMonitor.enabled` | Enable operator ServiceMonitor | `false` |
+
+### Certificate Management Configuration
+
+The operator supports three certificate management modes for webhook validation and gRPC communication.
+
+#### Self-Signed Mode (Default)
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `operator.webhook.tls.mode` | Certificate mode | `selfsigned` |
+| `operator.webhook.tls.validity` | Certificate validity period | `8760h` |
+| `operator.webhook.tls.keySize` | Private key size | `2048` |
+| `operator.webhook.tls.organization` | Certificate organization | `AVAPIGW` |
+| `operator.webhook.tls.country` | Certificate country | `US` |
+
+#### Vault PKI Mode
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `operator.webhook.tls.mode` | Certificate mode | `vault` |
+| `vault.enabled` | Enable Vault integration | `false` |
+| `vault.address` | Vault server address | `""` |
+| `vault.authMethod` | Vault auth method | `kubernetes` |
+| `vault.role` | Vault role for operator | `""` |
+| `vault.pki.enabled` | Enable Vault PKI for operator certs | `false` |
+| `vault.pki.pkiMount` | Vault PKI mount path | `pki` |
+| `vault.pki.role` | Vault PKI role name | `operator-certs` |
+| `vault.pki.commonName` | Certificate common name | `avapigw-operator-webhook.avapigw-system.svc` |
+| `vault.pki.altNames` | Certificate alternative names | `[]` |
+| `vault.pki.ttl` | Certificate TTL | `24h` |
+| `vault.pki.renewBefore` | Renew before expiry | `1h` |
+
+#### Cert-Manager Mode
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `operator.webhook.tls.mode` | Certificate mode | `cert-manager` |
+| `operator.webhook.tls.certificateName` | Certificate resource name | `""` (auto-detected) |
+| `operator.webhook.tls.secretName` | Secret name for certificates | `avapigw-operator-webhook-certs` |
+
+### Ingress Controller Configuration
+
+The ingress controller enables the operator to watch standard Kubernetes Ingress resources and translate them into APIRoute/Backend configuration.
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `operator.ingressController.enabled` | Enable ingress controller mode | `false` |
+| `operator.ingressController.className` | IngressClass name | `avapigw` |
+| `operator.ingressController.isDefaultClass` | Set as default IngressClass | `false` |
+| `operator.ingressController.lbAddress` | LoadBalancer address for Ingress status updates | `""` |
 
 ## Examples
 
@@ -570,6 +650,19 @@ operator:
       memory: 128Mi
 ```
 
+### Enable Ingress Controller
+
+```yaml
+# Enable ingress controller for standard Kubernetes Ingress support
+operator:
+  enabled: true
+  ingressController:
+    enabled: true
+    className: "avapigw"
+    isDefaultClass: false
+    lbAddress: "192.168.1.100"  # Optional LoadBalancer IP for status updates
+```
+
 After deploying with operator enabled, you can create CRDs:
 
 ```yaml
@@ -609,6 +702,38 @@ spec:
     timeout: 5s
   loadBalancer:
     algorithm: roundRobin
+```
+
+After deploying with ingress controller enabled, you can also use standard Kubernetes Ingress resources:
+
+```yaml
+# Example Ingress resource
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-ingress
+  annotations:
+    avapigw.io/timeout: "30s"
+    avapigw.io/retries: "3"
+    avapigw.io/rate-limit-rps: "100"
+    avapigw.io/cors-allow-origins: "https://example.com"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+  tls:
+  - hosts:
+    - api.example.com
+    secretName: api-tls
 ```
 
 ### Production Configuration

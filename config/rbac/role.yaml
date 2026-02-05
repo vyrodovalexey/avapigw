@@ -4,6 +4,7 @@ kind: ClusterRole
 metadata:
   name: avapigw-operator-role
 rules:
+# Core resources - Events for recording reconciliation events
 - apiGroups:
   - ""
   resources:
@@ -11,6 +12,39 @@ rules:
   verbs:
   - create
   - patch
+# Core resources - Secrets for TLS certificates and sensitive data
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+# Core resources - ConfigMaps for configuration storage
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+# Core resources - Services and Endpoints for backend service discovery
+- apiGroups:
+  - ""
+  resources:
+  - services
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+# CRD management - APIRoute, GRPCRoute, Backend, GRPCBackend
 - apiGroups:
   - avapigw.io
   resources:
@@ -26,6 +60,7 @@ rules:
   - patch
   - update
   - watch
+# CRD finalizers for cleanup
 - apiGroups:
   - avapigw.io
   resources:
@@ -35,6 +70,7 @@ rules:
   - grpcroutes/finalizers
   verbs:
   - update
+# CRD status updates
 - apiGroups:
   - avapigw.io
   resources:
@@ -46,3 +82,63 @@ rules:
   - get
   - patch
   - update
+# Networking - Ingress resources for ingress controller
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+# Networking - Ingress status updates
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses/status
+  verbs:
+  - get
+  - update
+  - patch
+# Networking - Ingress finalizers for cleanup
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses/finalizers
+  verbs:
+  - update
+# Networking - IngressClass for class-based filtering
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingressclasses
+  verbs:
+  - get
+  - list
+  - watch
+# Coordination - Leases for leader election
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+# Admission - ValidatingWebhookConfiguration for CA bundle injection
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch

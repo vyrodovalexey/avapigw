@@ -6,7 +6,61 @@ metadata:
   labels:
     {{- include "avapigw.operator.labels" . | nindent 4 }}
 rules:
-  # CRD management
+  # ==========================================================================
+  # Core Kubernetes Resources
+  # ==========================================================================
+  
+  # Events - for recording reconciliation events and status changes
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  
+  # Secrets - for TLS certificates, webhook certs, and sensitive configuration
+  # Required for: webhook TLS, Ingress TLS secrets, backend authentication
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  
+  # ConfigMaps - for configuration storage and leader election (legacy)
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  
+  # Services and Endpoints - for backend service discovery
+  # Required for: Ingress backend resolution, health checking
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - endpoints
+    verbs:
+      - get
+      - list
+      - watch
+  
+  # ==========================================================================
+  # avapigw.io Custom Resources
+  # ==========================================================================
+  
+  # CRD management - APIRoute, GRPCRoute, Backend, GRPCBackend
   - apiGroups:
       - avapigw.io
     resources:
@@ -22,6 +76,8 @@ rules:
       - patch
       - update
       - watch
+  
+  # CRD status updates - for reporting reconciliation status
   - apiGroups:
       - avapigw.io
     resources:
@@ -33,6 +89,8 @@ rules:
       - get
       - patch
       - update
+  
+  # CRD finalizers - for cleanup during deletion
   - apiGroups:
       - avapigw.io
     resources:
@@ -42,26 +100,63 @@ rules:
       - grpcbackends/finalizers
     verbs:
       - update
-  # Core resources
+  
+  # ==========================================================================
+  # Networking Resources (Ingress Controller)
+  # ==========================================================================
+  {{- if .Values.operator.ingressController.enabled }}
+  
+  # Ingress resources - for watching and converting to gateway configuration
   - apiGroups:
-      - ""
+      - networking.k8s.io
     resources:
-      - events
-    verbs:
-      - create
-      - patch
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
+      - ingresses
     verbs:
       - get
       - list
       - watch
+      - update
+      - patch
+  
+  # Ingress status - for updating load balancer status
   - apiGroups:
-      - ""
+      - networking.k8s.io
     resources:
-      - configmaps
+      - ingresses/status
+    verbs:
+      - get
+      - update
+      - patch
+  
+  # Ingress finalizers - for cleanup during deletion
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses/finalizers
+    verbs:
+      - update
+  
+  # IngressClass - for class-based filtering of Ingress resources
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingressclasses
+    verbs:
+      - get
+      - list
+      - watch
+  {{- end }}
+  
+  # ==========================================================================
+  # Coordination Resources (Leader Election)
+  # ==========================================================================
+  
+  # Leases - for leader election (preferred over ConfigMaps)
+  # Required for: high availability deployments with multiple replicas
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
     verbs:
       - get
       - list
@@ -70,8 +165,14 @@ rules:
       - update
       - patch
       - delete
-  # Admission webhook configuration
+  
+  # ==========================================================================
+  # Admission Webhook Resources
+  # ==========================================================================
   {{- if .Values.operator.webhook.enabled }}
+  
+  # ValidatingWebhookConfiguration - for CA bundle injection and webhook management
+  # Required for: self-signed and Vault PKI modes to inject CA bundle at startup
   - apiGroups:
       - admissionregistration.k8s.io
     resources:

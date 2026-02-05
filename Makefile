@@ -62,6 +62,7 @@ CONTROLLER_GEN := $(shell which controller-gen 2>/dev/null || echo "$(shell go e
         test test-unit test-coverage test-functional test-integration test-e2e test-all \
         test-grpc-unit test-grpc-integration test-grpc-e2e \
         test-auth-unit test-auth-integration test-auth-e2e \
+        test-ingress-unit test-ingress-functional \
         lint lint-fix fmt vet vuln \
         docker-build docker-run docker-push docker-clean \
         run dev clean deps tools generate proto-generate \
@@ -71,10 +72,12 @@ CONTROLLER_GEN := $(shell which controller-gen 2>/dev/null || echo "$(shell go e
         perf-generate-ammo perf-generate-charts perf-analyze \
         perf-start-gateway perf-stop-gateway perf-setup-infra \
         perf-setup-vault-k8s perf-verify-vault-k8s \
+        perf-test-ingress \
         ci help version \
         build-operator operator-generate operator-manifests operator-install-crds \
         operator-docker-build operator-docker-push operator-deploy operator-undeploy \
-        test-operator-unit test-operator-functional test-operator-integration
+        test-operator-unit test-operator-functional test-operator-integration \
+        helm-template-ingress helm-install-ingress
 
 # ==============================================================================
 # Default target
@@ -236,6 +239,24 @@ test-auth-e2e:
 	TEST_KEYCLOAK_CLIENT_ID=$(TEST_KEYCLOAK_CLIENT_ID) TEST_KEYCLOAK_CLIENT_SECRET=$(TEST_KEYCLOAK_CLIENT_SECRET) \
 		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/auth-e2e.out -covermode=atomic -tags=e2e -run ".*[Aa]uth.*|.*[Rr]bac.*|.*[Jj]wt.*|.*[Aa]pikey.*" ./test/e2e/...
 	@echo "==> Auth e2e tests completed"
+
+# ==============================================================================
+# Ingress controller test targets
+# ==============================================================================
+
+## test-ingress-unit: Run ingress controller unit tests
+test-ingress-unit:
+	@echo "==> Running ingress controller unit tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -v -race -coverprofile=$(COVERAGE_DIR)/ingress-unit.out ./internal/operator/controller/... -run Ingress
+	@echo "==> Ingress controller unit tests completed"
+
+## test-ingress-functional: Run ingress controller functional tests
+test-ingress-functional:
+	@echo "==> Running ingress controller functional tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -v -race -tags=functional -coverprofile=$(COVERAGE_DIR)/ingress-functional.out ./test/functional/operator/... -run Ingress
+	@echo "==> Ingress controller functional tests completed"
 
 ## test-merge-coverage: Merge all coverage reports
 test-merge-coverage:
@@ -631,6 +652,10 @@ help:
 	@echo "  test-auth-integration Run auth integration tests (requires Vault and Keycloak)"
 	@echo "  test-auth-e2e         Run auth e2e tests (requires Vault and Keycloak)"
 	@echo ""
+	@echo "Ingress controller test targets:"
+	@echo "  test-ingress-unit       Run ingress controller unit tests"
+	@echo "  test-ingress-functional Run ingress controller functional tests"
+	@echo ""
 	@echo "Quality targets:"
 	@echo "  lint            Run golangci-lint"
 	@echo "  lint-fix        Run golangci-lint with auto-fix"
@@ -719,10 +744,12 @@ help:
 	@echo "  helm-lint                  Lint Helm chart"
 	@echo "  helm-template              Template Helm chart (gateway only)"
 	@echo "  helm-template-with-operator Template Helm chart with operator"
+	@echo "  helm-template-ingress      Template Helm chart with ingress controller"
 	@echo "  helm-template-local        Template Helm chart with local values"
 	@echo "  helm-package               Package Helm chart"
 	@echo "  helm-install               Install gateway to local K8s"
 	@echo "  helm-install-with-operator Install gateway with operator to local K8s"
+	@echo "  helm-install-ingress       Install with ingress controller to local K8s"
 	@echo "  helm-uninstall             Uninstall from local K8s"
 	@echo "  helm-test                  Run Helm tests"
 	@echo "  helm-upgrade               Upgrade in local K8s"
@@ -749,6 +776,7 @@ help:
 	@echo "  perf-test-operator-config-push  Run config push performance tests"
 	@echo "  perf-test-operator-k8s          Run K8s operator performance tests"
 	@echo "  perf-test-operator-benchmarks   Run operator Go benchmarks"
+	@echo "  perf-test-ingress               Run ingress controller performance tests"
 	@echo "  perf-analyze-operator           Analyze operator performance results"
 	@echo "  perf-analyze-operator-charts    Generate charts from results"
 	@echo "  perf-analyze-operator-export    Export results to JSON"
@@ -923,6 +951,27 @@ helm-upgrade-with-operator:
 		--wait --timeout 120s
 	@echo "==> Helm chart with operator upgraded"
 
+## helm-template-ingress: Template Helm chart with ingress controller enabled
+helm-template-ingress:
+	@echo "==> Templating Helm chart with ingress controller..."
+	$(HELM) template $(CHART_NAME) $(CHART_DIR) \
+		--set operator.enabled=true \
+		--set operator.ingressController.enabled=true \
+		--namespace $(TEST_NAMESPACE)
+	@echo "==> Helm chart templating with ingress controller completed"
+
+## helm-install-ingress: Install with ingress controller to local K8s
+helm-install-ingress:
+	@echo "==> Installing Helm chart with ingress controller..."
+	$(HELM) upgrade --install $(CHART_NAME) $(CHART_DIR) \
+		-f $(CHART_DIR)/values-local.yaml \
+		--set operator.enabled=true \
+		--set operator.ingressController.enabled=true \
+		--namespace $(TEST_NAMESPACE) \
+		--create-namespace \
+		--wait --timeout 120s
+	@echo "==> Helm chart with ingress controller installed"
+
 # Legacy aliases for backward compatibility
 helm-lint-operator: helm-lint
 helm-template-operator: helm-template-with-operator
@@ -981,6 +1030,11 @@ perf-analyze-operator:
 perf-analyze-operator-charts:
 	@echo "==> Generating operator performance charts..."
 	@$(PERF_SCRIPTS)/analyze-operator-results.sh --charts
+
+## perf-test-ingress: Run ingress controller performance tests
+perf-test-ingress: build-operator
+	@echo "==> Running ingress controller performance tests..."
+	@$(PERF_SCRIPTS)/run-operator-test.sh ingress
 
 ## perf-analyze-operator-export: Export operator performance results to JSON
 perf-analyze-operator-export:

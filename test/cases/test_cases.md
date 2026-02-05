@@ -1,5 +1,7 @@
 # API Gateway Test Cases
 
+This document covers test cases for the AVAPIGW API Gateway, including the core gateway, operator, and ingress controller functionality.
+
 ## Functional Tests
 
 ### TestFunctional_Config_LoadAndValidate
@@ -2585,3 +2587,324 @@
   2. Verify each cycle succeeds independently
   3. Verify messages are received in each cycle
 - **Expected Results**: Sequential WebSocket connections work reliably through gateway
+
+## Operator Test Cases
+
+### Unit Tests
+
+#### TestOperator_BaseReconciler_Pattern
+- **Description**: Test base reconciler pattern for code reuse
+- **Preconditions**: Base reconciler implementation available
+- **Steps**:
+  1. Test common reconciliation logic
+  2. Verify status update patterns
+  3. Test generation-based reconciliation skip
+  4. Verify error handling patterns
+- **Expected Results**: Base reconciler provides consistent behavior across controllers
+
+#### TestOperator_StatusUpdater_ThreadSafety
+- **Description**: Test thread-safe StatusUpdater initialization
+- **Preconditions**: StatusUpdater implementation
+- **Steps**:
+  1. Initialize StatusUpdater from multiple goroutines
+  2. Verify no race conditions
+  3. Test concurrent status updates
+  4. Verify status updates use Patch instead of Update
+- **Expected Results**: StatusUpdater is thread-safe and uses efficient Patch operations
+
+#### TestOperator_CrossCRD_DuplicateDetection
+- **Description**: Test cross-CRD duplicate detection between Backend and GRPCBackend
+- **Preconditions**: Webhook validation enabled
+- **Steps**:
+  1. Create Backend with specific host/port
+  2. Attempt to create GRPCBackend with same host/port
+  3. Verify webhook rejects duplicate
+  4. Test with different ports - should succeed
+- **Expected Results**: Webhook prevents Backend vs GRPCBackend conflicts
+
+### Functional Tests
+
+#### TestOperator_IngressWebhook_Validation
+- **Description**: Test ingress webhook validation when ingress controller is enabled
+- **Preconditions**: Operator with ingress controller enabled
+- **Steps**:
+  1. Create valid Ingress resource
+  2. Verify webhook allows creation
+  3. Create invalid Ingress with bad annotations
+  4. Verify webhook rejects invalid resource
+  5. Test IngressClass validation
+- **Expected Results**: Ingress webhook validates resources correctly
+
+#### TestOperator_VaultPKI_CertificateIntegration
+- **Description**: Test Vault PKI certificate integration for webhooks
+- **Preconditions**: Vault PKI configured
+- **Steps**:
+  1. Configure operator with Vault PKI for webhook certificates
+  2. Verify webhook certificates are issued by Vault
+  3. Test certificate auto-renewal
+  4. Verify webhook continues to work with new certificates
+- **Expected Results**: Vault PKI integration works for webhook certificates
+
+### Integration Tests
+
+#### TestOperator_IngressController_ResourceConversion
+- **Description**: Test conversion of Ingress resources to APIRoute/Backend
+- **Preconditions**: Kubernetes cluster with ingress controller enabled
+- **Steps**:
+  1. Create Ingress resource with avapigw IngressClass
+  2. Verify APIRoute is created automatically
+  3. Verify Backend is created for service reference
+  4. Test annotation mapping to route configuration
+  5. Verify status updates on Ingress resource
+- **Expected Results**: Ingress resources are converted to internal configuration
+
+#### TestOperator_IngressController_StatusUpdates
+- **Description**: Test LoadBalancer IP/hostname status updates on Ingress
+- **Preconditions**: Ingress controller with LoadBalancer address configured
+- **Steps**:
+  1. Create Ingress resource
+  2. Verify status is updated with LoadBalancer IP
+  3. Test hostname-based status updates
+  4. Verify status persists across reconciliation cycles
+- **Expected Results**: Ingress status reflects LoadBalancer information
+
+## Ingress Controller Test Cases
+
+### Unit Tests
+
+#### TestIngressController_PathTypeConversion
+- **Description**: Test conversion of Kubernetes path types to gateway routes
+- **Preconditions**: Ingress controller implementation
+- **Steps**:
+  1. Test Exact path type conversion
+  2. Test Prefix path type conversion  
+  3. Test ImplementationSpecific (regex) path type conversion
+  4. Verify correct route matching configuration
+- **Expected Results**: All path types convert to appropriate route matchers
+
+#### TestIngressController_AnnotationParsing
+- **Description**: Test parsing of avapigw-specific annotations
+- **Preconditions**: Annotation parser implementation
+- **Steps**:
+  1. Test timeout annotation parsing
+  2. Test rate limiting annotation parsing
+  3. Test CORS annotation parsing
+  4. Test invalid annotation handling
+  5. Verify default values for missing annotations
+- **Expected Results**: Annotations are parsed correctly with proper validation
+
+#### TestIngressController_TLSConfiguration
+- **Description**: Test TLS configuration from Ingress TLS section
+- **Preconditions**: TLS configuration logic
+- **Steps**:
+  1. Test single host TLS configuration
+  2. Test multiple hosts TLS configuration
+  3. Test TLS secret reference validation
+  4. Verify certificate configuration mapping
+- **Expected Results**: TLS configuration is correctly mapped from Ingress
+
+### Functional Tests
+
+#### TestIngressController_DefaultBackend
+- **Description**: Test default backend configuration for catch-all routing
+- **Preconditions**: Ingress controller with default backend support
+- **Steps**:
+  1. Create Ingress with default backend
+  2. Verify catch-all route is created
+  3. Test request routing to default backend
+  4. Verify specific routes take precedence
+- **Expected Results**: Default backend provides catch-all functionality
+
+#### TestIngressController_MultipleIngress
+- **Description**: Test handling of multiple Ingress resources
+- **Preconditions**: Multiple Ingress resources
+- **Steps**:
+  1. Create multiple Ingress resources with different hosts
+  2. Verify separate APIRoute/Backend resources are created
+  3. Test cross-Ingress conflict detection
+  4. Verify independent lifecycle management
+- **Expected Results**: Multiple Ingress resources are handled independently
+
+#### TestIngressController_IngressClassFiltering
+- **Description**: Test filtering by IngressClass
+- **Preconditions**: Multiple IngressClass resources
+- **Steps**:
+  1. Create Ingress with avapigw IngressClass
+  2. Verify resource is processed
+  3. Create Ingress with different IngressClass
+  4. Verify resource is ignored
+  5. Test default IngressClass behavior
+- **Expected Results**: Only Ingress resources with correct IngressClass are processed
+
+### Performance Test Cases
+
+#### TestPerformance_OperatorReconciliation
+- **Description**: Test operator reconciliation performance with many CRDs
+- **Preconditions**: Kubernetes cluster with operator
+- **Steps**:
+  1. Create 100 APIRoute resources
+  2. Measure reconciliation time
+  3. Create 100 Backend resources
+  4. Measure total reconciliation time
+  5. Verify memory usage remains stable
+- **Expected Results**: Reconciliation scales linearly with resource count
+
+#### TestPerformance_IngressController_Throughput
+- **Description**: Test ingress controller throughput with many Ingress resources
+- **Preconditions**: Ingress controller enabled
+- **Steps**:
+  1. Create 50 Ingress resources rapidly
+  2. Measure conversion time to APIRoute/Backend
+  3. Verify all resources are processed
+  4. Test concurrent Ingress creation
+- **Expected Results**: Ingress controller handles high throughput efficiently
+
+#### TestPerformance_CrossCRD_ValidationScale
+- **Description**: Test cross-CRD validation performance with many resources
+- **Preconditions**: Webhook validation enabled
+- **Steps**:
+  1. Create 100 Backend resources
+  2. Create 100 GRPCBackend resources
+  3. Measure validation time for duplicate detection
+  4. Verify validation remains fast
+- **Expected Results**: Cross-CRD validation scales well with resource count
+
+## gRPC Ingress Test Cases
+
+### E2E Tests
+
+#### TestE2E_GRPCIngress_BasicRouting
+- **Description**: Test creating a gRPC Ingress and verifying gRPC routes are pushed to gRPC server
+- **Preconditions**: gRPC server running, Kubernetes cluster available
+- **Steps**:
+  1. Create gRPC Ingress with protocol annotation set to "grpc"
+  2. Verify reconciliation completes successfully
+  3. Verify gRPC routes are stored under grpcRoutes key in config
+  4. Verify gRPC backends are stored under grpcBackends key
+  5. Verify Ingress has finalizer added
+- **Expected Results**: gRPC Ingress creates GRPCRoute and GRPCBackend resources
+
+#### TestE2E_GRPCIngress_ServiceMethodRouting
+- **Description**: Test gRPC Ingress with service/method annotations
+- **Preconditions**: gRPC server running
+- **Steps**:
+  1. Create gRPC Ingress with grpc-service and grpc-method annotations
+  2. Set grpc-service-match-type and grpc-method-match-type to "exact"
+  3. Verify reconciliation completes
+  4. Verify applied-routes annotation contains grpcRoutes
+  5. Verify service/method matching is configured correctly
+- **Expected Results**: gRPC service/method matching is configured from annotations
+
+#### TestE2E_GRPCIngress_TLSTermination
+- **Description**: Test gRPC Ingress with TLS configuration
+- **Preconditions**: gRPC server running, TLS secrets available
+- **Steps**:
+  1. Create gRPC Ingress with TLS section
+  2. Add tls-min-version and tls-max-version annotations
+  3. Verify reconciliation completes
+  4. Verify TLS configuration is applied to gRPC route
+  5. Verify SNI hosts are configured
+- **Expected Results**: gRPC Ingress with TLS creates secure gRPC routes
+
+#### TestE2E_GRPCIngress_AnnotationFeatures
+- **Description**: Test gRPC Ingress with all gRPC-specific annotations
+- **Preconditions**: gRPC server running
+- **Steps**:
+  1. Create gRPC Ingress with all gRPC annotations:
+     - grpc-service, grpc-method, grpc-service-match-type, grpc-method-match-type
+     - grpc-retry-on, grpc-backoff-base-interval, grpc-backoff-max-interval
+     - grpc-health-check-enabled, grpc-health-check-service, grpc-health-check-interval
+     - grpc-max-idle-conns, grpc-max-conns-per-host, grpc-idle-conn-timeout
+  2. Add common annotations (timeout, rate-limit, cors, circuit-breaker)
+  3. Verify reconciliation completes
+  4. Verify all annotations are applied to gRPC route and backend
+- **Expected Results**: All gRPC-specific annotations are correctly applied
+
+#### TestE2E_GRPCIngress_DefaultBackend
+- **Description**: Test gRPC Ingress with default backend
+- **Preconditions**: gRPC server running
+- **Steps**:
+  1. Create gRPC Ingress with only defaultBackend (no rules)
+  2. Verify reconciliation completes
+  3. Verify default gRPC route is created with catch-all service match
+  4. Verify default gRPC backend is created
+- **Expected Results**: gRPC Ingress default backend creates catch-all gRPC route
+
+#### TestE2E_GRPCIngress_UpdateAndDelete
+- **Description**: Test full lifecycle of gRPC Ingress
+- **Preconditions**: gRPC server running
+- **Steps**:
+  1. Create gRPC Ingress
+  2. Verify gRPC route exists after create
+  3. Update Ingress with new annotations (timeout, grpc-retry-on)
+  4. Verify gRPC route is updated
+  5. Delete gRPC route via cleanup
+  6. Verify gRPC route is removed from config
+- **Expected Results**: gRPC Ingress lifecycle (create, update, delete) works correctly
+
+### Performance Tests
+
+#### BenchmarkGRPCIngressConversion_Basic
+- **Description**: Benchmark converting a basic gRPC Ingress to config.GRPCRoute/GRPCBackend
+- **Preconditions**: IngressConverter available
+- **Steps**:
+  1. Create basic gRPC Ingress with single rule and path
+  2. Run conversion benchmark
+  3. Measure allocations and time per operation
+- **Expected Results**: Basic gRPC Ingress conversion is fast with minimal allocations
+
+#### BenchmarkGRPCIngressConversion_Complex
+- **Description**: Benchmark converting a complex gRPC Ingress with all annotations
+- **Preconditions**: IngressConverter available
+- **Steps**:
+  1. Create complex gRPC Ingress with multiple rules, paths, TLS, and all annotations
+  2. Run conversion benchmark
+  3. Measure allocations and time per operation
+  4. Compare with HTTP Ingress conversion
+- **Expected Results**: Complex gRPC Ingress conversion scales linearly with complexity
+
+#### BenchmarkGRPCIngressConversion_WithAnnotations
+- **Description**: Benchmark gRPC annotation parsing overhead
+- **Preconditions**: IngressConverter available
+- **Steps**:
+  1. Create gRPC Ingress with all gRPC-specific annotations
+  2. Run conversion benchmark
+  3. Measure annotation parsing overhead
+  4. Compare with HTTP annotation parsing
+- **Expected Results**: gRPC annotation parsing has minimal overhead
+
+#### BenchmarkGRPCIngressReconciliation_Create
+- **Description**: Benchmark creating a gRPC Ingress resource
+- **Preconditions**: IngressReconciler with fake client
+- **Steps**:
+  1. Create fresh gRPC Ingress for each iteration
+  2. Run two reconciliation cycles (finalizer + apply)
+  3. Measure total reconciliation time
+- **Expected Results**: gRPC Ingress creation is performant
+
+#### BenchmarkGRPCIngressReconciliation_Update
+- **Description**: Benchmark updating a gRPC Ingress resource
+- **Preconditions**: IngressReconciler with pre-created gRPC Ingress
+- **Steps**:
+  1. Pre-create and reconcile gRPC Ingress
+  2. Run update reconciliation benchmark
+  3. Measure re-apply time
+- **Expected Results**: gRPC Ingress updates are efficient
+
+#### BenchmarkGRPCIngressConversion_Parallel
+- **Description**: Benchmark concurrent gRPC Ingress conversions
+- **Preconditions**: IngressConverter available
+- **Steps**:
+  1. Pre-create 100 complex gRPC Ingress objects
+  2. Run parallel conversion benchmark
+  3. Measure throughput and contention
+- **Expected Results**: gRPC Ingress conversion is thread-safe and scales with parallelism
+
+#### BenchmarkGRPCvsHTTPIngressConversion
+- **Description**: Compare gRPC vs HTTP Ingress conversion performance
+- **Preconditions**: IngressConverter available
+- **Steps**:
+  1. Create equivalent HTTP and gRPC Ingress resources
+  2. Run conversion benchmarks for both
+  3. Compare allocations and time per operation
+- **Expected Results**: gRPC and HTTP conversion have similar performance characteristics
