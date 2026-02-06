@@ -14,7 +14,7 @@ require (
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
-	github.com/redis/go-redis/v9 v9.17.2
+	github.com/redis/go-redis/v9 v9.17.3
 	github.com/sony/gobreaker v1.0.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.39.0
