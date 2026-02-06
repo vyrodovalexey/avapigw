@@ -6,6 +6,7 @@ package functional
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,7 +80,10 @@ func TestFunctional_RedirectValidation_SafeSchemes(t *testing.T) {
 			logger := observability.NopLogger()
 			registry := backend.NewRegistry(logger)
 
-			routeName := "safe-redirect-" + tt.name
+			// Sanitize the test name to create a URL-safe route path
+			// (spaces and special characters cause httptest.NewRequest to panic)
+			slug := strings.NewReplacer(" ", "-", "(", "", ")", "").Replace(tt.name)
+			routeName := "safe-redirect-" + slug
 			route := config.Route{
 				Name: routeName,
 				Match: []config.RouteMatch{

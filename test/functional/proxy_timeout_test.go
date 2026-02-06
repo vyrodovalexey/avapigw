@@ -4,7 +4,6 @@
 package functional
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -190,15 +189,23 @@ func TestFunctional_ProxyTimeout_TimeoutTriggered(t *testing.T) {
 		"slow backend with short timeout should return 502")
 }
 
-// TestFunctional_ProxyTimeout_ContextPropagation verifies that the parent
-// context cancellation is properly propagated through the timeout context.
+// TestFunctional_ProxyTimeout_ContextPropagation verifies that the proxy's
+// timeout mechanism works correctly by confirming that a request with a
+// configured timeout completes successfully when the backend responds
+// within the allowed time.
+//
+// Note: Go context deadlines do NOT propagate over HTTP. The backend's
+// http.Server creates a new server-side context for each incoming request,
+// so we cannot inspect the backend's received context for a deadline set
+// by the proxy. Instead, we verify the timeout behavior indirectly:
+// - A fast backend with a timeout returns 200 OK (this test)
+// - A slow backend with a short timeout returns 502 (TestFunctional_ProxyTimeout_TimeoutTriggered)
 func TestFunctional_ProxyTimeout_ContextPropagation(t *testing.T) {
 	t.Parallel()
 
-	var receivedCtx context.Context
 	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedCtx = r.Context()
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer backendServer.Close()
 
@@ -232,12 +239,6 @@ func TestFunctional_ProxyTimeout_ContextPropagation(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-
-	// After the request completes, the timeout context should have a deadline
-	if receivedCtx != nil {
-		deadline, hasDeadline := receivedCtx.Deadline()
-		assert.True(t, hasDeadline, "context should have a deadline when timeout is configured")
-		assert.False(t, deadline.IsZero(), "deadline should not be zero")
-	}
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"request with timeout should succeed when backend responds within the allowed time")
 }
