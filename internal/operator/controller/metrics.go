@@ -235,3 +235,64 @@ func (t *ReconcileTimer) RecordCanceled() {
 	t.ObserveDuration()
 	t.metrics.RecordReconcileResult(t.controller, ResultCanceled)
 }
+
+// StatusUpdateMetrics tracks status update operations.
+type StatusUpdateMetrics struct {
+	updateDuration *prometheus.HistogramVec
+	updateTotal    *prometheus.CounterVec
+	updateErrors   *prometheus.CounterVec
+	mu             sync.RWMutex
+}
+
+var (
+	statusUpdateMetrics     *StatusUpdateMetrics
+	statusUpdateMetricsOnce sync.Once
+)
+
+// GetStatusUpdateMetrics returns the global status update metrics instance.
+func GetStatusUpdateMetrics() *StatusUpdateMetrics {
+	statusUpdateMetricsOnce.Do(func() {
+		statusUpdateMetrics = &StatusUpdateMetrics{
+			updateDuration: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Namespace: "avapigw_operator",
+					Name:      "status_update_duration_seconds",
+					Help:      "Duration of status update operations in seconds",
+					Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+				},
+				[]string{labelKind},
+			),
+			updateTotal: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: "avapigw_operator",
+					Name:      "status_update_total",
+					Help:      "Total number of status update operations",
+				},
+				[]string{labelKind, labelResult},
+			),
+			updateErrors: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: "avapigw_operator",
+					Name:      "status_update_errors_total",
+					Help:      "Total number of status update errors",
+				},
+				[]string{labelKind},
+			),
+		}
+	})
+	return statusUpdateMetrics
+}
+
+// RecordStatusUpdate records a status update operation.
+func (m *StatusUpdateMetrics) RecordStatusUpdate(kind string, duration time.Duration, success bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	m.updateDuration.WithLabelValues(kind).Observe(duration.Seconds())
+	result := ResultSuccess
+	if !success {
+		result = ResultError
+		m.updateErrors.WithLabelValues(kind).Inc()
+	}
+	m.updateTotal.WithLabelValues(kind, result).Inc()
+}

@@ -6,13 +6,82 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/operator/keys"
+)
+
+// DuplicateCheckerConfig holds configuration for creating a DuplicateChecker.
+type DuplicateCheckerConfig struct {
+	// ClusterWide enables cluster-wide duplicate detection.
+	// When false (default), duplicate detection is namespace-scoped for better performance.
+	ClusterWide bool
+
+	// CacheEnabled enables caching of existing resources for efficient lookup.
+	CacheEnabled bool
+
+	// CacheTTL is the TTL for cache entries.
+	CacheTTL time.Duration
+}
+
+// DefaultDuplicateCheckerConfig returns the default configuration for DuplicateChecker.
+func DefaultDuplicateCheckerConfig() DuplicateCheckerConfig {
+	return DuplicateCheckerConfig{
+		ClusterWide:  false,
+		CacheEnabled: true,
+		CacheTTL:     defaultCacheTTL,
+	}
+}
+
+// Prometheus metrics for duplicate detection.
+var (
+	duplicateCheckDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "avapigw_operator",
+			Subsystem: "webhook",
+			Name:      "duplicate_check_duration_seconds",
+			Help:      "Duration of duplicate check operations in seconds",
+			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+		},
+		[]string{"resource_type", "scope"},
+	)
+
+	duplicateCheckTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "avapigw_operator",
+			Subsystem: "webhook",
+			Name:      "duplicate_check_total",
+			Help:      "Total number of duplicate check operations",
+		},
+		[]string{"resource_type", "scope", "result"},
+	)
+
+	duplicateCacheHits = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "avapigw_operator",
+			Subsystem: "webhook",
+			Name:      "duplicate_cache_hits_total",
+			Help:      "Total number of duplicate check cache hits",
+		},
+		[]string{"resource_type"},
+	)
+
+	duplicateCacheMisses = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "avapigw_operator",
+			Subsystem: "webhook",
+			Name:      "duplicate_cache_misses_total",
+			Help:      "Total number of duplicate check cache misses",
+		},
+		[]string{"resource_type"},
+	)
 )
 
 // DuplicateCheckerOption is a functional option for configuring DuplicateChecker.
@@ -23,7 +92,7 @@ type DuplicateCheckerOption func(*DuplicateChecker)
 // the duplicate check and is the recommended setting for most deployments.
 func WithNamespaceScoped(namespaceScoped bool) DuplicateCheckerOption {
 	return func(dc *DuplicateChecker) {
-		dc.namespaceScoped = namespaceScoped
+		dc.namespaceScoped.Store(namespaceScoped)
 	}
 }
 
@@ -97,7 +166,7 @@ func newResourceCache() *resourceCache {
 type DuplicateChecker struct {
 	client          client.Client
 	logger          observability.Logger
-	namespaceScoped bool // If true, only check for duplicates within the same namespace
+	namespaceScoped atomic.Bool // If true, only check for duplicates within the same namespace
 	cacheEnabled    bool
 	cacheTTL        time.Duration
 	cleanupInterval time.Duration
@@ -108,15 +177,28 @@ type DuplicateChecker struct {
 	cleanupDone chan struct{}
 }
 
-// NewDuplicateChecker creates a new DuplicateChecker.
+// NewDuplicateChecker creates a new DuplicateChecker with a background context.
 // By default, it checks for duplicates within the same namespace only (namespace-scoped).
 // Use WithNamespaceScoped(false) to check across all namespaces.
 // When caching is enabled, a background cleanup goroutine is started automatically.
 // Call Stop() to gracefully shutdown the cleanup goroutine.
+//
+// Deprecated: Use NewDuplicateCheckerWithContext for proper lifecycle management.
 func NewDuplicateChecker(c client.Client, opts ...DuplicateCheckerOption) *DuplicateChecker {
+	return NewDuplicateCheckerWithContext(context.Background(), c, opts...)
+}
+
+// NewDuplicateCheckerWithContext creates a new DuplicateChecker with context-based cancellation.
+// The cleanup goroutine will stop when the context is canceled or when Stop() is called.
+// By default, it checks for duplicates within the same namespace only (namespace-scoped).
+// Use WithNamespaceScoped(false) to check across all namespaces.
+func NewDuplicateCheckerWithContext(
+	ctx context.Context,
+	c client.Client,
+	opts ...DuplicateCheckerOption,
+) *DuplicateChecker {
 	dc := &DuplicateChecker{
 		client:          c,
-		namespaceScoped: true, // Default to namespace-scoped for better performance
 		cacheEnabled:    false,
 		cacheTTL:        defaultCacheTTL,
 		cleanupInterval: defaultCleanupInterval,
@@ -127,6 +209,7 @@ func NewDuplicateChecker(c client.Client, opts ...DuplicateCheckerOption) *Dupli
 			observability.String("component", "duplicate-checker"),
 		),
 	}
+	dc.namespaceScoped.Store(true) // Default to namespace-scoped for better performance
 
 	for _, opt := range opts {
 		opt(dc)
@@ -134,15 +217,40 @@ func NewDuplicateChecker(c client.Client, opts ...DuplicateCheckerOption) *Dupli
 
 	// Start background cleanup goroutine if caching is enabled
 	if dc.cacheEnabled {
-		go dc.runCleanupLoop()
+		go dc.runCleanupLoopWithContext(ctx)
 	}
 
 	return dc
 }
 
+// NewDuplicateCheckerFromConfig creates a new DuplicateChecker from a configuration struct.
+// This is the preferred way to create a DuplicateChecker with explicit configuration.
+func NewDuplicateCheckerFromConfig(c client.Client, cfg DuplicateCheckerConfig) *DuplicateChecker {
+	return NewDuplicateCheckerFromConfigWithContext(context.Background(), c, cfg)
+}
+
+// NewDuplicateCheckerFromConfigWithContext creates a new DuplicateChecker from a configuration struct
+// with context-based cancellation for the cleanup goroutine.
+func NewDuplicateCheckerFromConfigWithContext(
+	ctx context.Context,
+	c client.Client,
+	cfg DuplicateCheckerConfig,
+) *DuplicateChecker {
+	opts := []DuplicateCheckerOption{
+		WithNamespaceScoped(!cfg.ClusterWide),
+		WithCacheEnabled(cfg.CacheEnabled),
+	}
+
+	if cfg.CacheTTL > 0 {
+		opts = append(opts, WithCacheTTL(cfg.CacheTTL))
+	}
+
+	return NewDuplicateCheckerWithContext(ctx, c, opts...)
+}
+
 // GetScope returns the current duplicate detection scope.
 func (c *DuplicateChecker) GetScope() DuplicateDetectionScope {
-	if c.namespaceScoped {
+	if c.namespaceScoped.Load() {
 		return ScopeNamespace
 	}
 	return ScopeCluster
@@ -150,7 +258,7 @@ func (c *DuplicateChecker) GetScope() DuplicateDetectionScope {
 
 // SetScope sets the duplicate detection scope.
 func (c *DuplicateChecker) SetScope(scope DuplicateDetectionScope) {
-	c.namespaceScoped = scope == ScopeNamespace
+	c.namespaceScoped.Store(scope == ScopeNamespace)
 }
 
 // isCacheValid checks if the cache for a given key is still valid.
@@ -202,9 +310,10 @@ func (c *DuplicateChecker) Stop() {
 	c.logger.Info("duplicate checker cache cleanup stopped")
 }
 
-// runCleanupLoop runs the background cache cleanup loop.
+// runCleanupLoopWithContext runs the background cache cleanup loop with context support.
 // It periodically removes cache entries older than 2x TTL.
-func (c *DuplicateChecker) runCleanupLoop() {
+// The loop stops when the context is canceled or Stop() is called.
+func (c *DuplicateChecker) runCleanupLoopWithContext(ctx context.Context) {
 	defer close(c.cleanupDone)
 
 	ticker := time.NewTicker(c.cleanupInterval)
@@ -217,6 +326,9 @@ func (c *DuplicateChecker) runCleanupLoop() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			c.logger.Debug("cache cleanup loop stopping due to context cancellation")
+			return
 		case <-c.stopCleanup:
 			c.logger.Debug("cache cleanup loop stopping")
 			return
@@ -265,7 +377,15 @@ func (c *DuplicateChecker) CheckAPIRouteDuplicate(
 		return nil
 	}
 
-	cacheKey := c.buildCacheKey("apiroute", route.Namespace)
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := "apiroute"
+
+	defer func() {
+		duplicateCheckDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resourceType, route.Namespace)
 	var routes *avapigwv1alpha1.APIRouteList
 
 	// Try to use cached data
@@ -273,16 +393,19 @@ func (c *DuplicateChecker) CheckAPIRouteDuplicate(
 		c.cache.mu.RLock()
 		routes = c.cache.apiRoutes[cacheKey]
 		c.cache.mu.RUnlock()
+		duplicateCacheHits.WithLabelValues(resourceType).Inc()
 	}
 
 	// Fetch from API if cache miss or invalid
 	if routes == nil {
+		duplicateCacheMisses.WithLabelValues(resourceType).Inc()
 		routes = &avapigwv1alpha1.APIRouteList{}
 		listOpts := []client.ListOption{}
-		if c.namespaceScoped {
+		if c.namespaceScoped.Load() {
 			listOpts = append(listOpts, client.InNamespace(route.Namespace))
 		}
 		if err := c.client.List(ctx, routes, listOpts...); err != nil {
+			duplicateCheckTotal.WithLabelValues(resourceType, scope, "error").Inc()
 			return fmt.Errorf("failed to list APIRoutes: %w", err)
 		}
 
@@ -311,6 +434,7 @@ func (c *DuplicateChecker) CheckAPIRouteDuplicate(
 	}
 
 	if len(conflicts) > 0 {
+		duplicateCheckTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
 		c.logger.Warn("duplicate APIRoute detected",
 			observability.String("new_route", keys.ResourceKey(route.Namespace, route.Name)),
 			observability.Any("conflicting_routes", conflicts),
@@ -320,15 +444,24 @@ func (c *DuplicateChecker) CheckAPIRouteDuplicate(
 			route.Namespace, route.Name, strings.Join(conflicts, ", "))
 	}
 
+	duplicateCheckTotal.WithLabelValues(resourceType, scope, "ok").Inc()
 	return nil
 }
 
 // buildCacheKey builds a cache key for the given resource type and namespace.
 func (c *DuplicateChecker) buildCacheKey(resourceType, namespace string) string {
-	if c.namespaceScoped {
+	if c.namespaceScoped.Load() {
 		return fmt.Sprintf("%s/%s", resourceType, namespace)
 	}
 	return fmt.Sprintf("%s/cluster", resourceType)
+}
+
+// getScopeLabel returns the scope label for metrics.
+func (c *DuplicateChecker) getScopeLabel() string {
+	if c.namespaceScoped.Load() {
+		return "namespace"
+	}
+	return "cluster"
 }
 
 // CheckBackendDuplicate checks if a Backend with the same host:port combination exists.
@@ -341,7 +474,15 @@ func (c *DuplicateChecker) CheckBackendDuplicate(
 		return nil
 	}
 
-	cacheKey := c.buildCacheKey("backend", backend.Namespace)
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := "backend"
+
+	defer func() {
+		duplicateCheckDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resourceType, backend.Namespace)
 	var backends *avapigwv1alpha1.BackendList
 
 	// Try to use cached data
@@ -349,16 +490,19 @@ func (c *DuplicateChecker) CheckBackendDuplicate(
 		c.cache.mu.RLock()
 		backends = c.cache.backends[cacheKey]
 		c.cache.mu.RUnlock()
+		duplicateCacheHits.WithLabelValues(resourceType).Inc()
 	}
 
 	// Fetch from API if cache miss or invalid
 	if backends == nil {
+		duplicateCacheMisses.WithLabelValues(resourceType).Inc()
 		backends = &avapigwv1alpha1.BackendList{}
 		listOpts := []client.ListOption{}
-		if c.namespaceScoped {
+		if c.namespaceScoped.Load() {
 			listOpts = append(listOpts, client.InNamespace(backend.Namespace))
 		}
 		if err := c.client.List(ctx, backends, listOpts...); err != nil {
+			duplicateCheckTotal.WithLabelValues(resourceType, scope, "error").Inc()
 			return fmt.Errorf("failed to list Backends: %w", err)
 		}
 
@@ -387,6 +531,7 @@ func (c *DuplicateChecker) CheckBackendDuplicate(
 	}
 
 	if len(conflicts) > 0 {
+		duplicateCheckTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
 		c.logger.Warn("duplicate Backend detected",
 			observability.String("new_backend", keys.ResourceKey(backend.Namespace, backend.Name)),
 			observability.Any("conflicting_backends", conflicts),
@@ -397,6 +542,7 @@ func (c *DuplicateChecker) CheckBackendDuplicate(
 			backend.Namespace, backend.Name, strings.Join(conflicts, ", "))
 	}
 
+	duplicateCheckTotal.WithLabelValues(resourceType, scope, "ok").Inc()
 	return nil
 }
 
@@ -410,7 +556,15 @@ func (c *DuplicateChecker) CheckGRPCRouteDuplicate(
 		return nil
 	}
 
-	cacheKey := c.buildCacheKey("grpcroute", route.Namespace)
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := "grpcroute"
+
+	defer func() {
+		duplicateCheckDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resourceType, route.Namespace)
 	var routes *avapigwv1alpha1.GRPCRouteList
 
 	// Try to use cached data
@@ -418,16 +572,19 @@ func (c *DuplicateChecker) CheckGRPCRouteDuplicate(
 		c.cache.mu.RLock()
 		routes = c.cache.grpcRoutes[cacheKey]
 		c.cache.mu.RUnlock()
+		duplicateCacheHits.WithLabelValues(resourceType).Inc()
 	}
 
 	// Fetch from API if cache miss or invalid
 	if routes == nil {
+		duplicateCacheMisses.WithLabelValues(resourceType).Inc()
 		routes = &avapigwv1alpha1.GRPCRouteList{}
 		listOpts := []client.ListOption{}
-		if c.namespaceScoped {
+		if c.namespaceScoped.Load() {
 			listOpts = append(listOpts, client.InNamespace(route.Namespace))
 		}
 		if err := c.client.List(ctx, routes, listOpts...); err != nil {
+			duplicateCheckTotal.WithLabelValues(resourceType, scope, "error").Inc()
 			return fmt.Errorf("failed to list GRPCRoutes: %w", err)
 		}
 
@@ -454,6 +611,7 @@ func (c *DuplicateChecker) CheckGRPCRouteDuplicate(
 	}
 
 	if len(conflicts) > 0 {
+		duplicateCheckTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
 		c.logger.Warn("duplicate GRPCRoute detected",
 			observability.String("new_route", keys.ResourceKey(route.Namespace, route.Name)),
 			observability.Any("conflicting_routes", conflicts),
@@ -463,6 +621,7 @@ func (c *DuplicateChecker) CheckGRPCRouteDuplicate(
 			route.Namespace, route.Name, strings.Join(conflicts, ", "))
 	}
 
+	duplicateCheckTotal.WithLabelValues(resourceType, scope, "ok").Inc()
 	return nil
 }
 
@@ -476,7 +635,15 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 		return nil
 	}
 
-	cacheKey := c.buildCacheKey("grpcbackend", backend.Namespace)
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := "grpcbackend"
+
+	defer func() {
+		duplicateCheckDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resourceType, backend.Namespace)
 	var backends *avapigwv1alpha1.GRPCBackendList
 
 	// Try to use cached data
@@ -484,16 +651,19 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 		c.cache.mu.RLock()
 		backends = c.cache.grpcBackends[cacheKey]
 		c.cache.mu.RUnlock()
+		duplicateCacheHits.WithLabelValues(resourceType).Inc()
 	}
 
 	// Fetch from API if cache miss or invalid
 	if backends == nil {
+		duplicateCacheMisses.WithLabelValues(resourceType).Inc()
 		backends = &avapigwv1alpha1.GRPCBackendList{}
 		listOpts := []client.ListOption{}
-		if c.namespaceScoped {
+		if c.namespaceScoped.Load() {
 			listOpts = append(listOpts, client.InNamespace(backend.Namespace))
 		}
 		if err := c.client.List(ctx, backends, listOpts...); err != nil {
+			duplicateCheckTotal.WithLabelValues(resourceType, scope, "error").Inc()
 			return fmt.Errorf("failed to list GRPCBackends: %w", err)
 		}
 
@@ -520,6 +690,7 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 	}
 
 	if len(conflicts) > 0 {
+		duplicateCheckTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
 		c.logger.Warn("duplicate GRPCBackend detected",
 			observability.String("new_backend", keys.ResourceKey(backend.Namespace, backend.Name)),
 			observability.Any("conflicting_backends", conflicts),
@@ -529,6 +700,7 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 			backend.Namespace, backend.Name, strings.Join(conflicts, ", "))
 	}
 
+	duplicateCheckTotal.WithLabelValues(resourceType, scope, "ok").Inc()
 	return nil
 }
 
@@ -771,7 +943,7 @@ func (c *DuplicateChecker) CheckBackendCrossConflicts(
 	if grpcBackends == nil {
 		grpcBackends = &avapigwv1alpha1.GRPCBackendList{}
 		listOpts := []client.ListOption{}
-		if c.namespaceScoped {
+		if c.namespaceScoped.Load() {
 			listOpts = append(listOpts, client.InNamespace(backend.Namespace))
 		}
 		if err := c.client.List(ctx, grpcBackends, listOpts...); err != nil {
@@ -834,7 +1006,7 @@ func (c *DuplicateChecker) CheckGRPCBackendCrossConflicts(
 	if backends == nil {
 		backends = &avapigwv1alpha1.BackendList{}
 		listOpts := []client.ListOption{}
-		if c.namespaceScoped {
+		if c.namespaceScoped.Load() {
 			listOpts = append(listOpts, client.InNamespace(grpcBackend.Namespace))
 		}
 		if err := c.client.List(ctx, backends, listOpts...); err != nil {

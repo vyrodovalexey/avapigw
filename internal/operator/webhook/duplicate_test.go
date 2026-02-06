@@ -2008,3 +2008,221 @@ func TestDuplicateChecker_BackendAndGRPCBackendConflict(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// DuplicateCheckerConfig Tests
+// ============================================================================
+
+func TestDefaultDuplicateCheckerConfig(t *testing.T) {
+	cfg := DefaultDuplicateCheckerConfig()
+
+	if cfg.ClusterWide {
+		t.Error("DefaultDuplicateCheckerConfig() ClusterWide should be false")
+	}
+	if !cfg.CacheEnabled {
+		t.Error("DefaultDuplicateCheckerConfig() CacheEnabled should be true")
+	}
+	if cfg.CacheTTL != defaultCacheTTL {
+		t.Errorf("DefaultDuplicateCheckerConfig() CacheTTL = %v, want %v", cfg.CacheTTL, defaultCacheTTL)
+	}
+}
+
+func TestNewDuplicateCheckerFromConfig_Default(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := DefaultDuplicateCheckerConfig()
+	checker := NewDuplicateCheckerFromConfig(fakeClient, cfg)
+	defer checker.Stop()
+
+	if checker == nil {
+		t.Fatal("NewDuplicateCheckerFromConfig() returned nil")
+	}
+	if checker.client == nil {
+		t.Error("NewDuplicateCheckerFromConfig() client is nil")
+	}
+	if !checker.namespaceScoped.Load() {
+		t.Error("NewDuplicateCheckerFromConfig() should be namespace-scoped by default")
+	}
+	if !checker.cacheEnabled {
+		t.Error("NewDuplicateCheckerFromConfig() cache should be enabled by default")
+	}
+}
+
+func TestNewDuplicateCheckerFromConfig_ClusterWide(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := DuplicateCheckerConfig{
+		ClusterWide:  true,
+		CacheEnabled: false,
+		CacheTTL:     0,
+	}
+	checker := NewDuplicateCheckerFromConfig(fakeClient, cfg)
+
+	if checker == nil {
+		t.Fatal("NewDuplicateCheckerFromConfig() returned nil")
+	}
+	if checker.namespaceScoped.Load() {
+		t.Error("NewDuplicateCheckerFromConfig() should be cluster-scoped when ClusterWide=true")
+	}
+	if checker.cacheEnabled {
+		t.Error("NewDuplicateCheckerFromConfig() cache should be disabled when CacheEnabled=false")
+	}
+}
+
+func TestNewDuplicateCheckerFromConfig_CustomCacheTTL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	customTTL := 5 * time.Minute
+	cfg := DuplicateCheckerConfig{
+		ClusterWide:  false,
+		CacheEnabled: true,
+		CacheTTL:     customTTL,
+	}
+	checker := NewDuplicateCheckerFromConfig(fakeClient, cfg)
+	defer checker.Stop()
+
+	if checker == nil {
+		t.Fatal("NewDuplicateCheckerFromConfig() returned nil")
+	}
+	if checker.cacheTTL != customTTL {
+		t.Errorf("NewDuplicateCheckerFromConfig() cacheTTL = %v, want %v", checker.cacheTTL, customTTL)
+	}
+}
+
+func TestNewDuplicateCheckerFromConfig_ZeroCacheTTL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cfg := DuplicateCheckerConfig{
+		ClusterWide:  false,
+		CacheEnabled: true,
+		CacheTTL:     0, // Zero TTL should use default
+	}
+	checker := NewDuplicateCheckerFromConfig(fakeClient, cfg)
+	defer checker.Stop()
+
+	if checker == nil {
+		t.Fatal("NewDuplicateCheckerFromConfig() returned nil")
+	}
+	// When CacheTTL is 0, it should use the default TTL
+	if checker.cacheTTL != defaultCacheTTL {
+		t.Errorf("NewDuplicateCheckerFromConfig() with zero TTL should use default, got %v", checker.cacheTTL)
+	}
+}
+
+func TestDuplicateCheckerConfig_TableDriven(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name                string
+		cfg                 DuplicateCheckerConfig
+		wantNamespaceScoped bool
+		wantCacheEnabled    bool
+	}{
+		{
+			name:                "default config",
+			cfg:                 DefaultDuplicateCheckerConfig(),
+			wantNamespaceScoped: true,
+			wantCacheEnabled:    true,
+		},
+		{
+			name: "cluster-wide with cache",
+			cfg: DuplicateCheckerConfig{
+				ClusterWide:  true,
+				CacheEnabled: true,
+				CacheTTL:     time.Minute,
+			},
+			wantNamespaceScoped: false,
+			wantCacheEnabled:    true,
+		},
+		{
+			name: "namespace-scoped without cache",
+			cfg: DuplicateCheckerConfig{
+				ClusterWide:  false,
+				CacheEnabled: false,
+				CacheTTL:     0,
+			},
+			wantNamespaceScoped: true,
+			wantCacheEnabled:    false,
+		},
+		{
+			name: "cluster-wide without cache",
+			cfg: DuplicateCheckerConfig{
+				ClusterWide:  true,
+				CacheEnabled: false,
+				CacheTTL:     0,
+			},
+			wantNamespaceScoped: false,
+			wantCacheEnabled:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			checker := NewDuplicateCheckerFromConfig(fakeClient, tt.cfg)
+			if tt.wantCacheEnabled {
+				defer checker.Stop()
+			}
+
+			if checker.namespaceScoped.Load() != tt.wantNamespaceScoped {
+				t.Errorf("namespaceScoped = %v, want %v", checker.namespaceScoped.Load(), tt.wantNamespaceScoped)
+			}
+			if checker.cacheEnabled != tt.wantCacheEnabled {
+				t.Errorf("cacheEnabled = %v, want %v", checker.cacheEnabled, tt.wantCacheEnabled)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// GetScope Tests
+// ============================================================================
+
+func TestDuplicateChecker_GetScope_Extended(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Test namespace-scoped
+	checker := NewDuplicateChecker(fakeClient, WithNamespaceScoped(true))
+	if checker.GetScope() != ScopeNamespace {
+		t.Errorf("GetScope() = %v, want %v", checker.GetScope(), ScopeNamespace)
+	}
+
+	// Test cluster-scoped
+	checker = NewDuplicateChecker(fakeClient, WithNamespaceScoped(false))
+	if checker.GetScope() != ScopeCluster {
+		t.Errorf("GetScope() = %v, want %v", checker.GetScope(), ScopeCluster)
+	}
+}
+
+// ============================================================================
+// getScopeLabel Tests
+// ============================================================================
+
+func TestDuplicateChecker_GetScopeLabel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	// Test namespace-scoped
+	checker := NewDuplicateChecker(fakeClient, WithNamespaceScoped(true))
+	if checker.getScopeLabel() != "namespace" {
+		t.Errorf("getScopeLabel() = %q, want %q", checker.getScopeLabel(), "namespace")
+	}
+
+	// Test cluster-scoped
+	checker = NewDuplicateChecker(fakeClient, WithNamespaceScoped(false))
+	if checker.getScopeLabel() != "cluster" {
+		t.Errorf("getScopeLabel() = %q, want %q", checker.getScopeLabel(), "cluster")
+	}
+}

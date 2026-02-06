@@ -1,0 +1,61 @@
+# Yandex Tank Configuration: K8s HTTPS GET Throughput Test
+# Purpose: Measure HTTPS throughput for gateway deployed in local Kubernetes with Vault PKI TLS
+# Duration: 30 seconds total (ramp from 1 to 100 RPS)
+# Target: Conservative load for local K8s (Docker Desktop) with TLS
+#
+# Note: The address port is dynamically replaced by run-k8s-test.sh
+# with the actual K8s NodePort discovered via kubectl.
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:32681
+  load_profile:
+    load_type: rps
+    # Conservative ramp for local K8s with TLS:
+    # Ramp from 1 to 100 RPS over 30 seconds
+    schedule: line(1, 100, 30s)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  
+  # TLS settings - enable SSL for HTTPS
+  ssl: true
+  timeout: 15s  # Higher timeout for TLS handshake
+
+  # Instance settings - conservative for local K8s
+  instances: 200
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: avapigw.local]"
+    - "[User-Agent: YandexTank/K8sPerftest-HTTPS]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: k8s-https-throughput]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 15% for 15 seconds
+    - http(5xx,15%,15s)
+    # Stop if 50% of requests exceed 5000ms for 15 seconds
+    - time(5000,50%,15s)
+    # Stop if total network errors exceed 10% for 15 seconds
+    - http(net,10%,15s)

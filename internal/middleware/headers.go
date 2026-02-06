@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
@@ -79,6 +81,21 @@ func (rw *headerResponseWriter) manipulateResponseHeaders() {
 	for _, key := range rw.cfg.ResponseRemove {
 		rw.ResponseWriter.Header().Del(key)
 	}
+}
+
+// Flush implements http.Flusher interface for streaming support.
+func (rw *headerResponseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack implements http.Hijacker interface for WebSocket support.
+func (rw *headerResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 // HeadersFromConfig creates Headers middleware from gateway config.

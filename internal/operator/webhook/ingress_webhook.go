@@ -279,10 +279,10 @@ func (v *IngressValidator) validateIngressBackend(
 		}
 
 		if backend.Service.Port.Number != 0 {
-			if backend.Service.Port.Number < 1 || backend.Service.Port.Number > 65535 {
+			if backend.Service.Port.Number < MinPort || backend.Service.Port.Number > MaxPort {
 				return fmt.Errorf(
-					"%s.service.port.number must be between 1 and 65535",
-					fieldPath,
+					"%s.service.port.number must be between %d and %d",
+					fieldPath, MinPort, MaxPort,
 				)
 			}
 		}

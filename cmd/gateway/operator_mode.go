@@ -14,10 +14,17 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// operatorClientInterface abstracts the operator client for testability.
+type operatorClientInterface interface {
+	Start(ctx context.Context) error
+	Stop() error
+	SessionID() string
+}
+
 // operatorApplication holds components for operator mode.
 type operatorApplication struct {
 	*application
-	operatorClient *operator.Client
+	operatorClient operatorClientInterface
 	configHandler  *operator.ConfigHandler
 	operatorConfig *operator.Config
 }

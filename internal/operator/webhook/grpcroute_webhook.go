@@ -20,11 +20,16 @@ type GRPCRouteValidator struct {
 	DuplicateChecker *DuplicateChecker
 }
 
-// SetupGRPCRouteWebhook sets up the GRPCRoute webhook with the manager.
+// SetupGRPCRouteWebhook sets up the GRPCRoute webhook with the manager using default configuration.
 func SetupGRPCRouteWebhook(mgr ctrl.Manager) error {
+	return SetupGRPCRouteWebhookWithConfig(mgr, DefaultDuplicateCheckerConfig())
+}
+
+// SetupGRPCRouteWebhookWithConfig sets up the GRPCRoute webhook with the manager using the provided configuration.
+func SetupGRPCRouteWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerConfig) error {
 	validator := &GRPCRouteValidator{
 		Client:           mgr.GetClient(),
-		DuplicateChecker: NewDuplicateChecker(mgr.GetClient()),
+		DuplicateChecker: NewDuplicateCheckerFromConfig(mgr.GetClient(), cfg),
 	}
 	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.GRPCRoute{}).
 		WithValidator(validator).
@@ -248,17 +253,17 @@ func (v *GRPCRouteValidator) validateRouteDestinations(routes []avapigwv1alpha1.
 		if route.Destination.Host == "" {
 			return fmt.Errorf("route[%d].destination.host is required", i)
 		}
-		if route.Destination.Port < 1 || route.Destination.Port > 65535 {
-			return fmt.Errorf("route[%d].destination.port must be between 1 and 65535", i)
+		if route.Destination.Port < MinPort || route.Destination.Port > MaxPort {
+			return fmt.Errorf("route[%d].destination.port must be between %d and %d", i, MinPort, MaxPort)
 		}
-		if route.Weight < 0 || route.Weight > 100 {
-			return fmt.Errorf("route[%d].weight must be between 0 and 100", i)
+		if route.Weight < MinWeight || route.Weight > MaxWeight {
+			return fmt.Errorf("route[%d].weight must be between %d and %d", i, MinWeight, MaxWeight)
 		}
 		totalWeight += route.Weight
 	}
 
-	if len(routes) > 1 && totalWeight != 100 && totalWeight != 0 {
-		return fmt.Errorf("total weight of all routes must equal 100 (got %d)", totalWeight)
+	if len(routes) > 1 && totalWeight != TotalWeightExpected && totalWeight != 0 {
+		return fmt.Errorf("total weight of all routes must equal %d (got %d)", TotalWeightExpected, totalWeight)
 	}
 
 	return nil
@@ -266,8 +271,8 @@ func (v *GRPCRouteValidator) validateRouteDestinations(routes []avapigwv1alpha1.
 
 // validateGRPCRetryPolicy validates gRPC retry policy configuration.
 func (v *GRPCRouteValidator) validateGRPCRetryPolicy(policy *avapigwv1alpha1.GRPCRetryPolicy) error {
-	if policy.Attempts < 1 || policy.Attempts > 10 {
-		return fmt.Errorf("retries.attempts must be between 1 and 10")
+	if policy.Attempts < MinRetryAttempts || policy.Attempts > MaxRetryAttempts {
+		return fmt.Errorf("retries.attempts must be between %d and %d", MinRetryAttempts, MaxRetryAttempts)
 	}
 
 	if policy.PerTryTimeout != "" {

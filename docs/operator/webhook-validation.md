@@ -14,12 +14,12 @@ The AVAPIGW Operator includes comprehensive admission webhooks that validate Cus
 
 ## Overview
 
-The admission webhooks provide four main types of validation:
+The admission webhooks provide four main types of validation with enhanced validation constants and improved thread safety:
 
-1. **Schema Validation** - Ensures all required fields are present and have valid values
-2. **Cross-CRD Duplicate Detection** - Prevents conflicting route configurations across Backend vs GRPCBackend
+1. **Schema Validation** - Ensures all required fields are present and have valid values using named constants for port ranges and weights
+2. **Cross-CRD Duplicate Detection** - Prevents conflicting route configurations across Backend vs GRPCBackend with context-based cleanup lifecycle
 3. **Ingress Webhook Validation** - Validates Ingress resources when ingress controller is enabled
-4. **Cross-Reference Validation** - Ensures referenced resources exist
+4. **Cross-Reference Validation** - Ensures referenced resources exist with enhanced validation rules
 
 ### Webhook Types
 
@@ -107,12 +107,17 @@ match:
 ```yaml
 hosts:
   - address: "backend.example.com"   # Valid: hostname
-    port: 8080                       # Range: 1-65535
-    weight: 1                        # Range: 1-100
+    port: 8080                       # Range: 1-65535 (validated using named constants)
+    weight: 1                        # Range: 1-100 (validated using named constants)
   - address: "192.168.1.100"         # Valid: IP address
     port: 8080
     weight: 2
 ```
+
+**Validation Constants:**
+- Port range: 1-65535 (using `MinPort` and `MaxPort` constants)
+- Weight range: 1-100 (using `MinWeight` and `MaxWeight` constants)
+- Timeout ranges: Validated using predefined minimum and maximum values
 
 #### Health Check Validation
 ```yaml
@@ -179,7 +184,7 @@ match:
 
 ### Cross-CRD Backend Conflicts
 
-The webhook also detects conflicts between Backend and GRPCBackend resources:
+The webhook detects conflicts between Backend and GRPCBackend resources using improved duplicate detection with context-based lifecycle management:
 
 ```yaml
 # Backend CRD

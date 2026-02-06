@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -33,8 +34,16 @@ import (
 	operatorwebhook "github.com/vyrodovalexey/avapigw/internal/operator/webhook"
 )
 
-// envValueTrue is the string value used for boolean true in environment variables.
-const envValueTrue = "true"
+// tracerShutdowner is an interface for shutting down a tracer.
+// It is satisfied by *observability.Tracer and can be replaced in tests.
+type tracerShutdowner interface {
+	Shutdown(ctx context.Context) error
+}
+
+// setupTracingFunc is the function used to create a tracer.
+// It is a package-level variable to allow overriding in tests
+// where OpenTelemetry schema URL conflicts prevent real tracer creation.
+var setupTracingFunc = defaultSetupTracing
 
 var (
 	scheme   = runtime.NewScheme()
@@ -120,6 +129,16 @@ type Config struct {
 
 	// IngressLBAddress is the load balancer address (IP or hostname) to set on Ingress status.
 	IngressLBAddress string
+
+	// EnableClusterWideDuplicateCheck enables cluster-wide duplicate detection for webhooks.
+	// When false (default), duplicate detection is namespace-scoped for better performance.
+	EnableClusterWideDuplicateCheck bool
+
+	// DuplicateCacheEnabled enables caching for duplicate detection.
+	DuplicateCacheEnabled bool
+
+	// DuplicateCacheTTL is the TTL for duplicate detection cache entries.
+	DuplicateCacheTTL time.Duration
 }
 
 func main() {
@@ -131,7 +150,13 @@ func main() {
 
 func run() error {
 	cfg := parseFlags()
+	return runWithConfig(cfg, nil)
+}
 
+// runWithConfig is the main orchestration function that accepts a REST config.
+// When restConfig is nil, it uses ctrl.GetConfigOrDie() (production mode).
+// This separation enables unit testing without a real Kubernetes cluster.
+func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	// Setup logging
 	logger := setupLogger(cfg.LogLevel, cfg.LogFormat)
 	ctrl.SetLogger(logger)
@@ -153,7 +178,12 @@ func run() error {
 	}
 
 	// Create manager
-	mgr, err := createManager(cfg)
+	var mgr ctrl.Manager
+	if restConfig != nil {
+		mgr, err = createManagerWithConfig(restConfig, cfg)
+	} else {
+		mgr, err = createManager(cfg)
+	}
 	if err != nil {
 		return err
 	}
@@ -202,7 +232,7 @@ func setupTracingIfEnabled(cfg *Config) (func(), error) {
 		return nil, nil
 	}
 
-	tracer, err := setupTracing(cfg)
+	tracer, err := setupTracingFunc(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to setup tracing: %w", err)
 	}
@@ -220,7 +250,13 @@ func setupTracingIfEnabled(cfg *Config) (func(), error) {
 
 // createManager creates the controller-runtime manager.
 func createManager(cfg *Config) (ctrl.Manager, error) {
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	return createManagerWithConfig(ctrl.GetConfigOrDie(), cfg)
+}
+
+// createManagerWithConfig creates the controller-runtime manager using the provided REST config.
+// This is separated from createManager to enable unit testing with a fake API server.
+func createManagerWithConfig(restConfig *rest.Config, cfg *Config) (ctrl.Manager, error) {
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: cfg.MetricsAddr,
@@ -266,8 +302,15 @@ func setupWebhooksIfEnabled(mgr ctrl.Manager, cfg *Config) error {
 	return nil
 }
 
+// healthCheckAdder is an interface for adding health and readiness checks.
+// It is satisfied by ctrl.Manager and can be mocked in tests.
+type healthCheckAdder interface {
+	AddHealthzCheck(name string, check healthz.Checker) error
+	AddReadyzCheck(name string, check healthz.Checker) error
+}
+
 // setupHealthChecks adds health and ready checks to the manager.
-func setupHealthChecks(mgr ctrl.Manager) error {
+func setupHealthChecks(mgr healthCheckAdder) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("unable to set up health check: %w", err)
 	}
@@ -347,6 +390,12 @@ func defineFlags(cfg *Config) {
 		"The IngressClass name this controller handles.")
 	flag.StringVar(&cfg.IngressLBAddress, "ingress-lb-address", "",
 		"The load balancer address (IP or hostname) to set on Ingress status.")
+	flag.BoolVar(&cfg.EnableClusterWideDuplicateCheck, "enable-cluster-wide-duplicate-check", false,
+		"Enable cluster-wide duplicate detection for webhooks (default: namespace-scoped).")
+	flag.BoolVar(&cfg.DuplicateCacheEnabled, "duplicate-cache-enabled", true,
+		"Enable caching for duplicate detection.")
+	flag.DurationVar(&cfg.DuplicateCacheTTL, "duplicate-cache-ttl", 30*time.Second,
+		"TTL for duplicate detection cache entries.")
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -378,23 +427,31 @@ func applyEnvOverrides(cfg *Config) {
 	applyCertDNSNamesEnv(cfg)
 
 	// Bool overrides
-	if os.Getenv("LEADER_ELECT") == envValueTrue {
-		cfg.EnableLeaderElection = true
-	}
-	if os.Getenv("ENABLE_WEBHOOKS") == "false" {
-		cfg.EnableWebhooks = false
-	}
-	if os.Getenv("ENABLE_GRPC_SERVER") == "false" {
-		cfg.EnableGRPCServer = false
-	}
-	if os.Getenv("ENABLE_TRACING") == envValueTrue {
-		cfg.EnableTracing = true
-	}
-	if os.Getenv("ENABLE_INGRESS_CONTROLLER") == envValueTrue {
-		cfg.EnableIngressController = true
-	}
+	applyBoolEnv(&cfg.EnableLeaderElection, "LEADER_ELECT")
+	applyBoolEnv(&cfg.EnableWebhooks, "ENABLE_WEBHOOKS")
+	applyBoolEnv(&cfg.EnableGRPCServer, "ENABLE_GRPC_SERVER")
+	applyBoolEnv(&cfg.EnableTracing, "ENABLE_TRACING")
+	applyBoolEnv(&cfg.EnableIngressController, "ENABLE_INGRESS_CONTROLLER")
 	applyStringEnv(&cfg.IngressClassName, "INGRESS_CLASS_NAME")
 	applyStringEnv(&cfg.IngressLBAddress, "INGRESS_LB_ADDRESS")
+
+	// Duplicate detection configuration
+	applyBoolEnv(&cfg.EnableClusterWideDuplicateCheck, "ENABLE_CLUSTER_WIDE_DUPLICATE_CHECK")
+	applyBoolEnv(&cfg.DuplicateCacheEnabled, "DUPLICATE_CACHE_ENABLED")
+	applyDurationEnv(&cfg.DuplicateCacheTTL, "DUPLICATE_CACHE_TTL")
+}
+
+// applyBoolEnv applies a boolean environment variable override.
+// It handles both true and false values symmetrically.
+func applyBoolEnv(target *bool, envKey string) {
+	if v := os.Getenv(envKey); v != "" {
+		switch strings.ToLower(v) {
+		case "true", "1", "yes":
+			*target = true
+		case "false", "0", "no":
+			*target = false
+		}
+	}
 }
 
 func applyStringEnv(target *string, envKey string) {
@@ -510,6 +567,12 @@ func setupSignalHandler(cancel context.CancelFunc) {
 	}()
 }
 
+// defaultSetupTracing is the default implementation of setupTracingFunc.
+// It delegates to setupTracing and adapts the return type to tracerShutdowner.
+func defaultSetupTracing(cfg *Config) (tracerShutdowner, error) {
+	return setupTracing(cfg)
+}
+
 func setupTracing(cfg *Config) (*observability.Tracer, error) {
 	return observability.NewTracer(observability.TracerConfig{
 		ServiceName:  "avapigw-operator",
@@ -609,49 +672,68 @@ func setupGRPCServer(ctx context.Context, cfg *Config, certManager cert.Manager)
 	})
 }
 
+// controllerSetup defines a controller setup operation with a name for error reporting.
+type controllerSetup struct {
+	name  string
+	setup func() error
+}
+
 func setupControllers(mgr ctrl.Manager, grpcServer *operatorgrpc.Server, cfg *Config) error {
-	// Setup APIRoute controller
-	if err := (&controller.APIRouteReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
-		Recorder:   mgr.GetEventRecorderFor("apiroute-controller"),
-		GRPCServer: grpcServer,
-	}).SetupWithManager(mgr); err != nil {
-		return err
+	setups := []controllerSetup{
+		{
+			name: "APIRoute",
+			setup: func() error {
+				return (&controller.APIRouteReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("apiroute-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
+		{
+			name: "GRPCRoute",
+			setup: func() error {
+				return (&controller.GRPCRouteReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("grpcroute-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
+		{
+			name: "Backend",
+			setup: func() error {
+				return (&controller.BackendReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("backend-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
+		{
+			name: "GRPCBackend",
+			setup: func() error {
+				return (&controller.GRPCBackendReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("grpcbackend-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
 	}
 
-	// Setup GRPCRoute controller
-	if err := (&controller.GRPCRouteReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
-		Recorder:   mgr.GetEventRecorderFor("grpcroute-controller"),
-		GRPCServer: grpcServer,
-	}).SetupWithManager(mgr); err != nil {
-		return err
-	}
-
-	// Setup Backend controller
-	if err := (&controller.BackendReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
-		Recorder:   mgr.GetEventRecorderFor("backend-controller"),
-		GRPCServer: grpcServer,
-	}).SetupWithManager(mgr); err != nil {
-		return err
-	}
-
-	// Setup GRPCBackend controller
-	if err := (&controller.GRPCBackendReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
-		Recorder:   mgr.GetEventRecorderFor("grpcbackend-controller"),
-		GRPCServer: grpcServer,
-	}).SetupWithManager(mgr); err != nil {
-		return err
+	for _, s := range setups {
+		if err := s.setup(); err != nil {
+			return fmt.Errorf("unable to setup %s controller: %w", s.name, err)
+		}
 	}
 
 	// Setup Ingress controller if enabled
@@ -689,24 +771,50 @@ func setupIngressController(
 }
 
 func setupWebhooks(mgr ctrl.Manager, cfg *Config) error {
-	// Setup APIRoute webhook
-	if err := operatorwebhook.SetupAPIRouteWebhook(mgr); err != nil {
-		return err
+	// Create duplicate checker options based on configuration
+	duplicateCheckerOpts := operatorwebhook.DuplicateCheckerConfig{
+		ClusterWide:  cfg.EnableClusterWideDuplicateCheck,
+		CacheEnabled: cfg.DuplicateCacheEnabled,
+		CacheTTL:     cfg.DuplicateCacheTTL,
 	}
 
-	// Setup GRPCRoute webhook
-	if err := operatorwebhook.SetupGRPCRouteWebhook(mgr); err != nil {
-		return err
+	setupLog.Info("configuring webhook duplicate detection",
+		"cluster_wide", duplicateCheckerOpts.ClusterWide,
+		"cache_enabled", duplicateCheckerOpts.CacheEnabled,
+		"cache_ttl", duplicateCheckerOpts.CacheTTL,
+	)
+
+	webhookSetups := []controllerSetup{
+		{
+			name: "APIRoute",
+			setup: func() error {
+				return operatorwebhook.SetupAPIRouteWebhookWithConfig(mgr, duplicateCheckerOpts)
+			},
+		},
+		{
+			name: "GRPCRoute",
+			setup: func() error {
+				return operatorwebhook.SetupGRPCRouteWebhookWithConfig(mgr, duplicateCheckerOpts)
+			},
+		},
+		{
+			name: "Backend",
+			setup: func() error {
+				return operatorwebhook.SetupBackendWebhookWithConfig(mgr, duplicateCheckerOpts)
+			},
+		},
+		{
+			name: "GRPCBackend",
+			setup: func() error {
+				return operatorwebhook.SetupGRPCBackendWebhookWithConfig(mgr, duplicateCheckerOpts)
+			},
+		},
 	}
 
-	// Setup Backend webhook
-	if err := operatorwebhook.SetupBackendWebhook(mgr); err != nil {
-		return err
-	}
-
-	// Setup GRPCBackend webhook
-	if err := operatorwebhook.SetupGRPCBackendWebhook(mgr); err != nil {
-		return err
+	for _, s := range webhookSetups {
+		if err := s.setup(); err != nil {
+			return fmt.Errorf("unable to setup %s webhook: %w", s.name, err)
+		}
 	}
 
 	// Setup Ingress webhook if Ingress controller is enabled
@@ -715,7 +823,7 @@ func setupWebhooks(mgr ctrl.Manager, cfg *Config) error {
 			"ingress_class", cfg.IngressClassName,
 		)
 		if err := operatorwebhook.SetupIngressWebhook(mgr, cfg.IngressClassName); err != nil {
-			return err
+			return fmt.Errorf("unable to setup Ingress webhook: %w", err)
 		}
 	}
 

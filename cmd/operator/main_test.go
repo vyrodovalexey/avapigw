@@ -571,7 +571,7 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			expectedEnableIngress:  true,
 		},
 		{
-			name: "ingress controller not enabled with non-true value",
+			name: "ingress controller enabled with yes value",
 			envVars: map[string]string{
 				"ENABLE_INGRESS_CONTROLLER": "yes",
 			},
@@ -584,7 +584,7 @@ func TestApplyEnvOverrides_BoolOverrides(t *testing.T) {
 			expectedEnableWebhooks: true,
 			expectedEnableGRPC:     true,
 			expectedEnableTracing:  false,
-			expectedEnableIngress:  false,
+			expectedEnableIngress:  true,
 		},
 	}
 
@@ -1678,8 +1678,8 @@ func TestApplyEnvOverrides_InvalidFloatEnvVar(t *testing.T) {
 	}
 }
 
-func TestApplyEnvOverrides_BoolEnvVarNotExactMatch(t *testing.T) {
-	// Set bool env vars with non-exact values
+func TestApplyEnvOverrides_BoolEnvVarCaseInsensitive(t *testing.T) {
+	// Set bool env vars with case-insensitive values
 	os.Setenv("LEADER_ELECT", "TRUE") // uppercase
 	os.Setenv("ENABLE_WEBHOOKS", "FALSE")
 	os.Setenv("ENABLE_GRPC_SERVER", "no")
@@ -1701,21 +1701,21 @@ func TestApplyEnvOverrides_BoolEnvVarNotExactMatch(t *testing.T) {
 
 	applyEnvOverrides(cfg)
 
-	// Only exact "true" or "false" should work
-	if cfg.EnableLeaderElection {
-		t.Error("EnableLeaderElection should remain false (TRUE != true)")
+	// Case-insensitive matching: TRUE/true/True, FALSE/false/False, yes/YES, no/NO, 1, 0
+	if !cfg.EnableLeaderElection {
+		t.Error("EnableLeaderElection should be true (TRUE is case-insensitive true)")
 	}
-	if !cfg.EnableWebhooks {
-		t.Error("EnableWebhooks should remain true (FALSE != false)")
+	if cfg.EnableWebhooks {
+		t.Error("EnableWebhooks should be false (FALSE is case-insensitive false)")
 	}
-	if !cfg.EnableGRPCServer {
-		t.Error("EnableGRPCServer should remain true (no != false)")
+	if cfg.EnableGRPCServer {
+		t.Error("EnableGRPCServer should be false (no is case-insensitive false)")
 	}
-	if cfg.EnableTracing {
-		t.Error("EnableTracing should remain false (yes != true)")
+	if !cfg.EnableTracing {
+		t.Error("EnableTracing should be true (yes is case-insensitive true)")
 	}
-	if cfg.EnableIngressController {
-		t.Error("EnableIngressController should remain false (YES != true)")
+	if !cfg.EnableIngressController {
+		t.Error("EnableIngressController should be true (YES is case-insensitive true)")
 	}
 }
 

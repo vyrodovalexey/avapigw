@@ -1,8 +1,10 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -176,4 +178,19 @@ func (tw *timeoutWriter) Write(b []byte) (int, error) {
 	tw.written = true
 	tw.mu.Unlock()
 	return tw.ResponseWriter.Write(b)
+}
+
+// Flush implements http.Flusher interface for streaming support.
+func (tw *timeoutWriter) Flush() {
+	if f, ok := tw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack implements http.Hijacker interface for WebSocket support.
+func (tw *timeoutWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := tw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }

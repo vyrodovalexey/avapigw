@@ -860,6 +860,18 @@ operator:
     enabled: true
     # -- Webhook server port
     port: 9443
+    # Duplicate detection configuration
+    duplicateDetection:
+      # -- Enable cluster-wide duplicate detection.
+      # When false (default), duplicate detection is namespace-scoped for better performance.
+      # Enable this if you need to detect duplicates across all namespaces.
+      clusterWide: false
+      # -- Enable caching for duplicate detection.
+      # Caching improves performance by reducing API calls.
+      cacheEnabled: true
+      # -- TTL for duplicate detection cache entries.
+      # Format: Go duration string (e.g., "30s", "1m", "5m")
+      cacheTTL: "30s"
     # -- TLS configuration for webhook server
     tls:
       # -- TLS mode (selfsigned, vault, cert-manager)

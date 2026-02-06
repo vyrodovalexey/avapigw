@@ -1,7 +1,9 @@
 package util
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 )
 
@@ -64,5 +66,15 @@ func (w *StatusCapturingResponseWriter) Flush() {
 	}
 }
 
-// Compile-time interface assertion.
+// Hijack implements http.Hijacker interface for WebSocket support.
+// This allows the connection to be upgraded to WebSocket protocol.
+func (w *StatusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support Hijacker interface")
+}
+
+// Compile-time interface assertions.
 var _ http.Flusher = (*StatusCapturingResponseWriter)(nil)
+var _ http.Hijacker = (*StatusCapturingResponseWriter)(nil)

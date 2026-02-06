@@ -95,6 +95,20 @@ spec:
               value: {{ .Values.operator.vault.kubernetesMountPath | default "kubernetes" | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.operator.webhook.duplicateDetection }}
+            {{- if .Values.operator.webhook.duplicateDetection.clusterWide }}
+            - name: ENABLE_CLUSTER_WIDE_DUPLICATE_CHECK
+              value: "true"
+            {{- end }}
+            {{- if eq .Values.operator.webhook.duplicateDetection.cacheEnabled false }}
+            - name: DUPLICATE_CACHE_ENABLED
+              value: "false"
+            {{- end }}
+            {{- if .Values.operator.webhook.duplicateDetection.cacheTTL }}
+            - name: DUPLICATE_CACHE_TTL
+              value: {{ .Values.operator.webhook.duplicateDetection.cacheTTL | quote }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.operator.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

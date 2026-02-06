@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -96,7 +97,7 @@ type vaultProvider struct {
 
 	mu     sync.RWMutex
 	certs  map[string]*Certificate
-	closed bool
+	closed atomic.Bool
 }
 
 // NewVaultProvider creates a new Vault certificate provider.
@@ -245,7 +246,7 @@ func (p *vaultProvider) GetCertificate(ctx context.Context, req *CertificateRequ
 		return nil, fmt.Errorf("context canceled: %w", err)
 	}
 
-	if p.closed {
+	if p.closed.Load() {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
 
@@ -276,7 +277,7 @@ func (p *vaultProvider) GetCA(ctx context.Context) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("context canceled: %w", err)
 	}
 
-	if p.closed {
+	if p.closed.Load() {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
 
@@ -291,7 +292,7 @@ func (p *vaultProvider) RotateCertificate(ctx context.Context, req *CertificateR
 		return nil, fmt.Errorf("context canceled: %w", err)
 	}
 
-	if p.closed {
+	if p.closed.Load() {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
 
@@ -307,7 +308,7 @@ func (p *vaultProvider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.closed = true
+	p.closed.Store(true)
 	p.certs = nil
 
 	if p.vaultClient != nil {

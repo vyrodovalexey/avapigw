@@ -1,0 +1,57 @@
+# Yandex Tank Configuration: HTTP GET Throughput Test (Quick Version)
+# Purpose: Quick verification of HTTP throughput
+# Duration: 90 seconds total (30s warmup + 45s sustain + 15s cooldown)
+# Target: 2000+ RPS
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 30s ramp from 100 to 2000 RPS
+    # Sustain: 45s at 2000 RPS (main measurement phase)
+    # Cooldown: 15s ramp down
+    schedule: line(100, 2000, 30s) const(2000, 45s) line(2000, 100, 15s)
+
+  ammofile: /var/loadtest/ammo/http-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings - high concurrency for throughput testing
+  instances: 2000
+  threads: 8
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: http-throughput-quick]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 10% for 20 seconds
+    - http(5xx,10%,20s)
+    # Stop if 50% of requests exceed 5000ms for 20 seconds
+    - time(5000,50%,20s)
+    # Stop if total network errors exceed 5% for 20 seconds
+    - http(net,5%,20s)

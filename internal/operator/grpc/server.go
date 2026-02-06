@@ -24,6 +24,11 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
+var (
+	defaultMetrics     *serverMetrics
+	defaultMetricsOnce sync.Once
+)
+
 // RetryConfig contains configuration for retry behavior with exponential backoff.
 type RetryConfig struct {
 	// MaxAttempts is the maximum number of retry attempts.
@@ -120,10 +125,20 @@ type serverMetrics struct {
 	retryAttempts     *prometheus.CounterVec
 }
 
-// newServerMetrics creates new server metrics.
+// newServerMetrics returns the singleton server metrics instance.
+// This ensures metrics are only registered once with the default Prometheus registry.
 func newServerMetrics() *serverMetrics {
+	defaultMetricsOnce.Do(func() {
+		defaultMetrics = newServerMetricsWithFactory(promauto.With(prometheus.DefaultRegisterer))
+	})
+	return defaultMetrics
+}
+
+// newServerMetricsWithFactory creates server metrics using the given promauto factory.
+// This allows tests to supply a custom registry to avoid duplicate registration panics.
+func newServerMetricsWithFactory(factory promauto.Factory) *serverMetrics {
 	return &serverMetrics{
-		requestsTotal: promauto.NewCounterVec(
+		requestsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Subsystem: "grpc",
@@ -132,7 +147,7 @@ func newServerMetrics() *serverMetrics {
 			},
 			[]string{"method", "status"},
 		),
-		requestDuration: promauto.NewHistogramVec(
+		requestDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: "avapigw_operator",
 				Subsystem: "grpc",
@@ -142,7 +157,7 @@ func newServerMetrics() *serverMetrics {
 			},
 			[]string{"method"},
 		),
-		activeGateways: promauto.NewGauge(
+		activeGateways: factory.NewGauge(
 			prometheus.GaugeOpts{
 				Namespace: "avapigw_operator",
 				Subsystem: "grpc",
@@ -150,7 +165,7 @@ func newServerMetrics() *serverMetrics {
 				Help:      "Number of active gateway connections",
 			},
 		),
-		configApplied: promauto.NewCounterVec(
+		configApplied: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Subsystem: "grpc",
@@ -159,7 +174,7 @@ func newServerMetrics() *serverMetrics {
 			},
 			[]string{"type", "operation"},
 		),
-		cancelledOps: promauto.NewCounterVec(
+		cancelledOps: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Subsystem: "grpc",
@@ -168,7 +183,7 @@ func newServerMetrics() *serverMetrics {
 			},
 			[]string{"operation", "reason"},
 		),
-		operationDuration: promauto.NewHistogramVec(
+		operationDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: "avapigw_operator",
 				Subsystem: "grpc",
@@ -178,7 +193,7 @@ func newServerMetrics() *serverMetrics {
 			},
 			[]string{"operation", "type"},
 		),
-		retryAttempts: promauto.NewCounterVec(
+		retryAttempts: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Subsystem: "grpc",
@@ -192,6 +207,18 @@ func newServerMetrics() *serverMetrics {
 
 // NewServer creates a new gRPC server.
 func NewServer(config *ServerConfig) (*Server, error) {
+	return newServerInternal(config, newServerMetrics())
+}
+
+// NewServerWithRegistry creates a new gRPC server using a custom Prometheus registry.
+// This is useful for testing to avoid duplicate metric registration panics.
+func NewServerWithRegistry(config *ServerConfig, registry *prometheus.Registry) (*Server, error) {
+	metrics := newServerMetricsWithFactory(promauto.With(registry))
+	return newServerInternal(config, metrics)
+}
+
+// newServerInternal creates a new gRPC server with the given metrics.
+func newServerInternal(config *ServerConfig, metrics *serverMetrics) (*Server, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
@@ -227,7 +254,7 @@ func NewServer(config *ServerConfig) (*Server, error) {
 			JitterFactor:   retry.DefaultJitterFactor,
 		},
 		logger:       observability.GetGlobalLogger().With(observability.String("component", "grpc-server")),
-		metrics:      newServerMetrics(),
+		metrics:      metrics,
 		apiRoutes:    make(map[string][]byte),
 		grpcRoutes:   make(map[string][]byte),
 		backends:     make(map[string][]byte),
@@ -302,8 +329,11 @@ func (s *Server) Start(ctx context.Context) error {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
 	}
 
-	// Create gRPC server
-	s.grpcServer = grpc.NewServer(opts...)
+	// Create gRPC server and assign under mutex to prevent data race with Stop()
+	grpcSrv := grpc.NewServer(opts...)
+	s.mu.Lock()
+	s.grpcServer = grpcSrv
+	s.mu.Unlock()
 
 	s.logger.Info("starting gRPC server",
 		observability.String("address", addr),
@@ -824,43 +854,48 @@ func (s *Server) recordCanceledOperation(operation string, err error) {
 	)
 }
 
+// contextLockPollInterval is the interval for polling TryLock when waiting for the mutex.
+const contextLockPollInterval = time.Millisecond
+
 // withContextLock acquires the mutex with context cancellation support.
 // Returns a cleanup function that must be called to release the lock, or an error
 // if the context was canceled before or during lock acquisition.
 //
-// This helper encapsulates the context-aware locking pattern to avoid code duplication
-// and ensure consistent behavior across all operations that need mutex protection.
+// This implementation uses sync.Mutex.TryLock() in a loop with context checking
+// to avoid spawning goroutines that could leak if the context is canceled.
 func (s *Server) withContextLock(ctx context.Context) (unlock func(), err error) {
 	// Check context first to fail fast
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// Use channels to signal completion for context-aware mutex acquisition
-	lockAcquired := make(chan struct{})
-	lockFailed := make(chan struct{})
-
-	go func() {
-		s.mu.Lock()
-		select {
-		case <-lockFailed:
-			// Context was canceled while waiting for lock, release it
-			s.mu.Unlock()
-		default:
-			close(lockAcquired)
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		close(lockFailed)
-		return nil, ctx.Err()
-	case <-lockAcquired:
+	// Try to acquire the lock immediately
+	if s.mu.TryLock() {
 		// Check context again after acquiring lock
 		if err := ctx.Err(); err != nil {
 			s.mu.Unlock()
 			return nil, err
 		}
 		return s.mu.Unlock, nil
+	}
+
+	// Poll TryLock with context checking to avoid goroutine leaks
+	ticker := time.NewTicker(contextLockPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if s.mu.TryLock() {
+				// Check context again after acquiring lock
+				if err := ctx.Err(); err != nil {
+					s.mu.Unlock()
+					return nil, err
+				}
+				return s.mu.Unlock, nil
+			}
+		}
 	}
 }

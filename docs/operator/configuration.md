@@ -17,13 +17,21 @@ This guide covers all configuration options for the AVAPIGW Operator, including 
 
 ## Overview
 
-The AVAPIGW Operator can be configured through multiple methods:
+The AVAPIGW Operator can be configured through multiple methods with enhanced boolean environment variable support:
 
 1. **Helm Values** - Primary configuration method for deployment
-2. **Environment Variables** - Runtime configuration and overrides
+2. **Environment Variables** - Runtime configuration and overrides with symmetric boolean handling
 3. **Command Line Flags** - Direct operator configuration
 4. **ConfigMaps** - External configuration files
 5. **Secrets** - Sensitive configuration data
+
+### Boolean Environment Variable Support
+
+The operator now supports symmetric true/false/yes/no/1/0 handling for all boolean environment variables (case-insensitive):
+
+**Supported Boolean Values:**
+- **True values**: `true`, `yes`, `1`, `on`, `enable`, `enabled`
+- **False values**: `false`, `no`, `0`, `off`, `disable`, `disabled`
 
 ## Deployment Configuration
 
@@ -605,14 +613,29 @@ podSecurityPolicy:
 
 ### Core Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOG_LEVEL` | Logging level (debug, info, warn, error) | `info` |
-| `LOG_FORMAT` | Log format (json, console) | `json` |
-| `METRICS_BIND_ADDRESS` | Metrics server bind address | `:8080` |
-| `HEALTH_PROBE_BIND_ADDRESS` | Health probe bind address | `:8081` |
-| `LEADER_ELECT` | Enable leader election | `true` |
-| `LEADER_ELECT_RESOURCE_NAME` | Leader election resource name | `some_id.avapigw.io` |
+| Variable | Description | Default | Boolean Support |
+|----------|-------------|---------|----------------|
+| `LOG_LEVEL` | Logging level (debug, info, warn, error) | `info` | N/A |
+| `LOG_FORMAT` | Log format (json, console) | `json` | N/A |
+| `METRICS_BIND_ADDRESS` | Metrics server bind address | `:8080` | N/A |
+| `HEALTH_PROBE_BIND_ADDRESS` | Health probe bind address | `:8081` | N/A |
+| `LEADER_ELECT` | Enable leader election | `true` | ✅ |
+| `LEADER_ELECT_RESOURCE_NAME` | Leader election resource name | `some_id.avapigw.io` | N/A |
+
+**Boolean Environment Variable Examples:**
+```bash
+# All equivalent ways to enable leader election
+export LEADER_ELECT=true
+export LEADER_ELECT=yes
+export LEADER_ELECT=1
+export LEADER_ELECT=on
+
+# All equivalent ways to disable leader election
+export LEADER_ELECT=false
+export LEADER_ELECT=no
+export LEADER_ELECT=0
+export LEADER_ELECT=off
+```
 
 ### gRPC Configuration Variables
 

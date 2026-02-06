@@ -1,8 +1,25 @@
 ---
+# RBAC Configuration for avapigw-operator
+# 
+# This ClusterRole follows the principle of least privilege:
+# - Only the minimum required permissions are granted
+# - Read-only access where possible (get, list, watch)
+# - Write access only where necessary for reconciliation
+# - Separate rules for different resource types for clarity
+#
+# Permission Categories:
+# 1. Core Resources: Events, Secrets, ConfigMaps, Services, Endpoints
+# 2. CRD Management: APIRoute, GRPCRoute, Backend, GRPCBackend
+# 3. Networking: Ingress, IngressClass (for ingress controller)
+# 4. Coordination: Leases (for leader election)
+# 5. Admission: ValidatingWebhookConfiguration (for CA bundle injection)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: avapigw-operator-role
+  labels:
+    app.kubernetes.io/name: avapigw-operator
+    app.kubernetes.io/component: rbac
 rules:
 # Core resources - Events for recording reconciliation events
 - apiGroups:
@@ -132,6 +149,7 @@ rules:
   - patch
   - delete
 # Admission - ValidatingWebhookConfiguration for CA bundle injection
+# Required for: self-signed and Vault PKI modes to inject CA bundle at startup
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -142,3 +160,25 @@ rules:
   - watch
   - update
   - patch
+# Admission - MutatingWebhookConfiguration (for future use)
+# Currently not used, but included for completeness if mutating webhooks are added
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingwebhookconfigurations
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+# Namespaces - Read-only access for namespace-scoped operations
+# Required for: determining namespace boundaries in cluster-wide duplicate detection
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch

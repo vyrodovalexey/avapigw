@@ -1157,4 +1157,81 @@ spec:
             prefix: /secure
 ```
 
-This configuration reference provides comprehensive coverage of all route-level authentication, authorization, backend transformation, caching, and encoding options, enabling secure and efficient API gateway operations.
+## Security Features
+
+### Open Redirect Protection
+
+The AV API Gateway includes built-in protection against open redirect attacks by validating redirect URLs:
+
+#### Automatic Redirect Validation
+
+The gateway automatically validates all redirect URLs and blocks potentially unsafe schemes:
+
+**Blocked Schemes:**
+- `javascript:` - Prevents JavaScript execution
+- `data:` - Prevents data URI exploitation
+- `vbscript:` - Prevents VBScript execution
+- `file:` - Prevents local file access
+- `ftp:` - Prevents FTP redirects
+
+**Allowed Schemes:**
+- `http:` - Standard HTTP redirects
+- `https:` - Secure HTTPS redirects
+- Empty scheme - Relative redirects
+
+#### Example Configuration
+
+```yaml
+spec:
+  routes:
+    - name: safe-redirect-route
+      match:
+        - uri:
+            exact: /redirect
+      redirect:
+        uri: "https://safe.example.com/target"  # ✅ Safe - HTTPS scheme
+        code: 302
+    
+    - name: relative-redirect-route
+      match:
+        - uri:
+            exact: /relative
+      redirect:
+        uri: "/safe/path"                       # ✅ Safe - Relative redirect
+        code: 302
+```
+
+#### Blocked Redirect Examples
+
+The following redirect configurations would be automatically blocked:
+
+```yaml
+# ❌ These would be blocked by open redirect protection
+redirect:
+  uri: "javascript:alert('xss')"               # Blocked - JavaScript scheme
+redirect:
+  uri: "data:text/html,<script>alert(1)</script>"  # Blocked - Data URI
+redirect:
+  uri: "vbscript:msgbox('xss')"                # Blocked - VBScript scheme
+```
+
+#### Error Response
+
+When an unsafe redirect is detected, the gateway returns:
+- **HTTP Status**: 400 Bad Request
+- **Response Body**: `{"error":"bad request","message":"unsafe redirect URL"}`
+- **Logging**: Security event logged for monitoring
+
+#### Monitoring Redirect Security
+
+Monitor redirect security through metrics and logs:
+
+```bash
+# Check for blocked redirects in logs
+kubectl logs -l app=avapigw | grep "unsafe redirect"
+
+# Monitor redirect-related errors
+curl http://localhost:9090/metrics | grep redirect
+```
+
+This configuration reference provides comprehensive coverage of all route-level authentication, authorization, backend transformation, caching, encoding options, and security features, enabling secure and efficient API gateway operations.

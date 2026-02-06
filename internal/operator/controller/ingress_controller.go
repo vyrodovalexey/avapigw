@@ -43,44 +43,46 @@ type IngressReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile handles reconciliation of Ingress resources.
+// It follows the BaseReconcile pattern: fetch, check class, handle deletion,
+// add finalizer, reconcile, update status, record events, and update metrics.
 //
 //nolint:gocognit,cyclop // complex reconciliation with class matching and multi-resource apply
 func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	timer := NewReconcileTimer("ingress")
+	timer := NewReconcileTimer(ingressControllerName)
 	metrics := GetControllerMetrics()
 	logger := log.FromContext(ctx)
-	logger.Info("reconciling Ingress", "name", req.Name, "namespace", req.Namespace)
+	logger.Info("reconciling "+ingressResourceKind, "name", req.Name, "namespace", req.Namespace)
 
 	// Fetch the Ingress instance
 	ingress := &networkingv1.Ingress{}
 	if err := r.Get(ctx, req.NamespacedName, ingress); err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("Ingress not found, ignoring", "name", req.Name)
-			metrics.DeleteResourceConditionMetrics("Ingress", req.Name, req.Namespace)
+			logger.Info(ingressResourceKind+" not found, ignoring", "name", req.Name)
+			metrics.DeleteResourceConditionMetrics(ingressResourceKind, req.Name, req.Namespace)
 			timer.RecordSuccess()
 			return ctrl.Result{}, nil
 		}
-		logger.Error(err, "failed to get Ingress")
+		logger.Error(err, "failed to get "+ingressResourceKind)
 		timer.RecordError()
 		return ctrl.Result{}, err
 	}
 
 	// Check if this Ingress belongs to our IngressClass
 	if !r.matchesIngressClass(ingress) {
-		logger.Info("Ingress does not match IngressClass, ignoring",
+		logger.Info(ingressResourceKind+" does not match IngressClass, ignoring",
 			"name", req.Name,
 			"expected", r.IngressClassName,
 		)
 		return ctrl.Result{}, nil
 	}
 
-	// Check if the object is being deleted
+	// Handle deletion
 	if !ingress.ObjectMeta.DeletionTimestamp.IsZero() {
 		result, err := r.handleDeletion(ctx, ingress)
 		if err != nil {
 			timer.RecordError()
 		} else {
-			metrics.DeleteResourceConditionMetrics("Ingress", ingress.Name, ingress.Namespace)
+			metrics.DeleteResourceConditionMetrics(ingressResourceKind, ingress.Name, ingress.Namespace)
 			timer.RecordSuccess()
 		}
 		return result, err
@@ -94,16 +96,16 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			timer.RecordError()
 			return ctrl.Result{}, err
 		}
-		metrics.RecordFinalizerOperation("ingress", OperationAdd)
+		metrics.RecordFinalizerOperation(ingressControllerName, OperationAdd)
 		timer.RecordRequeue()
 		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Reconcile the Ingress
 	if err := r.reconcileIngress(ctx, ingress); err != nil {
-		logger.Error(err, "failed to reconcile Ingress")
+		logger.Error(err, "failed to reconcile "+ingressResourceKind)
 		r.Recorder.Event(ingress, "Warning", EventReasonIngressReconcileFailed, err.Error())
-		metrics.SetResourceCondition("Ingress", ingress.Name, ingress.Namespace, "Ready", 0)
+		metrics.SetResourceCondition(ingressResourceKind, ingress.Name, ingress.Namespace, "Ready", 0)
 		timer.RecordError()
 		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, err
 	}
@@ -118,11 +120,17 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	r.Recorder.Event(ingress, "Normal", EventReasonIngressReconciled, MessageIngressApplied)
-	metrics.SetResourceCondition("Ingress", ingress.Name, ingress.Namespace, "Ready", 1)
+	metrics.SetResourceCondition(ingressResourceKind, ingress.Name, ingress.Namespace, "Ready", 1)
 	timer.RecordSuccess()
 
 	return ctrl.Result{}, nil
 }
+
+// ingressResourceKind is the resource kind name for logging and metrics.
+const ingressResourceKind = "Ingress"
+
+// ingressControllerName is the controller name for metrics.
+const ingressControllerName = "ingress"
 
 // matchesIngressClass checks whether the Ingress is assigned to our IngressClass.
 // It checks both spec.ingressClassName and the legacy kubernetes.io/ingress.class annotation.
@@ -166,7 +174,7 @@ func (r *IngressReconciler) handleDeletion(
 			return ctrl.Result{}, err
 		}
 
-		metrics.RecordFinalizerOperation("ingress", OperationRemove)
+		metrics.RecordFinalizerOperation(ingressControllerName, OperationRemove)
 		r.Recorder.Event(ingress, "Normal", EventReasonIngressDeleted, MessageIngressDeleted)
 	}
 

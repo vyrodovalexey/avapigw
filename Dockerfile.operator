@@ -1,7 +1,7 @@
 # ==============================================================================
 # Build stage
 # ==============================================================================
-FROM golang:1.25.6-alpine AS builder
+FROM golang:1.25.7-alpine AS builder
 
 # Target architecture for cross-compilation (set by Docker buildx)
 ARG TARGETARCH
@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} go build \
     ./cmd/operator
 
 # ==============================================================================
-# Runtime stage
+# Runtime stage - Alpine for minimal footprint with shell access
 # ==============================================================================
 FROM alpine:3.23
 
@@ -56,30 +56,28 @@ LABEL org.opencontainers.image.title="avapigw-operator" \
       org.opencontainers.image.documentation="https://github.com/vyrodovalexey/avapigw/blob/main/README.md" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
-      org.opencontainers.image.created="${BUILD_TIME}"
+      org.opencontainers.image.created="${BUILD_TIME}" \
+      org.opencontainers.image.base.name="alpine:3.23"
 
 # Install runtime dependencies (sorted alphanumerically)
+# ca-certificates: for TLS connections
+# curl: for health checks
+# tzdata: for timezone support
 RUN apk add --no-cache \
     ca-certificates \
     curl \
-    tzdata
+    tzdata \
+    && rm -rf /var/cache/apk/*
 
-# Create non-root user and group
-RUN addgroup -g 65532 -S operator && \
-    adduser -u 65532 -S -G operator -h /app -s /sbin/nologin operator
+# Create non-root user and group for security
+RUN addgroup -g 1000 -S operator && \
+    adduser -u 1000 -S operator -G operator -h /home/operator -s /sbin/nologin
 
-# Set working directory
-WORKDIR /app
+# Copy the operator binary
+COPY --from=builder /operator /operator
 
-# Copy the binary from builder to /operator (matches Helm template command)
-COPY --from=builder --chown=operator:operator /operator /operator
-
-# Create directories for runtime data
-RUN mkdir -p /app/tmp && \
-    chown -R operator:operator /app
-
-# Switch to non-root user
-USER operator
+# Ensure binary is executable
+RUN chmod +x /operator
 
 # Expose ports
 # 8080 - Metrics
@@ -87,6 +85,9 @@ USER operator
 # 9443 - Webhook server
 # 9444 - gRPC server
 EXPOSE 8080 8081 9443 9444
+
+# Run as non-root user
+USER 1000:1000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

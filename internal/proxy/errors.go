@@ -6,6 +6,21 @@ import (
 	"fmt"
 )
 
+// JSON error response constants for consistent error messages.
+const (
+	// jsonErrNotFound is the JSON response body for route not found errors.
+	jsonErrNotFound = `{"error":"not found","message":"no matching route"}`
+
+	// jsonErrBadGateway is the JSON response body for proxy errors.
+	jsonErrBadGateway = `{"error":"bad gateway","message":"failed to proxy request"}`
+
+	// jsonErrServiceUnavailable is the JSON response body for circuit breaker open errors.
+	jsonErrServiceUnavailable = `{"error":"service unavailable","message":"circuit breaker open"}`
+
+	// jsonErrBadRedirect is the JSON response body for unsafe redirect attempts.
+	jsonErrBadRedirect = `{"error":"bad request","message":"unsafe redirect URL"}`
+)
+
 // Sentinel errors for proxy operations.
 var (
 	// ErrNoDestination indicates that no destination is configured for a route.

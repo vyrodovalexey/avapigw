@@ -123,7 +123,6 @@ func newTestVaultProvider(vaultClient vault.Client, config *VaultProviderConfig)
 		vaultClient: vaultClient,
 		logger:      observability.NopLogger(),
 		certs:       make(map[string]*Certificate),
-		closed:      false,
 	}
 }
 
@@ -232,7 +231,7 @@ func TestVaultProvider_GetCertificate_ProviderClosed(t *testing.T) {
 		TTL:      24 * time.Hour,
 	}
 	provider := newTestVaultProvider(mockClient, config)
-	provider.closed = true
+	provider.closed.Store(true)
 
 	// Act
 	cert, err := provider.GetCertificate(context.Background(), &CertificateRequest{
@@ -495,7 +494,7 @@ func TestVaultProvider_GetCA_ProviderClosed(t *testing.T) {
 		Role:     "test-role",
 	}
 	provider := newTestVaultProvider(mockClient, config)
-	provider.closed = true
+	provider.closed.Store(true)
 
 	// Act
 	pool, err := provider.GetCA(context.Background())
@@ -568,7 +567,7 @@ func TestVaultProvider_RotateCertificate_ProviderClosed(t *testing.T) {
 		Role:     "test-role",
 	}
 	provider := newTestVaultProvider(mockClient, config)
-	provider.closed = true
+	provider.closed.Store(true)
 
 	// Act
 	cert, err := provider.RotateCertificate(context.Background(), &CertificateRequest{
@@ -686,7 +685,7 @@ func TestVaultProvider_Close_Success(t *testing.T) {
 
 	// Assert
 	require.NoError(t, err)
-	assert.True(t, provider.closed)
+	assert.True(t, provider.closed.Load())
 	assert.Nil(t, provider.certs)
 	mockClient.AssertExpectations(t)
 }
@@ -709,7 +708,7 @@ func TestVaultProvider_Close_NilVaultClient(t *testing.T) {
 
 	// Assert
 	require.NoError(t, err)
-	assert.True(t, provider.closed)
+	assert.True(t, provider.closed.Load())
 }
 
 func TestVaultProvider_Close_VaultClientError(t *testing.T) {
@@ -730,7 +729,7 @@ func TestVaultProvider_Close_VaultClientError(t *testing.T) {
 	// Assert
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "close error")
-	assert.True(t, provider.closed)
+	assert.True(t, provider.closed.Load())
 	mockClient.AssertExpectations(t)
 }
 
@@ -1646,7 +1645,7 @@ func TestVaultProvider_Close_MultipleCalls(t *testing.T) {
 	// Assert - First close should succeed, second should also succeed (idempotent)
 	require.NoError(t, err1)
 	require.NoError(t, err2)
-	assert.True(t, provider.closed)
+	assert.True(t, provider.closed.Load())
 }
 
 func TestVaultProvider_OperationsAfterClose(t *testing.T) {

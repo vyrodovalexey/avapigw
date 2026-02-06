@@ -75,17 +75,17 @@ graph TB
 ### Components
 
 #### 1. Operator Controllers
-- **APIRoute Controller** - Manages HTTP route configuration with base reconciler pattern
+- **APIRoute Controller** - Manages HTTP route configuration with enhanced IngressReconciler pattern alignment
 - **GRPCRoute Controller** - Manages gRPC route configuration with base reconciler pattern
 - **Backend Controller** - Manages HTTP backend configuration with base reconciler pattern
 - **GRPCBackend Controller** - Manages gRPC backend configuration with base reconciler pattern
 - **Ingress Controller** - Converts standard Kubernetes Ingress resources to gateway routes
 
 #### 2. Enhanced Admission Webhooks
-- **Validating Webhooks** - Validate CRD specifications before creation/update
-- **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations across Backend vs GRPCBackend
+- **Validating Webhooks** - Validate CRD specifications before creation/update with improved validation constants
+- **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations across Backend vs GRPCBackend with context-based lifecycle management
 - **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
-- **Cross-Reference Validation** - Ensure referenced backends exist
+- **Cross-Reference Validation** - Ensure referenced backends exist with enhanced port range and weight validation
 
 #### 3. gRPC Communication
 - **Configuration Service** - Push configuration updates to gateways
@@ -93,9 +93,9 @@ graph TB
 - **Certificate Management** - Automated certificate provisioning and rotation
 
 #### 4. Certificate Management
-- **Self-Signed Mode** - Generate and manage certificates automatically
-- **Vault PKI Mode** - Integrate with HashiCorp Vault for certificate management
-- **Auto-Rotation** - Automatic certificate renewal before expiry
+- **Self-Signed Mode** - Generate and manage certificates automatically with thread-safe atomic operations
+- **Vault PKI Mode** - Integrate with HashiCorp Vault for certificate management with improved thread safety
+- **Auto-Rotation** - Automatic certificate renewal before expiry with atomic state management
 
 ## Key Features
 

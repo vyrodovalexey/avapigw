@@ -19,11 +19,16 @@ type BackendValidator struct {
 	DuplicateChecker *DuplicateChecker
 }
 
-// SetupBackendWebhook sets up the Backend webhook with the manager.
+// SetupBackendWebhook sets up the Backend webhook with the manager using default configuration.
 func SetupBackendWebhook(mgr ctrl.Manager) error {
+	return SetupBackendWebhookWithConfig(mgr, DefaultDuplicateCheckerConfig())
+}
+
+// SetupBackendWebhookWithConfig sets up the Backend webhook with the manager using the provided configuration.
+func SetupBackendWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerConfig) error {
 	validator := &BackendValidator{
 		Client:           mgr.GetClient(),
-		DuplicateChecker: NewDuplicateChecker(mgr.GetClient()),
+		DuplicateChecker: NewDuplicateCheckerFromConfig(mgr.GetClient(), cfg),
 	}
 	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.Backend{}).
 		WithValidator(validator).

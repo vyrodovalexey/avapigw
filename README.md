@@ -40,6 +40,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **SNI Certificate Management** - Per-route certificates with Vault PKI for multi-tenant deployments
 - **Backend Authentication** - JWT, Basic Auth, and mTLS authentication for backend connections
 - **X-Forwarded-For Security** - TrustedProxies configuration for secure client IP handling
+- **Open Redirect Protection** - Automatic validation and blocking of unsafe redirect URLs (javascript:, data:, vbscript: schemes)
 
 ### Authentication & Authorization
 - **JWT Authentication** - Multiple algorithms (RS256, ES256, HS256, etc.) with JWK URL support
@@ -103,6 +104,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 ### Observability
 - **Prometheus Metrics** - Comprehensive metrics collection with route-based labels for cardinality control
+- **WebSocket Metrics** - Dedicated Prometheus metrics for WebSocket connections (total, active, errors)
 - **OpenTelemetry Tracing** - Distributed tracing support with trace context in audit logs
 - **Structured Logging** - JSON and console logging formats
 - **Health Endpoints** - Health, readiness, and liveness probes
@@ -116,7 +118,9 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Multi-platform Builds** - Support for Linux, macOS, and Windows
 - **Shared Error Types** - Consistent error handling with ServerError and StatusCapturingResponseWriter
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
+- **Boolean ENV Override Support** - Symmetric true/false/yes/no/1/0 handling for all boolean environment variables (case-insensitive)
 - **Circuit Breaker Limitation** - Circuit breaker does not support runtime reconfiguration (requires restart)
+- **High Test Coverage** - 94.1% overall test coverage with 96.6% for proxy package
 
 ## 📋 Table of Contents
 
@@ -666,6 +670,23 @@ spec:
       format: json             # json, console
       accessLog: true
 ```
+
+### WebSocket Metrics
+
+The gateway provides dedicated Prometheus metrics for WebSocket connections:
+
+```bash
+# WebSocket connection metrics
+avapigw_websocket_connections_total{backend="websocket-backend"} 150
+avapigw_websocket_connections_active{backend="websocket-backend"} 25
+avapigw_websocket_errors_total{backend="websocket-backend",error_type="connection_failed"} 3
+avapigw_websocket_errors_total{backend="websocket-backend",error_type="upgrade_failed"} 1
+
+# Query WebSocket metrics
+curl http://localhost:9090/metrics | grep websocket
+```
+
+These metrics help monitor WebSocket connection health, track connection patterns, and identify error conditions in real-time.
 
 ### Security Configuration
 
@@ -2943,6 +2964,125 @@ vault:
   authMethod: kubernetes
   kubernetes:
     role: gateway
+```
+
+## ⚙️ Environment Variable Configuration
+
+The AV API Gateway supports comprehensive environment variable configuration with enhanced boolean value handling.
+
+### Boolean Environment Variables
+
+All boolean configuration options support symmetric true/false handling with multiple formats (case-insensitive):
+
+**Supported Boolean Values:**
+- **True values**: `true`, `yes`, `1`, `on`, `enable`, `enabled`
+- **False values**: `false`, `no`, `0`, `off`, `disable`, `disabled`
+
+```bash
+# All of these are equivalent for enabling features
+export VAULT_ENABLED=true
+export VAULT_ENABLED=yes
+export VAULT_ENABLED=1
+export VAULT_ENABLED=on
+
+# All of these are equivalent for disabling features
+export VAULT_ENABLED=false
+export VAULT_ENABLED=no
+export VAULT_ENABLED=0
+export VAULT_ENABLED=off
+```
+
+### Common Environment Variables
+
+```bash
+# Core gateway settings
+export GATEWAY_PORT=8080
+export GATEWAY_HOST=0.0.0.0
+export GATEWAY_LOG_LEVEL=info
+export GATEWAY_LOG_FORMAT=json
+
+# TLS configuration
+export TLS_ENABLED=true
+export TLS_CERT_FILE=/app/certs/tls.crt
+export TLS_KEY_FILE=/app/certs/tls.key
+export TLS_MIN_VERSION=1.2
+
+# Vault integration
+export VAULT_ENABLED=true
+export VAULT_ADDR=https://vault.example.com:8200
+export VAULT_AUTH_METHOD=kubernetes
+export VAULT_ROLE=gateway-role
+
+# Metrics and observability
+export METRICS_ENABLED=true
+export METRICS_PORT=9090
+export TRACING_ENABLED=true
+export TRACING_ENDPOINT=http://jaeger:14268/api/traces
+
+# Security settings
+export CORS_ENABLED=true
+export RATE_LIMIT_ENABLED=true
+export CIRCUIT_BREAKER_ENABLED=true
+```
+
+### Environment Variable Precedence
+
+Configuration values are resolved in the following order (highest to lowest precedence):
+
+1. **Command line flags** - Direct CLI arguments
+2. **Environment variables** - OS environment variables
+3. **Configuration file** - YAML configuration file
+4. **Default values** - Built-in defaults
+
+```bash
+# Example: Override config file settings with environment variables
+export GATEWAY_PORT=9080              # Overrides config file port
+export VAULT_ENABLED=false            # Disables Vault regardless of config file
+./bin/gateway -config gateway.yaml    # Config file provides base configuration
+```
+
+### Docker Environment Configuration
+
+```bash
+# Run with environment variables
+docker run -d \
+  -p 8080:8080 \
+  -p 9090:9090 \
+  -e GATEWAY_LOG_LEVEL=debug \
+  -e VAULT_ENABLED=true \
+  -e VAULT_ADDR=https://vault.example.com:8200 \
+  -e METRICS_ENABLED=true \
+  ghcr.io/vyrodovalexey/avapigw:latest
+```
+
+### Kubernetes Environment Configuration
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: avapigw
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway
+        image: ghcr.io/vyrodovalexey/avapigw:latest
+        env:
+        - name: GATEWAY_LOG_LEVEL
+          value: "info"
+        - name: VAULT_ENABLED
+          value: "true"
+        - name: VAULT_ADDR
+          value: "https://vault.vault.svc.cluster.local:8200"
+        - name: VAULT_AUTH_METHOD
+          value: "kubernetes"
+        - name: VAULT_ROLE
+          value: "gateway-role"
+        - name: METRICS_ENABLED
+          value: "yes"                    # Alternative boolean format
+        - name: TRACING_ENABLED
+          value: "1"                      # Alternative boolean format
 ```
 
 ## 🔐 Authentication

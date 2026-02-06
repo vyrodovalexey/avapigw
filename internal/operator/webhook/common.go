@@ -11,6 +11,36 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Validation boundary constants for webhook validation.
+const (
+	// MinPort is the minimum valid port number.
+	MinPort = 1
+
+	// MaxPort is the maximum valid port number.
+	MaxPort = 65535
+
+	// MinWeight is the minimum valid weight for load balancing.
+	MinWeight = 0
+
+	// MaxWeight is the maximum valid weight for load balancing.
+	MaxWeight = 100
+
+	// MinRetryAttempts is the minimum number of retry attempts.
+	MinRetryAttempts = 1
+
+	// MaxRetryAttempts is the maximum number of retry attempts.
+	MaxRetryAttempts = 10
+
+	// MinStatusCode is the minimum valid HTTP status code.
+	MinStatusCode = 100
+
+	// MaxStatusCode is the maximum valid HTTP status code.
+	MaxStatusCode = 599
+
+	// TotalWeightExpected is the expected total weight when multiple destinations are configured.
+	TotalWeightExpected = 100
+)
+
 // validateDuration validates a duration string using Go's time.ParseDuration.
 // This is safer than regex-based validation and avoids potential ReDoS vulnerabilities.
 // Negative durations are rejected as they don't make sense for timeout/interval configurations.
@@ -229,18 +259,18 @@ func validateBackendHosts(hosts []avapigwv1alpha1.BackendHost) error {
 		if host.Address == "" {
 			return fmt.Errorf("hosts[%d].address is required", i)
 		}
-		if host.Port < 1 || host.Port > 65535 {
-			return fmt.Errorf("hosts[%d].port must be between 1 and 65535", i)
+		if host.Port < MinPort || host.Port > MaxPort {
+			return fmt.Errorf("hosts[%d].port must be between %d and %d", i, MinPort, MaxPort)
 		}
-		if host.Weight < 0 || host.Weight > 100 {
-			return fmt.Errorf("hosts[%d].weight must be between 0 and 100", i)
+		if host.Weight < MinWeight || host.Weight > MaxWeight {
+			return fmt.Errorf("hosts[%d].weight must be between %d and %d", i, MinWeight, MaxWeight)
 		}
 		totalWeight += host.Weight
 	}
 
 	// If weights are specified, they should sum to 100
-	if len(hosts) > 1 && totalWeight > 0 && totalWeight != 100 {
-		return fmt.Errorf("total weight of all hosts must equal 100 (got %d)", totalWeight)
+	if len(hosts) > 1 && totalWeight > 0 && totalWeight != TotalWeightExpected {
+		return fmt.Errorf("total weight of all hosts must equal %d (got %d)", TotalWeightExpected, totalWeight)
 	}
 
 	return nil

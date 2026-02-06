@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
@@ -52,7 +53,7 @@ type selfSignedProvider struct {
 	mu     sync.RWMutex
 	ca     *Certificate
 	certs  map[string]*Certificate
-	closed bool
+	closed atomic.Bool
 }
 
 // NewSelfSignedProvider creates a new self-signed certificate provider.
@@ -109,7 +110,7 @@ func (p *selfSignedProvider) GetCertificate(ctx context.Context, req *Certificat
 		return nil, fmt.Errorf("context canceled: %w", err)
 	}
 
-	if p.closed {
+	if p.closed.Load() {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
 
@@ -136,7 +137,7 @@ func (p *selfSignedProvider) GetCertificate(ctx context.Context, req *Certificat
 
 // GetCA returns the CA certificate pool.
 func (p *selfSignedProvider) GetCA(ctx context.Context) (*x509.CertPool, error) {
-	if p.closed {
+	if p.closed.Load() {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
 
@@ -159,7 +160,7 @@ func (p *selfSignedProvider) RotateCertificate(ctx context.Context, req *Certifi
 		return nil, fmt.Errorf("context canceled: %w", err)
 	}
 
-	if p.closed {
+	if p.closed.Load() {
 		return nil, fmt.Errorf("certificate provider is closed")
 	}
 
@@ -175,7 +176,7 @@ func (p *selfSignedProvider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.closed = true
+	p.closed.Store(true)
 	p.certs = nil
 	p.ca = nil
 

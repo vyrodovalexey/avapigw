@@ -21,11 +21,16 @@ type APIRouteValidator struct {
 	DuplicateChecker *DuplicateChecker
 }
 
-// SetupAPIRouteWebhook sets up the APIRoute webhook with the manager.
+// SetupAPIRouteWebhook sets up the APIRoute webhook with the manager using default configuration.
 func SetupAPIRouteWebhook(mgr ctrl.Manager) error {
+	return SetupAPIRouteWebhookWithConfig(mgr, DefaultDuplicateCheckerConfig())
+}
+
+// SetupAPIRouteWebhookWithConfig sets up the APIRoute webhook with the manager using the provided configuration.
+func SetupAPIRouteWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerConfig) error {
 	validator := &APIRouteValidator{
 		Client:           mgr.GetClient(),
-		DuplicateChecker: NewDuplicateChecker(mgr.GetClient()),
+		DuplicateChecker: NewDuplicateCheckerFromConfig(mgr.GetClient(), cfg),
 	}
 	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.APIRoute{}).
 		WithValidator(validator).
@@ -267,17 +272,17 @@ func (v *APIRouteValidator) validateRouteDestinations(routes []avapigwv1alpha1.R
 		if route.Destination.Host == "" {
 			return fmt.Errorf("route[%d].destination.host is required", i)
 		}
-		if route.Destination.Port < 1 || route.Destination.Port > 65535 {
-			return fmt.Errorf("route[%d].destination.port must be between 1 and 65535", i)
+		if route.Destination.Port < MinPort || route.Destination.Port > MaxPort {
+			return fmt.Errorf("route[%d].destination.port must be between %d and %d", i, MinPort, MaxPort)
 		}
-		if route.Weight < 0 || route.Weight > 100 {
-			return fmt.Errorf("route[%d].weight must be between 0 and 100", i)
+		if route.Weight < MinWeight || route.Weight > MaxWeight {
+			return fmt.Errorf("route[%d].weight must be between %d and %d", i, MinWeight, MaxWeight)
 		}
 		totalWeight += route.Weight
 	}
 
-	if len(routes) > 1 && totalWeight != 100 && totalWeight != 0 {
-		return fmt.Errorf("total weight of all routes must equal 100 (got %d)", totalWeight)
+	if len(routes) > 1 && totalWeight != TotalWeightExpected && totalWeight != 0 {
+		return fmt.Errorf("total weight of all routes must equal %d (got %d)", TotalWeightExpected, totalWeight)
 	}
 
 	return nil
@@ -285,8 +290,8 @@ func (v *APIRouteValidator) validateRouteDestinations(routes []avapigwv1alpha1.R
 
 // validateRetryPolicy validates retry policy configuration.
 func (v *APIRouteValidator) validateRetryPolicy(policy *avapigwv1alpha1.RetryPolicy) error {
-	if policy.Attempts < 1 || policy.Attempts > 10 {
-		return fmt.Errorf("retries.attempts must be between 1 and 10")
+	if policy.Attempts < MinRetryAttempts || policy.Attempts > MaxRetryAttempts {
+		return fmt.Errorf("retries.attempts must be between %d and %d", MinRetryAttempts, MaxRetryAttempts)
 	}
 
 	if policy.PerTryTimeout != "" {
@@ -329,8 +334,8 @@ func (v *APIRouteValidator) validateRedirect(redirect *avapigwv1alpha1.RedirectC
 		return fmt.Errorf("redirect.scheme must be 'http' or 'https'")
 	}
 
-	if redirect.Port != 0 && (redirect.Port < 1 || redirect.Port > 65535) {
-		return fmt.Errorf("redirect.port must be between 1 and 65535")
+	if redirect.Port != 0 && (redirect.Port < MinPort || redirect.Port > MaxPort) {
+		return fmt.Errorf("redirect.port must be between %d and %d", MinPort, MaxPort)
 	}
 
 	return nil
@@ -338,8 +343,8 @@ func (v *APIRouteValidator) validateRedirect(redirect *avapigwv1alpha1.RedirectC
 
 // validateDirectResponse validates direct response configuration.
 func (v *APIRouteValidator) validateDirectResponse(dr *avapigwv1alpha1.DirectResponseConfig) error {
-	if dr.Status < 100 || dr.Status > 599 {
-		return fmt.Errorf("directResponse.status must be between 100 and 599")
+	if dr.Status < MinStatusCode || dr.Status > MaxStatusCode {
+		return fmt.Errorf("directResponse.status must be between %d and %d", MinStatusCode, MaxStatusCode)
 	}
 
 	return nil
@@ -360,8 +365,8 @@ func (v *APIRouteValidator) validateFaultInjection(fault *avapigwv1alpha1.FaultI
 	}
 
 	if fault.Abort != nil {
-		if fault.Abort.HTTPStatus < 100 || fault.Abort.HTTPStatus > 599 {
-			return fmt.Errorf("fault.abort.httpStatus must be between 100 and 599")
+		if fault.Abort.HTTPStatus < MinStatusCode || fault.Abort.HTTPStatus > MaxStatusCode {
+			return fmt.Errorf("fault.abort.httpStatus must be between %d and %d", MinStatusCode, MaxStatusCode)
 		}
 		if fault.Abort.Percentage < 0 || fault.Abort.Percentage > 100 {
 			return fmt.Errorf("fault.abort.percentage must be between 0 and 100")

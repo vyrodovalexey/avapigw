@@ -4,6 +4,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -11,6 +12,72 @@ import (
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
+
+// ValidConditionFromBool creates a ConditionUpdate for the Valid condition
+// based on a boolean valid state.
+func ValidConditionFromBool(valid bool, reason, message string, generation int64) ConditionUpdate {
+	status := metav1.ConditionFalse
+	if valid {
+		status = metav1.ConditionTrue
+	}
+	return ConditionUpdate{
+		Type:       avapigwv1alpha1.ConditionValid,
+		Status:     status,
+		Reason:     avapigwv1alpha1.ConditionReason(reason),
+		Message:    message,
+		Generation: generation,
+	}
+}
+
+// FindCondition finds a condition by type in the conditions slice.
+// Returns nil if not found.
+func FindCondition(
+	conditions []avapigwv1alpha1.Condition,
+	condType avapigwv1alpha1.ConditionType,
+) *avapigwv1alpha1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == condType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+// IsConditionTrue returns true if the condition with the given type is True.
+func IsConditionTrue(conditions []avapigwv1alpha1.Condition, condType avapigwv1alpha1.ConditionType) bool {
+	cond := FindCondition(conditions, condType)
+	return cond != nil && cond.Status == metav1.ConditionTrue
+}
+
+// IsConditionFalse returns true if the condition with the given type is False.
+func IsConditionFalse(conditions []avapigwv1alpha1.Condition, condType avapigwv1alpha1.ConditionType) bool {
+	cond := FindCondition(conditions, condType)
+	return cond != nil && cond.Status == metav1.ConditionFalse
+}
+
+// IsConditionUnknown returns true if the condition with the given type is Unknown or not found.
+func IsConditionUnknown(conditions []avapigwv1alpha1.Condition, condType avapigwv1alpha1.ConditionType) bool {
+	cond := FindCondition(conditions, condType)
+	return cond == nil || cond.Status == metav1.ConditionUnknown
+}
+
+// GetConditionReason returns the reason for a condition, or empty string if not found.
+func GetConditionReason(conditions []avapigwv1alpha1.Condition, condType avapigwv1alpha1.ConditionType) string {
+	cond := FindCondition(conditions, condType)
+	if cond == nil {
+		return ""
+	}
+	return string(cond.Reason)
+}
+
+// GetConditionMessage returns the message for a condition, or empty string if not found.
+func GetConditionMessage(conditions []avapigwv1alpha1.Condition, condType avapigwv1alpha1.ConditionType) string {
+	cond := FindCondition(conditions, condType)
+	if cond == nil {
+		return ""
+	}
+	return cond.Message
+}
 
 // Status message constants for health conditions.
 const (
@@ -141,6 +208,12 @@ func (u *StatusUpdater) UpdateRouteStatus(
 	reason, message string,
 ) error {
 	logger := log.FromContext(ctx)
+	startTime := time.Now()
+	kind := route.GetObjectKind().GroupVersionKind().Kind
+	if kind == "" {
+		// Fallback for when GVK is not set
+		kind = "Route"
+	}
 
 	// Capture the base state before modifications for the merge patch
 	patch := client.MergeFrom(route.DeepCopyObject().(client.Object))
@@ -155,14 +228,16 @@ func (u *StatusUpdater) UpdateRouteStatus(
 
 	// Patch status using merge patch to reduce conflicts
 	if err := u.client.Status().Patch(ctx, route, patch); err != nil {
+		GetStatusUpdateMetrics().RecordStatusUpdate(kind, time.Since(startTime), false)
 		logger.Error(err, "failed to patch route status",
-			"kind", route.GetObjectKind().GroupVersionKind().Kind,
+			"kind", kind,
 			"name", route.GetName(),
 			"namespace", route.GetNamespace(),
 		)
 		return fmt.Errorf("failed to patch route status: %w", err)
 	}
 
+	GetStatusUpdateMetrics().RecordStatusUpdate(kind, time.Since(startTime), true)
 	return nil
 }
 
@@ -177,6 +252,12 @@ func (u *StatusUpdater) UpdateBackendStatus(
 	totalHosts int,
 ) error {
 	logger := log.FromContext(ctx)
+	startTime := time.Now()
+	kind := backend.GetObjectKind().GroupVersionKind().Kind
+	if kind == "" {
+		// Fallback for when GVK is not set
+		kind = "Backend"
+	}
 
 	// Capture the base state before modifications for the merge patch
 	patch := client.MergeFrom(backend.DeepCopyObject().(client.Object))
@@ -206,13 +287,15 @@ func (u *StatusUpdater) UpdateBackendStatus(
 
 	// Patch status using merge patch to reduce conflicts
 	if err := u.client.Status().Patch(ctx, backend, patch); err != nil {
+		GetStatusUpdateMetrics().RecordStatusUpdate(kind, time.Since(startTime), false)
 		logger.Error(err, "failed to patch backend status",
-			"kind", backend.GetObjectKind().GroupVersionKind().Kind,
+			"kind", kind,
 			"name", backend.GetName(),
 			"namespace", backend.GetNamespace(),
 		)
 		return fmt.Errorf("failed to patch backend status: %w", err)
 	}
 
+	GetStatusUpdateMetrics().RecordStatusUpdate(kind, time.Since(startTime), true)
 	return nil
 }

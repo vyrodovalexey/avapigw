@@ -1216,3 +1216,516 @@ func TestStatusUpdater_UpdateBackendStatus_Logic(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// ValidConditionFromBool Tests
+// ============================================================================
+
+func TestValidConditionFromBool_True(t *testing.T) {
+	result := ValidConditionFromBool(true, "ValidationPassed", "All validations passed", 5)
+
+	if result.Type != avapigwv1alpha1.ConditionValid {
+		t.Errorf("ValidConditionFromBool() Type = %v, want %v", result.Type, avapigwv1alpha1.ConditionValid)
+	}
+	if result.Status != metav1.ConditionTrue {
+		t.Errorf("ValidConditionFromBool() Status = %v, want %v", result.Status, metav1.ConditionTrue)
+	}
+	if result.Reason != avapigwv1alpha1.ConditionReason("ValidationPassed") {
+		t.Errorf("ValidConditionFromBool() Reason = %v, want %v", result.Reason, "ValidationPassed")
+	}
+	if result.Message != "All validations passed" {
+		t.Errorf("ValidConditionFromBool() Message = %v, want %v", result.Message, "All validations passed")
+	}
+	if result.Generation != 5 {
+		t.Errorf("ValidConditionFromBool() Generation = %v, want %v", result.Generation, 5)
+	}
+}
+
+func TestValidConditionFromBool_False(t *testing.T) {
+	result := ValidConditionFromBool(false, "ValidationFailed", "Validation errors found", 3)
+
+	if result.Type != avapigwv1alpha1.ConditionValid {
+		t.Errorf("ValidConditionFromBool() Type = %v, want %v", result.Type, avapigwv1alpha1.ConditionValid)
+	}
+	if result.Status != metav1.ConditionFalse {
+		t.Errorf("ValidConditionFromBool() Status = %v, want %v", result.Status, metav1.ConditionFalse)
+	}
+	if result.Reason != avapigwv1alpha1.ConditionReason("ValidationFailed") {
+		t.Errorf("ValidConditionFromBool() Reason = %v, want %v", result.Reason, "ValidationFailed")
+	}
+	if result.Message != "Validation errors found" {
+		t.Errorf("ValidConditionFromBool() Message = %v, want %v", result.Message, "Validation errors found")
+	}
+}
+
+func TestValidConditionFromBool_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		valid      bool
+		reason     string
+		message    string
+		generation int64
+		wantStatus metav1.ConditionStatus
+	}{
+		{
+			name:       "valid true",
+			valid:      true,
+			reason:     "Passed",
+			message:    "OK",
+			generation: 1,
+			wantStatus: metav1.ConditionTrue,
+		},
+		{
+			name:       "valid false",
+			valid:      false,
+			reason:     "Failed",
+			message:    "Error",
+			generation: 2,
+			wantStatus: metav1.ConditionFalse,
+		},
+		{
+			name:       "valid true with empty message",
+			valid:      true,
+			reason:     "Validated",
+			message:    "",
+			generation: 0,
+			wantStatus: metav1.ConditionTrue,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ValidConditionFromBool(tt.valid, tt.reason, tt.message, tt.generation)
+
+			if result.Type != avapigwv1alpha1.ConditionValid {
+				t.Errorf("Type = %v, want %v", result.Type, avapigwv1alpha1.ConditionValid)
+			}
+			if result.Status != tt.wantStatus {
+				t.Errorf("Status = %v, want %v", result.Status, tt.wantStatus)
+			}
+			if string(result.Reason) != tt.reason {
+				t.Errorf("Reason = %v, want %v", result.Reason, tt.reason)
+			}
+			if result.Message != tt.message {
+				t.Errorf("Message = %v, want %v", result.Message, tt.message)
+			}
+			if result.Generation != tt.generation {
+				t.Errorf("Generation = %v, want %v", result.Generation, tt.generation)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// FindCondition Tests
+// ============================================================================
+
+func TestFindCondition_Found(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:    avapigwv1alpha1.ConditionReady,
+			Status:  metav1.ConditionTrue,
+			Reason:  avapigwv1alpha1.ReasonReconciled,
+			Message: "Ready",
+		},
+		{
+			Type:    avapigwv1alpha1.ConditionHealthy,
+			Status:  metav1.ConditionTrue,
+			Reason:  avapigwv1alpha1.ReasonHealthCheckOK,
+			Message: "Healthy",
+		},
+	}
+
+	result := FindCondition(conditions, avapigwv1alpha1.ConditionReady)
+	if result == nil {
+		t.Fatal("FindCondition() returned nil for existing condition")
+	}
+	if result.Type != avapigwv1alpha1.ConditionReady {
+		t.Errorf("FindCondition() Type = %v, want %v", result.Type, avapigwv1alpha1.ConditionReady)
+	}
+	if result.Status != metav1.ConditionTrue {
+		t.Errorf("FindCondition() Status = %v, want %v", result.Status, metav1.ConditionTrue)
+	}
+}
+
+func TestFindCondition_NotFound(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionTrue,
+		},
+	}
+
+	result := FindCondition(conditions, avapigwv1alpha1.ConditionHealthy)
+	if result != nil {
+		t.Errorf("FindCondition() = %v, want nil for non-existing condition", result)
+	}
+}
+
+func TestFindCondition_EmptySlice(t *testing.T) {
+	var conditions []avapigwv1alpha1.Condition
+
+	result := FindCondition(conditions, avapigwv1alpha1.ConditionReady)
+	if result != nil {
+		t.Errorf("FindCondition() = %v, want nil for empty slice", result)
+	}
+}
+
+func TestFindCondition_NilSlice(t *testing.T) {
+	result := FindCondition(nil, avapigwv1alpha1.ConditionReady)
+	if result != nil {
+		t.Errorf("FindCondition() = %v, want nil for nil slice", result)
+	}
+}
+
+// ============================================================================
+// IsConditionTrue Tests
+// ============================================================================
+
+func TestIsConditionTrue_True(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionTrue,
+		},
+	}
+
+	if !IsConditionTrue(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionTrue() = false, want true")
+	}
+}
+
+func TestIsConditionTrue_False(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionFalse,
+		},
+	}
+
+	if IsConditionTrue(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionTrue() = true, want false")
+	}
+}
+
+func TestIsConditionTrue_Unknown(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionUnknown,
+		},
+	}
+
+	if IsConditionTrue(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionTrue() = true for Unknown, want false")
+	}
+}
+
+func TestIsConditionTrue_NotFound(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{}
+
+	if IsConditionTrue(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionTrue() = true for non-existing condition, want false")
+	}
+}
+
+// ============================================================================
+// IsConditionFalse Tests
+// ============================================================================
+
+func TestIsConditionFalse_True(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionTrue,
+		},
+	}
+
+	if IsConditionFalse(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionFalse() = true for True status, want false")
+	}
+}
+
+func TestIsConditionFalse_False(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionFalse,
+		},
+	}
+
+	if !IsConditionFalse(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionFalse() = false, want true")
+	}
+}
+
+func TestIsConditionFalse_Unknown(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionUnknown,
+		},
+	}
+
+	if IsConditionFalse(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionFalse() = true for Unknown, want false")
+	}
+}
+
+func TestIsConditionFalse_NotFound(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{}
+
+	if IsConditionFalse(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionFalse() = true for non-existing condition, want false")
+	}
+}
+
+// ============================================================================
+// IsConditionUnknown Tests
+// ============================================================================
+
+func TestIsConditionUnknown_True(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionTrue,
+		},
+	}
+
+	if IsConditionUnknown(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionUnknown() = true for True status, want false")
+	}
+}
+
+func TestIsConditionUnknown_False(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionFalse,
+		},
+	}
+
+	if IsConditionUnknown(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionUnknown() = true for False status, want false")
+	}
+}
+
+func TestIsConditionUnknown_Unknown(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionUnknown,
+		},
+	}
+
+	if !IsConditionUnknown(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionUnknown() = false for Unknown status, want true")
+	}
+}
+
+func TestIsConditionUnknown_NotFound(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{}
+
+	if !IsConditionUnknown(conditions, avapigwv1alpha1.ConditionReady) {
+		t.Error("IsConditionUnknown() = false for non-existing condition, want true")
+	}
+}
+
+// ============================================================================
+// GetConditionReason Tests
+// ============================================================================
+
+func TestGetConditionReason_Found(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionTrue,
+			Reason: avapigwv1alpha1.ReasonReconciled,
+		},
+	}
+
+	result := GetConditionReason(conditions, avapigwv1alpha1.ConditionReady)
+	if result != string(avapigwv1alpha1.ReasonReconciled) {
+		t.Errorf("GetConditionReason() = %q, want %q", result, avapigwv1alpha1.ReasonReconciled)
+	}
+}
+
+func TestGetConditionReason_NotFound(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{}
+
+	result := GetConditionReason(conditions, avapigwv1alpha1.ConditionReady)
+	if result != "" {
+		t.Errorf("GetConditionReason() = %q, want empty string", result)
+	}
+}
+
+func TestGetConditionReason_EmptyReason(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:   avapigwv1alpha1.ConditionReady,
+			Status: metav1.ConditionTrue,
+			Reason: "",
+		},
+	}
+
+	result := GetConditionReason(conditions, avapigwv1alpha1.ConditionReady)
+	if result != "" {
+		t.Errorf("GetConditionReason() = %q, want empty string", result)
+	}
+}
+
+// ============================================================================
+// GetConditionMessage Tests
+// ============================================================================
+
+func TestGetConditionMessage_Found(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:    avapigwv1alpha1.ConditionReady,
+			Status:  metav1.ConditionTrue,
+			Message: "All systems operational",
+		},
+	}
+
+	result := GetConditionMessage(conditions, avapigwv1alpha1.ConditionReady)
+	if result != "All systems operational" {
+		t.Errorf("GetConditionMessage() = %q, want %q", result, "All systems operational")
+	}
+}
+
+func TestGetConditionMessage_NotFound(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{}
+
+	result := GetConditionMessage(conditions, avapigwv1alpha1.ConditionReady)
+	if result != "" {
+		t.Errorf("GetConditionMessage() = %q, want empty string", result)
+	}
+}
+
+func TestGetConditionMessage_EmptyMessage(t *testing.T) {
+	conditions := []avapigwv1alpha1.Condition{
+		{
+			Type:    avapigwv1alpha1.ConditionReady,
+			Status:  metav1.ConditionTrue,
+			Message: "",
+		},
+	}
+
+	result := GetConditionMessage(conditions, avapigwv1alpha1.ConditionReady)
+	if result != "" {
+		t.Errorf("GetConditionMessage() = %q, want empty string", result)
+	}
+}
+
+// ============================================================================
+// Condition Helper Functions Table-Driven Tests
+// ============================================================================
+
+func TestConditionHelpers_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		conditions  []avapigwv1alpha1.Condition
+		condType    avapigwv1alpha1.ConditionType
+		wantFound   bool
+		wantTrue    bool
+		wantFalse   bool
+		wantUnknown bool
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name: "condition true",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:    avapigwv1alpha1.ConditionReady,
+					Status:  metav1.ConditionTrue,
+					Reason:  avapigwv1alpha1.ReasonReconciled,
+					Message: "Ready",
+				},
+			},
+			condType:    avapigwv1alpha1.ConditionReady,
+			wantFound:   true,
+			wantTrue:    true,
+			wantFalse:   false,
+			wantUnknown: false,
+			wantReason:  string(avapigwv1alpha1.ReasonReconciled),
+			wantMessage: "Ready",
+		},
+		{
+			name: "condition false",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:    avapigwv1alpha1.ConditionHealthy,
+					Status:  metav1.ConditionFalse,
+					Reason:  avapigwv1alpha1.ReasonHealthCheckFail,
+					Message: "Unhealthy",
+				},
+			},
+			condType:    avapigwv1alpha1.ConditionHealthy,
+			wantFound:   true,
+			wantTrue:    false,
+			wantFalse:   true,
+			wantUnknown: false,
+			wantReason:  string(avapigwv1alpha1.ReasonHealthCheckFail),
+			wantMessage: "Unhealthy",
+		},
+		{
+			name: "condition unknown",
+			conditions: []avapigwv1alpha1.Condition{
+				{
+					Type:    avapigwv1alpha1.ConditionValid,
+					Status:  metav1.ConditionUnknown,
+					Reason:  "Pending",
+					Message: "Validation pending",
+				},
+			},
+			condType:    avapigwv1alpha1.ConditionValid,
+			wantFound:   true,
+			wantTrue:    false,
+			wantFalse:   false,
+			wantUnknown: true,
+			wantReason:  "Pending",
+			wantMessage: "Validation pending",
+		},
+		{
+			name:        "condition not found",
+			conditions:  []avapigwv1alpha1.Condition{},
+			condType:    avapigwv1alpha1.ConditionReady,
+			wantFound:   false,
+			wantTrue:    false,
+			wantFalse:   false,
+			wantUnknown: true,
+			wantReason:  "",
+			wantMessage: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			found := FindCondition(tt.conditions, tt.condType)
+			if (found != nil) != tt.wantFound {
+				t.Errorf("FindCondition() found = %v, want %v", found != nil, tt.wantFound)
+			}
+
+			if IsConditionTrue(tt.conditions, tt.condType) != tt.wantTrue {
+				t.Errorf("IsConditionTrue() = %v, want %v", IsConditionTrue(tt.conditions, tt.condType), tt.wantTrue)
+			}
+
+			if IsConditionFalse(tt.conditions, tt.condType) != tt.wantFalse {
+				t.Errorf("IsConditionFalse() = %v, want %v", IsConditionFalse(tt.conditions, tt.condType), tt.wantFalse)
+			}
+
+			if IsConditionUnknown(tt.conditions, tt.condType) != tt.wantUnknown {
+				t.Errorf("IsConditionUnknown() = %v, want %v", IsConditionUnknown(tt.conditions, tt.condType), tt.wantUnknown)
+			}
+
+			if GetConditionReason(tt.conditions, tt.condType) != tt.wantReason {
+				t.Errorf("GetConditionReason() = %q, want %q", GetConditionReason(tt.conditions, tt.condType), tt.wantReason)
+			}
+
+			if GetConditionMessage(tt.conditions, tt.condType) != tt.wantMessage {
+				t.Errorf("GetConditionMessage() = %q, want %q", GetConditionMessage(tt.conditions, tt.condType), tt.wantMessage)
+			}
+		})
+	}
+}

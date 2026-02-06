@@ -842,3 +842,87 @@ func TestGRPCListener_WithGRPCVaultProviderFactory_NilFactory(t *testing.T) {
 	assert.NotNil(t, listener)
 	assert.Nil(t, listener.vaultProviderFactory)
 }
+
+func TestGRPCListener_CreateTLSManagerFromConfig_WithVault(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	// Create a mock vault provider factory
+	factory := func(vaultCfg *tlspkg.VaultTLSConfig, _ observability.Logger) (tlspkg.CertificateProvider, error) {
+		// Verify the Vault config is passed correctly
+		assert.True(t, vaultCfg.Enabled)
+		assert.Equal(t, "pki", vaultCfg.PKIMount)
+		assert.Equal(t, "test-role", vaultCfg.Role)
+		assert.Equal(t, "test.example.com", vaultCfg.CommonName)
+		assert.Equal(t, []string{"localhost", "test.local"}, vaultCfg.AltNames)
+		return tlspkg.NewNopProvider(), nil
+	}
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCVaultProviderFactory(factory),
+	)
+	require.NoError(t, err)
+
+	// Create TLS config with Vault enabled
+	tlsCfg := &config.TLSConfig{
+		Enabled: true,
+		Mode:    "SIMPLE",
+		Vault: &config.VaultGRPCTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "test-role",
+			CommonName: "test.example.com",
+			AltNames:   []string{"localhost", "test.local"},
+		},
+	}
+
+	// Create TLS manager from config - this should use the Vault provider
+	manager, err := listener.createTLSManagerFromConfig(tlsCfg)
+	require.NoError(t, err)
+	assert.NotNil(t, manager)
+	assert.Equal(t, tlspkg.TLSModeSimple, manager.GetMode())
+}
+
+func TestGRPCListener_CreateTLSManagerFromConfig_VaultDefaultsToSimpleMode(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	factory := func(_ *tlspkg.VaultTLSConfig, _ observability.Logger) (tlspkg.CertificateProvider, error) {
+		return tlspkg.NewNopProvider(), nil
+	}
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCVaultProviderFactory(factory),
+	)
+	require.NoError(t, err)
+
+	// Create TLS config with Vault enabled but no explicit mode
+	tlsCfg := &config.TLSConfig{
+		Enabled: true,
+		// Mode is not set - should default to SIMPLE when Vault is enabled
+		Vault: &config.VaultGRPCTLSConfig{
+			Enabled:    true,
+			PKIMount:   "pki",
+			Role:       "test-role",
+			CommonName: "test.example.com",
+		},
+	}
+
+	manager, err := listener.createTLSManagerFromConfig(tlsCfg)
+	require.NoError(t, err)
+	assert.NotNil(t, manager)
+	// Should default to SIMPLE mode when Vault is enabled
+	assert.Equal(t, tlspkg.TLSModeSimple, manager.GetMode())
+}

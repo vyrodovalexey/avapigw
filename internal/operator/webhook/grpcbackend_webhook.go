@@ -19,11 +19,16 @@ type GRPCBackendValidator struct {
 	DuplicateChecker *DuplicateChecker
 }
 
-// SetupGRPCBackendWebhook sets up the GRPCBackend webhook with the manager.
+// SetupGRPCBackendWebhook sets up the GRPCBackend webhook with the manager using default configuration.
 func SetupGRPCBackendWebhook(mgr ctrl.Manager) error {
+	return SetupGRPCBackendWebhookWithConfig(mgr, DefaultDuplicateCheckerConfig())
+}
+
+// SetupGRPCBackendWebhookWithConfig sets up the GRPCBackend webhook with the manager using the provided configuration.
+func SetupGRPCBackendWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerConfig) error {
 	validator := &GRPCBackendValidator{
 		Client:           mgr.GetClient(),
-		DuplicateChecker: NewDuplicateChecker(mgr.GetClient()),
+		DuplicateChecker: NewDuplicateCheckerFromConfig(mgr.GetClient(), cfg),
 	}
 	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.GRPCBackend{}).
 		WithValidator(validator).

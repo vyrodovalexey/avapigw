@@ -183,5 +183,36 @@ rules:
       - watch
       - update
       - patch
+  
+  # MutatingWebhookConfiguration - for future use if mutating webhooks are added
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - mutatingwebhookconfigurations
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  {{- end }}
+  
+  # ==========================================================================
+  # Namespace Resources (for cluster-wide duplicate detection)
+  # ==========================================================================
+  {{- if and .Values.operator.webhook.enabled .Values.operator.webhook.duplicateDetection }}
+  {{- if .Values.operator.webhook.duplicateDetection.clusterWide }}
+  
+  # Namespaces - Read-only access for namespace-scoped operations
+  # Required for: determining namespace boundaries in cluster-wide duplicate detection
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+  {{- end }}
   {{- end }}
 {{- end }}
