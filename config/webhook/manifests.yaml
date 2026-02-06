@@ -1,0 +1,88 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: avapigw-operator-validating-webhook-configuration
+  labels:
+    app.kubernetes.io/name: avapigw-operator
+    app.kubernetes.io/component: webhook
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: avapigw-operator-webhook-service
+      namespace: avapigw-system
+      path: /validate-avapigw-io-v1alpha1-apiroute
+  failurePolicy: Fail
+  name: vapiroute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - apiroutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: avapigw-operator-webhook-service
+      namespace: avapigw-system
+      path: /validate-avapigw-io-v1alpha1-grpcroute
+  failurePolicy: Fail
+  name: vgrpcroute.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - grpcroutes
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: avapigw-operator-webhook-service
+      namespace: avapigw-system
+      path: /validate-avapigw-io-v1alpha1-backend
+  failurePolicy: Fail
+  name: vbackend.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - backends
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: avapigw-operator-webhook-service
+      namespace: avapigw-system
+      path: /validate-avapigw-io-v1alpha1-grpcbackend
+  failurePolicy: Fail
+  name: vgrpcbackend.kb.io
+  rules:
+  - apiGroups:
+    - avapigw.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - grpcbackends
+  sideEffects: None

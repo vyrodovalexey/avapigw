@@ -1,0 +1,11 @@
+[Host: api.example.com]
+[User-Agent: YandexTank/IngressPerftest]
+[Accept: application/json]
+[Connection: keep-alive]
+[X-Perf-Test: ingress-controller]
+/api/v1/users
+/api/v1/orders
+/api/v1/products
+/admin
+/admin/metrics
+/health

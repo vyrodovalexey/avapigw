@@ -40,6 +40,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **SNI Certificate Management** - Per-route certificates with Vault PKI for multi-tenant deployments
 - **Backend Authentication** - JWT, Basic Auth, and mTLS authentication for backend connections
 - **X-Forwarded-For Security** - TrustedProxies configuration for secure client IP handling
+- **Open Redirect Protection** - Automatic validation and blocking of unsafe redirect URLs (javascript:, data:, vbscript: schemes)
 
 ### Authentication & Authorization
 - **JWT Authentication** - Multiple algorithms (RS256, ES256, HS256, etc.) with JWK URL support
@@ -103,6 +104,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 ### Observability
 - **Prometheus Metrics** - Comprehensive metrics collection with route-based labels for cardinality control
+- **WebSocket Metrics** - Dedicated Prometheus metrics for WebSocket connections (total, active, errors)
 - **OpenTelemetry Tracing** - Distributed tracing support with trace context in audit logs
 - **Structured Logging** - JSON and console logging formats
 - **Health Endpoints** - Health, readiness, and liveness probes
@@ -116,7 +118,9 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Multi-platform Builds** - Support for Linux, macOS, and Windows
 - **Shared Error Types** - Consistent error handling with ServerError and StatusCapturingResponseWriter
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
+- **Boolean ENV Override Support** - Symmetric true/false/yes/no/1/0 handling for all boolean environment variables (case-insensitive)
 - **Circuit Breaker Limitation** - Circuit breaker does not support runtime reconfiguration (requires restart)
+- **High Test Coverage** - 94.1% overall test coverage with 96.6% for proxy package
 
 ## 📋 Table of Contents
 
@@ -136,6 +140,8 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Observability](#-observability)
 - [Development](#-development)
 - [Kubernetes & Helm](#️-kubernetes--helm)
+- [AVAPIGW Operator](#️-avapigw-operator)
+- [Ingress Controller](#-ingress-controller)
 - [Docker](#-docker)
 - [CI/CD](#-cicd)
 - [Performance Testing](#-performance-testing)
@@ -145,8 +151,10 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.25 (for building from source)
+- Go 1.25.6 (for building from source)
 - Docker (for containerized deployment)
+- Kubernetes 1.23+ (for operator deployment)
+- Helm 3.0+ (for Kubernetes deployment)
 - HashiCorp Vault (optional, for TLS certificate management)
 - Keycloak (optional, for OIDC authentication)
 
@@ -663,6 +671,23 @@ spec:
       accessLog: true
 ```
 
+### WebSocket Metrics
+
+The gateway provides dedicated Prometheus metrics for WebSocket connections:
+
+```bash
+# WebSocket connection metrics
+avapigw_websocket_connections_total{backend="websocket-backend"} 150
+avapigw_websocket_connections_active{backend="websocket-backend"} 25
+avapigw_websocket_errors_total{backend="websocket-backend",error_type="connection_failed"} 3
+avapigw_websocket_errors_total{backend="websocket-backend",error_type="upgrade_failed"} 1
+
+# Query WebSocket metrics
+curl http://localhost:9090/metrics | grep websocket
+```
+
+These metrics help monitor WebSocket connection health, track connection patterns, and identify error conditions in real-time.
+
 ### Security Configuration
 
 Configure trusted proxies for secure X-Forwarded-For handling:
@@ -1014,223 +1039,410 @@ When the same option is configured at multiple levels, the more specific level t
 
 ### HTTP Routes Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `routes[].name` | - | ✅ | - | Unique route name |
-| `routes[].match[].uri.exact` | - | ✅ | - | Exact URI match |
-| `routes[].match[].uri.prefix` | - | ✅ | - | URI prefix match |
-| `routes[].match[].uri.regex` | - | ✅ | - | URI regex match |
-| `routes[].match[].methods` | - | ✅ | - | HTTP methods to match |
-| `routes[].match[].headers[].name` | - | ✅ | - | Header name to match |
-| `routes[].match[].headers[].exact` | - | ✅ | - | Exact header value match |
-| `routes[].match[].headers[].prefix` | - | ✅ | - | Header value prefix match |
-| `routes[].match[].headers[].regex` | - | ✅ | - | Header value regex match |
-| `routes[].match[].headers[].present` | - | ✅ | - | Header must be present |
-| `routes[].match[].headers[].absent` | - | ✅ | - | Header must be absent |
-| `routes[].match[].queryParams[].name` | - | ✅ | - | Query parameter name |
-| `routes[].match[].queryParams[].exact` | - | ✅ | - | Exact query parameter value |
-| `routes[].match[].queryParams[].regex` | - | ✅ | - | Query parameter regex match |
-| `routes[].match[].queryParams[].present` | - | ✅ | - | Query parameter must be present |
-| `routes[].route[].destination.host` | - | ✅ | - | Backend host |
-| `routes[].route[].destination.port` | - | ✅ | - | Backend port |
-| `routes[].route[].weight` | - | ✅ | - | Traffic weight for load balancing |
-| `routes[].timeout` | ✅ | ✅ | - | Request timeout |
-| `routes[].retries.attempts` | ✅ | ✅ | - | Max retry attempts |
-| `routes[].retries.perTryTimeout` | ✅ | ✅ | - | Timeout per retry attempt |
-| `routes[].retries.retryOn` | ✅ | ✅ | - | Conditions to retry on |
-| `routes[].redirect.uri` | - | ✅ | - | Redirect URI |
-| `routes[].redirect.code` | - | ✅ | - | Redirect HTTP status code |
-| `routes[].redirect.scheme` | - | ✅ | - | Redirect scheme (http/https) |
-| `routes[].redirect.host` | - | ✅ | - | Redirect host |
-| `routes[].redirect.port` | - | ✅ | - | Redirect port |
-| `routes[].redirect.stripQuery` | - | ✅ | - | Strip query string on redirect |
-| `routes[].rewrite.uri` | - | ✅ | - | Rewrite URI |
-| `routes[].rewrite.authority` | - | ✅ | - | Rewrite authority/host |
-| `routes[].directResponse.status` | - | ✅ | - | Direct response status code |
-| `routes[].directResponse.body` | - | ✅ | - | Direct response body |
-| `routes[].directResponse.headers` | - | ✅ | - | Direct response headers |
-| `routes[].headers.request.set` | - | ✅ | - | Set request headers |
-| `routes[].headers.request.add` | - | ✅ | - | Add request headers |
-| `routes[].headers.request.remove` | - | ✅ | - | Remove request headers |
-| `routes[].headers.response.set` | - | ✅ | - | Set response headers |
-| `routes[].headers.response.add` | - | ✅ | - | Add response headers |
-| `routes[].headers.response.remove` | - | ✅ | - | Remove response headers |
-| `routes[].mirror.destination` | - | ✅ | - | Mirror traffic destination |
-| `routes[].mirror.percentage` | - | ✅ | - | Percentage of traffic to mirror |
-| `routes[].fault.delay.fixedDelay` | - | ✅ | - | Fixed delay duration |
-| `routes[].fault.delay.percentage` | - | ✅ | - | Percentage of requests to delay |
-| `routes[].fault.abort.httpStatus` | - | ✅ | - | HTTP status for abort |
-| `routes[].fault.abort.percentage` | - | ✅ | - | Percentage of requests to abort |
-| `routes[].requestLimits.maxBodySize` | ✅ | ✅ | - | Maximum request body size in bytes |
-| `routes[].requestLimits.maxHeaderSize` | ✅ | ✅ | - | Maximum total header size in bytes |
-| `routes[].cors.allowOrigins` | ✅ | ✅ | - | Allowed origins for CORS |
-| `routes[].cors.allowMethods` | ✅ | ✅ | - | Allowed HTTP methods for CORS |
-| `routes[].cors.allowHeaders` | ✅ | ✅ | - | Allowed request headers for CORS |
-| `routes[].cors.exposeHeaders` | ✅ | ✅ | - | Headers exposed to browser |
-| `routes[].cors.maxAge` | ✅ | ✅ | - | Preflight cache duration in seconds |
-| `routes[].cors.allowCredentials` | ✅ | ✅ | - | Allow credentials in CORS requests |
-| `routes[].security.enabled` | ✅ | ✅ | - | Enable security headers |
-| `routes[].security.headers.enabled` | ✅ | ✅ | - | Enable security headers injection |
-| `routes[].security.headers.xFrameOptions` | ✅ | ✅ | - | X-Frame-Options header value |
-| `routes[].security.headers.xContentTypeOptions` | ✅ | ✅ | - | X-Content-Type-Options header value |
-| `routes[].security.headers.xXSSProtection` | ✅ | ✅ | - | X-XSS-Protection header value |
-| `routes[].security.headers.customHeaders` | ✅ | ✅ | - | Custom security headers |
+| Option | Global | Route | Backend | CRD Route | Description |
+|--------|:------:|:-----:|:-------:|:---------:|-------------|
+| `routes[].name` | - | ✅ | - | ✅ | Unique route name |
+| `routes[].match[].uri.exact` | - | ✅ | - | ✅ | Exact URI match |
+| `routes[].match[].uri.prefix` | - | ✅ | - | ✅ | URI prefix match |
+| `routes[].match[].uri.regex` | - | ✅ | - | ✅ | URI regex match |
+| `routes[].match[].methods` | - | ✅ | - | ✅ | HTTP methods to match |
+| `routes[].match[].headers[].name` | - | ✅ | - | ✅ | Header name to match |
+| `routes[].match[].headers[].exact` | - | ✅ | - | ✅ | Exact header value match |
+| `routes[].match[].headers[].prefix` | - | ✅ | - | ✅ | Header value prefix match |
+| `routes[].match[].headers[].regex` | - | ✅ | - | ✅ | Header value regex match |
+| `routes[].match[].headers[].present` | - | ✅ | - | ✅ | Header must be present |
+| `routes[].match[].headers[].absent` | - | ✅ | - | ✅ | Header must be absent |
+| `routes[].match[].queryParams[].name` | - | ✅ | - | ✅ | Query parameter name |
+| `routes[].match[].queryParams[].exact` | - | ✅ | - | ✅ | Exact query parameter value |
+| `routes[].match[].queryParams[].regex` | - | ✅ | - | ✅ | Query parameter regex match |
+| `routes[].match[].queryParams[].present` | - | ✅ | - | ✅ | Query parameter must be present |
+| `routes[].route[].destination.host` | - | ✅ | - | ✅ | Backend host |
+| `routes[].route[].destination.port` | - | ✅ | - | ✅ | Backend port |
+| `routes[].route[].weight` | - | ✅ | - | ✅ | Traffic weight for load balancing |
+| `routes[].timeout` | ✅ | ✅ | - | ✅ | Request timeout |
+| `routes[].retries.attempts` | ✅ | ✅ | - | ✅ | Max retry attempts |
+| `routes[].retries.perTryTimeout` | ✅ | ✅ | - | ✅ | Timeout per retry attempt |
+| `routes[].retries.retryOn` | ✅ | ✅ | - | ✅ | Conditions to retry on |
+| `routes[].redirect.uri` | - | ✅ | - | ✅ | Redirect URI |
+| `routes[].redirect.code` | - | ✅ | - | ✅ | Redirect HTTP status code |
+| `routes[].redirect.scheme` | - | ✅ | - | ✅ | Redirect scheme (http/https) |
+| `routes[].redirect.host` | - | ✅ | - | ✅ | Redirect host |
+| `routes[].redirect.port` | - | ✅ | - | ✅ | Redirect port |
+| `routes[].redirect.stripQuery` | - | ✅ | - | ✅ | Strip query string on redirect |
+| `routes[].rewrite.uri` | - | ✅ | - | ✅ | Rewrite URI |
+| `routes[].rewrite.authority` | - | ✅ | - | ✅ | Rewrite authority/host |
+| `routes[].directResponse.status` | - | ✅ | - | ✅ | Direct response status code |
+| `routes[].directResponse.body` | - | ✅ | - | ✅ | Direct response body |
+| `routes[].directResponse.headers` | - | ✅ | - | ✅ | Direct response headers |
+| `routes[].headers.request.set` | - | ✅ | - | ✅ | Set request headers |
+| `routes[].headers.request.add` | - | ✅ | - | ✅ | Add request headers |
+| `routes[].headers.request.remove` | - | ✅ | - | ✅ | Remove request headers |
+| `routes[].headers.response.set` | - | ✅ | - | ✅ | Set response headers |
+| `routes[].headers.response.add` | - | ✅ | - | ✅ | Add response headers |
+| `routes[].headers.response.remove` | - | ✅ | - | ✅ | Remove response headers |
+| `routes[].mirror.destination` | - | ✅ | - | ✅ | Mirror traffic destination |
+| `routes[].mirror.percentage` | - | ✅ | - | ✅ | Percentage of traffic to mirror |
+| `routes[].fault.delay.fixedDelay` | - | ✅ | - | ✅ | Fixed delay duration |
+| `routes[].fault.delay.percentage` | - | ✅ | - | ✅ | Percentage of requests to delay |
+| `routes[].fault.abort.httpStatus` | - | ✅ | - | ✅ | HTTP status for abort |
+| `routes[].fault.abort.percentage` | - | ✅ | - | ✅ | Percentage of requests to abort |
+| `routes[].requestLimits.maxBodySize` | ✅ | ✅ | - | ✅ | Maximum request body size in bytes |
+| `routes[].requestLimits.maxHeaderSize` | ✅ | ✅ | - | ✅ | Maximum total header size in bytes |
+| `routes[].cors.allowOrigins` | ✅ | ✅ | - | ✅ | Allowed origins for CORS |
+| `routes[].cors.allowMethods` | ✅ | ✅ | - | ✅ | Allowed HTTP methods for CORS |
+| `routes[].cors.allowHeaders` | ✅ | ✅ | - | ✅ | Allowed request headers for CORS |
+| `routes[].cors.exposeHeaders` | ✅ | ✅ | - | ✅ | Headers exposed to browser |
+| `routes[].cors.maxAge` | ✅ | ✅ | - | ✅ | Preflight cache duration in seconds |
+| `routes[].cors.allowCredentials` | ✅ | ✅ | - | ✅ | Allow credentials in CORS requests |
+| `routes[].security.enabled` | ✅ | ✅ | - | ✅ | Enable security headers |
+| `routes[].security.headers.enabled` | ✅ | ✅ | - | ✅ | Enable security headers injection |
+| `routes[].security.headers.xFrameOptions` | ✅ | ✅ | - | ✅ | X-Frame-Options header value |
+| `routes[].security.headers.xContentTypeOptions` | ✅ | ✅ | - | ✅ | X-Content-Type-Options header value |
+| `routes[].security.headers.xXSSProtection` | ✅ | ✅ | - | ✅ | X-XSS-Protection header value |
+| `routes[].security.headers.customHeaders` | ✅ | ✅ | - | ✅ | Custom security headers |
+| `routes[].rateLimit.enabled` | ✅ | ✅ | - | ✅ | Enable route-level rate limiting |
+| `routes[].rateLimit.requestsPerSecond` | ✅ | ✅ | - | ✅ | Requests per second limit |
+| `routes[].rateLimit.burst` | ✅ | ✅ | - | ✅ | Burst size for rate limiting |
+| `routes[].rateLimit.perClient` | ✅ | ✅ | - | ✅ | Apply rate limit per client IP |
+| `routes[].transform.request.template` | - | ✅ | - | ✅ | Go template for request transformation |
+| `routes[].transform.response.allowFields` | - | ✅ | - | ✅ | Fields to allow in response |
+| `routes[].transform.response.denyFields` | - | ✅ | - | ✅ | Fields to deny in response |
+| `routes[].transform.response.fieldMappings` | - | ✅ | - | ✅ | Field name mappings |
+| `routes[].cache.enabled` | - | ✅ | - | ✅ | Enable caching |
+| `routes[].cache.ttl` | - | ✅ | - | ✅ | Cache time-to-live |
+| `routes[].cache.keyComponents` | - | ✅ | - | ✅ | Components for cache key generation |
+| `routes[].cache.staleWhileRevalidate` | - | ✅ | - | ✅ | Serve stale while revalidating |
+| `routes[].encoding.request.contentType` | - | ✅ | - | ✅ | Request content type |
+| `routes[].encoding.response.contentType` | - | ✅ | - | ✅ | Response content type |
+| `routes[].maxSessions.enabled` | ✅ | ✅ | - | ✅ | Enable max sessions limiting |
+| `routes[].maxSessions.maxConcurrent` | ✅ | ✅ | - | ✅ | Maximum concurrent sessions |
+| `routes[].maxSessions.queueSize` | ✅ | ✅ | - | ✅ | Queue size for waiting connections |
+| `routes[].maxSessions.queueTimeout` | ✅ | ✅ | - | ✅ | Timeout for queued connections |
+| `routes[].tls.certFile` | - | ✅ | - | ✅ | Route-specific certificate file |
+| `routes[].tls.keyFile` | - | ✅ | - | ✅ | Route-specific private key file |
+| `routes[].tls.sniHosts` | - | ✅ | - | ✅ | SNI hostnames for certificate |
+| `routes[].tls.minVersion` | - | ✅ | - | ✅ | Minimum TLS version |
+| `routes[].tls.maxVersion` | - | ✅ | - | ✅ | Maximum TLS version |
+| `routes[].tls.cipherSuites` | - | ✅ | - | ✅ | Allowed cipher suites |
+| `routes[].tls.clientValidation.enabled` | - | ✅ | - | ✅ | Enable client certificate validation |
+| `routes[].tls.clientValidation.caFile` | - | ✅ | - | ✅ | CA certificate for client validation |
+| `routes[].tls.clientValidation.requireClientCert` | - | ✅ | - | ✅ | Require client certificate |
+| `routes[].tls.clientValidation.allowedCNs` | - | ✅ | - | ✅ | Allowed common names |
+| `routes[].tls.clientValidation.allowedSANs` | - | ✅ | - | ✅ | Allowed subject alternative names |
+| `routes[].tls.vault.enabled` | - | ✅ | - | ✅ | Enable Vault certificate management |
+| `routes[].tls.vault.pkiMount` | - | ✅ | - | ✅ | Vault PKI mount path |
+| `routes[].tls.vault.role` | - | ✅ | - | ✅ | Vault PKI role name |
+| `routes[].tls.vault.commonName` | - | ✅ | - | ✅ | Certificate common name |
+| `routes[].tls.vault.altNames` | - | ✅ | - | ✅ | Certificate alternative names |
+| `routes[].tls.vault.ttl` | - | ✅ | - | ✅ | Certificate TTL |
+| `routes[].authentication.enabled` | ✅ | ✅ | - | ✅ | Enable route-level authentication |
+| `routes[].authorization.enabled` | ✅ | ✅ | - | ✅ | Enable route-level authorization |
 
 ### gRPC Routes Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `grpcRoutes[].name` | - | ✅ | - | Unique gRPC route name |
-| `grpcRoutes[].match[].service.exact` | - | ✅ | - | Exact service name match |
-| `grpcRoutes[].match[].service.prefix` | - | ✅ | - | Service name prefix match |
-| `grpcRoutes[].match[].service.regex` | - | ✅ | - | Service name regex match |
-| `grpcRoutes[].match[].method.exact` | - | ✅ | - | Exact method name match |
-| `grpcRoutes[].match[].method.prefix` | - | ✅ | - | Method name prefix match |
-| `grpcRoutes[].match[].method.regex` | - | ✅ | - | Method name regex match |
-| `grpcRoutes[].match[].metadata[].name` | - | ✅ | - | Metadata key name |
-| `grpcRoutes[].match[].metadata[].exact` | - | ✅ | - | Exact metadata value match |
-| `grpcRoutes[].match[].metadata[].prefix` | - | ✅ | - | Metadata value prefix match |
-| `grpcRoutes[].match[].metadata[].regex` | - | ✅ | - | Metadata value regex match |
-| `grpcRoutes[].match[].metadata[].present` | - | ✅ | - | Metadata must be present |
-| `grpcRoutes[].match[].metadata[].absent` | - | ✅ | - | Metadata must be absent |
-| `grpcRoutes[].match[].authority.exact` | - | ✅ | - | Exact authority match |
-| `grpcRoutes[].match[].authority.prefix` | - | ✅ | - | Authority prefix match |
-| `grpcRoutes[].match[].authority.regex` | - | ✅ | - | Authority regex match |
-| `grpcRoutes[].match[].withoutHeaders` | - | ✅ | - | Headers that must NOT be present |
-| `grpcRoutes[].route[].destination.host` | - | ✅ | - | Backend host |
-| `grpcRoutes[].route[].destination.port` | - | ✅ | - | Backend port |
-| `grpcRoutes[].route[].weight` | - | ✅ | - | Traffic weight |
-| `grpcRoutes[].timeout` | ✅ | ✅ | - | Request timeout |
-| `grpcRoutes[].retries.attempts` | ✅ | ✅ | - | Max retry attempts |
-| `grpcRoutes[].retries.perTryTimeout` | ✅ | ✅ | - | Timeout per retry |
-| `grpcRoutes[].retries.retryOn` | ✅ | ✅ | - | gRPC status codes to retry on |
-| `grpcRoutes[].retries.backoffBaseInterval` | ✅ | ✅ | - | Base interval for exponential backoff |
-| `grpcRoutes[].retries.backoffMaxInterval` | ✅ | ✅ | - | Max interval for exponential backoff |
-| `grpcRoutes[].headers.*` | - | ✅ | - | Header manipulation (same as HTTP routes) |
-| `grpcRoutes[].mirror.*` | - | ✅ | - | Traffic mirroring (same as HTTP routes) |
+| Option | Global | Route | Backend | CRD Route | Description |
+|--------|:------:|:-----:|:-------:|:---------:|-------------|
+| `grpcRoutes[].name` | - | ✅ | - | ✅ | Unique gRPC route name |
+| `grpcRoutes[].match[].service.exact` | - | ✅ | - | ✅ | Exact service name match |
+| `grpcRoutes[].match[].service.prefix` | - | ✅ | - | ✅ | Service name prefix match |
+| `grpcRoutes[].match[].service.regex` | - | ✅ | - | ✅ | Service name regex match |
+| `grpcRoutes[].match[].method.exact` | - | ✅ | - | ✅ | Exact method name match |
+| `grpcRoutes[].match[].method.prefix` | - | ✅ | - | ✅ | Method name prefix match |
+| `grpcRoutes[].match[].method.regex` | - | ✅ | - | ✅ | Method name regex match |
+| `grpcRoutes[].match[].metadata[].name` | - | ✅ | - | ✅ | Metadata key name |
+| `grpcRoutes[].match[].metadata[].exact` | - | ✅ | - | ✅ | Exact metadata value match |
+| `grpcRoutes[].match[].metadata[].prefix` | - | ✅ | - | ✅ | Metadata value prefix match |
+| `grpcRoutes[].match[].metadata[].regex` | - | ✅ | - | ✅ | Metadata value regex match |
+| `grpcRoutes[].match[].metadata[].present` | - | ✅ | - | ✅ | Metadata must be present |
+| `grpcRoutes[].match[].metadata[].absent` | - | ✅ | - | ✅ | Metadata must be absent |
+| `grpcRoutes[].match[].authority.exact` | - | ✅ | - | ✅ | Exact authority match |
+| `grpcRoutes[].match[].authority.prefix` | - | ✅ | - | ✅ | Authority prefix match |
+| `grpcRoutes[].match[].authority.regex` | - | ✅ | - | ✅ | Authority regex match |
+| `grpcRoutes[].match[].withoutHeaders` | - | ✅ | - | ✅ | Headers that must NOT be present |
+| `grpcRoutes[].route[].destination.host` | - | ✅ | - | ✅ | Backend host |
+| `grpcRoutes[].route[].destination.port` | - | ✅ | - | ✅ | Backend port |
+| `grpcRoutes[].route[].weight` | - | ✅ | - | ✅ | Traffic weight |
+| `grpcRoutes[].timeout` | ✅ | ✅ | - | ✅ | Request timeout |
+| `grpcRoutes[].retries.attempts` | ✅ | ✅ | - | ✅ | Max retry attempts |
+| `grpcRoutes[].retries.perTryTimeout` | ✅ | ✅ | - | ✅ | Timeout per retry |
+| `grpcRoutes[].retries.retryOn` | ✅ | ✅ | - | ✅ | gRPC status codes to retry on |
+| `grpcRoutes[].retries.backoffBaseInterval` | ✅ | ✅ | - | ✅ | Base interval for exponential backoff |
+| `grpcRoutes[].retries.backoffMaxInterval` | ✅ | ✅ | - | ✅ | Max interval for exponential backoff |
+| `grpcRoutes[].headers.request.set` | - | ✅ | - | ✅ | Set request headers |
+| `grpcRoutes[].headers.request.add` | - | ✅ | - | ✅ | Add request headers |
+| `grpcRoutes[].headers.request.remove` | - | ✅ | - | ✅ | Remove request headers |
+| `grpcRoutes[].headers.response.set` | - | ✅ | - | ✅ | Set response headers |
+| `grpcRoutes[].headers.response.add` | - | ✅ | - | ✅ | Add response headers |
+| `grpcRoutes[].headers.response.remove` | - | ✅ | - | ✅ | Remove response headers |
+| `grpcRoutes[].mirror.destination` | - | ✅ | - | ✅ | Mirror traffic destination |
+| `grpcRoutes[].mirror.percentage` | - | ✅ | - | ✅ | Percentage of traffic to mirror |
+| `grpcRoutes[].rateLimit.enabled` | ✅ | ✅ | - | ✅ | Enable route-level rate limiting |
+| `grpcRoutes[].rateLimit.requestsPerSecond` | ✅ | ✅ | - | ✅ | Requests per second limit |
+| `grpcRoutes[].rateLimit.burst` | ✅ | ✅ | - | ✅ | Burst size for rate limiting |
+| `grpcRoutes[].rateLimit.perClient` | ✅ | ✅ | - | ✅ | Apply rate limit per client IP |
+| `grpcRoutes[].transform.fieldMask.paths` | - | ✅ | - | ✅ | Field paths to include |
+| `grpcRoutes[].transform.metadata.static` | - | ✅ | - | ✅ | Static metadata values |
+| `grpcRoutes[].transform.metadata.dynamic` | - | ✅ | - | ✅ | Dynamic metadata templates |
+| `grpcRoutes[].cache.enabled` | - | ✅ | - | ✅ | Enable caching |
+| `grpcRoutes[].cache.ttl` | - | ✅ | - | ✅ | Cache time-to-live |
+| `grpcRoutes[].cache.keyComponents` | - | ✅ | - | ✅ | Components for cache key generation |
+| `grpcRoutes[].cache.staleWhileRevalidate` | - | ✅ | - | ✅ | Serve stale while revalidating |
+| `grpcRoutes[].encoding.request.contentType` | - | ✅ | - | ✅ | Request content type |
+| `grpcRoutes[].encoding.response.contentType` | - | ✅ | - | ✅ | Response content type |
+| `grpcRoutes[].cors.allowOrigins` | ✅ | ✅ | - | ✅ | Allowed origins for CORS |
+| `grpcRoutes[].cors.allowMethods` | ✅ | ✅ | - | ✅ | Allowed HTTP methods for CORS |
+| `grpcRoutes[].cors.allowHeaders` | ✅ | ✅ | - | ✅ | Allowed request headers for CORS |
+| `grpcRoutes[].cors.exposeHeaders` | ✅ | ✅ | - | ✅ | Headers exposed to browser |
+| `grpcRoutes[].cors.maxAge` | ✅ | ✅ | - | ✅ | Preflight cache duration in seconds |
+| `grpcRoutes[].cors.allowCredentials` | ✅ | ✅ | - | ✅ | Allow credentials in CORS requests |
+| `grpcRoutes[].security.enabled` | ✅ | ✅ | - | ✅ | Enable security headers |
+| `grpcRoutes[].security.headers.enabled` | ✅ | ✅ | - | ✅ | Enable security headers injection |
+| `grpcRoutes[].tls.certFile` | - | ✅ | - | ✅ | Route-specific certificate file |
+| `grpcRoutes[].tls.keyFile` | - | ✅ | - | ✅ | Route-specific private key file |
+| `grpcRoutes[].tls.sniHosts` | - | ✅ | - | ✅ | SNI hostnames for certificate |
+| `grpcRoutes[].tls.minVersion` | - | ✅ | - | ✅ | Minimum TLS version |
+| `grpcRoutes[].tls.maxVersion` | - | ✅ | - | ✅ | Maximum TLS version |
+| `grpcRoutes[].tls.cipherSuites` | - | ✅ | - | ✅ | Allowed cipher suites |
+| `grpcRoutes[].tls.clientValidation.enabled` | - | ✅ | - | ✅ | Enable client certificate validation |
+| `grpcRoutes[].tls.vault.enabled` | - | ✅ | - | ✅ | Enable Vault certificate management |
+| `grpcRoutes[].authentication.enabled` | ✅ | ✅ | - | ✅ | Enable route-level authentication |
+| `grpcRoutes[].authorization.enabled` | ✅ | ✅ | - | ✅ | Enable route-level authorization |
+| `grpcRoutes[].maxSessions.enabled` | ✅ | ✅ | - | ✅ | Enable max sessions limiting |
+| `grpcRoutes[].maxSessions.maxConcurrent` | ✅ | ✅ | - | ✅ | Maximum concurrent sessions |
+| `grpcRoutes[].maxSessions.queueSize` | ✅ | ✅ | - | ✅ | Queue size for waiting connections |
+| `grpcRoutes[].maxSessions.queueTimeout` | ✅ | ✅ | - | ✅ | Timeout for queued connections |
+| `grpcRoutes[].requestLimits.maxBodySize` | ✅ | ✅ | - | ✅ | Maximum request body size in bytes |
+| `grpcRoutes[].requestLimits.maxHeaderSize` | ✅ | ✅ | - | ✅ | Maximum total header size in bytes |
 
 ### HTTP Backends Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `backends[].name` | - | - | ✅ | Unique backend name |
-| `backends[].hosts[].address` | - | - | ✅ | Backend host address |
-| `backends[].hosts[].port` | - | - | ✅ | Backend port |
-| `backends[].hosts[].weight` | - | - | ✅ | Host weight for load balancing |
-| `backends[].healthCheck.path` | - | - | ✅ | Health check endpoint path |
-| `backends[].healthCheck.interval` | - | - | ✅ | Health check interval |
-| `backends[].healthCheck.timeout` | - | - | ✅ | Health check timeout |
-| `backends[].healthCheck.healthyThreshold` | - | - | ✅ | Consecutive successes to mark healthy |
-| `backends[].healthCheck.unhealthyThreshold` | - | - | ✅ | Consecutive failures to mark unhealthy |
-| `backends[].loadBalancer.algorithm` | - | - | ✅ | Load balancing algorithm (roundRobin, weighted, leastConn, random) |
-| `backends[].maxSessions.enabled` | - | - | ✅ | Enable max sessions for backend hosts |
-| `backends[].maxSessions.maxConcurrent` | - | - | ✅ | Max concurrent connections per host |
-| `backends[].rateLimit.enabled` | - | - | ✅ | Enable rate limiting for backend hosts |
-| `backends[].rateLimit.requestsPerSecond` | - | - | ✅ | Requests per second limit per host |
-| `backends[].rateLimit.burst` | - | - | ✅ | Burst size per host |
-| `backends[].tls.enabled` | - | - | ✅ | Enable TLS for backend connections |
-| `backends[].tls.mode` | - | - | ✅ | TLS mode (SIMPLE, MUTUAL) |
-| `backends[].tls.caFile` | - | - | ✅ | CA certificate for server verification |
-| `backends[].tls.certFile` | - | - | ✅ | Client certificate (for mTLS) |
-| `backends[].tls.keyFile` | - | - | ✅ | Client private key (for mTLS) |
-| `backends[].tls.serverName` | - | - | ✅ | Server name for TLS verification (SNI) |
-| `backends[].tls.insecureSkipVerify` | - | - | ✅ | Skip server certificate verification |
-| `backends[].tls.minVersion` | - | - | ✅ | Minimum TLS version |
-| `backends[].tls.maxVersion` | - | - | ✅ | Maximum TLS version |
-| `backends[].tls.cipherSuites` | - | - | ✅ | Allowed cipher suites |
-| `backends[].tls.alpn` | - | - | ✅ | ALPN protocols |
-| `backends[].tls.vault.*` | - | - | ✅ | Vault-based client certificate management |
-| `backends[].circuitBreaker.enabled` | - | - | ✅ | Enable circuit breaker for this backend |
-| `backends[].circuitBreaker.threshold` | - | - | ✅ | Failure threshold to open circuit |
-| `backends[].circuitBreaker.timeout` | - | - | ✅ | Time to wait before half-open |
-| `backends[].circuitBreaker.halfOpenRequests` | - | - | ✅ | Requests allowed in half-open state |
-| `backends[].authentication.type` | - | - | ✅ | Authentication type (jwt, basic, mtls) |
-| `backends[].authentication.jwt.enabled` | - | - | ✅ | Enable JWT authentication |
-| `backends[].authentication.jwt.tokenSource` | - | - | ✅ | Token source (static, vault, oidc) |
-| `backends[].authentication.jwt.staticToken` | - | - | ✅ | Static JWT token (dev only) |
-| `backends[].authentication.jwt.vaultPath` | - | - | ✅ | Vault path for JWT token |
-| `backends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | OIDC issuer URL |
-| `backends[].authentication.jwt.oidc.clientId` | - | - | ✅ | OIDC client ID |
-| `backends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | OIDC client secret |
-| `backends[].authentication.jwt.oidc.scopes` | - | - | ✅ | OIDC scopes to request |
-| `backends[].authentication.jwt.headerName` | - | - | ✅ | Header name for JWT token |
-| `backends[].authentication.jwt.headerPrefix` | - | - | ✅ | Header prefix for JWT token |
-| `backends[].authentication.basic.enabled` | - | - | ✅ | Enable Basic authentication |
-| `backends[].authentication.basic.username` | - | - | ✅ | Username for Basic auth |
-| `backends[].authentication.basic.password` | - | - | ✅ | Password for Basic auth |
-| `backends[].authentication.basic.vaultPath` | - | - | ✅ | Vault path for credentials |
-| `backends[].authentication.basic.usernameKey` | - | - | ✅ | Vault key for username |
-| `backends[].authentication.basic.passwordKey` | - | - | ✅ | Vault key for password |
-| `backends[].authentication.mtls.enabled` | - | - | ✅ | Enable mTLS authentication |
-| `backends[].authentication.mtls.certFile` | - | - | ✅ | Client certificate file |
-| `backends[].authentication.mtls.keyFile` | - | - | ✅ | Client private key file |
-| `backends[].authentication.mtls.caFile` | - | - | ✅ | CA certificate for server verification |
-| `backends[].authentication.mtls.vault.*` | - | - | ✅ | Vault-based certificate management |
+| Option | Global | Route | Backend | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:-----------:|-------------|
+| `backends[].name` | - | - | ✅ | ✅ | Unique backend name |
+| `backends[].hosts[].address` | - | - | ✅ | ✅ | Backend host address |
+| `backends[].hosts[].port` | - | - | ✅ | ✅ | Backend port |
+| `backends[].hosts[].weight` | - | - | ✅ | ✅ | Host weight for load balancing |
+| `backends[].healthCheck.path` | - | - | ✅ | ✅ | Health check endpoint path |
+| `backends[].healthCheck.interval` | - | - | ✅ | ✅ | Health check interval |
+| `backends[].healthCheck.timeout` | - | - | ✅ | ✅ | Health check timeout |
+| `backends[].healthCheck.healthyThreshold` | - | - | ✅ | ✅ | Consecutive successes to mark healthy |
+| `backends[].healthCheck.unhealthyThreshold` | - | - | ✅ | ✅ | Consecutive failures to mark unhealthy |
+| `backends[].loadBalancer.algorithm` | - | - | ✅ | ✅ | Load balancing algorithm (roundRobin, weighted, leastConn, random) |
+| `backends[].maxSessions.enabled` | - | - | ✅ | ✅ | Enable max sessions for backend hosts |
+| `backends[].maxSessions.maxConcurrent` | - | - | ✅ | ✅ | Max concurrent connections per host |
+| `backends[].maxSessions.queueSize` | - | - | ✅ | ✅ | Queue size for waiting connections |
+| `backends[].maxSessions.queueTimeout` | - | - | ✅ | ✅ | Timeout for queued connections |
+| `backends[].rateLimit.enabled` | - | - | ✅ | ✅ | Enable rate limiting for backend hosts |
+| `backends[].rateLimit.requestsPerSecond` | - | - | ✅ | ✅ | Requests per second limit per host |
+| `backends[].rateLimit.burst` | - | - | ✅ | ✅ | Burst size per host |
+| `backends[].rateLimit.perClient` | - | - | ✅ | ✅ | Apply rate limit per client IP |
+| `backends[].tls.enabled` | - | - | ✅ | ✅ | Enable TLS for backend connections |
+| `backends[].tls.mode` | - | - | ✅ | ✅ | TLS mode (SIMPLE, MUTUAL, INSECURE) |
+| `backends[].tls.caFile` | - | - | ✅ | ✅ | CA certificate for server verification |
+| `backends[].tls.certFile` | - | - | ✅ | ✅ | Client certificate (for mTLS) |
+| `backends[].tls.keyFile` | - | - | ✅ | ✅ | Client private key (for mTLS) |
+| `backends[].tls.serverName` | - | - | ✅ | ✅ | Server name for TLS verification (SNI) |
+| `backends[].tls.insecureSkipVerify` | - | - | ✅ | ✅ | Skip server certificate verification |
+| `backends[].tls.minVersion` | - | - | ✅ | ✅ | Minimum TLS version |
+| `backends[].tls.maxVersion` | - | - | ✅ | ✅ | Maximum TLS version |
+| `backends[].tls.cipherSuites` | - | - | ✅ | ✅ | Allowed cipher suites |
+| `backends[].tls.alpn` | - | - | ✅ | ✅ | ALPN protocols |
+| `backends[].tls.vault.enabled` | - | - | ✅ | ✅ | Enable Vault-based client certificate management |
+| `backends[].tls.vault.pkiMount` | - | - | ✅ | ✅ | Vault PKI mount path |
+| `backends[].tls.vault.role` | - | - | ✅ | ✅ | Vault PKI role name |
+| `backends[].tls.vault.commonName` | - | - | ✅ | ✅ | Certificate common name |
+| `backends[].tls.vault.altNames` | - | - | ✅ | ✅ | Certificate alternative names |
+| `backends[].tls.vault.ttl` | - | - | ✅ | ✅ | Certificate TTL |
+| `backends[].circuitBreaker.enabled` | - | - | ✅ | ✅ | Enable circuit breaker for this backend |
+| `backends[].circuitBreaker.threshold` | - | - | ✅ | ✅ | Failure threshold to open circuit |
+| `backends[].circuitBreaker.timeout` | - | - | ✅ | ✅ | Time to wait before half-open |
+| `backends[].circuitBreaker.halfOpenRequests` | - | - | ✅ | ✅ | Requests allowed in half-open state |
+| `backends[].authentication.type` | - | - | ✅ | ✅ | Authentication type (jwt, basic, mtls) |
+| `backends[].authentication.jwt.enabled` | - | - | ✅ | ✅ | Enable JWT authentication |
+| `backends[].authentication.jwt.tokenSource` | - | - | ✅ | ✅ | Token source (static, vault, oidc) |
+| `backends[].authentication.jwt.staticToken` | - | - | ✅ | ✅ | Static JWT token (dev only) |
+| `backends[].authentication.jwt.vaultPath` | - | - | ✅ | ✅ | Vault path for JWT token |
+| `backends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | ✅ | OIDC issuer URL |
+| `backends[].authentication.jwt.oidc.clientId` | - | - | ✅ | ✅ | OIDC client ID |
+| `backends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | ✅ | OIDC client secret |
+| `backends[].authentication.jwt.oidc.clientSecretRef.name` | - | - | ✅ | ✅ | Kubernetes secret name for client secret |
+| `backends[].authentication.jwt.oidc.clientSecretRef.key` | - | - | ✅ | ✅ | Kubernetes secret key for client secret |
+| `backends[].authentication.jwt.oidc.scopes` | - | - | ✅ | ✅ | OIDC scopes to request |
+| `backends[].authentication.jwt.oidc.tokenCacheTTL` | - | - | ✅ | ✅ | TTL for cached tokens |
+| `backends[].authentication.jwt.headerName` | - | - | ✅ | ✅ | Header name for JWT token |
+| `backends[].authentication.jwt.headerPrefix` | - | - | ✅ | ✅ | Header prefix for JWT token |
+| `backends[].authentication.basic.enabled` | - | - | ✅ | ✅ | Enable Basic authentication |
+| `backends[].authentication.basic.username` | - | - | ✅ | ✅ | Username for Basic auth |
+| `backends[].authentication.basic.password` | - | - | ✅ | ✅ | Password for Basic auth |
+| `backends[].authentication.basic.vaultPath` | - | - | ✅ | ✅ | Vault path for credentials |
+| `backends[].authentication.basic.usernameKey` | - | - | ✅ | ✅ | Vault key for username |
+| `backends[].authentication.basic.passwordKey` | - | - | ✅ | ✅ | Vault key for password |
+| `backends[].authentication.mtls.enabled` | - | - | ✅ | ✅ | Enable mTLS authentication |
+| `backends[].authentication.mtls.certFile` | - | - | ✅ | ✅ | Client certificate file |
+| `backends[].authentication.mtls.keyFile` | - | - | ✅ | ✅ | Client private key file |
+| `backends[].authentication.mtls.caFile` | - | - | ✅ | ✅ | CA certificate for server verification |
+| `backends[].authentication.mtls.vault.enabled` | - | - | ✅ | ✅ | Enable Vault-based certificate management |
+| `backends[].authentication.mtls.vault.pkiMount` | - | - | ✅ | ✅ | Vault PKI mount path |
+| `backends[].authentication.mtls.vault.role` | - | - | ✅ | ✅ | Vault PKI role name |
+| `backends[].authentication.mtls.vault.commonName` | - | - | ✅ | ✅ | Certificate common name |
+| `backends[].authentication.mtls.vault.altNames` | - | - | ✅ | ✅ | Certificate alternative names |
+| `backends[].authentication.mtls.vault.ttl` | - | - | ✅ | ✅ | Certificate TTL |
+| `backends[].requestLimits.maxBodySize` | - | - | ✅ | ✅ | Maximum request body size in bytes |
+| `backends[].requestLimits.maxHeaderSize` | - | - | ✅ | ✅ | Maximum total header size in bytes |
+| `backends[].transform.request.template` | - | - | ✅ | ✅ | Go template for request transformation |
+| `backends[].transform.request.headers.set` | - | - | ✅ | ✅ | Set request headers |
+| `backends[].transform.request.headers.add` | - | - | ✅ | ✅ | Add request headers |
+| `backends[].transform.request.headers.remove` | - | - | ✅ | ✅ | Remove request headers |
+| `backends[].transform.response.allowFields` | - | - | ✅ | ✅ | Fields to allow in response |
+| `backends[].transform.response.denyFields` | - | - | ✅ | ✅ | Fields to deny in response |
+| `backends[].transform.response.fieldMappings` | - | - | ✅ | ✅ | Field name mappings |
+| `backends[].transform.response.headers.set` | - | - | ✅ | ✅ | Set response headers |
+| `backends[].transform.response.headers.add` | - | - | ✅ | ✅ | Add response headers |
+| `backends[].transform.response.headers.remove` | - | - | ✅ | ✅ | Remove response headers |
+| `backends[].cache.enabled` | - | - | ✅ | ✅ | Enable caching |
+| `backends[].cache.ttl` | - | - | ✅ | ✅ | Cache time-to-live |
+| `backends[].cache.keyComponents` | - | - | ✅ | ✅ | Components for cache key generation |
+| `backends[].cache.staleWhileRevalidate` | - | - | ✅ | ✅ | Serve stale while revalidating |
+| `backends[].cache.type` | - | - | ✅ | ✅ | Cache type (memory, redis) |
+| `backends[].encoding.request.contentType` | - | - | ✅ | ✅ | Request content type |
+| `backends[].encoding.request.compression` | - | - | ✅ | ✅ | Request compression algorithm |
+| `backends[].encoding.response.contentType` | - | - | ✅ | ✅ | Response content type |
+| `backends[].encoding.response.compression` | - | - | ✅ | ✅ | Response compression algorithm |
 
 ### gRPC Backends Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `grpcBackends[].name` | - | - | ✅ | Unique gRPC backend name |
-| `grpcBackends[].hosts[].address` | - | - | ✅ | Backend host address |
-| `grpcBackends[].hosts[].port` | - | - | ✅ | Backend port |
-| `grpcBackends[].hosts[].weight` | - | - | ✅ | Host weight for load balancing |
-| `grpcBackends[].healthCheck.enabled` | - | - | ✅ | Enable gRPC health checking |
-| `grpcBackends[].healthCheck.service` | - | - | ✅ | Service name to check (empty for overall) |
-| `grpcBackends[].healthCheck.interval` | - | - | ✅ | Health check interval |
-| `grpcBackends[].healthCheck.timeout` | - | - | ✅ | Health check timeout |
-| `grpcBackends[].healthCheck.healthyThreshold` | - | - | ✅ | Consecutive successes to mark healthy |
-| `grpcBackends[].healthCheck.unhealthyThreshold` | - | - | ✅ | Consecutive failures to mark unhealthy |
-| `grpcBackends[].loadBalancer.algorithm` | - | - | ✅ | Load balancing algorithm |
-| `grpcBackends[].tls.*` | - | - | ✅ | TLS configuration (same as HTTP backends) |
-| `grpcBackends[].connectionPool.maxIdleConns` | - | - | ✅ | Max idle connections per host |
-| `grpcBackends[].connectionPool.maxConnsPerHost` | - | - | ✅ | Max connections per host |
-| `grpcBackends[].connectionPool.idleConnTimeout` | - | - | ✅ | Idle connection timeout |
+| Option | Global | Route | Backend | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:-----------:|-------------|
+| `grpcBackends[].name` | - | - | ✅ | ✅ | Unique gRPC backend name |
+| `grpcBackends[].hosts[].address` | - | - | ✅ | ✅ | Backend host address |
+| `grpcBackends[].hosts[].port` | - | - | ✅ | ✅ | Backend port |
+| `grpcBackends[].hosts[].weight` | - | - | ✅ | ✅ | Host weight for load balancing |
+| `grpcBackends[].healthCheck.enabled` | - | - | ✅ | ✅ | Enable gRPC health checking |
+| `grpcBackends[].healthCheck.service` | - | - | ✅ | ✅ | Service name to check (empty for overall) |
+| `grpcBackends[].healthCheck.interval` | - | - | ✅ | ✅ | Health check interval |
+| `grpcBackends[].healthCheck.timeout` | - | - | ✅ | ✅ | Health check timeout |
+| `grpcBackends[].healthCheck.healthyThreshold` | - | - | ✅ | ✅ | Consecutive successes to mark healthy |
+| `grpcBackends[].healthCheck.unhealthyThreshold` | - | - | ✅ | ✅ | Consecutive failures to mark unhealthy |
+| `grpcBackends[].loadBalancer.algorithm` | - | - | ✅ | ✅ | Load balancing algorithm |
+| `grpcBackends[].tls.enabled` | - | - | ✅ | ✅ | Enable TLS for backend connections |
+| `grpcBackends[].tls.mode` | - | - | ✅ | ✅ | TLS mode (SIMPLE, MUTUAL, INSECURE) |
+| `grpcBackends[].tls.caFile` | - | - | ✅ | ✅ | CA certificate for server verification |
+| `grpcBackends[].tls.certFile` | - | - | ✅ | ✅ | Client certificate (for mTLS) |
+| `grpcBackends[].tls.keyFile` | - | - | ✅ | ✅ | Client private key (for mTLS) |
+| `grpcBackends[].tls.serverName` | - | - | ✅ | ✅ | Server name for TLS verification (SNI) |
+| `grpcBackends[].tls.insecureSkipVerify` | - | - | ✅ | ✅ | Skip server certificate verification |
+| `grpcBackends[].tls.minVersion` | - | - | ✅ | ✅ | Minimum TLS version |
+| `grpcBackends[].tls.maxVersion` | - | - | ✅ | ✅ | Maximum TLS version |
+| `grpcBackends[].tls.cipherSuites` | - | - | ✅ | ✅ | Allowed cipher suites |
+| `grpcBackends[].tls.alpn` | - | - | ✅ | ✅ | ALPN protocols |
+| `grpcBackends[].tls.vault.enabled` | - | - | ✅ | ✅ | Enable Vault-based client certificate management |
+| `grpcBackends[].tls.vault.pkiMount` | - | - | ✅ | ✅ | Vault PKI mount path |
+| `grpcBackends[].tls.vault.role` | - | - | ✅ | ✅ | Vault PKI role name |
+| `grpcBackends[].tls.vault.commonName` | - | - | ✅ | ✅ | Certificate common name |
+| `grpcBackends[].tls.vault.altNames` | - | - | ✅ | ✅ | Certificate alternative names |
+| `grpcBackends[].tls.vault.ttl` | - | - | ✅ | ✅ | Certificate TTL |
+| `grpcBackends[].connectionPool.maxIdleConns` | - | - | ✅ | ✅ | Max idle connections per host |
+| `grpcBackends[].connectionPool.maxConnsPerHost` | - | - | ✅ | ✅ | Max connections per host |
+| `grpcBackends[].connectionPool.idleConnTimeout` | - | - | ✅ | ✅ | Idle connection timeout |
+| `grpcBackends[].circuitBreaker.enabled` | - | - | ✅ | ✅ | Enable circuit breaker for this backend |
+| `grpcBackends[].circuitBreaker.threshold` | - | - | ✅ | ✅ | Failure threshold to open circuit |
+| `grpcBackends[].circuitBreaker.timeout` | - | - | ✅ | ✅ | Time to wait before half-open |
+| `grpcBackends[].circuitBreaker.halfOpenRequests` | - | - | ✅ | ✅ | Requests allowed in half-open state |
+| `grpcBackends[].authentication.type` | - | - | ✅ | ✅ | Authentication type (jwt, basic, mtls) |
+| `grpcBackends[].authentication.jwt.enabled` | - | - | ✅ | ✅ | Enable JWT authentication |
+| `grpcBackends[].authentication.jwt.tokenSource` | - | - | ✅ | ✅ | Token source (static, vault, oidc) |
+| `grpcBackends[].authentication.jwt.staticToken` | - | - | ✅ | ✅ | Static JWT token (dev only) |
+| `grpcBackends[].authentication.jwt.vaultPath` | - | - | ✅ | ✅ | Vault path for JWT token |
+| `grpcBackends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | ✅ | OIDC issuer URL |
+| `grpcBackends[].authentication.jwt.oidc.clientId` | - | - | ✅ | ✅ | OIDC client ID |
+| `grpcBackends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | ✅ | OIDC client secret |
+| `grpcBackends[].authentication.jwt.oidc.clientSecretRef.name` | - | - | ✅ | ✅ | Kubernetes secret name for client secret |
+| `grpcBackends[].authentication.jwt.oidc.clientSecretRef.key` | - | - | ✅ | ✅ | Kubernetes secret key for client secret |
+| `grpcBackends[].authentication.jwt.oidc.scopes` | - | - | ✅ | ✅ | OIDC scopes to request |
+| `grpcBackends[].authentication.jwt.oidc.tokenCacheTTL` | - | - | ✅ | ✅ | TTL for cached tokens |
+| `grpcBackends[].authentication.jwt.headerName` | - | - | ✅ | ✅ | Header name for JWT token |
+| `grpcBackends[].authentication.jwt.headerPrefix` | - | - | ✅ | ✅ | Header prefix for JWT token |
+| `grpcBackends[].authentication.basic.enabled` | - | - | ✅ | ✅ | Enable Basic authentication |
+| `grpcBackends[].authentication.basic.username` | - | - | ✅ | ✅ | Username for Basic auth |
+| `grpcBackends[].authentication.basic.password` | - | - | ✅ | ✅ | Password for Basic auth |
+| `grpcBackends[].authentication.basic.vaultPath` | - | - | ✅ | ✅ | Vault path for credentials |
+| `grpcBackends[].authentication.basic.usernameKey` | - | - | ✅ | ✅ | Vault key for username |
+| `grpcBackends[].authentication.basic.passwordKey` | - | - | ✅ | ✅ | Vault key for password |
+| `grpcBackends[].authentication.mtls.enabled` | - | - | ✅ | ✅ | Enable mTLS authentication |
+| `grpcBackends[].authentication.mtls.certFile` | - | - | ✅ | ✅ | Client certificate file |
+| `grpcBackends[].authentication.mtls.keyFile` | - | - | ✅ | ✅ | Client private key file |
+| `grpcBackends[].authentication.mtls.caFile` | - | - | ✅ | ✅ | CA certificate for server verification |
+| `grpcBackends[].authentication.mtls.vault.enabled` | - | - | ✅ | ✅ | Enable Vault-based certificate management |
+| `grpcBackends[].authentication.mtls.vault.pkiMount` | - | - | ✅ | ✅ | Vault PKI mount path |
+| `grpcBackends[].authentication.mtls.vault.role` | - | - | ✅ | ✅ | Vault PKI role name |
+| `grpcBackends[].authentication.mtls.vault.commonName` | - | - | ✅ | ✅ | Certificate common name |
+| `grpcBackends[].authentication.mtls.vault.altNames` | - | - | ✅ | ✅ | Certificate alternative names |
+| `grpcBackends[].authentication.mtls.vault.ttl` | - | - | ✅ | ✅ | Certificate TTL |
+| `grpcBackends[].maxSessions.enabled` | - | - | ✅ | ✅ | Enable max sessions for backend hosts |
+| `grpcBackends[].maxSessions.maxConcurrent` | - | - | ✅ | ✅ | Max concurrent connections per host |
+| `grpcBackends[].maxSessions.queueSize` | - | - | ✅ | ✅ | Queue size for waiting connections |
+| `grpcBackends[].maxSessions.queueTimeout` | - | - | ✅ | ✅ | Timeout for queued connections |
+| `grpcBackends[].rateLimit.enabled` | - | - | ✅ | ✅ | Enable rate limiting for backend hosts |
+| `grpcBackends[].rateLimit.requestsPerSecond` | - | - | ✅ | ✅ | Requests per second limit per host |
+| `grpcBackends[].rateLimit.burst` | - | - | ✅ | ✅ | Burst size per host |
+| `grpcBackends[].rateLimit.perClient` | - | - | ✅ | ✅ | Apply rate limit per client IP |
+| `grpcBackends[].transform.fieldMask.paths` | - | - | ✅ | ✅ | Field paths to include |
+| `grpcBackends[].transform.metadata.static` | - | - | ✅ | ✅ | Static metadata values |
+| `grpcBackends[].transform.metadata.dynamic` | - | - | ✅ | ✅ | Dynamic metadata templates |
+| `grpcBackends[].cache.enabled` | - | - | ✅ | ✅ | Enable caching |
+| `grpcBackends[].cache.ttl` | - | - | ✅ | ✅ | Cache time-to-live |
+| `grpcBackends[].cache.keyComponents` | - | - | ✅ | ✅ | Components for cache key generation |
+| `grpcBackends[].cache.staleWhileRevalidate` | - | - | ✅ | ✅ | Serve stale while revalidating |
+| `grpcBackends[].cache.type` | - | - | ✅ | ✅ | Cache type (memory, redis) |
+| `grpcBackends[].encoding.request.contentType` | - | - | ✅ | ✅ | Request content type |
+| `grpcBackends[].encoding.request.compression` | - | - | ✅ | ✅ | Request compression algorithm |
+| `grpcBackends[].encoding.response.contentType` | - | - | ✅ | ✅ | Response content type |
+| `grpcBackends[].encoding.response.compression` | - | - | ✅ | ✅ | Response compression algorithm |
 
 ### Rate Limiting Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `rateLimit.enabled` | ✅ | ✅ | ✅ | Enable rate limiting |
-| `rateLimit.requestsPerSecond` | ✅ | ✅ | ✅ | Requests per second limit |
-| `rateLimit.burst` | ✅ | ✅ | ✅ | Burst size (token bucket) |
-| `rateLimit.perClient` | ✅ | ✅ | - | Apply rate limit per client IP |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `rateLimit.enabled` | ✅ | ✅ | ✅ | ✅ | ✅ | Enable rate limiting |
+| `rateLimit.requestsPerSecond` | ✅ | ✅ | ✅ | ✅ | ✅ | Requests per second limit |
+| `rateLimit.burst` | ✅ | ✅ | ✅ | ✅ | ✅ | Burst size (token bucket) |
+| `rateLimit.perClient` | ✅ | ✅ | ✅ | ✅ | ✅ | Apply rate limit per client IP |
 
 ### Max Sessions Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `maxSessions.enabled` | ✅ | ✅ | ✅ | Enable max sessions limiting |
-| `maxSessions.maxConcurrent` | ✅ | ✅ | ✅ | Maximum concurrent connections |
-| `maxSessions.queueSize` | ✅ | ✅ | ✅ | Queue size for waiting connections |
-| `maxSessions.queueTimeout` | ✅ | ✅ | ✅ | Timeout for queued connections |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `maxSessions.enabled` | ✅ | ✅ | ✅ | ✅ | ✅ | Enable max sessions limiting |
+| `maxSessions.maxConcurrent` | ✅ | ✅ | ✅ | ✅ | ✅ | Maximum concurrent connections |
+| `maxSessions.queueSize` | ✅ | ✅ | ✅ | ✅ | ✅ | Queue size for waiting connections |
+| `maxSessions.queueTimeout` | ✅ | ✅ | ✅ | ✅ | ✅ | Timeout for queued connections |
 
 ### Circuit Breaker Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `circuitBreaker.enabled` | ✅ | - | ✅ | Enable circuit breaker |
-| `circuitBreaker.threshold` | ✅ | - | ✅ | Failure threshold to open circuit |
-| `circuitBreaker.timeout` | ✅ | - | ✅ | Time to wait before half-open |
-| `circuitBreaker.halfOpenRequests` | ✅ | - | ✅ | Requests allowed in half-open state |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `circuitBreaker.enabled` | ✅ | - | ✅ | - | ✅ | Enable circuit breaker |
+| `circuitBreaker.threshold` | ✅ | - | ✅ | - | ✅ | Failure threshold to open circuit |
+| `circuitBreaker.timeout` | ✅ | - | ✅ | - | ✅ | Time to wait before half-open |
+| `circuitBreaker.halfOpenRequests` | ✅ | - | ✅ | - | ✅ | Requests allowed in half-open state |
 
 ### Request Limits Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `requestLimits.maxBodySize` | ✅ | ✅ | - | Maximum request body size in bytes |
-| `requestLimits.maxHeaderSize` | ✅ | ✅ | - | Maximum total header size in bytes |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `requestLimits.maxBodySize` | ✅ | ✅ | ✅ | ✅ | ✅ | Maximum request body size in bytes |
+| `requestLimits.maxHeaderSize` | ✅ | ✅ | ✅ | ✅ | ✅ | Maximum total header size in bytes |
 
 ### CORS Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `cors.allowOrigins` | ✅ | ✅ | - | Allowed origins |
-| `cors.allowMethods` | ✅ | ✅ | - | Allowed HTTP methods |
-| `cors.allowHeaders` | ✅ | ✅ | - | Allowed request headers |
-| `cors.exposeHeaders` | ✅ | ✅ | - | Headers exposed to browser |
-| `cors.maxAge` | ✅ | ✅ | - | Preflight cache duration in seconds |
-| `cors.allowCredentials` | ✅ | ✅ | - | Allow credentials |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `cors.allowOrigins` | ✅ | ✅ | - | ✅ | - | Allowed origins |
+| `cors.allowMethods` | ✅ | ✅ | - | ✅ | - | Allowed HTTP methods |
+| `cors.allowHeaders` | ✅ | ✅ | - | ✅ | - | Allowed request headers |
+| `cors.exposeHeaders` | ✅ | ✅ | - | ✅ | - | Headers exposed to browser |
+| `cors.maxAge` | ✅ | ✅ | - | ✅ | - | Preflight cache duration in seconds |
+| `cors.allowCredentials` | ✅ | ✅ | - | ✅ | - | Allow credentials |
 
 ### Observability Configuration
 
@@ -1249,93 +1461,125 @@ When the same option is configured at multiple levels, the more specific level t
 
 ### Authentication Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `authentication.enabled` | ✅ | ✅ | - | Enable authentication |
-| `authentication.allowAnonymous` | ✅ | ✅ | - | Allow anonymous access |
-| `authentication.skipPaths` | ✅ | - | - | Paths to skip authentication |
-| `authentication.jwt.enabled` | ✅ | ✅ | - | Enable JWT authentication |
-| `authentication.jwt.issuer` | ✅ | ✅ | - | Expected token issuer |
-| `authentication.jwt.audience` | ✅ | ✅ | - | Expected token audience |
-| `authentication.jwt.jwksUrl` | ✅ | ✅ | - | JWKS URL for key retrieval |
-| `authentication.jwt.secret` | ✅ | ✅ | - | Secret for HMAC algorithms |
-| `authentication.jwt.publicKey` | ✅ | ✅ | - | Public key for RSA/ECDSA |
-| `authentication.jwt.algorithm` | ✅ | ✅ | - | Expected signing algorithm |
-| `authentication.jwt.claimMapping.roles` | ✅ | ✅ | - | Claim containing roles |
-| `authentication.jwt.claimMapping.permissions` | ✅ | ✅ | - | Claim containing permissions |
-| `authentication.jwt.claimMapping.groups` | ✅ | ✅ | - | Claim containing groups |
-| `authentication.jwt.claimMapping.scopes` | ✅ | ✅ | - | Claim containing scopes |
-| `authentication.jwt.claimMapping.email` | ✅ | ✅ | - | Claim containing email |
-| `authentication.jwt.claimMapping.name` | ✅ | ✅ | - | Claim containing name |
-| `authentication.apiKey.enabled` | ✅ | ✅ | - | Enable API key authentication |
-| `authentication.apiKey.header` | ✅ | ✅ | - | Header name for API key |
-| `authentication.apiKey.query` | ✅ | ✅ | - | Query parameter for API key |
-| `authentication.apiKey.hashAlgorithm` | ✅ | ✅ | - | Hash algorithm for stored keys |
-| `authentication.apiKey.vaultPath` | ✅ | ✅ | - | Vault path for API keys |
-| `authentication.mtls.enabled` | ✅ | ✅ | - | Enable mTLS authentication |
-| `authentication.mtls.caFile` | ✅ | ✅ | - | CA certificate path |
-| `authentication.mtls.extractIdentity` | ✅ | ✅ | - | How to extract identity from cert |
-| `authentication.mtls.allowedCNs` | ✅ | ✅ | - | Allowed common names |
-| `authentication.mtls.allowedOUs` | ✅ | ✅ | - | Allowed organizational units |
-| `authentication.oidc.enabled` | ✅ | ✅ | - | Enable OIDC authentication |
-| `authentication.oidc.providers[].name` | ✅ | ✅ | - | Provider name |
-| `authentication.oidc.providers[].issuerUrl` | ✅ | ✅ | - | OIDC issuer URL |
-| `authentication.oidc.providers[].clientId` | ✅ | ✅ | - | OIDC client ID |
-| `authentication.oidc.providers[].clientSecret` | ✅ | ✅ | - | OIDC client secret |
-| `authentication.oidc.providers[].scopes` | ✅ | ✅ | - | Scopes to request |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `authentication.enabled` | ✅ | ✅ | - | ✅ | - | Enable authentication |
+| `authentication.allowAnonymous` | ✅ | ✅ | - | ✅ | - | Allow anonymous access |
+| `authentication.skipPaths` | ✅ | ✅ | - | ✅ | - | Paths to skip authentication |
+| `authentication.jwt.enabled` | ✅ | ✅ | - | ✅ | - | Enable JWT authentication |
+| `authentication.jwt.issuer` | ✅ | ✅ | - | ✅ | - | Expected token issuer |
+| `authentication.jwt.audience` | ✅ | ✅ | - | ✅ | - | Expected token audience |
+| `authentication.jwt.jwksUrl` | ✅ | ✅ | - | ✅ | - | JWKS URL for key retrieval |
+| `authentication.jwt.secret` | ✅ | ✅ | - | ✅ | - | Secret for HMAC algorithms |
+| `authentication.jwt.publicKey` | ✅ | ✅ | - | ✅ | - | Public key for RSA/ECDSA |
+| `authentication.jwt.algorithm` | ✅ | ✅ | - | ✅ | - | Expected signing algorithm |
+| `authentication.jwt.claimMapping.roles` | ✅ | ✅ | - | ✅ | - | Claim containing roles |
+| `authentication.jwt.claimMapping.permissions` | ✅ | ✅ | - | ✅ | - | Claim containing permissions |
+| `authentication.jwt.claimMapping.groups` | ✅ | ✅ | - | ✅ | - | Claim containing groups |
+| `authentication.jwt.claimMapping.scopes` | ✅ | ✅ | - | ✅ | - | Claim containing scopes |
+| `authentication.jwt.claimMapping.email` | ✅ | ✅ | - | ✅ | - | Claim containing email |
+| `authentication.jwt.claimMapping.name` | ✅ | ✅ | - | ✅ | - | Claim containing name |
+| `authentication.apiKey.enabled` | ✅ | ✅ | - | ✅ | - | Enable API key authentication |
+| `authentication.apiKey.header` | ✅ | ✅ | - | ✅ | - | Header name for API key |
+| `authentication.apiKey.query` | ✅ | ✅ | - | ✅ | - | Query parameter for API key |
+| `authentication.apiKey.hashAlgorithm` | ✅ | ✅ | - | ✅ | - | Hash algorithm for stored keys |
+| `authentication.apiKey.vaultPath` | ✅ | ✅ | - | ✅ | - | Vault path for API keys |
+| `authentication.mtls.enabled` | ✅ | ✅ | - | ✅ | - | Enable mTLS authentication |
+| `authentication.mtls.caFile` | ✅ | ✅ | - | ✅ | - | CA certificate path |
+| `authentication.mtls.extractIdentity` | ✅ | ✅ | - | ✅ | - | How to extract identity from cert |
+| `authentication.mtls.allowedCNs` | ✅ | ✅ | - | ✅ | - | Allowed common names |
+| `authentication.mtls.allowedOUs` | ✅ | ✅ | - | ✅ | - | Allowed organizational units |
+| `authentication.oidc.enabled` | ✅ | ✅ | - | ✅ | - | Enable OIDC authentication |
+| `authentication.oidc.providers[].name` | ✅ | ✅ | - | ✅ | - | Provider name |
+| `authentication.oidc.providers[].issuerUrl` | ✅ | ✅ | - | ✅ | - | OIDC issuer URL |
+| `authentication.oidc.providers[].clientId` | ✅ | ✅ | - | ✅ | - | OIDC client ID |
+| `authentication.oidc.providers[].clientSecret` | ✅ | ✅ | - | ✅ | - | OIDC client secret |
+| `authentication.oidc.providers[].clientSecretRef.name` | ✅ | ✅ | - | ✅ | - | Kubernetes secret name for client secret |
+| `authentication.oidc.providers[].clientSecretRef.key` | ✅ | ✅ | - | ✅ | - | Kubernetes secret key for client secret |
+| `authentication.oidc.providers[].scopes` | ✅ | ✅ | - | ✅ | - | Scopes to request |
+| `backends[].authentication.type` | - | - | ✅ | - | ✅ | Backend authentication type (jwt, basic, mtls) |
+| `backends[].authentication.jwt.enabled` | - | - | ✅ | - | ✅ | Enable JWT authentication for backend |
+| `backends[].authentication.jwt.tokenSource` | - | - | ✅ | - | ✅ | Token source (static, vault, oidc) |
+| `backends[].authentication.jwt.staticToken` | - | - | ✅ | - | ✅ | Static JWT token (dev only) |
+| `backends[].authentication.jwt.vaultPath` | - | - | ✅ | - | ✅ | Vault path for JWT token |
+| `backends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | - | ✅ | OIDC issuer URL for backend auth |
+| `backends[].authentication.jwt.oidc.clientId` | - | - | ✅ | - | ✅ | OIDC client ID for backend auth |
+| `backends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | - | ✅ | OIDC client secret for backend auth |
+| `backends[].authentication.jwt.oidc.clientSecretRef.name` | - | - | ✅ | - | ✅ | Kubernetes secret name for backend OIDC client secret |
+| `backends[].authentication.jwt.oidc.clientSecretRef.key` | - | - | ✅ | - | ✅ | Kubernetes secret key for backend OIDC client secret |
+| `backends[].authentication.jwt.oidc.scopes` | - | - | ✅ | - | ✅ | OIDC scopes for backend auth |
+| `backends[].authentication.jwt.oidc.tokenCacheTTL` | - | - | ✅ | - | ✅ | TTL for cached backend tokens |
+| `backends[].authentication.jwt.headerName` | - | - | ✅ | - | ✅ | Header name for backend JWT token |
+| `backends[].authentication.jwt.headerPrefix` | - | - | ✅ | - | ✅ | Header prefix for backend JWT token |
+| `backends[].authentication.basic.enabled` | - | - | ✅ | - | ✅ | Enable Basic authentication for backend |
+| `backends[].authentication.basic.username` | - | - | ✅ | - | ✅ | Username for backend Basic auth |
+| `backends[].authentication.basic.password` | - | - | ✅ | - | ✅ | Password for backend Basic auth |
+| `backends[].authentication.basic.vaultPath` | - | - | ✅ | - | ✅ | Vault path for backend credentials |
+| `backends[].authentication.basic.usernameKey` | - | - | ✅ | - | ✅ | Vault key for backend username |
+| `backends[].authentication.basic.passwordKey` | - | - | ✅ | - | ✅ | Vault key for backend password |
+| `backends[].authentication.mtls.enabled` | - | - | ✅ | - | ✅ | Enable mTLS authentication for backend |
+| `backends[].authentication.mtls.certFile` | - | - | ✅ | - | ✅ | Client certificate file for backend |
+| `backends[].authentication.mtls.keyFile` | - | - | ✅ | - | ✅ | Client private key file for backend |
+| `backends[].authentication.mtls.caFile` | - | - | ✅ | - | ✅ | CA certificate for backend server verification |
+| `backends[].authentication.mtls.vault.enabled` | - | - | ✅ | - | ✅ | Enable Vault-based certificate management for backend |
+| `backends[].authentication.mtls.vault.pkiMount` | - | - | ✅ | - | ✅ | Vault PKI mount path for backend |
+| `backends[].authentication.mtls.vault.role` | - | - | ✅ | - | ✅ | Vault PKI role name for backend |
+| `backends[].authentication.mtls.vault.commonName` | - | - | ✅ | - | ✅ | Certificate common name for backend |
+| `backends[].authentication.mtls.vault.altNames` | - | - | ✅ | - | ✅ | Certificate alternative names for backend |
+| `backends[].authentication.mtls.vault.ttl` | - | - | ✅ | - | ✅ | Certificate TTL for backend |
 
 ### Authorization Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `authorization.enabled` | ✅ | ✅ | - | Enable authorization |
-| `authorization.defaultPolicy` | ✅ | ✅ | - | Default policy (allow/deny) |
-| `authorization.skipPaths` | ✅ | - | - | Paths to skip authorization |
-| `authorization.cache.enabled` | ✅ | - | - | Enable authorization caching |
-| `authorization.cache.ttl` | ✅ | - | - | Cache TTL |
-| `authorization.cache.maxSize` | ✅ | - | - | Maximum cache entries |
-| `authorization.cache.type` | ✅ | - | - | Cache type (memory, redis) |
-| `authorization.rbac.enabled` | ✅ | ✅ | - | Enable RBAC |
-| `authorization.rbac.policies[].name` | ✅ | ✅ | - | Policy name |
-| `authorization.rbac.policies[].roles` | ✅ | ✅ | - | Roles that match policy |
-| `authorization.rbac.policies[].resources` | ✅ | ✅ | - | Resources policy applies to |
-| `authorization.rbac.policies[].actions` | ✅ | ✅ | - | Actions policy allows |
-| `authorization.rbac.policies[].effect` | ✅ | ✅ | - | Policy effect (allow/deny) |
-| `authorization.rbac.policies[].priority` | ✅ | ✅ | - | Policy priority |
-| `authorization.rbac.roleHierarchy` | ✅ | - | - | Role inheritance definitions |
-| `authorization.abac.enabled` | ✅ | ✅ | - | Enable ABAC |
-| `authorization.abac.policies[].name` | ✅ | ✅ | - | Policy name |
-| `authorization.abac.policies[].expression` | ✅ | ✅ | - | CEL expression for policy |
-| `authorization.abac.policies[].resources` | ✅ | ✅ | - | Resources policy applies to |
-| `authorization.abac.policies[].actions` | ✅ | ✅ | - | Actions policy applies to |
-| `authorization.abac.policies[].effect` | ✅ | ✅ | - | Policy effect (allow/deny) |
-| `authorization.abac.policies[].priority` | ✅ | ✅ | - | Policy priority |
-| `authorization.external.enabled` | ✅ | ✅ | - | Enable external authorization |
-| `authorization.external.opa.url` | ✅ | ✅ | - | OPA server URL |
-| `authorization.external.opa.policy` | ✅ | ✅ | - | OPA policy path |
-| `authorization.external.opa.headers` | ✅ | ✅ | - | Additional headers for OPA |
-| `authorization.external.timeout` | ✅ | ✅ | - | External authz timeout |
-| `authorization.external.failOpen` | ✅ | ✅ | - | Allow on external authz failure |
+| Option | Global | Route | Backend | CRD Route | Description |
+|--------|:------:|:-----:|:-------:|:---------:|-------------|
+| `authorization.enabled` | ✅ | ✅ | - | ✅ | Enable authorization |
+| `authorization.defaultPolicy` | ✅ | ✅ | - | ✅ | Default policy (allow/deny) |
+| `authorization.skipPaths` | ✅ | ✅ | - | ✅ | Paths to skip authorization |
+| `authorization.cache.enabled` | ✅ | ✅ | - | ✅ | Enable authorization caching |
+| `authorization.cache.ttl` | ✅ | ✅ | - | ✅ | Cache TTL |
+| `authorization.cache.maxSize` | ✅ | ✅ | - | ✅ | Maximum cache entries |
+| `authorization.cache.type` | ✅ | ✅ | - | ✅ | Cache type (memory, redis) |
+| `authorization.rbac.enabled` | ✅ | ✅ | - | ✅ | Enable RBAC |
+| `authorization.rbac.policies[].name` | ✅ | ✅ | - | ✅ | Policy name |
+| `authorization.rbac.policies[].roles` | ✅ | ✅ | - | ✅ | Roles that match policy |
+| `authorization.rbac.policies[].resources` | ✅ | ✅ | - | ✅ | Resources policy applies to |
+| `authorization.rbac.policies[].actions` | ✅ | ✅ | - | ✅ | Actions policy allows |
+| `authorization.rbac.policies[].effect` | ✅ | ✅ | - | ✅ | Policy effect (allow/deny) |
+| `authorization.rbac.policies[].priority` | ✅ | ✅ | - | ✅ | Policy priority |
+| `authorization.rbac.roleHierarchy` | ✅ | - | - | ✅ | Role inheritance definitions |
+| `authorization.abac.enabled` | ✅ | ✅ | - | ✅ | Enable ABAC |
+| `authorization.abac.policies[].name` | ✅ | ✅ | - | ✅ | Policy name |
+| `authorization.abac.policies[].expression` | ✅ | ✅ | - | ✅ | CEL expression for policy |
+| `authorization.abac.policies[].resources` | ✅ | ✅ | - | ✅ | Resources policy applies to |
+| `authorization.abac.policies[].actions` | ✅ | ✅ | - | ✅ | Actions policy applies to |
+| `authorization.abac.policies[].effect` | ✅ | ✅ | - | ✅ | Policy effect (allow/deny) |
+| `authorization.abac.policies[].priority` | ✅ | ✅ | - | ✅ | Policy priority |
+| `authorization.external.enabled` | ✅ | ✅ | - | ✅ | Enable external authorization |
+| `authorization.external.opa.url` | ✅ | ✅ | - | ✅ | OPA server URL |
+| `authorization.external.opa.policy` | ✅ | ✅ | - | ✅ | OPA policy path |
+| `authorization.external.opa.headers` | ✅ | ✅ | - | ✅ | Additional headers for OPA |
+| `authorization.external.timeout` | ✅ | ✅ | - | ✅ | External authz timeout |
+| `authorization.external.failOpen` | ✅ | ✅ | - | ✅ | Allow on external authz failure |
 
 ### Security Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `security.enabled` | ✅ | ✅ | - | Enable security features |
-| `security.headers.enabled` | ✅ | ✅ | - | Enable security headers |
-| `security.headers.xFrameOptions` | ✅ | ✅ | - | X-Frame-Options header value |
-| `security.headers.xContentTypeOptions` | ✅ | ✅ | - | X-Content-Type-Options header |
-| `security.headers.xXSSProtection` | ✅ | ✅ | - | X-XSS-Protection header |
-| `security.headers.customHeaders` | ✅ | ✅ | - | Custom security headers |
-| `security.hsts.enabled` | ✅ | ✅ | - | Enable HSTS |
-| `security.hsts.maxAge` | ✅ | ✅ | - | HSTS max-age in seconds |
-| `security.hsts.includeSubDomains` | ✅ | ✅ | - | Include subdomains |
-| `security.hsts.preload` | ✅ | ✅ | - | Enable preload |
-| `security.csp.enabled` | ✅ | ✅ | - | Enable CSP |
-| `security.csp.policy` | ✅ | ✅ | - | CSP policy string |
-| `security.csp.reportOnly` | ✅ | ✅ | - | Report-only mode |
-| `security.csp.reportUri` | ✅ | ✅ | - | CSP violation report URI |
-| `security.referrerPolicy` | ✅ | ✅ | - | Referrer-Policy header value |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `security.enabled` | ✅ | ✅ | - | ✅ | - | Enable security features |
+| `security.headers.enabled` | ✅ | ✅ | - | ✅ | - | Enable security headers |
+| `security.headers.xFrameOptions` | ✅ | ✅ | - | ✅ | - | X-Frame-Options header value |
+| `security.headers.xContentTypeOptions` | ✅ | ✅ | - | ✅ | - | X-Content-Type-Options header |
+| `security.headers.xXSSProtection` | ✅ | ✅ | - | ✅ | - | X-XSS-Protection header |
+| `security.headers.customHeaders` | ✅ | ✅ | - | ✅ | - | Custom security headers |
+| `security.hsts.enabled` | ✅ | ✅ | - | ✅ | - | Enable HSTS |
+| `security.hsts.maxAge` | ✅ | ✅ | - | ✅ | - | HSTS max-age in seconds |
+| `security.hsts.includeSubDomains` | ✅ | ✅ | - | ✅ | - | Include subdomains |
+| `security.hsts.preload` | ✅ | ✅ | - | ✅ | - | Enable preload |
+| `security.csp.enabled` | ✅ | ✅ | - | ✅ | - | Enable CSP |
+| `security.csp.policy` | ✅ | ✅ | - | ✅ | - | CSP policy string |
+| `security.csp.reportOnly` | ✅ | ✅ | - | ✅ | - | Report-only mode |
+| `security.csp.reportUri` | ✅ | ✅ | - | ✅ | - | CSP violation report URI |
+| `security.referrerPolicy` | ✅ | ✅ | - | ✅ | - | Referrer-Policy header value |
 
 ### Audit Configuration
 
@@ -1356,137 +1600,168 @@ When the same option is configured at multiple levels, the more specific level t
 
 ### Backend Authentication Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `backends[].authentication.type` | - | - | ✅ | Authentication type (jwt, basic, mtls) |
-| `backends[].authentication.jwt.enabled` | - | - | ✅ | Enable JWT authentication |
-| `backends[].authentication.jwt.tokenSource` | - | - | ✅ | Token source (static, vault, oidc) |
-| `backends[].authentication.jwt.staticToken` | - | - | ✅ | Static JWT token (development only) |
-| `backends[].authentication.jwt.vaultPath` | - | - | ✅ | Vault path for JWT token |
-| `backends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | OIDC issuer URL |
-| `backends[].authentication.jwt.oidc.clientId` | - | - | ✅ | OIDC client ID |
-| `backends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | OIDC client secret |
-| `backends[].authentication.jwt.oidc.clientSecretVaultPath` | - | - | ✅ | Vault path for OIDC client secret |
-| `backends[].authentication.jwt.oidc.scopes` | - | - | ✅ | OIDC scopes to request |
-| `backends[].authentication.jwt.oidc.tokenCacheTTL` | - | - | ✅ | TTL for cached tokens |
-| `backends[].authentication.jwt.headerName` | - | - | ✅ | Header name for JWT token (default: Authorization) |
-| `backends[].authentication.jwt.headerPrefix` | - | - | ✅ | Header prefix for JWT token (default: Bearer) |
-| `backends[].authentication.basic.enabled` | - | - | ✅ | Enable Basic authentication |
-| `backends[].authentication.basic.username` | - | - | ✅ | Username for Basic auth |
-| `backends[].authentication.basic.password` | - | - | ✅ | Password for Basic auth |
-| `backends[].authentication.basic.vaultPath` | - | - | ✅ | Vault path for credentials |
-| `backends[].authentication.basic.usernameKey` | - | - | ✅ | Vault key for username (default: username) |
-| `backends[].authentication.basic.passwordKey` | - | - | ✅ | Vault key for password (default: password) |
-| `backends[].authentication.mtls.enabled` | - | - | ✅ | Enable mTLS authentication |
-| `backends[].authentication.mtls.certFile` | - | - | ✅ | Client certificate file path |
-| `backends[].authentication.mtls.keyFile` | - | - | ✅ | Client private key file path |
-| `backends[].authentication.mtls.caFile` | - | - | ✅ | CA certificate for server verification |
-| `backends[].authentication.mtls.vault.enabled` | - | - | ✅ | Enable Vault-based certificate management |
-| `backends[].authentication.mtls.vault.pkiMount` | - | - | ✅ | Vault PKI mount path |
-| `backends[].authentication.mtls.vault.role` | - | - | ✅ | Vault PKI role name |
-| `backends[].authentication.mtls.vault.commonName` | - | - | ✅ | Certificate common name |
-| `backends[].authentication.mtls.vault.altNames` | - | - | ✅ | Certificate alternative names |
-| `backends[].authentication.mtls.vault.ttl` | - | - | ✅ | Certificate TTL |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `backends[].authentication.type` | - | - | ✅ | - | ✅ | Authentication type (jwt, basic, mtls) |
+| `backends[].authentication.jwt.enabled` | - | - | ✅ | - | ✅ | Enable JWT authentication |
+| `backends[].authentication.jwt.tokenSource` | - | - | ✅ | - | ✅ | Token source (static, vault, oidc) |
+| `backends[].authentication.jwt.staticToken` | - | - | ✅ | - | ✅ | Static JWT token (development only) |
+| `backends[].authentication.jwt.vaultPath` | - | - | ✅ | - | ✅ | Vault path for JWT token |
+| `backends[].authentication.jwt.oidc.issuerUrl` | - | - | ✅ | - | ✅ | OIDC issuer URL |
+| `backends[].authentication.jwt.oidc.clientId` | - | - | ✅ | - | ✅ | OIDC client ID |
+| `backends[].authentication.jwt.oidc.clientSecret` | - | - | ✅ | - | ✅ | OIDC client secret |
+| `backends[].authentication.jwt.oidc.clientSecretVaultPath` | - | - | ✅ | - | ✅ | Vault path for OIDC client secret |
+| `backends[].authentication.jwt.oidc.scopes` | - | - | ✅ | - | ✅ | OIDC scopes to request |
+| `backends[].authentication.jwt.oidc.tokenCacheTTL` | - | - | ✅ | - | ✅ | TTL for cached tokens |
+| `backends[].authentication.jwt.headerName` | - | - | ✅ | - | ✅ | Header name for JWT token (default: Authorization) |
+| `backends[].authentication.jwt.headerPrefix` | - | - | ✅ | - | ✅ | Header prefix for JWT token (default: Bearer) |
+| `backends[].authentication.basic.enabled` | - | - | ✅ | - | ✅ | Enable Basic authentication |
+| `backends[].authentication.basic.username` | - | - | ✅ | - | ✅ | Username for Basic auth |
+| `backends[].authentication.basic.password` | - | - | ✅ | - | ✅ | Password for Basic auth |
+| `backends[].authentication.basic.vaultPath` | - | - | ✅ | - | ✅ | Vault path for credentials |
+| `backends[].authentication.basic.usernameKey` | - | - | ✅ | - | ✅ | Vault key for username (default: username) |
+| `backends[].authentication.basic.passwordKey` | - | - | ✅ | - | ✅ | Vault key for password (default: password) |
+| `backends[].authentication.mtls.enabled` | - | - | ✅ | - | ✅ | Enable mTLS authentication |
+| `backends[].authentication.mtls.certFile` | - | - | ✅ | - | ✅ | Client certificate file path |
+| `backends[].authentication.mtls.keyFile` | - | - | ✅ | - | ✅ | Client private key file path |
+| `backends[].authentication.mtls.caFile` | - | - | ✅ | - | ✅ | CA certificate for server verification |
+| `backends[].authentication.mtls.vault.enabled` | - | - | ✅ | - | ✅ | Enable Vault-based certificate management |
+| `backends[].authentication.mtls.vault.pkiMount` | - | - | ✅ | - | ✅ | Vault PKI mount path |
+| `backends[].authentication.mtls.vault.role` | - | - | ✅ | - | ✅ | Vault PKI role name |
+| `backends[].authentication.mtls.vault.commonName` | - | - | ✅ | - | ✅ | Certificate common name |
+| `backends[].authentication.mtls.vault.altNames` | - | - | ✅ | - | ✅ | Certificate alternative names |
+| `backends[].authentication.mtls.vault.ttl` | - | - | ✅ | - | ✅ | Certificate TTL |
 
 ### HTTP Transform Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `routes[].transform.request.passthroughBody` | - | ✅ | - | Pass request body unchanged |
-| `routes[].transform.request.bodyTemplate` | - | ✅ | - | Go template for request body |
-| `routes[].transform.request.staticHeaders` | - | ✅ | - | Static headers to add |
-| `routes[].transform.request.dynamicHeaders` | - | ✅ | - | Dynamic headers from context |
-| `routes[].transform.request.injectFields` | - | ✅ | - | Fields to inject into body |
-| `routes[].transform.request.removeFields` | - | ✅ | - | Fields to remove from body |
-| `routes[].transform.request.defaultValues` | - | ✅ | - | Default values for missing fields |
-| `routes[].transform.request.validateBeforeTransform` | - | ✅ | - | Validate before transformation |
-| `routes[].transform.response.allowFields` | - | ✅ | - | Fields to include (whitelist) |
-| `routes[].transform.response.denyFields` | - | ✅ | - | Fields to exclude (blacklist) |
-| `routes[].transform.response.fieldMappings` | - | ✅ | - | Field rename mappings |
-| `routes[].transform.response.groupFields` | - | ✅ | - | Group fields into objects |
-| `routes[].transform.response.flattenFields` | - | ✅ | - | Flatten nested objects |
-| `routes[].transform.response.arrayOperations` | - | ✅ | - | Array manipulation operations |
-| `routes[].transform.response.template` | - | ✅ | - | Go template for response |
-| `routes[].transform.response.mergeStrategy` | - | ✅ | - | Merge strategy (deep, shallow, replace) |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `routes[].transform.request.passthroughBody` | - | ✅ | - | ✅ | - | Pass request body unchanged |
+| `routes[].transform.request.bodyTemplate` | - | ✅ | - | ✅ | - | Go template for request body |
+| `routes[].transform.request.staticHeaders` | - | ✅ | - | ✅ | - | Static headers to add |
+| `routes[].transform.request.dynamicHeaders` | - | ✅ | - | ✅ | - | Dynamic headers from context |
+| `routes[].transform.request.injectFields` | - | ✅ | - | ✅ | - | Fields to inject into body |
+| `routes[].transform.request.removeFields` | - | ✅ | - | ✅ | - | Fields to remove from body |
+| `routes[].transform.request.defaultValues` | - | ✅ | - | ✅ | - | Default values for missing fields |
+| `routes[].transform.request.validateBeforeTransform` | - | ✅ | - | ✅ | - | Validate before transformation |
+| `routes[].transform.response.allowFields` | - | ✅ | - | ✅ | - | Fields to include (whitelist) |
+| `routes[].transform.response.denyFields` | - | ✅ | - | ✅ | - | Fields to exclude (blacklist) |
+| `routes[].transform.response.fieldMappings` | - | ✅ | - | ✅ | - | Field rename mappings |
+| `routes[].transform.response.groupFields` | - | ✅ | - | ✅ | - | Group fields into objects |
+| `routes[].transform.response.flattenFields` | - | ✅ | - | ✅ | - | Flatten nested objects |
+| `routes[].transform.response.arrayOperations` | - | ✅ | - | ✅ | - | Array manipulation operations |
+| `routes[].transform.response.template` | - | ✅ | - | ✅ | - | Go template for response |
+| `routes[].transform.response.mergeStrategy` | - | ✅ | - | ✅ | - | Merge strategy (deep, shallow, replace) |
+| `backends[].transform.request.template` | - | - | ✅ | - | ✅ | Go template for request transformation |
+| `backends[].transform.request.headers.set` | - | - | ✅ | - | ✅ | Set request headers |
+| `backends[].transform.request.headers.add` | - | - | ✅ | - | ✅ | Add request headers |
+| `backends[].transform.request.headers.remove` | - | - | ✅ | - | ✅ | Remove request headers |
+| `backends[].transform.response.allowFields` | - | - | ✅ | - | ✅ | Fields to allow in response |
+| `backends[].transform.response.denyFields` | - | - | ✅ | - | ✅ | Fields to deny in response |
+| `backends[].transform.response.fieldMappings` | - | - | ✅ | - | ✅ | Field name mappings |
+| `backends[].transform.response.headers.set` | - | - | ✅ | - | ✅ | Set response headers |
+| `backends[].transform.response.headers.add` | - | - | ✅ | - | ✅ | Add response headers |
+| `backends[].transform.response.headers.remove` | - | - | ✅ | - | ✅ | Remove response headers |
 
 ### gRPC Transform Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `grpcRoutes[].transform.request.injectFieldMask` | - | ✅ | - | FieldMask to inject |
-| `grpcRoutes[].transform.request.staticMetadata` | - | ✅ | - | Static metadata to add |
-| `grpcRoutes[].transform.request.dynamicMetadata` | - | ✅ | - | Dynamic metadata from context |
-| `grpcRoutes[].transform.request.injectFields` | - | ✅ | - | Fields to inject |
-| `grpcRoutes[].transform.request.removeFields` | - | ✅ | - | Fields to remove |
-| `grpcRoutes[].transform.request.defaultValues` | - | ✅ | - | Default values |
-| `grpcRoutes[].transform.request.validateBeforeTransform` | - | ✅ | - | Validate before transformation |
-| `grpcRoutes[].transform.request.injectDeadline` | - | ✅ | - | Deadline to inject |
-| `grpcRoutes[].transform.request.authorityOverride` | - | ✅ | - | Override :authority header |
-| `grpcRoutes[].transform.response.fieldMask` | - | ✅ | - | FieldMask for filtering |
-| `grpcRoutes[].transform.response.fieldMappings` | - | ✅ | - | Field rename mappings |
-| `grpcRoutes[].transform.response.repeatedFieldOps` | - | ✅ | - | Operations on repeated fields |
-| `grpcRoutes[].transform.response.mapFieldOps` | - | ✅ | - | Operations on map fields |
-| `grpcRoutes[].transform.response.preserveUnknownFields` | - | ✅ | - | Preserve unknown fields |
-| `grpcRoutes[].transform.response.trailerMetadata` | - | ✅ | - | Metadata for response trailers |
-| `grpcRoutes[].transform.response.streaming.perMessageTransform` | - | ✅ | - | Transform each message |
-| `grpcRoutes[].transform.response.streaming.aggregate` | - | ✅ | - | Aggregate messages |
-| `grpcRoutes[].transform.response.streaming.filterCondition` | - | ✅ | - | CEL filter for messages |
-| `grpcRoutes[].transform.response.streaming.bufferSize` | - | ✅ | - | Message buffer size |
-| `grpcRoutes[].transform.response.streaming.rateLimit` | - | ✅ | - | Max messages per second |
-| `grpcRoutes[].transform.response.streaming.messageTimeout` | - | ✅ | - | Per-message timeout |
-| `grpcRoutes[].transform.response.streaming.totalTimeout` | - | ✅ | - | Total streaming timeout |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `grpcRoutes[].transform.request.injectFieldMask` | - | ✅ | - | ✅ | - | FieldMask to inject |
+| `grpcRoutes[].transform.request.staticMetadata` | - | ✅ | - | ✅ | - | Static metadata to add |
+| `grpcRoutes[].transform.request.dynamicMetadata` | - | ✅ | - | ✅ | - | Dynamic metadata from context |
+| `grpcRoutes[].transform.request.injectFields` | - | ✅ | - | ✅ | - | Fields to inject |
+| `grpcRoutes[].transform.request.removeFields` | - | ✅ | - | ✅ | - | Fields to remove |
+| `grpcRoutes[].transform.request.defaultValues` | - | ✅ | - | ✅ | - | Default values |
+| `grpcRoutes[].transform.request.validateBeforeTransform` | - | ✅ | - | ✅ | - | Validate before transformation |
+| `grpcRoutes[].transform.request.injectDeadline` | - | ✅ | - | ✅ | - | Deadline to inject |
+| `grpcRoutes[].transform.request.authorityOverride` | - | ✅ | - | ✅ | - | Override :authority header |
+| `grpcRoutes[].transform.response.fieldMask` | - | ✅ | - | ✅ | - | FieldMask for filtering |
+| `grpcRoutes[].transform.response.fieldMappings` | - | ✅ | - | ✅ | - | Field rename mappings |
+| `grpcRoutes[].transform.response.repeatedFieldOps` | - | ✅ | - | ✅ | - | Operations on repeated fields |
+| `grpcRoutes[].transform.response.mapFieldOps` | - | ✅ | - | ✅ | - | Operations on map fields |
+| `grpcRoutes[].transform.response.preserveUnknownFields` | - | ✅ | - | ✅ | - | Preserve unknown fields |
+| `grpcRoutes[].transform.response.trailerMetadata` | - | ✅ | - | ✅ | - | Metadata for response trailers |
+| `grpcRoutes[].transform.response.streaming.perMessageTransform` | - | ✅ | - | ✅ | - | Transform each message |
+| `grpcRoutes[].transform.response.streaming.aggregate` | - | ✅ | - | ✅ | - | Aggregate messages |
+| `grpcRoutes[].transform.response.streaming.filterCondition` | - | ✅ | - | ✅ | - | CEL filter for messages |
+| `grpcRoutes[].transform.response.streaming.bufferSize` | - | ✅ | - | ✅ | - | Message buffer size |
+| `grpcRoutes[].transform.response.streaming.rateLimit` | - | ✅ | - | ✅ | - | Max messages per second |
+| `grpcRoutes[].transform.response.streaming.messageTimeout` | - | ✅ | - | ✅ | - | Per-message timeout |
+| `grpcRoutes[].transform.response.streaming.totalTimeout` | - | ✅ | - | ✅ | - | Total streaming timeout |
+| `grpcBackends[].transform.fieldMask.paths` | - | - | ✅ | - | ✅ | Field paths to include |
+| `grpcBackends[].transform.metadata.static` | - | - | ✅ | - | ✅ | Static metadata values |
+| `grpcBackends[].transform.metadata.dynamic` | - | - | ✅ | - | ✅ | Dynamic metadata templates |
 
 ### Cache Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `routes[].cache.enabled` | - | ✅ | - | Enable caching |
-| `routes[].cache.type` | - | ✅ | - | Cache type (memory, redis) |
-| `routes[].cache.ttl` | - | ✅ | - | Cache TTL |
-| `routes[].cache.maxEntries` | - | ✅ | - | Max entries (memory cache) |
-| `routes[].cache.honorCacheControl` | - | ✅ | - | Honor Cache-Control headers |
-| `routes[].cache.staleWhileRevalidate` | - | ✅ | - | Stale-while-revalidate duration |
-| `routes[].cache.negativeCacheTTL` | - | ✅ | - | TTL for error responses |
-| `routes[].cache.redis.url` | - | ✅ | - | Redis connection URL |
-| `routes[].cache.redis.poolSize` | - | ✅ | - | Redis connection pool size |
-| `routes[].cache.redis.connectTimeout` | - | ✅ | - | Redis connect timeout |
-| `routes[].cache.redis.readTimeout` | - | ✅ | - | Redis read timeout |
-| `routes[].cache.redis.writeTimeout` | - | ✅ | - | Redis write timeout |
-| `routes[].cache.redis.keyPrefix` | - | ✅ | - | Redis key prefix |
-| `routes[].cache.redis.tls.*` | - | ✅ | - | Redis TLS configuration |
-| `routes[].cache.redis.retry.maxRetries` | - | ✅ | - | Max connection retries |
-| `routes[].cache.redis.retry.initialBackoff` | - | ✅ | - | Initial retry backoff |
-| `routes[].cache.redis.retry.maxBackoff` | - | ✅ | - | Max retry backoff |
-| `routes[].cache.keyConfig.includeMethod` | - | ✅ | - | Include method in cache key |
-| `routes[].cache.keyConfig.includePath` | - | ✅ | - | Include path in cache key |
-| `routes[].cache.keyConfig.includeQueryParams` | - | ✅ | - | Query params to include |
-| `routes[].cache.keyConfig.includeHeaders` | - | ✅ | - | Headers to include |
-| `routes[].cache.keyConfig.includeBodyHash` | - | ✅ | - | Include body hash |
-| `routes[].cache.keyConfig.keyTemplate` | - | ✅ | - | Custom key template |
-| `grpcRoutes[].cache.*` | - | ✅ | - | Same as HTTP routes cache |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `routes[].cache.enabled` | - | ✅ | - | ✅ | - | Enable caching |
+| `routes[].cache.type` | - | ✅ | - | ✅ | - | Cache type (memory, redis) |
+| `routes[].cache.ttl` | - | ✅ | - | ✅ | - | Cache TTL |
+| `routes[].cache.maxEntries` | - | ✅ | - | ✅ | - | Max entries (memory cache) |
+| `routes[].cache.honorCacheControl` | - | ✅ | - | ✅ | - | Honor Cache-Control headers |
+| `routes[].cache.staleWhileRevalidate` | - | ✅ | - | ✅ | - | Stale-while-revalidate duration |
+| `routes[].cache.negativeCacheTTL` | - | ✅ | - | ✅ | - | TTL for error responses |
+| `routes[].cache.redis.url` | - | ✅ | - | ✅ | - | Redis connection URL |
+| `routes[].cache.redis.poolSize` | - | ✅ | - | ✅ | - | Redis connection pool size |
+| `routes[].cache.redis.connectTimeout` | - | ✅ | - | ✅ | - | Redis connect timeout |
+| `routes[].cache.redis.readTimeout` | - | ✅ | - | ✅ | - | Redis read timeout |
+| `routes[].cache.redis.writeTimeout` | - | ✅ | - | ✅ | - | Redis write timeout |
+| `routes[].cache.redis.keyPrefix` | - | ✅ | - | ✅ | - | Redis key prefix |
+| `routes[].cache.redis.tls.*` | - | ✅ | - | ✅ | - | Redis TLS configuration |
+| `routes[].cache.redis.retry.maxRetries` | - | ✅ | - | ✅ | - | Max connection retries |
+| `routes[].cache.redis.retry.initialBackoff` | - | ✅ | - | ✅ | - | Initial retry backoff |
+| `routes[].cache.redis.retry.maxBackoff` | - | ✅ | - | ✅ | - | Max retry backoff |
+| `routes[].cache.keyConfig.includeMethod` | - | ✅ | - | ✅ | - | Include method in cache key |
+| `routes[].cache.keyConfig.includePath` | - | ✅ | - | ✅ | - | Include path in cache key |
+| `routes[].cache.keyConfig.includeQueryParams` | - | ✅ | - | ✅ | - | Query params to include |
+| `routes[].cache.keyConfig.includeHeaders` | - | ✅ | - | ✅ | - | Headers to include |
+| `routes[].cache.keyConfig.includeBodyHash` | - | ✅ | - | ✅ | - | Include body hash |
+| `routes[].cache.keyConfig.keyTemplate` | - | ✅ | - | ✅ | - | Custom key template |
+| `grpcRoutes[].cache.*` | - | ✅ | - | ✅ | - | Same as HTTP routes cache |
+| `backends[].cache.enabled` | - | - | ✅ | - | ✅ | Enable caching |
+| `backends[].cache.ttl` | - | - | ✅ | - | ✅ | Cache time-to-live |
+| `backends[].cache.keyComponents` | - | - | ✅ | - | ✅ | Components for cache key generation |
+| `backends[].cache.staleWhileRevalidate` | - | - | ✅ | - | ✅ | Serve stale while revalidating |
+| `backends[].cache.type` | - | - | ✅ | - | ✅ | Cache type (memory, redis) |
+| `grpcBackends[].cache.enabled` | - | - | ✅ | - | ✅ | Enable caching |
+| `grpcBackends[].cache.ttl` | - | - | ✅ | - | ✅ | Cache time-to-live |
+| `grpcBackends[].cache.keyComponents` | - | - | ✅ | - | ✅ | Components for cache key generation |
+| `grpcBackends[].cache.staleWhileRevalidate` | - | - | ✅ | - | ✅ | Serve stale while revalidating |
+| `grpcBackends[].cache.type` | - | - | ✅ | - | ✅ | Cache type (memory, redis) |
 
 ### Encoding Configuration
 
-| Option | Global | Route | Backend | Description |
-|--------|:------:|:-----:|:-------:|-------------|
-| `routes[].encoding.requestEncoding` | - | ✅ | - | Request encoding (json, xml, yaml, protobuf) |
-| `routes[].encoding.responseEncoding` | - | ✅ | - | Response encoding |
-| `routes[].encoding.enableContentNegotiation` | - | ✅ | - | Enable content negotiation |
-| `routes[].encoding.supportedContentTypes` | - | ✅ | - | Supported content types |
-| `routes[].encoding.passthrough` | - | ✅ | - | Pass content unchanged |
-| `routes[].encoding.json.emitDefaults` | - | ✅ | - | Include default values |
-| `routes[].encoding.json.useProtoNames` | - | ✅ | - | Use proto field names |
-| `routes[].encoding.json.enumAsIntegers` | - | ✅ | - | Encode enums as integers |
-| `routes[].encoding.json.int64AsStrings` | - | ✅ | - | Encode int64 as strings |
-| `routes[].encoding.json.prettyPrint` | - | ✅ | - | Pretty print JSON |
-| `routes[].encoding.protobuf.useJSONEncoding` | - | ✅ | - | Use JSON for protobuf |
-| `routes[].encoding.protobuf.descriptorSource` | - | ✅ | - | Descriptor source (reflection, file) |
-| `routes[].encoding.protobuf.descriptorFile` | - | ✅ | - | Path to descriptor file |
-| `routes[].encoding.compression.enabled` | - | ✅ | - | Enable compression |
-| `routes[].encoding.compression.algorithms` | - | ✅ | - | Compression algorithms |
-| `routes[].encoding.compression.minSize` | - | ✅ | - | Min size to compress |
-| `routes[].encoding.compression.level` | - | ✅ | - | Compression level |
-| `grpcRoutes[].encoding.*` | - | ✅ | - | Same as HTTP routes encoding |
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `routes[].encoding.requestEncoding` | - | ✅ | - | ✅ | - | Request encoding (json, xml, yaml, protobuf) |
+| `routes[].encoding.responseEncoding` | - | ✅ | - | ✅ | - | Response encoding |
+| `routes[].encoding.enableContentNegotiation` | - | ✅ | - | ✅ | - | Enable content negotiation |
+| `routes[].encoding.supportedContentTypes` | - | ✅ | - | ✅ | - | Supported content types |
+| `routes[].encoding.passthrough` | - | ✅ | - | ✅ | - | Pass content unchanged |
+| `routes[].encoding.json.emitDefaults` | - | ✅ | - | ✅ | - | Include default values |
+| `routes[].encoding.json.useProtoNames` | - | ✅ | - | ✅ | - | Use proto field names |
+| `routes[].encoding.json.enumAsIntegers` | - | ✅ | - | ✅ | - | Encode enums as integers |
+| `routes[].encoding.json.int64AsStrings` | - | ✅ | - | ✅ | - | Encode int64 as strings |
+| `routes[].encoding.json.prettyPrint` | - | ✅ | - | ✅ | - | Pretty print JSON |
+| `routes[].encoding.protobuf.useJSONEncoding` | - | ✅ | - | ✅ | - | Use JSON for protobuf |
+| `routes[].encoding.protobuf.descriptorSource` | - | ✅ | - | ✅ | - | Descriptor source (reflection, file) |
+| `routes[].encoding.protobuf.descriptorFile` | - | ✅ | - | ✅ | - | Path to descriptor file |
+| `routes[].encoding.compression.enabled` | - | ✅ | - | ✅ | - | Enable compression |
+| `routes[].encoding.compression.algorithms` | - | ✅ | - | ✅ | - | Compression algorithms |
+| `routes[].encoding.compression.minSize` | - | ✅ | - | ✅ | - | Min size to compress |
+| `routes[].encoding.compression.level` | - | ✅ | - | ✅ | - | Compression level |
+| `grpcRoutes[].encoding.*` | - | ✅ | - | ✅ | - | Same as HTTP routes encoding |
+| `backends[].encoding.request.contentType` | - | - | ✅ | - | ✅ | Request content type |
+| `backends[].encoding.request.compression` | - | - | ✅ | - | ✅ | Request compression algorithm |
+| `backends[].encoding.response.contentType` | - | - | ✅ | - | ✅ | Response content type |
+| `backends[].encoding.response.compression` | - | - | ✅ | - | ✅ | Response compression algorithm |
+| `grpcBackends[].encoding.request.contentType` | - | - | ✅ | - | ✅ | Request content type |
+| `grpcBackends[].encoding.request.compression` | - | - | ✅ | - | ✅ | Request compression algorithm |
+| `grpcBackends[].encoding.response.contentType` | - | - | ✅ | - | ✅ | Response content type |
+| `grpcBackends[].encoding.response.compression` | - | - | ✅ | - | ✅ | Response compression algorithm |
 
 ### Configuration Level Examples
 
@@ -2689,6 +2964,125 @@ vault:
   authMethod: kubernetes
   kubernetes:
     role: gateway
+```
+
+## ⚙️ Environment Variable Configuration
+
+The AV API Gateway supports comprehensive environment variable configuration with enhanced boolean value handling.
+
+### Boolean Environment Variables
+
+All boolean configuration options support symmetric true/false handling with multiple formats (case-insensitive):
+
+**Supported Boolean Values:**
+- **True values**: `true`, `yes`, `1`, `on`, `enable`, `enabled`
+- **False values**: `false`, `no`, `0`, `off`, `disable`, `disabled`
+
+```bash
+# All of these are equivalent for enabling features
+export VAULT_ENABLED=true
+export VAULT_ENABLED=yes
+export VAULT_ENABLED=1
+export VAULT_ENABLED=on
+
+# All of these are equivalent for disabling features
+export VAULT_ENABLED=false
+export VAULT_ENABLED=no
+export VAULT_ENABLED=0
+export VAULT_ENABLED=off
+```
+
+### Common Environment Variables
+
+```bash
+# Core gateway settings
+export GATEWAY_PORT=8080
+export GATEWAY_HOST=0.0.0.0
+export GATEWAY_LOG_LEVEL=info
+export GATEWAY_LOG_FORMAT=json
+
+# TLS configuration
+export TLS_ENABLED=true
+export TLS_CERT_FILE=/app/certs/tls.crt
+export TLS_KEY_FILE=/app/certs/tls.key
+export TLS_MIN_VERSION=1.2
+
+# Vault integration
+export VAULT_ENABLED=true
+export VAULT_ADDR=https://vault.example.com:8200
+export VAULT_AUTH_METHOD=kubernetes
+export VAULT_ROLE=gateway-role
+
+# Metrics and observability
+export METRICS_ENABLED=true
+export METRICS_PORT=9090
+export TRACING_ENABLED=true
+export TRACING_ENDPOINT=http://jaeger:14268/api/traces
+
+# Security settings
+export CORS_ENABLED=true
+export RATE_LIMIT_ENABLED=true
+export CIRCUIT_BREAKER_ENABLED=true
+```
+
+### Environment Variable Precedence
+
+Configuration values are resolved in the following order (highest to lowest precedence):
+
+1. **Command line flags** - Direct CLI arguments
+2. **Environment variables** - OS environment variables
+3. **Configuration file** - YAML configuration file
+4. **Default values** - Built-in defaults
+
+```bash
+# Example: Override config file settings with environment variables
+export GATEWAY_PORT=9080              # Overrides config file port
+export VAULT_ENABLED=false            # Disables Vault regardless of config file
+./bin/gateway -config gateway.yaml    # Config file provides base configuration
+```
+
+### Docker Environment Configuration
+
+```bash
+# Run with environment variables
+docker run -d \
+  -p 8080:8080 \
+  -p 9090:9090 \
+  -e GATEWAY_LOG_LEVEL=debug \
+  -e VAULT_ENABLED=true \
+  -e VAULT_ADDR=https://vault.example.com:8200 \
+  -e METRICS_ENABLED=true \
+  ghcr.io/vyrodovalexey/avapigw:latest
+```
+
+### Kubernetes Environment Configuration
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: avapigw
+spec:
+  template:
+    spec:
+      containers:
+      - name: gateway
+        image: ghcr.io/vyrodovalexey/avapigw:latest
+        env:
+        - name: GATEWAY_LOG_LEVEL
+          value: "info"
+        - name: VAULT_ENABLED
+          value: "true"
+        - name: VAULT_ADDR
+          value: "https://vault.vault.svc.cluster.local:8200"
+        - name: VAULT_AUTH_METHOD
+          value: "kubernetes"
+        - name: VAULT_ROLE
+          value: "gateway-role"
+        - name: METRICS_ENABLED
+          value: "yes"                    # Alternative boolean format
+        - name: TRACING_ENABLED
+          value: "1"                      # Alternative boolean format
 ```
 
 ## 🔐 Authentication
@@ -4798,30 +5192,53 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
 ## ☸️ Kubernetes & Helm
 
-### Helm Chart Installation
+The AV API Gateway provides production-ready Helm charts for easy deployment to Kubernetes clusters. The chart supports both standalone gateway deployment and optional operator mode for CRD-based configuration management.
 
-The AV API Gateway includes a production-ready Helm chart for Kubernetes deployment.
+### Helm Installation
 
-#### Prerequisites
-
-- Kubernetes 1.19+
-- Helm 3.8+
-
-#### Quick Install
+#### Gateway Only (Default)
 
 ```bash
-# Add the Helm repository (if published)
-# helm repo add avapigw https://charts.avapigw.io
-# helm repo update
-
-# Install from local chart
-helm install my-gateway ./helm/avapigw
+# Install the gateway only
+helm install avapigw ./helm/avapigw \
+  -n avapigw \
+  --create-namespace
 
 # Install with custom values
-helm install my-gateway ./helm/avapigw -f my-values.yaml
+helm install avapigw ./helm/avapigw \
+  -f values-production.yaml \
+  -n avapigw \
+  --create-namespace
+```
 
-# Install in a specific namespace
-helm install my-gateway ./helm/avapigw --namespace gateway --create-namespace
+#### Gateway with Operator
+
+```bash
+# Install gateway with operator for CRD-based configuration
+helm install avapigw ./helm/avapigw \
+  --set operator.enabled=true \
+  -n avapigw \
+  --create-namespace
+
+# Install with custom values and operator
+helm install avapigw ./helm/avapigw \
+  -f values-production.yaml \
+  --set operator.enabled=true \
+  -n avapigw \
+  --create-namespace
+```
+
+#### Upgrade Existing Installation
+
+```bash
+# Upgrade gateway only
+helm upgrade avapigw ./helm/avapigw \
+  -n avapigw
+
+# Upgrade and enable operator
+helm upgrade avapigw ./helm/avapigw \
+  --set operator.enabled=true \
+  -n avapigw
 ```
 
 #### Vault TLS with Kubernetes Auth Deployment
@@ -5030,6 +5447,627 @@ helm install --dry-run --debug my-gateway ./helm/avapigw
 helm test my-gateway
 ```
 
+### Makefile Targets
+
+The project includes convenient Makefile targets for Helm operations:
+
+```bash
+# Helm operations (gateway only)
+make helm-lint                    # Lint Helm chart
+make helm-template                # Template gateway only
+make helm-install                 # Install gateway only to local K8s
+make helm-uninstall              # Uninstall from local K8s
+
+# Helm operations (with operator)
+make helm-template-with-operator  # Template with operator enabled
+make helm-install-with-operator   # Install with operator to local K8s
+
+# Legacy aliases (still supported for backward compatibility)
+make helm-template-operator       # Alias for helm-template-with-operator
+make helm-install-operator        # Alias for helm-install-with-operator
+```
+
+## 🎛️ AVAPIGW Operator
+
+The AVAPIGW Operator is a Kubernetes operator that manages API Gateway configuration through Custom Resource Definitions (CRDs). It enables declarative configuration of routes and backends using Kubernetes-native resources and is now integrated into the main Helm chart.
+
+### Key Features
+
+- **Declarative Configuration** - Manage routes and backends using Kubernetes CRDs
+- **Hot Configuration Updates** - Apply configuration changes without gateway restarts
+- **Base Reconciler Pattern** - Extracted common reconciliation logic to reduce code duplication
+- **Efficient Status Updates** - Status updates now use Patch instead of Update for better performance
+- **Generation-based Reconciliation** - Skip unnecessary reconciliation when resources haven't changed
+- **Thread-safe StatusUpdater** - Improved initialization and concurrent access handling
+- **gRPC Communication** - Secure mTLS communication between operator and gateway
+- **Automated Certificate Management** - Webhook certificate provisioning supporting self-signed, Vault PKI, and cert-manager modes
+- **Enhanced Admission Webhooks** - Cross-CRD duplicate detection, ingress validation, and cross-reference validation
+- **Comprehensive RBAC** - Least-privilege RBAC permissions for Ingress, IngressClass, Leases, Secrets, Services, ConfigMaps, and ValidatingWebhookConfigurations
+- **Webhook CA Injection** - Automated CA injection into ValidatingWebhookConfigurations for seamless certificate rotation
+- **Ingress Controller Support** - Convert standard Kubernetes Ingress to gateway configuration
+- **Status Reporting** - Real-time status updates and condition reporting
+- **Multi-Gateway Support** - Manage multiple gateway instances from a single operator
+- **Consolidated Deployment** - Single Helm chart with optional operator mode
+
+### Quick Start
+
+#### Prerequisites
+
+- Kubernetes 1.23+
+- Helm 3.0+
+- AVAPIGW gateway instances running in the cluster
+
+#### Install the Operator
+
+The operator is now part of the main Helm chart and can be enabled optionally:
+
+```bash
+# Install gateway with operator enabled
+helm install avapigw ./helm/avapigw \
+  --set operator.enabled=true \
+  -n avapigw \
+  --create-namespace
+
+# Verify installation
+kubectl get pods -n avapigw
+kubectl get crd | grep avapigw.io
+```
+
+#### Create Your First Route
+
+```bash
+# Create an APIRoute (note the new API group)
+cat <<EOF | kubectl apply -f -
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: hello-world
+  namespace: default
+spec:
+  match:
+    - uri:
+        prefix: /hello
+      methods:
+        - GET
+  route:
+    - destination:
+        host: hello-service
+        port: 8080
+  timeout: 30s
+EOF
+
+# Check route status
+kubectl get apiroutes hello-world -o yaml
+```
+
+#### Create a Backend
+
+```bash
+# Create a Backend (note the new API group)
+cat <<EOF | kubectl apply -f -
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: hello-backend
+  namespace: default
+spec:
+  hosts:
+    - address: hello-service.default.svc.cluster.local
+      port: 8080
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+EOF
+
+# Check backend status
+kubectl get backends hello-backend -o yaml
+```
+
+### Available CRDs
+
+The operator manages four types of Custom Resource Definitions:
+
+| CRD | Kind | Description |
+|-----|------|-------------|
+| `apiroutes` | `APIRoute` | HTTP route configuration |
+| `grpcroutes` | `GRPCRoute` | gRPC route configuration |
+| `backends` | `Backend` | HTTP backend configuration |
+| `grpcbackends` | `GRPCBackend` | gRPC backend configuration |
+
+### RBAC Permissions
+
+The operator requires comprehensive RBAC permissions for full functionality:
+
+#### Core Resources
+- **Events** - Recording reconciliation events and status changes
+- **Secrets** - TLS certificates and sensitive data access (read-only)
+- **ConfigMaps** - Configuration storage and management
+- **Services/Endpoints** - Backend service discovery and health checking
+
+#### CRD Management
+- **APIRoute, GRPCRoute, Backend, GRPCBackend** - Full CRUD operations and status updates
+- **Cross-reference validation** - Ensuring referenced backends exist
+
+#### Ingress Support (when ingress controller enabled)
+- **Ingress** - Reading and converting standard Kubernetes Ingress resources
+- **IngressClass** - Managing IngressClass resources for opt-in behavior
+
+#### Coordination and Security
+- **Leases** - Leader election for high availability deployments
+- **ValidatingWebhookConfigurations** - Webhook CA injection for certificate rotation
+
+### Certificate Management
+
+The operator supports three certificate management modes for webhook validation:
+
+#### Self-Signed Mode (Default)
+```yaml
+operator:
+  webhook:
+    tls:
+      mode: selfsigned
+```
+- Automatically generates self-signed certificates
+- Handles certificate rotation and CA injection
+- No external dependencies required
+
+#### Vault PKI Mode
+```yaml
+operator:
+  webhook:
+    tls:
+      mode: vault
+vault:
+  enabled: true
+  address: "https://vault.example.com:8200"
+  authMethod: kubernetes
+  role: avapigw-operator
+```
+- Integrates with HashiCorp Vault PKI
+- Automatic certificate issuance and renewal
+- Enterprise-grade certificate management
+
+#### Cert-Manager Mode
+```yaml
+operator:
+  webhook:
+    tls:
+      mode: cert-manager
+```
+- Integrates with cert-manager for certificate lifecycle
+- Supports various certificate issuers
+- Kubernetes-native certificate management
+
+### Documentation
+
+For comprehensive operator documentation, see:
+
+- **[Operator Overview](docs/operator/README.md)** - Architecture and key concepts
+- **[Installation Guide](docs/operator/installation.md)** - Detailed installation instructions
+- **[CRD Reference](docs/operator/crd-reference.md)** - Complete CRD specification
+- **[Configuration Guide](docs/operator/configuration.md)** - Operator configuration options
+- **[Vault PKI Integration](docs/operator/vault-pki.md)** - Certificate management setup
+- **[Troubleshooting](docs/operator/troubleshooting.md)** - Common issues and solutions
+
+### Makefile Targets
+
+The project includes convenient Makefile targets for Helm and operator operations:
+
+```bash
+# Helm operations (gateway only)
+make helm-lint                    # Lint Helm chart
+make helm-template                # Template gateway only
+make helm-install                 # Install gateway only
+make helm-uninstall              # Uninstall from cluster
+
+# Helm operations (with operator)
+make helm-template-with-operator  # Template with operator
+make helm-install-with-operator   # Install with operator
+
+# Legacy aliases (still supported for backward compatibility)
+make helm-template-operator       # Alias for helm-template-with-operator
+make helm-install-operator        # Alias for helm-install-with-operator
+```
+
+### Monitoring
+
+The operator exposes Prometheus metrics for monitoring:
+
+```bash
+# Check operator metrics (when operator is enabled)
+kubectl port-forward -n avapigw svc/avapigw-operator-metrics 8080:8080
+curl http://localhost:8080/metrics
+```
+
+Key metrics include:
+- `controller_runtime_reconcile_total` - Total reconciliations
+- `controller_runtime_reconcile_errors_total` - Reconciliation errors
+- `controller_runtime_reconcile_time_seconds` - Reconciliation duration
+
+### Examples
+
+Complete examples are available in the [test/crd-samples/](test/crd-samples/) directory:
+
+- [Basic APIRoute](test/crd-samples/apiroute-basic.yaml)
+- [Advanced APIRoute with all features](test/crd-samples/apiroute-full.yaml)
+- [GRPCRoute example](test/crd-samples/grpcroute-basic.yaml)
+- [Backend with health checks](test/crd-samples/backend-basic.yaml)
+- [GRPCBackend example](test/crd-samples/grpcbackend-basic.yaml)
+
+## 🌐 Ingress Controller
+
+The AVAPIGW Ingress Controller enables the operator to watch standard Kubernetes `networking.k8s.io/v1` Ingress resources and automatically translate them into internal APIRoute/Backend configuration. This provides a familiar Kubernetes-native way to configure the gateway using standard Ingress resources.
+
+### Key Features
+
+- **Standard Ingress Support** - Works with standard `networking.k8s.io/v1` Ingress resources
+- **IngressClass Integration** - Uses `avapigw` IngressClass for opt-in behavior
+- **Rich Annotations** - Extensive annotation support for advanced gateway features
+- **Path Type Support** - Supports Exact, Prefix, and ImplementationSpecific path types
+- **TLS Termination** - Automatic TLS configuration from Ingress TLS section
+- **Default Backend** - Support for catch-all routing via default backend
+- **Status Updates** - Updates Ingress status with LoadBalancer IP/hostname
+- **Hot Configuration** - Changes are applied immediately without restart
+
+### Quick Start
+
+#### Prerequisites
+
+- Kubernetes 1.23+
+- AVAPIGW operator deployed with ingress controller enabled
+- Standard Kubernetes Ingress resources
+
+#### Enable Ingress Controller
+
+The ingress controller is an optional feature that must be explicitly enabled:
+
+```bash
+# Enable via Helm values
+helm install avapigw ./helm/avapigw \
+  --set operator.enabled=true \
+  --set operator.ingressController.enabled=true \
+  -n avapigw \
+  --create-namespace
+
+# Or enable via environment variable
+kubectl set env deployment/avapigw-operator \
+  ENABLE_INGRESS_CONTROLLER=true \
+  -n avapigw
+
+# Or enable via command line flag
+kubectl patch deployment avapigw-operator \
+  --patch '{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":["--enable-ingress-controller"]}]}}}}' \
+  -n avapigw
+```
+
+#### Create Your First Ingress
+
+```yaml
+# Create IngressClass (automatically created by Helm chart)
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: avapigw
+spec:
+  controller: avapigw.io/ingress-controller
+
+---
+# Create Ingress resource
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-ingress
+  annotations:
+    avapigw.io/timeout: "30s"
+    avapigw.io/retries: "3"
+    avapigw.io/rate-limit-rps: "100"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+  tls:
+  - hosts:
+    - api.example.com
+    secretName: api-tls
+```
+
+### Supported Annotations
+
+The ingress controller supports a comprehensive set of annotations for configuring advanced gateway features:
+
+| Annotation | Description | Example |
+|------------|-------------|---------|
+| `avapigw.io/timeout` | Request timeout | `30s` |
+| `avapigw.io/retries` | Number of retries | `3` |
+| `avapigw.io/retry-on` | Retry conditions | `5xx,reset` |
+| `avapigw.io/rate-limit-rps` | Rate limit requests/sec | `100` |
+| `avapigw.io/rate-limit-burst` | Rate limit burst | `200` |
+| `avapigw.io/cors-allow-origins` | CORS allowed origins | `https://example.com` |
+| `avapigw.io/cors-allow-methods` | CORS allowed methods | `GET,POST,PUT` |
+| `avapigw.io/cors-allow-headers` | CORS allowed headers | `Content-Type,Authorization` |
+| `avapigw.io/circuit-breaker-threshold` | Circuit breaker threshold | `5` |
+| `avapigw.io/circuit-breaker-timeout` | Circuit breaker timeout | `30s` |
+| `avapigw.io/load-balancer` | Load balancing algorithm | `round-robin` |
+| `avapigw.io/health-check-path` | Health check path | `/health` |
+| `avapigw.io/health-check-interval` | Health check interval | `10s` |
+| `avapigw.io/strip-prefix` | Strip path prefix | `true` |
+| `avapigw.io/rewrite-path` | Rewrite path | `/new-path` |
+| `avapigw.io/websocket` | Enable WebSocket | `true` |
+| `avapigw.io/max-body-size` | Max request body size | `10485760` |
+| `avapigw.io/request-headers-add` | Add request headers | `X-Gateway:avapigw` |
+| `avapigw.io/response-headers-add` | Add response headers | `X-Served-By:avapigw` |
+| `avapigw.io/request-headers-remove` | Remove request headers | `X-Internal-Token` |
+| `avapigw.io/response-headers-remove` | Remove response headers | `X-Debug` |
+
+### Path Type Support
+
+The ingress controller supports all standard Kubernetes path types:
+
+#### Exact Path Matching
+```yaml
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /api/v1/users
+        pathType: Exact
+        backend:
+          service:
+            name: user-service
+            port:
+              number: 8080
+```
+
+#### Prefix Path Matching
+```yaml
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+#### Implementation Specific (Regex)
+```yaml
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /users/[0-9]+
+        pathType: ImplementationSpecific
+        backend:
+          service:
+            name: user-service
+            port:
+              number: 8080
+```
+
+### TLS Configuration
+
+The ingress controller automatically configures TLS based on the Ingress TLS section:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tls-example
+spec:
+  ingressClassName: avapigw
+  tls:
+  - hosts:
+    - secure.example.com
+    - api.example.com
+    secretName: example-tls
+  rules:
+  - host: secure.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: secure-service
+            port:
+              number: 8080
+```
+
+### Default Backend
+
+Configure a default backend for catch-all routing:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: default-backend-example
+spec:
+  ingressClassName: avapigw
+  defaultBackend:
+    service:
+      name: default-service
+      port:
+        number: 8080
+  rules:
+  - host: example.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+### Advanced Configuration Examples
+
+#### Rate Limiting and Circuit Breaker
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rate-limited-api
+  annotations:
+    avapigw.io/rate-limit-rps: "100"
+    avapigw.io/rate-limit-burst: "200"
+    avapigw.io/circuit-breaker-threshold: "5"
+    avapigw.io/circuit-breaker-timeout: "30s"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+#### CORS Configuration
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cors-enabled-api
+  annotations:
+    avapigw.io/cors-allow-origins: "https://app.example.com,https://admin.example.com"
+    avapigw.io/cors-allow-methods: "GET,POST,PUT,DELETE,OPTIONS"
+    avapigw.io/cors-allow-headers: "Content-Type,Authorization,X-Requested-With"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+#### Header Manipulation
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: header-manipulation
+  annotations:
+    avapigw.io/request-headers-add: "X-Gateway:avapigw,X-Version:v1"
+    avapigw.io/response-headers-add: "X-Served-By:avapigw"
+    avapigw.io/request-headers-remove: "X-Internal-Token"
+    avapigw.io/response-headers-remove: "X-Debug-Info"
+spec:
+  ingressClassName: avapigw
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /api/v1
+        pathType: Prefix
+        backend:
+          service:
+            name: api-service
+            port:
+              number: 8080
+```
+
+### Helm Chart Configuration
+
+Configure the ingress controller through Helm values:
+
+```yaml
+operator:
+  enabled: true
+  ingressController:
+    enabled: true              # Enable ingress controller
+    className: "avapigw"       # IngressClass name
+    isDefaultClass: false      # Set as default IngressClass
+    lbAddress: ""              # LoadBalancer address for status updates
+```
+
+### Monitoring
+
+Monitor ingress controller operations through metrics and logs:
+
+```bash
+# Check ingress controller logs
+kubectl logs -n avapigw deployment/avapigw-operator -c manager
+
+# Monitor ingress resources
+kubectl get ingress --all-namespaces
+kubectl describe ingress example-ingress
+
+# Check generated APIRoutes and Backends
+kubectl get apiroutes
+kubectl get backends
+```
+
+### Troubleshooting
+
+#### Common Issues
+
+1. **Ingress not processed**
+   - Verify IngressClass is set to `avapigw`
+   - Check that ingress controller is enabled
+   - Verify operator is running
+
+2. **Annotations not applied**
+   - Ensure annotations use `avapigw.io/` prefix
+   - Check annotation syntax and values
+   - Review operator logs for validation errors
+
+3. **TLS not working**
+   - Verify TLS secret exists and is valid
+   - Check certificate format and content
+   - Ensure hosts match certificate SANs
+
+#### Debug Commands
+
+```bash
+# Check IngressClass
+kubectl get ingressclass avapigw -o yaml
+
+# Verify operator configuration
+kubectl get deployment avapigw-operator -o yaml | grep -A5 -B5 ingress
+
+# Check generated resources
+kubectl get apiroutes,backends -o wide
+
+# Monitor events
+kubectl get events --field-selector involvedObject.kind=Ingress
+```
+
+For more detailed troubleshooting, see the [operator documentation](docs/operator/troubleshooting.md).
+
 ## 🐳 Docker
 
 ### Building Docker Image
@@ -5183,37 +6221,118 @@ volumes:
 
 ### GitHub Actions
 
-The project includes a comprehensive CI/CD pipeline:
+The project includes a comprehensive CI/CD pipeline with enhanced security features including image signing and SBOM generation:
 
 ```yaml
 # .github/workflows/ci.yml
 name: CI
 on: [push, pull_request]
+
+env:
+  GO_VERSION: '1.25.6'
+  GOLANGCI_LINT_VERSION: 'v2.8.0'
+
 jobs:
-  test:
+  # Parallel quality checks
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
-      - run: make ci
-  
-  docker:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: golangci/golangci-lint-action@v9.2.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+  unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: make docker-build
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go test -race -coverprofile=coverage.out ./internal/... ./cmd/...
+      - uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.out
+          flags: unit
+
+  # Enhanced build and security
+  build:
+    needs: [lint, unit-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - run: make build-all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: bin/
+
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ghcr.io/${{ github.repository }}:latest
 ```
 
-### Pipeline Stages
+### Enhanced Pipeline Stages
 
-1. **Lint** - Code quality checks
-2. **Test** - Unit and functional tests
-3. **Security** - Vulnerability scanning
-4. **Build** - Multi-platform builds
-5. **Docker** - Container image build
-6. **Deploy** - Automated deployment (on release)
+1. **Parallel Quality Checks**
+   - **Lint** - Code quality checks with golangci-lint v2.8.0
+   - **Vulnerability Check** - Security scanning with govulncheck
+   - **Unit Tests** - Comprehensive test suite with 90%+ coverage
+   - **Functional Tests** - End-to-end testing with enhanced coverage
+
+2. **Build & Security**
+   - **Build Binaries** - Multi-platform builds (Linux, macOS, Windows)
+   - **Docker Images** - Multi-architecture containers (amd64, arm64)
+   - **Security Scan** - Container vulnerability scanning
+   - **Image Signing** - Cosign-based image signing for supply chain security
+   - **SBOM Generation** - Software Bill of Materials for transparency
+
+3. **Enhanced Validation**
+   - **Operator Validation** - CRD validation, webhook testing, certificate management
+   - **Ingress Controller Validation** - Standard Kubernetes Ingress support testing
+   - **Helm Chart Validation** - Chart linting and template validation
+
+4. **Release & Publish**
+   - **Create Release** - Automated GitHub releases with artifacts
+   - **Publish Images** - Signed container images to GitHub Container Registry
+
+### Security Features
+
+#### Image Signing with Cosign
+All container images are signed using Cosign for supply chain security:
+
+```bash
+# Verify signed images
+cosign verify ghcr.io/vyrodovalexey/avapigw:latest \
+  --certificate-identity-regexp="https://github.com/vyrodovalexey/avapigw" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+```
+
+#### SBOM Generation
+Software Bill of Materials (SBOM) is generated for all releases:
+
+```bash
+# Download SBOM from release
+gh release download --pattern="*sbom*" --repo vyrodovalexey/avapigw
+```
+
+#### Enhanced Security Scanning
+- Multi-layer vulnerability scanning
+- Critical vulnerability blocking
+- Continuous security monitoring
+- Compliance reporting
 
 ### Running Integration Tests
 

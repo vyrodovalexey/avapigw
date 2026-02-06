@@ -1,0 +1,5 @@
+[Host: localhost:9090]
+[User-Agent: YandexTank/IngressPerftest]
+[Accept: text/plain]
+[Connection: close]
+/metrics

@@ -1,0 +1,52 @@
+# Scenario 5: Ingress with TLS
+# This Ingress resource configures routes through the avapigw ingress controller
+# TLS is handled by Vault PKI at the gateway level
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: avapigw-tls-ingress
+  namespace: avapigw-test
+  annotations:
+    avapigw.io/timeout: "30s"
+    avapigw.io/retry-attempts: "3"
+spec:
+  ingressClassName: avapigw
+  tls:
+    - hosts:
+        - avapigw.local
+        - localhost
+  rules:
+    - host: avapigw.local
+      http:
+        paths:
+          - path: /api/v1/items
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service-1
+                port:
+                  number: 8801
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: backend-service-1
+                port:
+                  number: 8801
+    - host: localhost
+      http:
+        paths:
+          - path: /api/v1/items
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service-1
+                port:
+                  number: 8801
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: backend-service-1
+                port:
+                  number: 8801

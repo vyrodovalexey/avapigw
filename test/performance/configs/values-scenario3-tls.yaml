@@ -1,0 +1,255 @@
+# Scenario 3: CRD Mode (Operator) WITH TLS (Vault PKI)
+# Performance test values - TLS via Vault PKI, operator enabled
+# Deploy with: helm upgrade --install avapigw helm/avapigw/ -f test/performance/configs/values-scenario3-tls.yaml -n avapigw-test --create-namespace
+
+namespace: avapigw-test
+
+replicaCount: 1
+
+image:
+  repository: avapigw
+  pullPolicy: Never
+  tag: "test"
+
+service:
+  type: NodePort
+  httpPort: 8080
+  httpsPort: 8443
+  grpcPort: 9000
+  grpcTlsPort: 9443
+  metricsPort: 9090
+
+# Relax security for local testing
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+gateway:
+  logLevel: error
+  logFormat: json
+  environment: perftest-scenario3
+
+  listeners:
+    http:
+      enabled: true
+      port: 8080
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+    grpc:
+      enabled: true
+      port: 9000
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+      maxConcurrentStreams: 1000
+      maxRecvMsgSize: 4194304
+      maxSendMsgSize: 4194304
+      reflection: true
+      healthCheck: true
+
+  # Empty routes - will be configured via CRDs
+  routes: []
+  backends: []
+  grpcRoutes: []
+  grpcBackends: []
+
+  # Disable rate limiting for max performance
+  rateLimit:
+    enabled: false
+
+  circuitBreaker:
+    enabled: false
+
+  security:
+    enabled: false
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 86400
+    allowCredentials: false
+
+  # Disable audit for max performance
+  audit:
+    enabled: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: error
+      format: json
+
+# Vault enabled for TLS via PKI
+vault:
+  enabled: true
+  address: "http://host.docker.internal:8200"
+  authMethod: kubernetes
+  role: avapigw
+  pki:
+    enabled: true
+    pkiMount: "pki"
+    role: "test-role"
+    commonName: "avapigw.local"
+    altNames:
+      - "localhost"
+      - "avapigw.local"
+      - "*.avapigw.local"
+    ttl: "24h"
+    renewBefore: "1h"
+    grpc:
+      enabled: true
+
+# Operator enabled for CRD mode
+operator:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: avapigw-operator
+    pullPolicy: Never
+    tag: "latest"
+
+  leaderElection:
+    enabled: true
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+    resourceName: avapigw-operator-leader.avapigw.io
+
+  grpc:
+    port: 9444
+    tls:
+      mode: selfsigned
+      selfsigned:
+        validity: 8760h
+
+  webhook:
+    enabled: false
+
+  vault:
+    enabled: false
+
+  metrics:
+    enabled: true
+    port: 8080
+
+  health:
+    port: 8081
+
+  service:
+    type: ClusterIP
+
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: health
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    capabilities:
+      drop:
+        - ALL
+
+  serviceAccount:
+    create: true
+    automount: true
+
+  podDisruptionBudget:
+    enabled: false
+
+  ingressController:
+    enabled: false
+
+  serviceMonitor:
+    enabled: false
+
+  networkPolicy:
+    enabled: false

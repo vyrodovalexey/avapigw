@@ -320,12 +320,33 @@ func (l *GRPCListener) createTLSManagerFromConfig(cfg *config.TLSConfig) (*tlspk
 		tlsConfig.MaxVersion = tlspkg.TLSVersion(cfg.MaxVersion)
 	}
 
-	// Configure server certificate
+	// Configure server certificate from file
 	if cfg.CertFile != "" && cfg.KeyFile != "" {
 		tlsConfig.ServerCertificate = &tlspkg.CertificateConfig{
 			Source:   tlspkg.CertificateSourceFile,
 			CertFile: cfg.CertFile,
 			KeyFile:  cfg.KeyFile,
+		}
+	}
+
+	// Configure Vault-based TLS if enabled
+	if cfg.Vault != nil && cfg.Vault.Enabled {
+		tlsConfig.Vault = &tlspkg.VaultTLSConfig{
+			Enabled:    true,
+			PKIMount:   cfg.Vault.PKIMount,
+			Role:       cfg.Vault.Role,
+			CommonName: cfg.Vault.CommonName,
+			AltNames:   cfg.Vault.AltNames,
+		}
+		// When Vault is the certificate source, set ServerCertificate accordingly
+		if tlsConfig.ServerCertificate == nil {
+			tlsConfig.ServerCertificate = &tlspkg.CertificateConfig{
+				Source: tlspkg.CertificateSourceVault,
+			}
+		}
+		// Default to SIMPLE mode when Vault is enabled and no mode is set
+		if tlsConfig.Mode == "" {
+			tlsConfig.Mode = tlspkg.TLSModeSimple
 		}
 	}
 

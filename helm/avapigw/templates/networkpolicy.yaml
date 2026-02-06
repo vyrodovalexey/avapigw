@@ -8,7 +8,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      {{- include "avapigw.selectorLabels" . | nindent 6 }}
+      {{- include "avapigw.gateway.selectorLabels" . | nindent 6 }}
   policyTypes:
     {{- if .Values.networkPolicy.ingress }}
     - Ingress

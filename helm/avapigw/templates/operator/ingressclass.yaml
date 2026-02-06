@@ -1,0 +1,14 @@
+{{- if and .Values.operator.enabled .Values.operator.ingressController.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ .Values.operator.ingressController.className | default "avapigw" }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+  {{- if .Values.operator.ingressController.isDefaultClass }}
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "true"
+  {{- end }}
+spec:
+  controller: avapigw.io/ingress-controller
+{{- end }}

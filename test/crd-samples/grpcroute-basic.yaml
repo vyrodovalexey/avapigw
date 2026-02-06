@@ -1,0 +1,15 @@
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: basic-grpc-route
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        prefix: api.v1
+  route:
+    - destination:
+        host: grpc-backend
+        port: 9000
+      weight: 100
+  timeout: 30s

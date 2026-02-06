@@ -1,0 +1,17 @@
+{{- if and .Values.operator.enabled .Values.operator.leaderElection.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "avapigw.operator.leaderElectionRoleName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "avapigw.operator.leaderElectionRoleName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "avapigw.operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

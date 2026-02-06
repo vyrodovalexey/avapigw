@@ -1,0 +1,161 @@
+{{- if and .Values.operator.enabled .Values.operator.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "avapigw.operator.fullname" . }}-validating-webhook
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+    # Label for operator to identify this webhook configuration for CA injection
+    avapigw.io/webhook-config: "true"
+  annotations:
+    {{- if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+    # cert-manager injects the CA bundle automatically via this annotation.
+    # The Certificate resource must exist in the specified namespace with the given name.
+    # Format: <namespace>/<certificate-name>
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "avapigw.operator.fullname" . }}-webhook-cert
+    {{- else }}
+    # For selfsigned and vault modes, the operator injects the CA bundle at startup.
+    # This annotation marks the webhook for automatic CA bundle injection.
+    avapigw.io/inject-ca-from: {{ .Values.operator.webhook.tls.mode }}
+    {{- end }}
+webhooks:
+  # ==========================================================================
+  # APIRoute Validation Webhook
+  # ==========================================================================
+  - name: vapiroute.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      {{- if and (ne .Values.operator.webhook.tls.mode "cert-manager") .Values.operator.webhook.tls.caBundle }}
+      # Static CA bundle provided via values (for selfsigned/vault modes with pre-configured CA)
+      caBundle: {{ .Values.operator.webhook.tls.caBundle }}
+      {{- else if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+      # CA bundle will be injected by cert-manager via the annotation above
+      caBundle: Cg==
+      {{- else }}
+      # Placeholder CA bundle - will be replaced by operator at startup for selfsigned/vault modes
+      # The operator watches this configuration and injects the actual CA bundle
+      caBundle: Cg==
+      {{- end }}
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-apiroute
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - apiroutes
+        scope: Namespaced
+    sideEffects: None
+    timeoutSeconds: 10
+  
+  # ==========================================================================
+  # GRPCRoute Validation Webhook
+  # ==========================================================================
+  - name: vgrpcroute.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      {{- if and (ne .Values.operator.webhook.tls.mode "cert-manager") .Values.operator.webhook.tls.caBundle }}
+      caBundle: {{ .Values.operator.webhook.tls.caBundle }}
+      {{- else if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+      caBundle: Cg==
+      {{- else }}
+      caBundle: Cg==
+      {{- end }}
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-grpcroute
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - grpcroutes
+        scope: Namespaced
+    sideEffects: None
+    timeoutSeconds: 10
+  
+  # ==========================================================================
+  # Backend Validation Webhook
+  # ==========================================================================
+  - name: vbackend.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      {{- if and (ne .Values.operator.webhook.tls.mode "cert-manager") .Values.operator.webhook.tls.caBundle }}
+      caBundle: {{ .Values.operator.webhook.tls.caBundle }}
+      {{- else if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+      caBundle: Cg==
+      {{- else }}
+      caBundle: Cg==
+      {{- end }}
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-backend
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - backends
+        scope: Namespaced
+    sideEffects: None
+    timeoutSeconds: 10
+  
+  # ==========================================================================
+  # GRPCBackend Validation Webhook
+  # ==========================================================================
+  - name: vgrpcbackend.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      {{- if and (ne .Values.operator.webhook.tls.mode "cert-manager") .Values.operator.webhook.tls.caBundle }}
+      caBundle: {{ .Values.operator.webhook.tls.caBundle }}
+      {{- else if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+      caBundle: Cg==
+      {{- else }}
+      caBundle: Cg==
+      {{- end }}
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-grpcbackend
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - grpcbackends
+        scope: Namespaced
+    sideEffects: None
+    timeoutSeconds: 10
+{{- end }}

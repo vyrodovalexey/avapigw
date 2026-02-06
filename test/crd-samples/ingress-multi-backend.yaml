@@ -1,0 +1,36 @@
+# Ingress with multiple backends and path types
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: multi-backend-ingress
+  namespace: avapigw-test
+  annotations:
+    avapigw.io/load-balancer: "round-robin"
+    avapigw.io/health-check-path: "/health"
+spec:
+  ingressClassName: avapigw
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /api/v1/exact
+            pathType: Exact
+            backend:
+              service:
+                name: exact-service
+                port:
+                  number: 8080
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: prefix-service
+                port:
+                  number: 8080
+          - path: /legacy
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: legacy-service
+                port:
+                  number: 8080

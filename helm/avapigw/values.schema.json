@@ -894,6 +894,300 @@
           "description": "Enable network policies"
         }
       }
+    },
+    "operator": {
+      "type": "object",
+      "description": "Operator configuration for CRD-based gateway management",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the avapigw operator"
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Number of replicas for the operator deployment"
+        },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "default": "ghcr.io/vyrodovalexey/avapigw-operator",
+              "description": "Operator container image repository"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"],
+              "default": "IfNotPresent",
+              "description": "Operator image pull policy"
+            },
+            "tag": {
+              "type": "string",
+              "default": "",
+              "description": "Operator image tag (defaults to chart appVersion)"
+            }
+          }
+        },
+        "leaderElection": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable leader election for controller manager"
+            },
+            "leaseDuration": {
+              "type": "string",
+              "default": "15s",
+              "description": "Lease duration for leader election"
+            },
+            "renewDeadline": {
+              "type": "string",
+              "default": "10s",
+              "description": "Renew deadline for leader election"
+            },
+            "retryPeriod": {
+              "type": "string",
+              "default": "2s",
+              "description": "Retry period for leader election"
+            },
+            "resourceName": {
+              "type": "string",
+              "default": "some_id.avapigw.io",
+              "description": "Resource name for leader election lease"
+            }
+          }
+        },
+        "grpc": {
+          "type": "object",
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 9444,
+              "description": "gRPC server port for gateway communication"
+            },
+            "tls": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": ["selfsigned", "vault"],
+                  "default": "selfsigned",
+                  "description": "TLS mode for gRPC server"
+                }
+              }
+            }
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable admission webhooks"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 9443,
+              "description": "Webhook server port"
+            },
+            "tls": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": ["selfsigned", "vault", "cert-manager"],
+                  "default": "selfsigned",
+                  "description": "TLS mode for webhook server"
+                }
+              }
+            }
+          }
+        },
+        "vault": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable Vault integration for operator"
+            },
+            "address": {
+              "type": "string",
+              "default": "",
+              "description": "Vault server address"
+            },
+            "authMethod": {
+              "type": "string",
+              "enum": ["token", "kubernetes", "approle"],
+              "default": "kubernetes",
+              "description": "Vault authentication method"
+            },
+            "role": {
+              "type": "string",
+              "default": "",
+              "description": "Vault role for Kubernetes auth"
+            },
+            "kubernetesMountPath": {
+              "type": "string",
+              "default": "kubernetes",
+              "description": "Vault Kubernetes auth mount path"
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable Prometheus metrics"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 8080,
+              "description": "Metrics server port"
+            }
+          }
+        },
+        "health": {
+          "type": "object",
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 8081,
+              "description": "Health probe bind address port"
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+              "default": "ClusterIP",
+              "description": "Service type"
+            },
+            "annotations": {
+              "type": "object",
+              "default": {},
+              "description": "Annotations to add to the service"
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "properties": {
+            "limits": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "string"
+                },
+                "memory": {
+                  "type": "string"
+                }
+              }
+            },
+            "requests": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "string"
+                },
+                "memory": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "description": "Resource limits and requests for operator"
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "description": "Pod security context for operator"
+        },
+        "securityContext": {
+          "type": "object",
+          "description": "Container security context for operator"
+        },
+        "serviceAccount": {
+          "type": "object",
+          "properties": {
+            "create": {
+              "type": "boolean",
+              "default": true,
+              "description": "Specifies whether a service account should be created"
+            },
+            "automount": {
+              "type": "boolean",
+              "default": true,
+              "description": "Automatically mount a ServiceAccount's API credentials"
+            },
+            "annotations": {
+              "type": "object",
+              "default": {},
+              "description": "Annotations to add to the service account"
+            },
+            "name": {
+              "type": "string",
+              "default": "",
+              "description": "The name of the service account to use"
+            }
+          }
+        },
+        "podDisruptionBudget": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable pod disruption budget"
+            },
+            "minAvailable": {
+              "type": ["integer", "string"],
+              "description": "Minimum available pods"
+            },
+            "maxUnavailable": {
+              "type": ["integer", "string"],
+              "description": "Maximum unavailable pods"
+            }
+          }
+        },
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable ServiceMonitor for Prometheus Operator"
+            }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable network policies for operator"
+            }
+          }
+        }
+      }
     }
   },
   "required": ["replicaCount", "image", "service", "gateway"]

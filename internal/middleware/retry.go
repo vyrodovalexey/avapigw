@@ -51,6 +51,13 @@ func Retry(cfg RetryConfig, logger observability.Logger) func(http.Handler) http
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip retry for WebSocket upgrade requests
+			// WebSocket connections cannot be retried and require direct access to the connection
+			if isWebSocketUpgrade(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			bodyBytes, canRetry := readRequestBodyWithLimit(r, maxBodySize, logger)
 			if !canRetry {
 				// Body too large for retry buffering, execute without retry
@@ -60,6 +67,12 @@ func Retry(cfg RetryConfig, logger observability.Logger) func(http.Handler) http
 			executeWithRetry(w, r, next, cfg, bodyBytes, logger)
 		})
 	}
+}
+
+// isWebSocketUpgrade checks if the request is a WebSocket upgrade request.
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
 // readRequestBodyWithLimit reads and buffers the request body up to maxSize.

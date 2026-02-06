@@ -323,6 +323,77 @@ func (c *KeycloakClient) CreateUser(ctx context.Context, realmName string, userC
 	return nil
 }
 
+// ResetUserPassword resets a user's password.
+func (c *KeycloakClient) ResetUserPassword(ctx context.Context, realmName, username, password string) error {
+	// First, get the user ID
+	usersURL := fmt.Sprintf("%s/admin/realms/%s/users?username=%s&exact=true", c.baseURL, realmName, username)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usersURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.adminToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to get user: status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+
+	var users []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		return fmt.Errorf("failed to decode users: %w", err)
+	}
+
+	if len(users) == 0 {
+		return fmt.Errorf("user not found: %s", username)
+	}
+
+	userID, ok := users[0]["id"].(string)
+	if !ok {
+		return fmt.Errorf("user ID not found")
+	}
+
+	// Reset the password
+	passwordURL := fmt.Sprintf("%s/admin/realms/%s/users/%s/reset-password", c.baseURL, realmName, userID)
+
+	passwordData := map[string]interface{}{
+		"type":      "password",
+		"value":     password,
+		"temporary": false,
+	}
+
+	body, err := json.Marshal(passwordData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal password data: %w", err)
+	}
+
+	req, err = http.NewRequestWithContext(ctx, http.MethodPut, passwordURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.adminToken)
+
+	resp, err = c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to reset password: status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 // CreateRealmRole creates a realm role.
 func (c *KeycloakClient) CreateRealmRole(ctx context.Context, realmName, roleName string) error {
 	roleURL := fmt.Sprintf("%s/admin/realms/%s/roles", c.baseURL, realmName)
@@ -569,6 +640,10 @@ func SetupKeycloakForTesting(t *testing.T) *KeycloakTestSetup {
 		}
 		if err := client.CreateUser(ctx, cfg.Realm, userConfig); err != nil {
 			t.Logf("Warning: Failed to create user %s (may already exist): %v", user.Username, err)
+		}
+		// Always reset password to ensure it matches expected value (in case user already existed)
+		if err := client.ResetUserPassword(ctx, cfg.Realm, user.Username, user.Password); err != nil {
+			t.Logf("Warning: Failed to reset password for user %s: %v", user.Username, err)
 		}
 	}
 

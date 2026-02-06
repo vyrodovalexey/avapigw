@@ -351,3 +351,158 @@ vault:
     renewBefore: "1h"
     grpc:
       enabled: true
+
+# =============================================================================
+# Operator Configuration for Local Testing
+# =============================================================================
+# Enable the operator to test CRD-based configuration management.
+# When enabled, you can manage routes and backends using Kubernetes CRDs.
+#
+# Prerequisites:
+#   - CRDs are automatically installed from helm/avapigw/crds/
+#   - Build operator image: make operator-docker-build
+#   - Tag for local use: docker tag avapigw-operator:latest avapigw-operator:latest
+#
+# Usage:
+#   helm upgrade --install avapigw helm/avapigw/ -f helm/avapigw/values-local.yaml -n avapigw-test --create-namespace
+
+operator:
+  # Enable operator for local testing
+  enabled: true
+
+  replicaCount: 1
+
+  image:
+    repository: avapigw-operator
+    pullPolicy: Never
+    tag: "latest"
+
+  # Leader election configuration
+  leaderElection:
+    enabled: true
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+    resourceName: avapigw-operator-leader.avapigw.io
+
+  # gRPC server configuration
+  grpc:
+    port: 9444
+    tls:
+      mode: selfsigned
+      selfsigned:
+        validity: 8760h
+
+  # Webhook configuration - disabled for local testing
+  # Enable if you want to test webhook validation
+  webhook:
+    enabled: false
+    port: 9443
+    tls:
+      mode: selfsigned
+      selfsigned:
+        validity: 8760h
+
+  # Vault integration - disabled for local testing
+  # Enable if you have Vault running in docker-compose
+  vault:
+    enabled: false
+    address: "http://host.docker.internal:8200"
+    authMethod: kubernetes
+    role: avapigw-operator
+    kubernetesMountPath: kubernetes
+
+  # Metrics configuration
+  metrics:
+    enabled: true
+    port: 8080
+
+  # Health probes configuration
+  health:
+    port: 8081
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    annotations: {}
+
+  # Reduced resources for local testing
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+  # Liveness probe configuration
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: health
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+  # Readiness probe configuration
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+  # Pod security context
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+
+  # Container security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    capabilities:
+      drop:
+        - ALL
+
+  # ServiceAccount configuration
+  serviceAccount:
+    create: true
+    automount: true
+    annotations: {}
+    name: ""
+
+  # Pod Disruption Budget - disabled for local testing
+  podDisruptionBudget:
+    enabled: false
+
+  # Node selector, tolerations, affinity - empty for local testing
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Ingress controller - disabled by default for local testing
+  # Enable to test Ingress-based route configuration
+  ingressController:
+    enabled: false
+    className: avapigw
+    isDefaultClass: false
+    lbAddress: ""
+
+  # ServiceMonitor - disabled for local testing
+  serviceMonitor:
+    enabled: false
+
+  # Network policies - disabled for local testing
+  networkPolicy:
+    enabled: false

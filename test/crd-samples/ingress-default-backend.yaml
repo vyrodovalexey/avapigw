@@ -1,0 +1,26 @@
+# Ingress with default backend (catch-all)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: default-backend-ingress
+  namespace: avapigw-test
+  annotations:
+    avapigw.io/timeout: "15s"
+spec:
+  ingressClassName: avapigw
+  defaultBackend:
+    service:
+      name: default-service
+      port:
+        number: 8080
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8080

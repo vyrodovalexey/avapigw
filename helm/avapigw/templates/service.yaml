@@ -47,4 +47,4 @@ spec:
       protocol: TCP
       name: metrics
   selector:
-    {{- include "avapigw.selectorLabels" . | nindent 4 }}
+    {{- include "avapigw.gateway.selectorLabels" . | nindent 4 }}

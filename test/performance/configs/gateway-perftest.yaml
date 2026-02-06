@@ -91,6 +91,21 @@ spec:
             host: 127.0.0.1
             port: 8801
 
+    # WebSocket route for performance testing
+    - name: websocket-route
+      match:
+        - uri:
+            exact: /ws
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      websocket:
+        enabled: true
+        timeout: 300s
+        pingInterval: 30s
+        pongTimeout: 10s
+
     # Catch-all route
     - name: catch-all
       match:

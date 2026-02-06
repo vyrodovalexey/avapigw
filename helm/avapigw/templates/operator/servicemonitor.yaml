@@ -1,0 +1,36 @@
+{{- if and .Values.operator.enabled .Values.operator.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "avapigw.operator.fullname" . }}
+  {{- if .Values.operator.serviceMonitor.namespace }}
+  namespace: {{ .Values.operator.serviceMonitor.namespace }}
+  {{- else }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+    {{- with .Values.operator.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "avapigw.operator.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.operator.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.operator.serviceMonitor.scrapeTimeout }}
+      path: /metrics
+      {{- with .Values.operator.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

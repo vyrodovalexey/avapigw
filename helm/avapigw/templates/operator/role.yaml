@@ -1,0 +1,63 @@
+{{- if and .Values.operator.enabled .Values.operator.leaderElection.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "avapigw.operator.leaderElectionRoleName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+rules:
+  # ==========================================================================
+  # Leader Election Resources (namespace-scoped)
+  # ==========================================================================
+  
+  # ConfigMaps - legacy leader election mechanism
+  # Used by controller-runtime for leader election when Leases are not available
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  
+  # Leases - preferred leader election mechanism (coordination.k8s.io/v1)
+  # Used by controller-runtime for leader election in HA deployments
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  
+  # Events - for recording leader election events
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  
+  # Secrets - for reading TLS certificates in the operator namespace
+  # Required for: webhook TLS certificates, CA bundles
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+{{- end }}

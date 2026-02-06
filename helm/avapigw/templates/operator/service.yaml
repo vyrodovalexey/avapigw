@@ -1,0 +1,29 @@
+{{- if .Values.operator.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "avapigw.operator.fullname" . }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+  {{- with .Values.operator.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.operator.service.type }}
+  ports:
+    - port: {{ .Values.operator.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    - port: {{ .Values.operator.health.port }}
+      targetPort: health
+      protocol: TCP
+      name: health
+    - port: {{ .Values.operator.grpc.port }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+  selector:
+    {{- include "avapigw.operator.selectorLabels" . | nindent 4 }}
+{{- end }}

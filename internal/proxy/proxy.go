@@ -174,27 +174,11 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		return
 	}
 
-	// Try to get backend from registry for authentication and TLS config
-	var serviceBackend *backend.ServiceBackend
-	if p.backendRegistry != nil {
-		if b, ok := p.backendRegistry.Get(dest.Destination.Host); ok {
-			if sb, ok := b.(*backend.ServiceBackend); ok {
-				serviceBackend = sb
-			}
-		}
-	}
-
-	// Determine URL scheme based on backend TLS configuration
-	scheme := "http"
-	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
-		scheme = "https"
-	}
-
-	// Get backend host
-	targetURL := scheme + "://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
-	target, err := url.Parse(targetURL)
+	// Get backend and target URL
+	serviceBackend := p.getServiceBackend(dest.Destination.Host)
+	target, err := p.buildTargetURL(dest, serviceBackend)
 	if err != nil {
-		p.errorHandler(w, r, NewInvalidTargetError(route.Name, targetURL, err))
+		p.errorHandler(w, r, NewInvalidTargetError(route.Name, dest.Destination.Host, err))
 		return
 	}
 
@@ -203,15 +187,53 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		r = p.applyRewrite(r, route.Config.Rewrite)
 	}
 
-	// Create reverse proxy
-	proxy := &httputil.ReverseProxy{
+	// Create and execute reverse proxy
+	proxy := p.createReverseProxy(target, r, dest.Destination.Host, serviceBackend)
+	r, cancel := p.applyTimeout(r, route.Config.Timeout.Duration())
+	defer cancel()
+	p.executeProxy(w, r, proxy, dest.Destination.Host)
+}
+
+// getServiceBackend retrieves the service backend from the registry.
+func (p *ReverseProxy) getServiceBackend(host string) *backend.ServiceBackend {
+	if p.backendRegistry == nil {
+		return nil
+	}
+	b, ok := p.backendRegistry.Get(host)
+	if !ok {
+		return nil
+	}
+	sb, _ := b.(*backend.ServiceBackend)
+	return sb
+}
+
+// buildTargetURL constructs the target URL for the backend.
+func (p *ReverseProxy) buildTargetURL(
+	dest *config.RouteDestination,
+	serviceBackend *backend.ServiceBackend,
+) (*url.URL, error) {
+	scheme := "http"
+	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
+		scheme = "https"
+	}
+	targetURL := scheme + "://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
+	return url.Parse(targetURL)
+}
+
+// createReverseProxy creates a configured reverse proxy.
+func (p *ReverseProxy) createReverseProxy(
+	target *url.URL,
+	originalReq *http.Request,
+	backendHost string,
+	serviceBackend *backend.ServiceBackend,
+) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			p.director(req, target, r)
-			// Apply backend authentication if available
+			p.director(req, target, originalReq)
 			if serviceBackend != nil {
 				if err := serviceBackend.ApplyAuth(req.Context(), req); err != nil {
 					p.logger.Error("failed to apply backend authentication",
-						observability.String("backend", dest.Destination.Host),
+						observability.String("backend", backendHost),
 						observability.Error(err),
 					)
 				}
@@ -222,23 +244,66 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		ErrorHandler:   p.errorHandler,
 		ModifyResponse: p.modifyResponse,
 	}
+}
 
-	// Apply timeout if configured
-	if route.Config.Timeout.Duration() > 0 {
-		ctx, cancel := context.WithTimeout(r.Context(), route.Config.Timeout.Duration())
-		defer cancel()
-		r = r.WithContext(ctx)
+// applyTimeout applies timeout to the request context if configured.
+// It returns the modified request and a cancel function that must be deferred by the caller.
+func (p *ReverseProxy) applyTimeout(r *http.Request, timeout time.Duration) (*http.Request, context.CancelFunc) {
+	if timeout > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		return r.WithContext(ctx), cancel
 	}
+	// Return a no-op cancel function when no timeout is applied
+	return r, func() { /* no-op: no timeout context was created */ }
+}
 
-	// Execute with circuit breaker protection if available
-	backendName := dest.Destination.Host
+// executeProxy executes the proxy request with optional circuit breaker protection.
+func (p *ReverseProxy) executeProxy(
+	w http.ResponseWriter,
+	r *http.Request,
+	proxy *httputil.ReverseProxy,
+	backendName string,
+) {
 	cb := p.getCircuitBreaker(backendName)
+
+	// WebSocket upgrades require direct access to the underlying connection (Hijacker)
+	// and cannot be wrapped by the circuit breaker's response recorder
+	if isWebSocketRequest(r) {
+		p.executeWebSocket(w, r, proxy, backendName)
+		return
+	}
 
 	if cb != nil {
 		p.executeWithCircuitBreaker(w, r, proxy, cb, backendName)
 	} else {
 		proxy.ServeHTTP(w, r)
 	}
+}
+
+// executeWebSocket executes a WebSocket proxy request with metrics tracking.
+func (p *ReverseProxy) executeWebSocket(
+	w http.ResponseWriter,
+	r *http.Request,
+	proxy *httputil.ReverseProxy,
+	backendName string,
+) {
+	wsMetrics := getWebSocketMetrics()
+	wsMetrics.connectionsTotal.WithLabelValues(backendName).Inc()
+	wsMetrics.connectionsActive.WithLabelValues(backendName).Inc()
+	defer wsMetrics.connectionsActive.WithLabelValues(backendName).Dec()
+
+	p.logger.Debug("websocket connection established",
+		observability.String("backend", backendName),
+		observability.String("path", r.URL.Path),
+	)
+
+	proxy.ServeHTTP(w, r)
+}
+
+// isWebSocketRequest checks if the request is a WebSocket upgrade request.
+func isWebSocketRequest(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
 // getCircuitBreaker returns the circuit breaker for a backend.
@@ -290,7 +355,7 @@ func (p *ReverseProxy) executeWithCircuitBreaker(
 			if !recorder.HeaderWritten {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = io.WriteString(w, `{"error":"service unavailable","message":"circuit breaker open"}`)
+				_, _ = io.WriteString(w, jsonErrServiceUnavailable)
 			}
 		}
 		// For server errors, the response was already written by the proxy
@@ -470,6 +535,20 @@ func (p *ReverseProxy) handleRedirect(w http.ResponseWriter, r *http.Request, re
 		redirectURL.RawQuery = ""
 	}
 
+	// Validate redirect URL to prevent open redirect attacks
+	if !isRedirectSafe(&redirectURL) {
+		p.logger.Warn("blocked potentially unsafe redirect",
+			observability.String("redirect_url", redirectURL.String()),
+			observability.String("scheme", redirectURL.Scheme),
+			observability.String("path", r.URL.Path),
+			observability.String("remote_addr", r.RemoteAddr),
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, jsonErrBadRedirect)
+		return
+	}
+
 	// Determine status code
 	code := redirect.Code
 	if code == 0 {
@@ -477,6 +556,19 @@ func (p *ReverseProxy) handleRedirect(w http.ResponseWriter, r *http.Request, re
 	}
 
 	http.Redirect(w, r, redirectURL.String(), code)
+}
+
+// isRedirectSafe validates that a redirect URL is safe and not an open redirect attack.
+// Only http and https schemes are allowed. Dangerous schemes like javascript:, data:,
+// vbscript:, etc. are rejected.
+func isRedirectSafe(u *url.URL) bool {
+	// Allow empty scheme (relative redirects)
+	if u.Scheme == "" {
+		return true
+	}
+
+	scheme := strings.ToLower(u.Scheme)
+	return scheme == "http" || scheme == "https"
 }
 
 // handleRouteNotFound handles route not found errors.
@@ -489,7 +581,7 @@ func (p *ReverseProxy) handleRouteNotFound(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = io.WriteString(w, `{"error":"not found","message":"no matching route"}`)
+	_, _ = io.WriteString(w, jsonErrNotFound)
 }
 
 // defaultErrorHandler is the default error handler.
@@ -502,7 +594,7 @@ func (p *ReverseProxy) defaultErrorHandler(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
-	_, _ = io.WriteString(w, `{"error":"bad gateway","message":"failed to proxy request"}`)
+	_, _ = io.WriteString(w, jsonErrBadGateway)
 }
 
 // Handler returns an http.Handler for the proxy.

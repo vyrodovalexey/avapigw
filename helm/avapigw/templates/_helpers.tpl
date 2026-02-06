@@ -43,11 +43,32 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
-Selector labels
+Selector labels (base - used for common matching)
 */}}
 {{- define "avapigw.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "avapigw.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Gateway selector labels (includes component for service targeting)
+*/}}
+{{- define "avapigw.gateway.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "avapigw.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: gateway
+{{- end }}
+
+{{/*
+Gateway labels (full labels including component)
+*/}}
+{{- define "avapigw.gateway.labels" -}}
+helm.sh/chart: {{ include "avapigw.chart" . }}
+{{ include "avapigw.gateway.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
@@ -88,6 +109,93 @@ Redis port
 {{- else }}
 {{- .Values.redis.externalPort | default 6379 }}
 {{- end }}
+{{- end }}
+
+{{/*
+=============================================================================
+Operator Helper Templates
+=============================================================================
+*/}}
+
+{{/*
+Operator fullname
+*/}}
+{{- define "avapigw.operator.fullname" -}}
+{{- printf "%s-operator" (include "avapigw.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Operator service account name
+*/}}
+{{- define "avapigw.operator.serviceAccountName" -}}
+{{- if .Values.operator.serviceAccount.create }}
+{{- default (include "avapigw.operator.fullname" .) .Values.operator.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.operator.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Operator labels
+*/}}
+{{- define "avapigw.operator.labels" -}}
+helm.sh/chart: {{ include "avapigw.chart" . }}
+{{ include "avapigw.operator.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Operator selector labels
+*/}}
+{{- define "avapigw.operator.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "avapigw.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: operator
+{{- end }}
+
+{{/*
+Webhook certificate secret name
+*/}}
+{{- define "avapigw.operator.webhookCertSecretName" -}}
+{{- printf "%s-webhook-cert" (include "avapigw.operator.fullname" .) }}
+{{- end }}
+
+{{/*
+Webhook service name
+*/}}
+{{- define "avapigw.operator.webhookServiceName" -}}
+{{- printf "%s-webhook" (include "avapigw.operator.fullname" .) }}
+{{- end }}
+
+{{/*
+Webhook service FQDN
+*/}}
+{{- define "avapigw.operator.webhookServiceFQDN" -}}
+{{- printf "%s.%s.svc" (include "avapigw.operator.webhookServiceName" .) .Release.Namespace }}
+{{- end }}
+
+{{/*
+Webhook service FQDN with cluster domain
+*/}}
+{{- define "avapigw.operator.webhookServiceFQDNFull" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "avapigw.operator.webhookServiceName" .) .Release.Namespace }}
+{{- end }}
+
+{{/*
+Cluster role name
+*/}}
+{{- define "avapigw.operator.clusterRoleName" -}}
+{{- printf "%s-manager" (include "avapigw.operator.fullname" .) }}
+{{- end }}
+
+{{/*
+Leader election role name
+*/}}
+{{- define "avapigw.operator.leaderElectionRoleName" -}}
+{{- printf "%s-leader-election" (include "avapigw.operator.fullname" .) }}
 {{- end }}
 
 {{/*

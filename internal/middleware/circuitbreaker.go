@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sony/gobreaker"
@@ -94,6 +95,14 @@ func (cb *CircuitBreaker) State() gobreaker.State {
 func CircuitBreakerMiddleware(cb *CircuitBreaker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip circuit breaker for WebSocket upgrade requests
+			// WebSocket connections require direct access to the underlying connection (Hijacker)
+			// and cannot be wrapped by the circuit breaker's response recorder
+			if isWebSocketUpgradeRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			rw := util.NewStatusCapturingResponseWriter(w)
 
 			// Execute the request through the circuit breaker for atomic state check
@@ -149,4 +158,10 @@ func CircuitBreakerFromConfig(
 	)
 
 	return CircuitBreakerMiddleware(cb)
+}
+
+// isWebSocketUpgradeRequest checks if the request is a WebSocket upgrade request.
+func isWebSocketUpgradeRequest(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }

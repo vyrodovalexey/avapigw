@@ -76,14 +76,10 @@ func (h *StreamHandler) createClientStream(
 
 // proxyStreams proxies data between server and client streams.
 func (h *StreamHandler) proxyStreams(serverStream grpc.ServerStream, clientStream grpc.ClientStream) error {
-	// Forward server header metadata to client
-	if md, err := clientStream.Header(); err == nil && md != nil {
-		if err := serverStream.SendHeader(md); err != nil {
-			h.logger.Debug("failed to send header",
-				observability.Error(err),
-			)
-		}
-	}
+	// NOTE: We do NOT call clientStream.Header() here because it blocks until
+	// the backend sends headers. For unary calls, the backend only sends headers
+	// after receiving the request, which would cause a deadlock.
+	// Instead, headers are forwarded in forwardClientToServer after the first response.
 
 	// Create error channels for bidirectional streaming
 	serverToClientErr := make(chan error, 1)
@@ -141,6 +137,7 @@ func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, cl
 
 // forwardClientToServer forwards messages from client stream to server stream.
 func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, serverStream grpc.ServerStream) error {
+	headerSent := false
 	for {
 		frame := &Frame{}
 		if err := clientStream.RecvMsg(frame); err != nil {
@@ -148,6 +145,18 @@ func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, se
 				return nil
 			}
 			return err
+		}
+
+		// Forward headers before the first message (non-blocking after first RecvMsg)
+		if !headerSent {
+			headerSent = true
+			if md, err := clientStream.Header(); err == nil && md != nil {
+				if err := serverStream.SendHeader(md); err != nil {
+					h.logger.Debug("failed to send header",
+						observability.Error(err),
+					)
+				}
+			}
 		}
 
 		if err := serverStream.SendMsg(frame); err != nil {

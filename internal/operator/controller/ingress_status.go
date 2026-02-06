@@ -1,0 +1,154 @@
+// Package controller provides Kubernetes controllers for the operator.
+package controller
+
+import (
+	"context"
+	"fmt"
+	"sync"
+
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+)
+
+// IngressStatusUpdater manages the LoadBalancer status of Ingress resources.
+// It sets the load balancer IP or hostname on the Ingress status so that
+// external DNS or other tools can discover the gateway address.
+type IngressStatusUpdater struct {
+	client    client.Client
+	lbAddress string
+	mu        sync.RWMutex
+}
+
+// NewIngressStatusUpdater creates a new IngressStatusUpdater.
+// The lbAddress parameter is the initial load balancer address (IP or hostname).
+func NewIngressStatusUpdater(c client.Client, lbAddress string) *IngressStatusUpdater {
+	return &IngressStatusUpdater{
+		client:    c,
+		lbAddress: lbAddress,
+	}
+}
+
+// SetLoadBalancerAddress dynamically updates the load balancer address.
+// This can be called when the gateway service's external IP changes.
+func (u *IngressStatusUpdater) SetLoadBalancerAddress(address string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.lbAddress = address
+}
+
+// GetLoadBalancerAddress returns the current load balancer address.
+func (u *IngressStatusUpdater) GetLoadBalancerAddress() string {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.lbAddress
+}
+
+// UpdateIngressStatus updates the Ingress status with the load balancer address.
+// If no address is configured, the status update is skipped.
+func (u *IngressStatusUpdater) UpdateIngressStatus(
+	ctx context.Context,
+	ingress *networkingv1.Ingress,
+) error {
+	logger := log.FromContext(ctx)
+
+	address := u.GetLoadBalancerAddress()
+	if address == "" {
+		// No load balancer address configured; skip status update
+		return nil
+	}
+
+	// Build the desired LoadBalancer ingress entry
+	desiredIngress := buildLoadBalancerIngress(address)
+
+	// Check if status already matches to avoid unnecessary updates
+	if ingressStatusMatches(ingress.Status.LoadBalancer.Ingress, desiredIngress) {
+		return nil
+	}
+
+	// Update the status
+	ingress.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{desiredIngress}
+
+	if err := u.client.Status().Update(ctx, ingress); err != nil {
+		logger.Error(err, "failed to update Ingress LoadBalancer status",
+			"name", ingress.Name,
+			"namespace", ingress.Namespace,
+			"address", address,
+		)
+		return fmt.Errorf("failed to update Ingress status: %w", err)
+	}
+
+	logger.V(1).Info("updated Ingress LoadBalancer status",
+		"name", ingress.Name,
+		"namespace", ingress.Namespace,
+		"address", address,
+	)
+
+	return nil
+}
+
+// buildLoadBalancerIngress creates an IngressLoadBalancerIngress entry
+// from the given address. It determines whether the address is an IP or hostname.
+func buildLoadBalancerIngress(address string) networkingv1.IngressLoadBalancerIngress {
+	entry := networkingv1.IngressLoadBalancerIngress{}
+
+	// Simple heuristic: if it looks like an IP, set IP; otherwise set Hostname
+	if isIPAddress(address) {
+		entry.IP = address
+	} else {
+		entry.Hostname = address
+	}
+
+	// Set port 80 as default for HTTP traffic
+	httpPort := int32(80)
+	entry.Ports = []networkingv1.IngressPortStatus{
+		{
+			Port:     httpPort,
+			Protocol: corev1.ProtocolTCP,
+		},
+	}
+
+	return entry
+}
+
+// ingressStatusMatches checks if the current Ingress LoadBalancer status
+// already matches the desired state.
+func ingressStatusMatches(
+	current []networkingv1.IngressLoadBalancerIngress,
+	desired networkingv1.IngressLoadBalancerIngress,
+) bool {
+	if len(current) != 1 {
+		return false
+	}
+	return current[0].IP == desired.IP && current[0].Hostname == desired.Hostname
+}
+
+// isIPAddress performs a simple check to determine if a string is an IP address.
+// It checks for IPv4 format (contains dots and digits only) or IPv6 format (contains colons).
+func isIPAddress(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	// IPv6 check: contains colons
+	for _, c := range s {
+		if c == ':' {
+			return true
+		}
+	}
+
+	// IPv4 check: all characters are digits or dots, and contains at least one dot
+	hasDot := false
+	for _, c := range s {
+		if c == '.' {
+			hasDot = true
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+
+	return hasDot
+}

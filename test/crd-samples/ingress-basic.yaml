@@ -1,0 +1,21 @@
+# Basic Ingress resource for avapigw ingress controller
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: basic-ingress
+  namespace: avapigw-test
+  annotations:
+    avapigw.io/timeout: "30s"
+spec:
+  ingressClassName: avapigw
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: 8080

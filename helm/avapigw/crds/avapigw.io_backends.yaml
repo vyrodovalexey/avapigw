@@ -1,0 +1,673 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: backends.avapigw.io
+spec:
+  group: avapigw.io
+  names:
+    kind: Backend
+    listKind: BackendList
+    plural: backends
+    shortNames:
+    - be
+    singular: backend
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Healthy')].status
+      name: Healthy
+      type: string
+    - jsonPath: .status.healthyHosts
+      name: Hosts
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Backend is the Schema for the backends API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: BackendSpec defines the desired state of Backend.
+            properties:
+              authentication:
+                description: Authentication configures authentication for backend
+                  connections.
+                properties:
+                  basic:
+                    description: Basic configures Basic authentication for backend.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables Basic authentication.
+                        type: boolean
+                      password:
+                        description: Password is the password for Basic auth.
+                        type: string
+                      passwordKey:
+                        default: password
+                        description: 'PasswordKey is the key in Vault for password
+                          (default: password).'
+                        type: string
+                      username:
+                        description: Username is the username for Basic auth.
+                        type: string
+                      usernameKey:
+                        default: username
+                        description: 'UsernameKey is the key in Vault for username
+                          (default: username).'
+                        type: string
+                      vaultPath:
+                        description: VaultPath is the Vault path for credentials.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  jwt:
+                    description: JWT configures JWT authentication for backend.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables JWT authentication.
+                        type: boolean
+                      headerName:
+                        default: Authorization
+                        description: 'HeaderName is the header name for the token
+                          (default: Authorization).'
+                        type: string
+                      headerPrefix:
+                        default: Bearer
+                        description: 'HeaderPrefix is the prefix for the token (default:
+                          Bearer).'
+                        type: string
+                      oidc:
+                        description: OIDC configures OIDC token acquisition.
+                        properties:
+                          clientId:
+                            description: ClientID is the OIDC client ID.
+                            minLength: 1
+                            type: string
+                          clientSecret:
+                            description: ClientSecret is the OIDC client secret.
+                            type: string
+                          clientSecretRef:
+                            description: ClientSecretRef references a Kubernetes secret
+                              containing the client secret.
+                            properties:
+                              key:
+                                description: Key is the key in the secret.
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name is the name of the secret.
+                                minLength: 1
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          issuerUrl:
+                            description: IssuerURL is the OIDC issuer URL.
+                            minLength: 1
+                            type: string
+                          scopes:
+                            description: Scopes are the scopes to request.
+                            items:
+                              type: string
+                            type: array
+                          tokenCacheTTL:
+                            description: TokenCacheTTL is the TTL for cached tokens.
+                            pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                            type: string
+                        required:
+                        - clientId
+                        - issuerUrl
+                        type: object
+                      staticToken:
+                        description: StaticToken is a static JWT token (for development
+                          only).
+                        type: string
+                      tokenSource:
+                        description: TokenSource specifies where to get the token
+                          (static, vault, oidc).
+                        enum:
+                        - static
+                        - vault
+                        - oidc
+                        type: string
+                      vaultPath:
+                        description: VaultPath is the Vault path for JWT token.
+                        type: string
+                    required:
+                    - enabled
+                    - tokenSource
+                    type: object
+                  mtls:
+                    description: MTLS configures mTLS authentication for backend.
+                    properties:
+                      caFile:
+                        description: CAFile is the path to the CA certificate for
+                          server verification.
+                        type: string
+                      certFile:
+                        description: CertFile is the path to the client certificate.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled enables mTLS authentication.
+                        type: boolean
+                      keyFile:
+                        description: KeyFile is the path to the client private key.
+                        type: string
+                      vault:
+                        description: Vault configures Vault-based certificate management.
+                        properties:
+                          altNames:
+                            description: AltNames for certificate requests.
+                            items:
+                              type: string
+                            type: array
+                          commonName:
+                            description: CommonName for certificate requests.
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables Vault integration for client
+                              certificates.
+                            type: boolean
+                          pkiMount:
+                            description: PKIMount is the Vault PKI mount path.
+                            type: string
+                          role:
+                            description: Role is the Vault PKI role name.
+                            type: string
+                          ttl:
+                            description: TTL for certificate requests.
+                            type: string
+                        required:
+                        - enabled
+                        type: object
+                    required:
+                    - enabled
+                    type: object
+                  type:
+                    description: Type specifies the authentication type (jwt, basic,
+                      mtls).
+                    enum:
+                    - jwt
+                    - basic
+                    - mtls
+                    type: string
+                required:
+                - type
+                type: object
+              cache:
+                description: Cache contains caching configuration for this backend.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables caching.
+                    type: boolean
+                  keyComponents:
+                    description: KeyComponents are the components used to generate
+                      the cache key.
+                    items:
+                      type: string
+                    type: array
+                  staleWhileRevalidate:
+                    description: StaleWhileRevalidate allows serving stale content
+                      while revalidating.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                  ttl:
+                    description: TTL is the cache time-to-live.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                  type:
+                    default: memory
+                    description: Type is the cache type (memory, redis).
+                    enum:
+                    - memory
+                    - redis
+                    type: string
+                required:
+                - enabled
+                type: object
+              circuitBreaker:
+                description: CircuitBreaker configures circuit breaker for this backend.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables circuit breaker.
+                    type: boolean
+                  halfOpenRequests:
+                    description: HalfOpenRequests is the number of requests to allow
+                      in half-open state.
+                    type: integer
+                  threshold:
+                    description: Threshold is the number of failures before opening
+                      the circuit.
+                    minimum: 1
+                    type: integer
+                  timeout:
+                    description: Timeout is the time to wait before attempting to
+                      close the circuit.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                required:
+                - enabled
+                - threshold
+                - timeout
+                type: object
+              encoding:
+                description: Encoding contains encoding configuration for this backend.
+                properties:
+                  request:
+                    description: Request contains request encoding configuration.
+                    properties:
+                      compression:
+                        description: Compression specifies compression algorithm.
+                        enum:
+                        - gzip
+                        - deflate
+                        - br
+                        - none
+                        type: string
+                      contentType:
+                        description: ContentType is the content type.
+                        type: string
+                    type: object
+                  response:
+                    description: Response contains response encoding configuration.
+                    properties:
+                      compression:
+                        description: Compression specifies compression algorithm.
+                        enum:
+                        - gzip
+                        - deflate
+                        - br
+                        - none
+                        type: string
+                      contentType:
+                        description: ContentType is the content type.
+                        type: string
+                    type: object
+                type: object
+              healthCheck:
+                description: HealthCheck contains health check configuration.
+                properties:
+                  healthyThreshold:
+                    default: 2
+                    description: HealthyThreshold is the number of consecutive successes
+                      to mark healthy.
+                    minimum: 1
+                    type: integer
+                  interval:
+                    description: Interval is the health check interval.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                  path:
+                    description: Path is the health check path.
+                    minLength: 1
+                    type: string
+                  timeout:
+                    description: Timeout is the health check timeout.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                  unhealthyThreshold:
+                    default: 3
+                    description: UnhealthyThreshold is the number of consecutive failures
+                      to mark unhealthy.
+                    minimum: 1
+                    type: integer
+                required:
+                - path
+                type: object
+              hosts:
+                description: Hosts contains the backend host configurations.
+                items:
+                  description: BackendHost represents a single backend host.
+                  properties:
+                    address:
+                      description: Address is the backend host address (IP or hostname).
+                      minLength: 1
+                      type: string
+                    port:
+                      description: Port is the backend port.
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    weight:
+                      default: 1
+                      description: Weight is the traffic weight for this host (0-100).
+                      maximum: 100
+                      minimum: 0
+                      type: integer
+                  required:
+                  - address
+                  - port
+                  type: object
+                minItems: 1
+                type: array
+              loadBalancer:
+                description: LoadBalancer contains load balancer configuration.
+                properties:
+                  algorithm:
+                    default: roundRobin
+                    description: Algorithm is the load balancing algorithm.
+                    enum:
+                    - roundRobin
+                    - weighted
+                    - leastConn
+                    - random
+                    type: string
+                type: object
+              maxSessions:
+                description: MaxSessions configures maximum concurrent sessions for
+                  this backend.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables max sessions limiting.
+                    type: boolean
+                  maxConcurrent:
+                    description: MaxConcurrent is the maximum number of concurrent
+                      sessions.
+                    minimum: 1
+                    type: integer
+                  queueSize:
+                    description: QueueSize is the size of the waiting queue (0 = reject
+                      immediately).
+                    type: integer
+                  queueTimeout:
+                    description: QueueTimeout is the maximum time to wait in queue.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                required:
+                - enabled
+                - maxConcurrent
+                type: object
+              rateLimit:
+                description: RateLimit configures rate limiting for this backend.
+                properties:
+                  burst:
+                    description: Burst is the maximum burst size.
+                    minimum: 1
+                    type: integer
+                  enabled:
+                    default: false
+                    description: Enabled enables rate limiting.
+                    type: boolean
+                  perClient:
+                    description: PerClient enables per-client rate limiting.
+                    type: boolean
+                  requestsPerSecond:
+                    description: RequestsPerSecond is the maximum requests per second.
+                    minimum: 1
+                    type: integer
+                required:
+                - burst
+                - enabled
+                - requestsPerSecond
+                type: object
+              requestLimits:
+                description: RequestLimits configures request size limits for this
+                  backend.
+                properties:
+                  maxBodySize:
+                    description: MaxBodySize is the maximum allowed request body size
+                      in bytes.
+                    format: int64
+                    type: integer
+                  maxHeaderSize:
+                    description: MaxHeaderSize is the maximum allowed total header
+                      size in bytes.
+                    format: int64
+                    type: integer
+                type: object
+              tls:
+                description: TLS contains TLS configuration for backend connections.
+                properties:
+                  alpn:
+                    description: ALPN protocols for negotiation.
+                    items:
+                      type: string
+                    type: array
+                  caFile:
+                    description: CAFile is the path to the CA certificate for server
+                      verification.
+                    type: string
+                  certFile:
+                    description: CertFile is the path to the client certificate (for
+                      mTLS).
+                    type: string
+                  cipherSuites:
+                    description: CipherSuites is the list of allowed cipher suites.
+                    items:
+                      type: string
+                    type: array
+                  enabled:
+                    default: false
+                    description: Enabled enables TLS for backend connections.
+                    type: boolean
+                  insecureSkipVerify:
+                    description: InsecureSkipVerify skips server certificate verification
+                      (dev only).
+                    type: boolean
+                  keyFile:
+                    description: KeyFile is the path to the client private key (for
+                      mTLS).
+                    type: string
+                  maxVersion:
+                    description: MaxVersion is the maximum TLS version.
+                    enum:
+                    - TLS12
+                    - TLS13
+                    type: string
+                  minVersion:
+                    description: MinVersion is the minimum TLS version (TLS12, TLS13).
+                    enum:
+                    - TLS12
+                    - TLS13
+                    type: string
+                  mode:
+                    default: SIMPLE
+                    description: Mode specifies the TLS mode (SIMPLE, MUTUAL).
+                    enum:
+                    - SIMPLE
+                    - MUTUAL
+                    - INSECURE
+                    type: string
+                  serverName:
+                    description: ServerName overrides the server name for TLS verification.
+                    type: string
+                  vault:
+                    description: Vault configures Vault-based client certificate management.
+                    properties:
+                      altNames:
+                        description: AltNames for certificate requests.
+                        items:
+                          type: string
+                        type: array
+                      commonName:
+                        description: CommonName for certificate requests.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled enables Vault integration for client
+                          certificates.
+                        type: boolean
+                      pkiMount:
+                        description: PKIMount is the Vault PKI mount path.
+                        type: string
+                      role:
+                        description: Role is the Vault PKI role name.
+                        type: string
+                      ttl:
+                        description: TTL for certificate requests.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                required:
+                - enabled
+                type: object
+              transform:
+                description: Transform contains transformation configuration for this
+                  backend.
+                properties:
+                  request:
+                    description: Request contains request transformation configuration.
+                    properties:
+                      headers:
+                        description: Headers contains header manipulation.
+                        properties:
+                          add:
+                            additionalProperties:
+                              type: string
+                            description: Add appends header values.
+                            type: object
+                          remove:
+                            description: Remove removes headers.
+                            items:
+                              type: string
+                            type: array
+                          set:
+                            additionalProperties:
+                              type: string
+                            description: Set replaces header values.
+                            type: object
+                        type: object
+                      template:
+                        description: Template is a Go template for transforming the
+                          request body.
+                        type: string
+                    type: object
+                  response:
+                    description: Response contains response transformation configuration.
+                    properties:
+                      allowFields:
+                        description: AllowFields is the list of fields to allow in
+                          the response.
+                        items:
+                          type: string
+                        type: array
+                      denyFields:
+                        description: DenyFields is the list of fields to deny in the
+                          response.
+                        items:
+                          type: string
+                        type: array
+                      fieldMappings:
+                        additionalProperties:
+                          type: string
+                        description: FieldMappings maps field names.
+                        type: object
+                      headers:
+                        description: Headers contains header manipulation.
+                        properties:
+                          add:
+                            additionalProperties:
+                              type: string
+                            description: Add appends header values.
+                            type: object
+                          remove:
+                            description: Remove removes headers.
+                            items:
+                              type: string
+                            type: array
+                          set:
+                            additionalProperties:
+                              type: string
+                            description: Set replaces header values.
+                            type: object
+                        type: object
+                    type: object
+                type: object
+            required:
+            - hosts
+            type: object
+          status:
+            description: BackendStatus defines the observed state of Backend.
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the Backend's state.
+                items:
+                  description: Condition represents a condition of a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time the condition
+                        transitioned from one status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable message indicating
+                        details about the transition.
+                      type: string
+                    observedGeneration:
+                      description: ObservedGeneration represents the .metadata.generation
+                        that the condition was set based upon.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: Reason for the condition's last transition.
+                      type: string
+                    status:
+                      description: Status of the condition (True, False, Unknown).
+                      type: string
+                    type:
+                      description: Type of condition.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              healthyHosts:
+                description: HealthyHosts is the number of healthy hosts.
+                type: integer
+              lastHealthCheck:
+                description: LastHealthCheck is the timestamp of the last health check.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
+              totalHosts:
+                description: TotalHosts is the total number of hosts.
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

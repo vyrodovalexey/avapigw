@@ -1,0 +1,18 @@
+{{- if and .Values.operator.enabled .Values.operator.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "avapigw.operator.fullname" . }}
+  labels:
+    {{- include "avapigw.operator.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.operator.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.operator.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if .Values.operator.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.operator.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "avapigw.operator.selectorLabels" . | nindent 6 }}
+{{- end }}

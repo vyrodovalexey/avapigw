@@ -20,12 +20,12 @@ message UnaryResponse {
 }
 
 message StreamRequest {
-  string message = 1;
-  int32 count = 2;
+  int32 count = 1;
+  int32 interval_ms = 2;
 }
 
 message StreamResponse {
-  string message = 1;
+  int64 value = 1;
   int32 sequence = 2;
   int64 timestamp = 3;
 }

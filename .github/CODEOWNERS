@@ -6,7 +6,7 @@
 
 # CI/CD and DevOps configuration requires review
 /.github/ @vyrodovalexey
-/Dockerfile @vyrodovalexey
+/Dockerfile* @vyrodovalexey
 /Makefile @vyrodovalexey
 /.golangci.yml @vyrodovalexey
 /sonar-project.properties @vyrodovalexey

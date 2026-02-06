@@ -645,4 +645,593 @@ for _, warning := range warnings {
    openssl s_client -connect gateway.example.com:8443 -servername gateway.example.com
    ```
 
-This configuration reference provides comprehensive coverage of all Vault PKI integration options, enabling secure and automated certificate management across the entire gateway infrastructure.
+## Route-Level Authentication
+
+Route-level authentication allows you to secure specific routes with different authentication mechanisms.
+
+### JWT Authentication
+
+```yaml
+spec:
+  routes:
+    - name: secure-api
+      match:
+        - uri:
+            prefix: /api/v1/secure
+      route:
+        - destination:
+            host: backend
+            port: 8080
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: "https://auth.example.com"
+          audience: ["api.example.com"]
+          jwksUrl: "https://auth.example.com/.well-known/jwks.json"
+          algorithm: "RS256"
+          claimMapping:
+            roles: "roles"
+            permissions: "permissions"
+            email: "email"
+            name: "name"
+            groups: "groups"
+            scopes: "scope"
+        allowAnonymous: false
+        skipPaths:
+          - "/api/v1/secure/health"
+          - "/api/v1/secure/metrics"
+```
+
+### API Key Authentication
+
+```yaml
+spec:
+  routes:
+    - name: api-key-route
+      match:
+        - uri:
+            prefix: /api/v1/apikey
+      authentication:
+        enabled: true
+        apiKey:
+          enabled: true
+          header: "X-API-Key"           # Header name for API key
+          query: "api_key"              # Alternative: query parameter
+          hashAlgorithm: "sha256"       # Hash algorithm for stored keys
+          vaultPath: "secret/api-keys"  # Vault path for key storage
+```
+
+### mTLS Authentication
+
+```yaml
+spec:
+  routes:
+    - name: mtls-route
+      match:
+        - uri:
+            prefix: /api/v1/mtls
+      authentication:
+        enabled: true
+        mtls:
+          enabled: true
+          caFile: "/certs/client-ca.crt"
+          extractIdentity: "cn"         # Extract identity from CN
+          allowedCNs:
+            - "client.example.com"
+            - "admin.example.com"
+          allowedOUs:
+            - "Engineering"
+            - "Operations"
+```
+
+### OIDC Authentication
+
+```yaml
+spec:
+  routes:
+    - name: oidc-route
+      match:
+        - uri:
+            prefix: /api/v1/oidc
+      authentication:
+        enabled: true
+        oidc:
+          enabled: true
+          providers:
+            - name: "keycloak"
+              issuerUrl: "https://keycloak.example.com/realms/myrealm"
+              clientId: "api-client"
+              clientSecretRef:
+                name: "oidc-secret"
+                key: "client-secret"
+              scopes: ["openid", "profile", "email"]
+            - name: "auth0"
+              issuerUrl: "https://example.auth0.com/"
+              clientId: "auth0-client"
+              clientSecret: "auth0-secret"
+              scopes: ["openid", "profile"]
+```
+
+## Route-Level Authorization
+
+Route-level authorization provides fine-grained access control for your APIs.
+
+### RBAC (Role-Based Access Control)
+
+```yaml
+spec:
+  routes:
+    - name: rbac-route
+      match:
+        - uri:
+            prefix: /api/v1/rbac
+      authorization:
+        enabled: true
+        defaultPolicy: "deny"
+        rbac:
+          enabled: true
+          policies:
+            - name: "admin-full-access"
+              roles: ["admin", "super-admin"]
+              resources: ["*"]
+              actions: ["*"]
+              effect: "allow"
+              priority: 100
+            - name: "user-read-access"
+              roles: ["user"]
+              resources: ["/api/v1/rbac/users/*"]
+              actions: ["GET"]
+              effect: "allow"
+              priority: 50
+            - name: "user-write-own"
+              roles: ["user"]
+              resources: ["/api/v1/rbac/users/{{.user.id}}/*"]
+              actions: ["PUT", "PATCH"]
+              effect: "allow"
+              priority: 60
+          roleHierarchy:
+            super-admin: ["admin", "user", "viewer"]
+            admin: ["user", "viewer"]
+            user: ["viewer"]
+        skipPaths:
+          - "/api/v1/rbac/health"
+        cache:
+          enabled: true
+          ttl: "5m"
+          maxSize: 1000
+          type: "memory"
+```
+
+### ABAC (Attribute-Based Access Control)
+
+```yaml
+spec:
+  routes:
+    - name: abac-route
+      match:
+        - uri:
+            prefix: /api/v1/abac
+      authorization:
+        enabled: true
+        defaultPolicy: "deny"
+        abac:
+          enabled: true
+          policies:
+            - name: "business-hours-only"
+              expression: "request.time.getHours() >= 9 && request.time.getHours() <= 17"
+              resources: ["/api/v1/abac/admin/*"]
+              effect: "allow"
+              priority: 80
+            - name: "ip-whitelist"
+              expression: "request.remote_addr in ['10.0.0.0/8', '192.168.0.0/16']"
+              resources: ["/api/v1/abac/internal/*"]
+              effect: "allow"
+              priority: 90
+            - name: "user-owns-resource"
+              expression: "request.user.id == resource.owner_id"
+              resources: ["/api/v1/abac/users/*/profile"]
+              actions: ["PUT", "DELETE"]
+              effect: "allow"
+              priority: 70
+```
+
+### External Authorization (OPA)
+
+```yaml
+spec:
+  routes:
+    - name: opa-route
+      match:
+        - uri:
+            prefix: /api/v1/opa
+      authorization:
+        enabled: true
+        defaultPolicy: "deny"
+        external:
+          enabled: true
+          opa:
+            url: "http://opa.example.com:8181/v1/data/authz/allow"
+            policy: "authz"
+            headers:
+              Authorization: "Bearer opa-token"
+              Content-Type: "application/json"
+          timeout: "5s"
+          failOpen: false
+```
+
+## Backend Transformation
+
+Backend transformation allows you to modify requests and responses at the backend level.
+
+### HTTP Backend Transformation
+
+```yaml
+spec:
+  backends:
+    - name: transform-backend
+      hosts:
+        - address: api.internal
+          port: 8080
+      transform:
+        request:
+          template: |
+            {
+              "data": {{.Body}},
+              "metadata": {
+                "timestamp": "{{.Timestamp}}",
+                "requestId": "{{.RequestID}}",
+                "source": "gateway",
+                "version": "v1",
+                "user": {
+                  "id": "{{.user.id}}",
+                  "email": "{{.user.email}}"
+                }
+              }
+            }
+          headers:
+            set:
+              X-Gateway-Transform: "enabled"
+              X-Request-ID: "{{.RequestID}}"
+              X-User-ID: "{{.user.id}}"
+            add:
+              X-Forwarded-By: "avapigw"
+            remove:
+              - "X-Internal-Header"
+              - "X-Debug-Info"
+        response:
+          allowFields:
+            - "id"
+            - "name"
+            - "email"
+            - "created_at"
+            - "updated_at"
+            - "status"
+            - "profile"
+          denyFields:
+            - "password"
+            - "secret"
+            - "internal_id"
+            - "private_key"
+            - "ssn"
+            - "credit_card"
+          fieldMappings:
+            created_at: "createdAt"
+            updated_at: "updatedAt"
+            user_id: "userId"
+            first_name: "firstName"
+            last_name: "lastName"
+          headers:
+            set:
+              X-Response-Transform: "applied"
+              X-Response-Time: "{{.ResponseTime}}"
+            remove:
+              - "Server"
+              - "X-Powered-By"
+```
+
+### gRPC Backend Transformation
+
+```yaml
+spec:
+  grpcBackends:
+    - name: grpc-transform-backend
+      hosts:
+        - address: grpc-service.internal
+          port: 9000
+      transform:
+        fieldMask:
+          paths:
+            - "user.id"
+            - "user.name"
+            - "user.email"
+            - "user.profile.avatar"
+            - "user.profile.bio"
+            - "user.created_at"
+            - "user.permissions"
+        metadata:
+          static:
+            x-source: "gateway"
+            x-version: "v1"
+            x-backend: "user-service"
+            x-environment: "production"
+          dynamic:
+            x-request-id: "{{.RequestID}}"
+            x-timestamp: "{{.Timestamp}}"
+            x-user-id: "{{.user.id}}"
+            x-tenant-id: "{{.tenant.id}}"
+            x-gateway-id: "{{.GatewayID}}"
+```
+
+## Backend Caching
+
+Backend caching improves performance by caching responses at the backend level.
+
+### HTTP Backend Caching
+
+```yaml
+spec:
+  backends:
+    - name: cached-backend
+      hosts:
+        - address: api.internal
+          port: 8080
+      cache:
+        enabled: true
+        ttl: "10m"                     # Cache for 10 minutes
+        keyComponents:
+          - "path"                     # Include request path
+          - "query"                    # Include query parameters
+          - "headers.Authorization"    # Include auth header
+          - "headers.X-Tenant-ID"      # Include tenant header
+          - "headers.Accept-Language"  # Include language header
+        staleWhileRevalidate: "2m"     # Serve stale for 2 minutes while revalidating
+        type: "memory"                 # Use in-memory cache
+```
+
+### Redis Backend Caching
+
+```yaml
+spec:
+  backends:
+    - name: redis-cached-backend
+      hosts:
+        - address: api.internal
+          port: 8080
+      cache:
+        enabled: true
+        ttl: "1h"
+        keyComponents:
+          - "path"
+          - "query"
+          - "headers.Authorization"
+        staleWhileRevalidate: "5m"
+        type: "redis"
+        redis:
+          address: "redis.cache.svc.cluster.local:6379"
+          password: "redis-password"
+          db: 0
+          maxRetries: 3
+          poolSize: 10
+```
+
+### gRPC Backend Caching
+
+```yaml
+spec:
+  grpcBackends:
+    - name: grpc-cached-backend
+      hosts:
+        - address: grpc-service.internal
+          port: 9000
+      cache:
+        enabled: true
+        ttl: "5m"
+        keyComponents:
+          - "service"                  # gRPC service name
+          - "method"                   # gRPC method name
+          - "metadata.x-tenant-id"     # Tenant metadata
+          - "metadata.authorization"   # Auth metadata
+          - "request.user_id"          # Request field
+        staleWhileRevalidate: "1m"
+        type: "memory"
+```
+
+## Backend Encoding
+
+Backend encoding configures content type and compression for backend communication.
+
+### HTTP Backend Encoding
+
+```yaml
+spec:
+  backends:
+    - name: encoded-backend
+      hosts:
+        - address: api.internal
+          port: 8080
+      encoding:
+        request:
+          contentType: "application/json"
+          compression: "gzip"          # Compress requests
+        response:
+          contentType: "application/json"
+          compression: "gzip"          # Compress responses
+```
+
+### Advanced Encoding Configuration
+
+```yaml
+spec:
+  backends:
+    - name: advanced-encoding-backend
+      hosts:
+        - address: api.internal
+          port: 8080
+      encoding:
+        request:
+          contentType: "application/json; charset=utf-8"
+          compression: "br"            # Brotli compression
+        response:
+          contentType: "application/json; charset=utf-8"
+          compression: "deflate"       # Deflate compression
+```
+
+### gRPC Backend Encoding
+
+```yaml
+spec:
+  grpcBackends:
+    - name: grpc-encoded-backend
+      hosts:
+        - address: grpc-service.internal
+          port: 9000
+      encoding:
+        request:
+          contentType: "application/grpc"
+        response:
+          contentType: "application/grpc"
+```
+
+## Configuration Level Hierarchy
+
+### Route vs Backend Configuration
+
+When the same configuration option is available at both route and backend levels, the route-level configuration takes precedence:
+
+```yaml
+# Example: Rate limiting at both levels
+spec:
+  routes:
+    - name: example-route
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100        # Route-level limit (takes precedence)
+      route:
+        - destination:
+            host: example-backend
+            port: 8080
+  
+  backends:
+    - name: example-backend
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 500        # Backend-level limit (ignored for this route)
+```
+
+### Configuration Inheritance
+
+Some configurations can be inherited from higher levels:
+
+1. **Gateway Level** - Default configuration for all routes
+2. **Route Level** - Overrides gateway defaults
+3. **Backend Level** - Applies to all routes using this backend
+
+```yaml
+# Gateway-level defaults
+spec:
+  defaults:
+    rateLimit:
+      enabled: true
+      requestsPerSecond: 1000
+    authentication:
+      enabled: false
+  
+  routes:
+    - name: public-route
+      # Inherits gateway defaults: 1000 RPS, no auth
+      match:
+        - uri:
+            prefix: /public
+    
+    - name: secure-route
+      # Overrides defaults: 100 RPS, JWT auth
+      rateLimit:
+        requestsPerSecond: 100
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+      match:
+        - uri:
+            prefix: /secure
+```
+
+## Security Features
+
+### Open Redirect Protection
+
+The AV API Gateway includes built-in protection against open redirect attacks by validating redirect URLs:
+
+#### Automatic Redirect Validation
+
+The gateway automatically validates all redirect URLs and blocks potentially unsafe schemes:
+
+**Blocked Schemes:**
+- `javascript:` - Prevents JavaScript execution
+- `data:` - Prevents data URI exploitation
+- `vbscript:` - Prevents VBScript execution
+- `file:` - Prevents local file access
+- `ftp:` - Prevents FTP redirects
+
+**Allowed Schemes:**
+- `http:` - Standard HTTP redirects
+- `https:` - Secure HTTPS redirects
+- Empty scheme - Relative redirects
+
+#### Example Configuration
+
+```yaml
+spec:
+  routes:
+    - name: safe-redirect-route
+      match:
+        - uri:
+            exact: /redirect
+      redirect:
+        uri: "https://safe.example.com/target"  # ✅ Safe - HTTPS scheme
+        code: 302
+    
+    - name: relative-redirect-route
+      match:
+        - uri:
+            exact: /relative
+      redirect:
+        uri: "/safe/path"                       # ✅ Safe - Relative redirect
+        code: 302
+```
+
+#### Blocked Redirect Examples
+
+The following redirect configurations would be automatically blocked:
+
+```yaml
+# ❌ These would be blocked by open redirect protection
+redirect:
+  uri: "javascript:alert('xss')"               # Blocked - JavaScript scheme
+redirect:
+  uri: "data:text/html,<script>alert(1)</script>"  # Blocked - Data URI
+redirect:
+  uri: "vbscript:msgbox('xss')"                # Blocked - VBScript scheme
+```
+
+#### Error Response
+
+When an unsafe redirect is detected, the gateway returns:
+- **HTTP Status**: 400 Bad Request
+- **Response Body**: `{"error":"bad request","message":"unsafe redirect URL"}`
+- **Logging**: Security event logged for monitoring
+
+#### Monitoring Redirect Security
+
+Monitor redirect security through metrics and logs:
+
+```bash
+# Check for blocked redirects in logs
+kubectl logs -l app=avapigw | grep "unsafe redirect"
+
+# Monitor redirect-related errors
+curl http://localhost:9090/metrics | grep redirect
+```
+
+This configuration reference provides comprehensive coverage of all route-level authentication, authorization, backend transformation, caching, encoding options, and security features, enabling secure and efficient API gateway operations.

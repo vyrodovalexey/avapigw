@@ -1,0 +1,241 @@
+# Scenario 4: Ingress Controller WITHOUT TLS
+# Performance test values - Ingress controller enabled, no TLS
+# Deploy with: helm upgrade --install avapigw helm/avapigw/ -f test/performance/configs/values-scenario4-ingress.yaml -n avapigw-test --create-namespace
+
+namespace: avapigw-test
+
+replicaCount: 1
+
+image:
+  repository: avapigw
+  pullPolicy: Never
+  tag: "test"
+
+service:
+  type: NodePort
+  httpPort: 8080
+  grpcPort: 9000
+  metricsPort: 9090
+
+# Relax security for local testing
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+gateway:
+  logLevel: error
+  logFormat: json
+  environment: perftest-scenario4
+
+  listeners:
+    http:
+      enabled: true
+      port: 8080
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+    grpc:
+      enabled: true
+      port: 9000
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+      maxConcurrentStreams: 1000
+      maxRecvMsgSize: 4194304
+      maxSendMsgSize: 4194304
+      reflection: true
+      healthCheck: true
+
+  # Empty routes - will be configured via Ingress resources
+  routes: []
+  backends: []
+  grpcRoutes: []
+  grpcBackends: []
+
+  # Disable rate limiting for max performance
+  rateLimit:
+    enabled: false
+
+  circuitBreaker:
+    enabled: false
+
+  security:
+    enabled: false
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 86400
+    allowCredentials: false
+
+  # Disable audit for max performance
+  audit:
+    enabled: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: error
+      format: json
+
+# Vault disabled for this scenario
+vault:
+  enabled: false
+
+# Operator enabled with Ingress Controller
+operator:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: avapigw-operator
+    pullPolicy: Never
+    tag: "latest"
+
+  leaderElection:
+    enabled: true
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+    resourceName: avapigw-operator-leader.avapigw.io
+
+  grpc:
+    port: 9444
+    tls:
+      mode: selfsigned
+      selfsigned:
+        validity: 8760h
+
+  webhook:
+    enabled: false
+
+  vault:
+    enabled: false
+
+  metrics:
+    enabled: true
+    port: 8080
+
+  health:
+    port: 8081
+
+  service:
+    type: ClusterIP
+
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: health
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    capabilities:
+      drop:
+        - ALL
+
+  serviceAccount:
+    create: true
+    automount: true
+
+  podDisruptionBudget:
+    enabled: false
+
+  # Ingress controller ENABLED
+  ingressController:
+    enabled: true
+    className: avapigw
+    isDefaultClass: false
+    lbAddress: ""
+
+  serviceMonitor:
+    enabled: false
+
+  networkPolicy:
+    enabled: false

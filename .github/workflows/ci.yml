@@ -1,12 +1,12 @@
 name: CI
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
-  push:
-    tags:
-      - 'v*'
 
 # Concurrency control - cancel in-progress runs for the same branch/tag
 concurrency:
@@ -14,10 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.25.6'
+  GO_VERSION: '1.25.7'
   GOLANGCI_LINT_VERSION: 'v2.8.0'
   DOCKER_REGISTRY: ghcr.io
   DOCKER_IMAGE: ghcr.io/${{ github.repository }}
+  DOCKER_IMAGE_OPERATOR: ghcr.io/${{ github.repository }}-operator
   BINARY_NAME: gateway
 
 jobs:
@@ -616,7 +617,7 @@ jobs:
             "-Dsonar.organization=${{ github.repository_owner }}"
             "-Dsonar.go.coverage.reportPaths=coverage/unit.out,coverage/functional.out,coverage/integration.out,coverage/e2e.out"
             "-Dsonar.sources=."
-            "-Dsonar.exclusions=**/vendor/**,**/test/**,**/*_test.go,**/mocks/**,**/testdata/**,**/bin/**,**/coverage/**,**/helm/**"
+            "-Dsonar.exclusions=**/vendor/**,**/test/**,**/*_test.go,**/mocks/**,**/testdata/**,**/bin/**,**/coverage/**,**/helm/**,**/api/**,**/proto/**"
             "-Dsonar.tests=."
             "-Dsonar.test.inclusions=**/*_test.go"
             "-Dsonar.qualitygate.wait=${{ !startsWith(github.ref, 'refs/tags/') }}"
@@ -655,6 +656,37 @@ jobs:
           path: bin/${{ env.BINARY_NAME }}
           retention-days: 7
 
+  build-operator:
+    name: Build Operator
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [sonarcloud]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build operator binary
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/operator ./cmd/operator
+
+      - name: Upload operator binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: operator-binary
+          path: bin/operator
+          retention-days: 7
+
+
   docker-build-pr:
     name: Docker Build (PR)
     runs-on: ubuntu-latest
@@ -684,6 +716,7 @@ jobs:
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: .
+          file: ./Dockerfile.gateway
           push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -693,6 +726,47 @@ jobs:
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  docker-build-operator-pr:
+    name: Docker Build Operator (PR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build-operator]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.DOCKER_IMAGE_OPERATOR }}
+          tags: |
+            type=ref,event=pr
+            type=sha,prefix=pr-
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: .
+          file: ./Dockerfile.operator
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
 
   # ================================
   # Tag-only Jobs: Build & Release
@@ -790,6 +864,68 @@ jobs:
           path: bin/${{ env.BINARY_NAME }}-*
           retention-days: 30
 
+  build-release-operator:
+    name: Build & Release Operator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [sonarcloud]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Building operator version: ${VERSION}"
+
+      - name: Build operator binaries for multiple platforms
+        run: |
+          mkdir -p bin
+          # Linux amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S') -X main.gitCommit=${{ github.sha }}" \
+            -trimpath \
+            -o bin/operator-linux-amd64 \
+            ./cmd/operator
+          # Linux arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S') -X main.gitCommit=${{ github.sha }}" \
+            -trimpath \
+            -o bin/operator-linux-arm64 \
+            ./cmd/operator
+
+      - name: Create checksums
+        run: |
+          cd bin
+          sha256sum operator-linux-amd64 > operator-linux-amd64.sha256
+          sha256sum operator-linux-arm64 > operator-linux-arm64.sha256
+
+      - name: Upload operator binaries to release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+        with:
+          files: |
+            bin/operator-linux-amd64
+            bin/operator-linux-amd64.sha256
+            bin/operator-linux-arm64
+            bin/operator-linux-arm64.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
   # ===========================================================================
   # Tag-only Jobs: Docker Build & Push, Trivy Scan
   # ===========================================================================
@@ -803,6 +939,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # Required for Cosign keyless signing
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       image-tag: ${{ steps.meta.outputs.version }}
@@ -840,6 +977,7 @@ jobs:
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
         with:
           context: .
+          file: ./Dockerfile.gateway
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -850,6 +988,20 @@ jobs:
             BUILD_TIME=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign container image with Cosign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
 
       - name: Generate SBOM
         uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.22.1
@@ -864,6 +1016,94 @@ jobs:
         with:
           name: sbom
           path: ./sbom.spdx.json
+          retention-days: 90
+
+  docker-build-push-operator:
+    name: Docker Build & Push Operator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [sonarcloud]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+      id-token: write  # Required for Cosign keyless signing
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.DOCKER_IMAGE_OPERATOR }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: .
+          file: ./Dockerfile.operator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+
+      - name: Sign container image with Cosign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
+
+      - name: Generate SBOM for operator
+        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.22.1
+        with:
+          image: ${{ env.DOCKER_IMAGE_OPERATOR }}:${{ steps.meta.outputs.version }}
+          artifact-name: sbom-operator-${{ steps.meta.outputs.version }}.spdx.json
+          output-file: ./sbom-operator.spdx.json
+          upload-release-assets: false
+
+      - name: Upload operator SBOM artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-operator
+          path: ./sbom-operator.spdx.json
           retention-days: 90
 
   trivy-scan:
@@ -915,6 +1155,48 @@ jobs:
         with:
           name: trivy-results
           path: trivy-results.sarif
+          retention-days: 30
+
+  trivy-scan-operator:
+    name: Trivy Security Scan Operator
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [docker-build-push-operator]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.31.0
+        with:
+          image-ref: '${{ env.DOCKER_IMAGE_OPERATOR }}:${{ needs.docker-build-push-operator.outputs.image-tag }}'
+          format: 'sarif'
+          output: 'trivy-operator-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          vuln-type: 'os,library'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@ce28f5bb42b7a9f2c824e633a3f6ee835bab6858 # v4.32.0
+        with:
+          sarif_file: 'trivy-operator-results.sarif'
+
+      - name: Upload Trivy results artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: trivy-operator-results
+          path: trivy-operator-results.sarif
           retention-days: 30
 
   # ===========================================================================
@@ -992,11 +1274,40 @@ jobs:
             --set ingress.enabled=true \
             --set serviceMonitor.enabled=true
 
+      - name: Helm template with operator enabled
+        run: |
+          echo "==> Validating Helm templates with operator enabled..."
+          helm template avapigw helm/avapigw \
+            --set operator.enabled=true \
+            --set operator.webhook.enabled=false > /dev/null
+          echo "Operator template validation successful!"
+
+      - name: Helm template with ingress controller enabled
+        run: |
+          echo "==> Validating Helm templates with ingress controller enabled..."
+          helm template avapigw helm/avapigw \
+            --set operator.enabled=true \
+            --set operator.ingressController.enabled=true \
+            --set operator.webhook.enabled=false > /dev/null
+          echo "Ingress controller template validation successful!"
+
+      - name: Validate Kubernetes manifests with ingress controller
+        run: |
+          echo "==> Validating generated Kubernetes manifests with ingress controller..."
+          helm template avapigw helm/avapigw --set operator.enabled=true --set operator.ingressController.enabled=true --set operator.webhook.enabled=false | kubectl apply --dry-run=client -f -
+          echo "Kubernetes manifest validation with ingress controller successful!"
+
       - name: Validate Kubernetes manifests
         run: |
           echo "==> Validating generated Kubernetes manifests..."
           helm template avapigw helm/avapigw | kubectl apply --dry-run=client -f -
           echo "Kubernetes manifest validation successful!"
+
+      - name: Validate Kubernetes manifests with operator
+        run: |
+          echo "==> Validating generated Kubernetes manifests with operator..."
+          helm template avapigw helm/avapigw --set operator.enabled=true --set operator.webhook.enabled=false | kubectl apply --dry-run=client -f -
+          echo "Kubernetes manifest validation with operator successful!"
 
   # ===========================================================================
   # Helm Chart Install Test (TAG - Full Install)
@@ -1032,7 +1343,7 @@ jobs:
       - name: Build Docker image for testing
         run: |
           echo "==> Building Docker image for Helm install test..."
-          docker build -t avapigw:helm-test .
+          docker build -f Dockerfile.gateway -t avapigw:helm-test .
 
       - name: Load image into kind cluster
         run: |

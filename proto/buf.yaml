@@ -1,0 +1,13 @@
+# buf.yaml - Buf configuration for proto files
+version: v2
+modules:
+  - path: .
+    name: buf.build/avapigw/operator
+lint:
+  use:
+    - DEFAULT
+  except:
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE

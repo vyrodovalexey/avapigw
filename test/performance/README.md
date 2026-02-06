@@ -1556,6 +1556,64 @@ performance_test:
   when: manual
 ```
 
+## Ingress Controller Performance Tests
+
+The Ingress Controller performance benchmarks measure the overhead of converting Kubernetes `networking.k8s.io/v1` Ingress resources into internal gateway configuration (routes and backends), as well as the full reconciliation lifecycle (create, update, delete).
+
+### Running Ingress Controller Benchmarks
+
+```bash
+# Run all Ingress benchmarks
+go test -tags performance -bench=BenchmarkIngress -benchmem -count=1 ./test/performance/operator/...
+
+# Run only conversion benchmarks
+go test -tags performance -bench=BenchmarkIngressConversion -benchmem -count=1 ./test/performance/operator/...
+
+# Run only reconciliation benchmarks
+go test -tags performance -bench=BenchmarkIngressReconciliation -benchmem -count=1 ./test/performance/operator/...
+
+# Run parallel conversion benchmark
+go test -tags performance -bench=BenchmarkIngressConversion_Parallel -benchmem -count=3 ./test/performance/operator/...
+
+# Run with CPU profiling
+go test -tags performance -bench=BenchmarkIngressConversion_Complex -benchmem -cpuprofile=cpu.prof ./test/performance/operator/...
+```
+
+### Benchmark Descriptions
+
+| Benchmark | Description | What It Measures |
+|-----------|-------------|------------------|
+| `BenchmarkIngressConversion_Basic` | Single rule, single path Ingress | Baseline conversion cost |
+| `BenchmarkIngressConversion_Complex` | Multiple rules, paths, TLS, default backend, all annotations | Worst-case conversion cost |
+| `BenchmarkIngressConversion_WithAnnotations` | Single path with all annotation types (timeout, retries, rate-limit, CORS, circuit-breaker, health-check) | Annotation parsing overhead |
+| `BenchmarkIngressReconciliation_Create` | Full create cycle: Ingress creation → finalizer add → conversion → gRPC apply | End-to-end create latency |
+| `BenchmarkIngressReconciliation_Update` | Re-reconcile an existing Ingress (routes re-applied) | Steady-state update cost |
+| `BenchmarkIngressReconciliation_Delete` | Full delete cycle: cleanup routes/backends → remove finalizer | Deletion cleanup cost |
+| `BenchmarkIngressConversion_Parallel` | Concurrent conversion of 100 complex Ingress objects | Thread-safety and scalability |
+
+### Expected Performance Characteristics
+
+- **Basic conversion**: < 5 µs/op, < 5 allocations/op
+- **Complex conversion** (5 paths + default + all annotations): < 30 µs/op
+- **Annotation parsing**: Adds ~2-5 µs overhead per annotation group
+- **Full reconciliation** (create): < 200 µs/op (includes fake client I/O)
+- **Full reconciliation** (update): < 100 µs/op (steady-state, no finalizer add)
+- **Parallel conversion**: Near-linear scaling — the `IngressConverter` is stateless and thread-safe
+
+### Ammo File
+
+The `ammo/ingress-reconciliation.txt` file provides a Yandex Tank ammo configuration for load-testing the operator metrics endpoint during Ingress reconciliation:
+
+```
+[Host: localhost:9090]
+[User-Agent: YandexTank/IngressPerftest]
+[Accept: text/plain]
+[Connection: close]
+/metrics
+```
+
+This can be used to monitor operator metrics under load while running Ingress reconciliation stress tests.
+
 ## References
 
 ### HTTP Testing (Yandex Tank)
