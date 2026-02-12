@@ -122,6 +122,128 @@ The performance testing suite includes comprehensive security testing configurat
 
 These tests help measure the performance impact of security features and ensure the gateway maintains acceptable performance under secure configurations.
 
+### Redis Sentinel Cache Performance Tests
+
+The performance testing suite includes Redis Sentinel cache performance tests to measure the impact of high-availability caching:
+
+#### Redis Cache Performance Tests
+- **Redis Standalone Cache:** `configs/redis-cache-throughput.yaml` - HTTP performance with Redis standalone caching
+- **Redis Sentinel Cache:** `configs/redis-sentinel-cache-throughput.yaml` - HTTP performance with Redis Sentinel high-availability caching
+- **Cache Hit Rate Test:** `configs/cache-hit-rate.yaml` - Test cache effectiveness and hit rates
+- **Cache Failover Test:** `configs/cache-failover.yaml` - Test cache behavior during Redis master failover
+
+#### New Redis Cache Features
+
+The performance tests now include validation of advanced Redis cache features:
+
+**TTL Jitter Testing:**
+- Measures the effectiveness of TTL jitter in preventing thundering herd scenarios
+- Tests cache expiration distribution with different jitter percentages (0.0-1.0)
+- Validates that cache entries expire at different times to avoid simultaneous cache misses
+- Compares performance with and without TTL jitter enabled
+
+**Hash Keys Testing:**
+- Tests SHA256 hashing of cache keys for privacy and length control
+- Measures performance impact of key hashing vs. plain text keys
+- Validates cache hit rates with hashed keys
+- Tests key collision resistance and uniqueness
+
+**Vault Password Integration Testing:**
+- Tests secure password resolution from HashiCorp Vault KV secrets
+- Validates both standalone Redis and Redis Sentinel password integration
+- Measures authentication overhead when using Vault-resolved passwords
+- Tests password rotation scenarios during load testing
+
+#### Test Descriptions
+
+**Redis Standalone vs Sentinel Comparison:**
+- Measures performance difference between standalone Redis and Redis Sentinel
+- Tests cache hit/miss ratios under different load patterns
+- Evaluates connection pool efficiency and failover behavior
+- Compares latency impact of Sentinel service discovery
+- Includes testing of new cache features (TTL jitter, hash keys, Vault passwords)
+
+**Cache Hit Rate Test:**
+- Generates repeated requests to measure cache effectiveness
+- Tests cache key generation with different components (path, query, headers)
+- Measures cache TTL behavior and stale-while-revalidate performance
+- Validates cache invalidation and refresh patterns
+- Tests TTL jitter effectiveness in preventing thundering herd scenarios
+- Validates hash key functionality for privacy and performance
+
+**Cache Failover Test:**
+- Simulates Redis master failure during load testing
+- Measures gateway behavior during Sentinel failover
+- Tests connection pool recovery and error handling
+- Validates cache availability during infrastructure changes
+
+#### Expected Results Format
+
+Redis cache performance tests output additional metrics:
+
+```json
+{
+  "test_info": {
+    "name": "redis-sentinel-cache-throughput",
+    "cache_type": "redis-sentinel",
+    "cache_config": {
+      "master_name": "mymaster",
+      "sentinel_count": 3,
+      "ttl": "10m",
+      "ttl_jitter": 0.1,
+      "hash_keys": true,
+      "vault_integration": true
+    }
+  },
+  "cache_metrics": {
+    "hit_rate": 0.85,
+    "miss_rate": 0.15,
+    "total_cache_operations": 50000,
+    "cache_hits": 42500,
+    "cache_misses": 7500,
+    "avg_cache_latency_ms": 2.1,
+    "p95_cache_latency_ms": 5.2,
+    "failover_events": 0,
+    "connection_errors": 0
+  },
+  "redis_metrics": {
+    "connections_active": 10,
+    "connections_total": 15,
+    "commands_processed": 50000,
+    "keyspace_hits": 42500,
+    "keyspace_misses": 7500,
+    "memory_usage_bytes": 104857600
+  }
+}
+```
+
+#### Running Redis Cache Performance Tests
+
+```bash
+# Run Redis standalone cache test
+./test/performance/scripts/run-test.sh redis-cache-throughput
+
+# Run Redis Sentinel cache test  
+./test/performance/scripts/run-test.sh redis-sentinel-cache-throughput
+
+# Run cache hit rate test
+./test/performance/scripts/run-test.sh cache-hit-rate
+
+# Run cache failover test (requires Redis Sentinel setup)
+./test/performance/scripts/run-test.sh cache-failover
+
+# Compare Redis standalone vs Sentinel performance
+./test/performance/scripts/run-test.sh redis-cache-throughput
+./test/performance/scripts/run-test.sh redis-sentinel-cache-throughput
+./test/performance/scripts/analyze-results.sh --compare results/redis-cache-throughput_*/ results/redis-sentinel-cache-throughput_*/
+```
+
+**Prerequisites for Redis Cache Tests:**
+- Redis server running on localhost:6379 (for standalone tests)
+- Redis Sentinel cluster running (for Sentinel tests): master + 2 replicas + 3 sentinels
+- Gateway configured with Redis cache enabled
+- Docker Compose setup: `docker-compose -f test/docker-compose/docker-compose.yml up -d`
+
 ## Directory Structure
 
 ```
@@ -1649,3 +1771,27 @@ This can be used to monitor operator metrics under load while running Ingress re
 - [API Gateway Performance](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html)
 - [gRPC Performance Best Practices](https://grpc.io/docs/guides/performance/)
 - [WebSocket Performance Optimization](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_servers)
+
+## Recent Updates
+
+### Dependency Upgrades
+
+The performance testing infrastructure has been updated with the latest dependencies:
+
+**Go Dependencies:**
+- `go-redis` v9.17.3 - Enhanced Redis client with improved connection pooling, Sentinel support, and performance optimizations
+- `protobuf` v1.36.11 - Latest Protocol Buffers implementation with performance improvements for gRPC testing
+
+**CI/CD Action Upgrades:**
+- `actions/checkout` v6.0.2 - Improved Git checkout performance for CI pipelines
+- `docker/login-action` v3.7.0 - Enhanced Docker registry authentication for container builds
+- `github/codeql-action` v4.32.2 - Latest CodeQL security analysis for code quality
+- `anchore/sbom-action` v0.22.2 - Improved Software Bill of Materials generation
+- `helm/kind-action` v1.13.0 - Latest Kubernetes in Docker for K8s performance testing
+
+**Redis Cache Features:**
+- TTL Jitter support for preventing thundering herd scenarios
+- SHA256 hash keys for privacy and performance optimization
+- Vault password integration for secure Redis authentication
+
+These upgrades provide enhanced performance testing capabilities, improved security analysis, and better compatibility with modern infrastructure components.

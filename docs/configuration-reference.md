@@ -967,6 +967,29 @@ spec:
 
 Backend caching improves performance by caching responses at the backend level.
 
+### Redis Cache Features
+
+The gateway provides advanced Redis caching features for improved performance and reliability:
+
+**TTL Jitter**
+- Prevents thundering herd problems by adding random jitter to TTL values
+- Configurable jitter percentage (0.0-1.0) applied as ±jitter% to cache TTL
+- Example: `ttlJitter: 0.1` means TTL varies by ±10%
+- Helps distribute cache expiration times to avoid simultaneous cache misses
+
+**Hash Keys**
+- SHA256 hashing of cache keys for privacy and length control
+- Prevents key length issues with Redis key size limits
+- Provides privacy by obscuring cache key contents
+- Maintains cache key uniqueness while reducing storage overhead
+
+**Vault Password Integration**
+- Secure password management using HashiCorp Vault KV secrets
+- Supports both standalone Redis and Redis Sentinel configurations
+- Automatic password resolution from Vault at runtime
+- Vault path format: `mount/path` (e.g., `secret/redis`)
+- Secret must contain a `password` key
+
 ### HTTP Backend Caching
 
 ```yaml
@@ -991,6 +1014,8 @@ spec:
 
 ### Redis Backend Caching
 
+#### Redis Standalone Configuration
+
 ```yaml
 spec:
   backends:
@@ -1007,12 +1032,158 @@ spec:
           - "headers.Authorization"
         staleWhileRevalidate: "5m"
         type: "redis"
+          redis:
+            address: "redis.cache.svc.cluster.local:6379"
+            password: "redis-password"
+            # Vault password integration
+            passwordVaultPath: "secret/redis"
+            db: 0
+            maxRetries: 3
+            poolSize: 10
+            keyPrefix: "avapigw:cache:"
+            # TTL jitter to prevent thundering herd
+            ttlJitter: 0.1  # ±10% jitter on TTL values
+            # Hash cache keys for privacy and length control
+            hashKeys: true
+            tls:
+              enabled: true
+              caFile: "/etc/ssl/certs/redis-ca.crt"
+              certFile: "/etc/ssl/certs/redis-client.crt"
+              keyFile: "/etc/ssl/private/redis-client.key"
+              insecureSkipVerify: false
+```
+
+#### Redis Sentinel Configuration
+
+```yaml
+spec:
+  backends:
+    - name: redis-sentinel-cached-backend
+      hosts:
+        - address: api.internal
+          port: 8080
+      cache:
+        enabled: true
+        ttl: "1h"
+        keyComponents:
+          - "path"
+          - "query"
+          - "headers.Authorization"
+        staleWhileRevalidate: "5m"
+        type: "redis"
         redis:
-          address: "redis.cache.svc.cluster.local:6379"
-          password: "redis-password"
-          db: 0
+          # Redis Sentinel configuration takes precedence over standalone
+          sentinel:
+            masterName: "mymaster"
+            sentinelAddrs:
+              - "sentinel1.cache.svc.cluster.local:26379"
+              - "sentinel2.cache.svc.cluster.local:26379"
+              - "sentinel3.cache.svc.cluster.local:26379"
+            sentinelPassword: "sentinel-password"
+            password: "redis-master-password"
+            # Vault password integration for sentinel
+            sentinelPasswordVaultPath: "secret/redis-sentinel"
+            passwordVaultPath: "secret/redis-master"
+            db: 0
+          # Connection pool settings
           maxRetries: 3
           poolSize: 10
+          keyPrefix: "avapigw:cache:"
+          # TTL jitter to prevent thundering herd
+          ttlJitter: 0.1  # ±10% jitter on TTL values
+          # Hash cache keys for privacy and length control
+          hashKeys: true
+          # TLS configuration for Redis connections
+          tls:
+            enabled: true
+            caFile: "/etc/ssl/certs/redis-ca.crt"
+            certFile: "/etc/ssl/certs/redis-client.crt"
+            keyFile: "/etc/ssl/private/redis-client.key"
+            insecureSkipVerify: false
+```
+
+#### Redis Configuration Environment Variables
+
+Redis cache configuration can be overridden using environment variables:
+
+| Environment Variable | Description | Example |
+|---------------------|-------------|---------|
+| `REDIS_SENTINEL_MASTER_NAME` | Sentinel master name | `mymaster` |
+| `REDIS_SENTINEL_ADDRS` | Comma-separated sentinel addresses | `sentinel1:26379,sentinel2:26379,sentinel3:26379` |
+| `REDIS_SENTINEL_PASSWORD` | Sentinel authentication password | `sentinel-password` |
+| `REDIS_MASTER_PASSWORD` | Redis master password | `redis-master-password` |
+| `REDIS_SENTINEL_DB` | Redis database number | `0` |
+| `REDIS_ADDRESS` | Redis standalone address (fallback) | `redis:6379` |
+| `REDIS_PASSWORD` | Redis standalone password (fallback) | `redis-password` |
+| `REDIS_DB` | Redis standalone database (fallback) | `0` |
+| `REDIS_TTL_JITTER` | TTL jitter percentage (0.0-1.0) | `0.1` |
+| `REDIS_HASH_KEYS` | Enable cache key hashing (true/false) | `true` |
+| `REDIS_PASSWORD_VAULT_PATH` | Vault path for Redis password | `secret/redis` |
+| `REDIS_SENTINEL_PASSWORD_VAULT_PATH` | Vault path for sentinel password | `secret/redis-sentinel` |
+| `REDIS_SENTINEL_SENTINEL_PASSWORD_VAULT_PATH` | Vault path for sentinel auth password | `secret/redis-sentinel-auth` |
+
+**Configuration Precedence:**
+1. Environment variables (highest priority)
+2. Sentinel configuration in YAML
+3. Standalone Redis configuration in YAML (lowest priority)
+
+#### Redis Sentinel High Availability
+
+Redis Sentinel provides automatic failover and high availability:
+
+- **Automatic Failover**: When the master becomes unavailable, Sentinel promotes a replica to master
+- **Service Discovery**: Gateway automatically discovers the current master through Sentinel
+- **Connection Pooling**: Optimized connection pooling with exponential backoff retry
+- **TLS Support**: Full TLS encryption for both Sentinel and Redis connections
+- **Health Monitoring**: Continuous monitoring of Redis master and replica health
+
+Example with full high availability configuration:
+
+```yaml
+spec:
+  backends:
+    - name: ha-redis-cached-backend
+      hosts:
+        - address: api.internal
+          port: 8080
+      cache:
+        enabled: true
+        ttl: "30m"
+        keyComponents:
+          - "path"
+          - "query"
+          - "headers.Authorization"
+          - "headers.X-Tenant-ID"
+        staleWhileRevalidate: "5m"
+        type: "redis"
+        redis:
+          sentinel:
+            masterName: "mymaster"
+            sentinelAddrs:
+              - "sentinel1.cache.svc.cluster.local:26379"
+              - "sentinel2.cache.svc.cluster.local:26379"
+              - "sentinel3.cache.svc.cluster.local:26379"
+            sentinelPassword: "sentinel-password"
+            password: "redis-master-password"
+            db: 0
+          # Performance tuning
+          maxRetries: 5
+          poolSize: 20
+          minIdleConns: 5
+          maxConnAge: "30m"
+          poolTimeout: "5s"
+          idleTimeout: "10m"
+          idleCheckFrequency: "1m"
+          # Cache key management
+          keyPrefix: "avapigw:cache:v1:"
+          # TLS for production security
+          tls:
+            enabled: true
+            caFile: "/etc/ssl/certs/redis-ca.crt"
+            certFile: "/etc/ssl/certs/redis-client.crt"
+            keyFile: "/etc/ssl/private/redis-client.key"
+            serverName: "redis.cache.internal"
+            insecureSkipVerify: false
 ```
 
 ### gRPC Backend Caching
@@ -1233,5 +1404,24 @@ kubectl logs -l app=avapigw | grep "unsafe redirect"
 # Monitor redirect-related errors
 curl http://localhost:9090/metrics | grep redirect
 ```
+
+## Recent Updates
+
+### Dependency Upgrades
+
+The following dependencies have been upgraded for improved performance and security:
+
+**Go Dependencies:**
+- `go-redis` upgraded to v9.17.3 - Enhanced Redis client with improved connection pooling and Sentinel support
+- `protobuf` upgraded to v1.36.11 - Latest Protocol Buffers implementation with performance improvements
+
+**CI/CD Action Upgrades:**
+- `actions/checkout` upgraded to v6.0.2 - Improved Git checkout performance and security
+- `docker/login-action` upgraded to v3.7.0 - Enhanced Docker registry authentication
+- `github/codeql-action` upgraded to v4.32.2 - Latest CodeQL security analysis
+- `anchore/sbom-action` upgraded to v0.22.2 - Improved Software Bill of Materials generation
+- `helm/kind-action` upgraded to v1.13.0 - Latest Kubernetes in Docker for testing
+
+These upgrades provide enhanced security, performance improvements, and better compatibility with modern infrastructure.
 
 This configuration reference provides comprehensive coverage of all route-level authentication, authorization, backend transformation, caching, encoding options, and security features, enabling secure and efficient API gateway operations.

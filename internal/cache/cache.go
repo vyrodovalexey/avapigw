@@ -4,10 +4,12 @@ package cache
 import (
 	"context"
 	"errors"
+	"net"
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // Common cache errors.
@@ -80,8 +82,40 @@ func (s CacheStats) HitRate() float64 {
 	return float64(s.Hits) / float64(total) * 100
 }
 
+// CacheOption is a functional option for cache creation.
+type CacheOption func(*cacheOptions)
+
+// cacheOptions holds optional configuration for cache creation.
+type cacheOptions struct {
+	// redisDialer is a custom dialer for Redis connections.
+	// Useful for testing with Docker networking where sentinel discovers
+	// the master at a Docker-internal IP unreachable from the host.
+	redisDialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// vaultClient is an optional Vault client for resolving Redis passwords from Vault.
+	vaultClient vault.Client
+}
+
+// WithRedisDialer sets a custom dialer for Redis connections.
+// This is primarily used in integration tests to handle Docker networking
+// where Redis Sentinel discovers the master at a Docker-internal IP.
+func WithRedisDialer(dialer func(ctx context.Context, network, addr string) (net.Conn, error)) CacheOption {
+	return func(o *cacheOptions) {
+		o.redisDialer = dialer
+	}
+}
+
+// WithVaultClient sets a Vault client for resolving Redis passwords from Vault.
+// When configured, Redis passwords can be fetched from Vault KV secrets engine
+// using the passwordVaultPath configuration fields.
+func WithVaultClient(client vault.Client) CacheOption {
+	return func(o *cacheOptions) {
+		o.vaultClient = client
+	}
+}
+
 // New creates a new cache based on the configuration.
-func New(cfg *config.CacheConfig, logger observability.Logger) (Cache, error) {
+func New(cfg *config.CacheConfig, logger observability.Logger, opts ...CacheOption) (Cache, error) {
 	if cfg == nil {
 		return nil, ErrInvalidConfig
 	}
@@ -94,11 +128,16 @@ func New(cfg *config.CacheConfig, logger observability.Logger) (Cache, error) {
 		logger = observability.NopLogger()
 	}
 
+	options := &cacheOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
 	switch cfg.Type {
 	case config.CacheTypeMemory, "":
 		return newMemoryCache(cfg, logger)
 	case config.CacheTypeRedis:
-		return newRedisCache(cfg, logger)
+		return newRedisCache(cfg, logger, options)
 	default:
 		return nil, errors.New("unknown cache type: " + cfg.Type)
 	}

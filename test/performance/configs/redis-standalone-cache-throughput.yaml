@@ -1,0 +1,58 @@
+# Yandex Tank Configuration: Redis Standalone Cache Throughput Test
+# Purpose: Measure cache hit latency and throughput with Redis Standalone backend (baseline)
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+# Target: 2000 RPS
+# Focus: Cache hit latency with Redis Standalone (baseline for comparison)
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 100 to 2000 RPS (populate cache)
+    # Sustain: 3 min at 2000 RPS (main measurement phase - cache hits)
+    # Cooldown: 1 min ramp down
+    schedule: line(100, 2000, 1m) const(2000, 3m) line(2000, 100, 1m)
+
+  ammofile: /var/loadtest/ammo/cache-get.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings - high concurrency for throughput testing
+  instances: 2000
+  threads: 8
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-Redis-Standalone-Cache]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: redis-standalone-cache-throughput]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 10% for 30 seconds
+    - http(5xx,10%,30s)
+    # Stop if 50% of requests exceed 5000ms for 30 seconds
+    - time(5000,50%,30s)
+    # Stop if total network errors exceed 5% for 30 seconds
+    - http(net,5%,30s)

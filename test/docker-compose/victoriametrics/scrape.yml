@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: 'avapigw-gateway'
+    static_configs:
+      - targets: ['host.docker.internal:9090']
+        labels:
+          instance: 'gateway-local'
+          component: 'gateway'
+    metrics_path: /metrics
+
+  - job_name: 'avapigw-gateway-k8s'
+    static_configs:
+      - targets: ['host.docker.internal:30090']
+        labels:
+          instance: 'gateway-k8s'
+          component: 'gateway'
+    metrics_path: /metrics
+
+  - job_name: 'avapigw-operator'
+    static_configs:
+      - targets: ['host.docker.internal:30080']
+        labels:
+          instance: 'operator-k8s'
+          component: 'operator'
+    metrics_path: /metrics
+
+  - job_name: 'rest-backend-1'
+    static_configs:
+      - targets: ['rest_api_1:8080']
+        labels:
+          instance: 'rest-backend-1'
+          component: 'backend'
+    metrics_path: /metrics
+
+  - job_name: 'rest-backend-2'
+    static_configs:
+      - targets: ['rest_api_2:8080']
+        labels:
+          instance: 'rest-backend-2'
+          component: 'backend'
+    metrics_path: /metrics

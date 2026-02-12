@@ -391,6 +391,51 @@ func (c *KeycloakClient) ResetUserPassword(ctx context.Context, realmName, usern
 		return fmt.Errorf("failed to reset password: status=%d, body=%s", resp.StatusCode, string(respBody))
 	}
 
+	// Clear required actions to prevent "Account is not fully set up" errors
+	if err := c.clearRequiredActions(ctx, realmName, userID); err != nil {
+		return fmt.Errorf("failed to clear required actions: %w", err)
+	}
+
+	return nil
+}
+
+// clearRequiredActions removes all required actions from a user and ensures
+// required profile fields are set. This prevents "Account is not fully set up"
+// errors during password grant in Keycloak 26.x which enforces user profile validation.
+func (c *KeycloakClient) clearRequiredActions(ctx context.Context, realmName, userID string) error {
+	userURL := fmt.Sprintf("%s/admin/realms/%s/users/%s", c.baseURL, realmName, userID)
+
+	// Keycloak 26.x requires firstName and lastName to be set for user profile validation.
+	// Without these, password grant fails with "Account is not fully set up".
+	updateData := map[string]interface{}{
+		"requiredActions": []string{},
+		"firstName":       "Test",
+		"lastName":        "User",
+	}
+
+	body, err := json.Marshal(updateData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update data: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, userURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.adminToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to clear required actions: status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+
 	return nil
 }
 

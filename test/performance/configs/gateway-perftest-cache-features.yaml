@@ -1,0 +1,366 @@
+# Gateway configuration optimized for performance testing with Redis Cache Features
+# This configuration is designed to test the new Redis cache features:
+# - TTL Jitter (0.1 = 10% jitter to prevent cache stampede)
+# - Hash Keys (SHA256 hashing of cache keys)
+# - Redis standalone cache
+#
+# For accurate performance measurements comparing cache feature overhead
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-gateway-cache-features
+  labels:
+    app: avapigw
+    environment: perftest
+    cache: redis-features
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      grpc:
+        maxConcurrentStreams: 1000
+        maxRecvMsgSize: 4194304  # 4MB
+        maxSendMsgSize: 4194304  # 4MB
+        reflection: true
+        healthCheck: true
+        keepalive:
+          time: 30s
+          timeout: 10s
+          maxConnectionIdle: 5m
+          maxConnectionAge: 30m
+          maxConnectionAgeGrace: 10s
+          permitWithoutStream: true
+
+  routes:
+    # Health check endpoint - direct response (no backend)
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"perftest-cache-features"}'
+        headers:
+          Content-Type: application/json
+
+    # Items API with Redis cache features enabled (TTL jitter + hash keys)
+    - name: items-api-cached-features
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "5xx,reset,connect-failure"
+      # Redis cache configuration with new features
+      cache:
+        enabled: true
+        type: redis
+        ttl: 5m
+        redis:
+          url: "redis://default:password@127.0.0.1:6379"
+          keyPrefix: "perftest:cache-features:"
+          poolSize: 20
+          connectTimeout: 5s
+          readTimeout: 3s
+          writeTimeout: 3s
+          # New cache features being tested
+          ttlJitter: 0.1    # 10% TTL jitter to prevent cache stampede
+          hashKeys: true    # SHA256 hash cache keys
+        keyConfig:
+          includeMethod: true
+          includePath: true
+        honorCacheControl: false
+
+    # Users API with cache features - different paths for hash key distribution testing
+    - name: users-api-cached-features
+      match:
+        - uri:
+            prefix: /api/v1/users
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+      cache:
+        enabled: true
+        type: redis
+        ttl: 3m
+        redis:
+          url: "redis://default:password@127.0.0.1:6379"
+          keyPrefix: "perftest:users:"
+          poolSize: 20
+          connectTimeout: 5s
+          readTimeout: 3s
+          writeTimeout: 3s
+          ttlJitter: 0.1
+          hashKeys: true
+        keyConfig:
+          includeMethod: true
+          includePath: true
+          includeQueryParams:
+            - id
+            - page
+            - limit
+        honorCacheControl: false
+
+    # Products API with cache features - for testing varied cache key patterns
+    - name: products-api-cached-features
+      match:
+        - uri:
+            prefix: /api/v1/products
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+      cache:
+        enabled: true
+        type: redis
+        ttl: 10m
+        redis:
+          url: "redis://default:password@127.0.0.1:6379"
+          keyPrefix: "perftest:products:"
+          poolSize: 20
+          connectTimeout: 5s
+          readTimeout: 3s
+          writeTimeout: 3s
+          ttlJitter: 0.1
+          hashKeys: true
+        keyConfig:
+          includeMethod: true
+          includePath: true
+          includeHeaders:
+            - Accept-Language
+        honorCacheControl: false
+
+    # Backend health check
+    - name: backend-health
+      match:
+        - uri:
+            exact: /backend/health
+          methods:
+            - GET
+      rewrite:
+        uri: /health
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+    # WebSocket route for performance testing
+    - name: websocket-route
+      match:
+        - uri:
+            exact: /ws
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      websocket:
+        enabled: true
+        timeout: 300s
+        pingInterval: 30s
+        pongTimeout: 10s
+
+    # Catch-all route
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    - name: backend-service-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+    - name: backend-service-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+  grpcRoutes:
+    - name: test-service-route
+      match:
+        - service:
+            exact: api.v1.TestService
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8804
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "unavailable,resource-exhausted"
+
+    - name: catch-all-grpc
+      match:
+        - service:
+            prefix: "/"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8803
+
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8803
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+    - name: grpc-backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8804
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+  # Rate limiting - moderate limits for testing
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 3000
+    burst: 5000
+    perClient: true
+
+  # Circuit breaker - tuned for performance testing
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+    timeout: 30s
+    halfOpenRequests: 5
+
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - X-Perf-Test
+      - Cache-Control
+      - Accept-Language
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+      - X-Cache-Status
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+      samplingRate: 0.01  # Low sampling for perf tests
+      otlpEndpoint: ""
+      serviceName: avapigw-perftest-cache-features
+    logging:
+      level: warn  # Reduced logging for performance
+      format: json

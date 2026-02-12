@@ -1,0 +1,53 @@
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.115.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  metricsPort: 8888
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"
+      http:
+        endpoint: "0.0.0.0:4318"
+
+exporters:
+  prometheusremotewrite:
+    endpoint: "http://victoriametrics:8428/api/v1/write"
+  logging:
+    verbosity: normal
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+
+pipelines:
+  traces:
+    receivers: ["otlp"]
+    processors: ["batch"]
+    exporters: ["logging"]
+  metrics:
+    receivers: ["otlp"]
+    processors: ["batch"]
+    exporters: ["prometheusremotewrite"]
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+serviceAccount:
+  create: true
+  name: ""

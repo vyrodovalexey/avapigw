@@ -112,6 +112,41 @@ Redis port
 {{- end }}
 
 {{/*
+Check if Redis Sentinel is enabled
+*/}}
+{{- define "avapigw.redisSentinelEnabled" -}}
+{{- if and .Values.redis.enabled (eq .Values.redis.architecture "replication") .Values.redis.sentinel.enabled }}
+{{- true }}
+{{- end }}
+{{- end }}
+
+{{/*
+Redis Sentinel addresses
+*/}}
+{{- define "avapigw.redisSentinelAddrs" -}}
+{{- if include "avapigw.redisSentinelEnabled" . }}
+{{- $fullName := printf "%s-redis" .Release.Name -}}
+{{- $sentinelPort := 26379 -}}
+{{- $replicaCount := .Values.redis.replica.replicaCount | default 1 | int -}}
+{{- $totalNodes := add $replicaCount 1 -}}
+{{- $addrs := list -}}
+{{- range $i := until (int $totalNodes) -}}
+{{- $addrs = append $addrs (printf "%s-node-%d.%s-headless:%d" $fullName $i $fullName $sentinelPort) -}}
+{{- end -}}
+{{- join "," $addrs -}}
+{{- end }}
+{{- end }}
+
+{{/*
+Redis Sentinel master name
+*/}}
+{{- define "avapigw.redisSentinelMasterName" -}}
+{{- if include "avapigw.redisSentinelEnabled" . }}
+{{- .Values.redis.sentinel.masterSet | default "mymaster" }}
+{{- end }}
+{{- end }}
+
+{{/*
 =============================================================================
 Operator Helper Templates
 =============================================================================

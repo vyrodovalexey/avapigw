@@ -4,10 +4,13 @@ metadata:
   name: {{ include "avapigw.fullname" . }}
   labels:
     {{- include "avapigw.labels" . | nindent 4 }}
-  {{- with .Values.service.annotations }}
   annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ .Values.service.metricsPort | default 9090 | quote }}
+    prometheus.io/path: {{ .Values.gateway.observability.metrics.path | default "/metrics" | quote }}
+    {{- with .Values.service.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   type: {{ .Values.service.type }}
   ports:

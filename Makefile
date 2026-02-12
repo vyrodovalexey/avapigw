@@ -44,6 +44,11 @@ TEST_KEYCLOAK_REALM ?= gateway-test
 TEST_KEYCLOAK_CLIENT_ID ?= gateway
 TEST_KEYCLOAK_CLIENT_SECRET ?= gateway-secret
 
+# Redis Sentinel settings
+TEST_REDIS_SENTINEL_ADDRS ?= 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381
+TEST_REDIS_SENTINEL_MASTER_NAME ?= mymaster
+TEST_REDIS_MASTER_PASSWORD ?= password
+
 # Coverage settings
 COVERAGE_DIR := coverage
 COVERAGE_UNIT := $(COVERAGE_DIR)/unit.out
@@ -63,6 +68,7 @@ CONTROLLER_GEN := $(shell which controller-gen 2>/dev/null || echo "$(shell go e
         test-grpc-unit test-grpc-integration test-grpc-e2e \
         test-auth-unit test-auth-integration test-auth-e2e \
         test-ingress-unit test-ingress-functional \
+        test-sentinel \
         lint lint-fix fmt vet vuln \
         docker-build docker-run docker-push docker-clean \
         run dev clean deps tools generate proto-generate \
@@ -158,6 +164,9 @@ test-integration:
 	@mkdir -p $(COVERAGE_DIR)
 	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
 	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
+	TEST_REDIS_SENTINEL_ADDRS=$(TEST_REDIS_SENTINEL_ADDRS) \
+	TEST_REDIS_SENTINEL_MASTER_NAME=$(TEST_REDIS_SENTINEL_MASTER_NAME) \
+	TEST_REDIS_MASTER_PASSWORD=$(TEST_REDIS_MASTER_PASSWORD) \
 		$(GO) test -race -coverprofile=$(COVERAGE_INTEGRATION) -covermode=atomic -tags=integration ./test/integration/...
 	@echo "==> Integration tests completed"
 
@@ -169,12 +178,25 @@ test-e2e:
 	@mkdir -p $(COVERAGE_DIR)
 	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
 	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
+	TEST_REDIS_SENTINEL_ADDRS=$(TEST_REDIS_SENTINEL_ADDRS) \
+	TEST_REDIS_SENTINEL_MASTER_NAME=$(TEST_REDIS_SENTINEL_MASTER_NAME) \
+	TEST_REDIS_MASTER_PASSWORD=$(TEST_REDIS_MASTER_PASSWORD) \
 		$(GO) test -race -coverprofile=$(COVERAGE_E2E) -covermode=atomic -tags=e2e ./test/e2e/...
 	@echo "==> E2E tests completed"
 
 ## test-all: Run all tests (unit, functional, integration, e2e)
 test-all: test-unit test-functional test-integration test-e2e
 	@echo "==> All tests completed"
+
+## test-sentinel: Run Redis Sentinel specific tests
+test-sentinel:
+	@echo "==> Running Redis Sentinel tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_REDIS_SENTINEL_ADDRS=$(TEST_REDIS_SENTINEL_ADDRS) \
+	TEST_REDIS_SENTINEL_MASTER_NAME=$(TEST_REDIS_SENTINEL_MASTER_NAME) \
+	TEST_REDIS_MASTER_PASSWORD=$(TEST_REDIS_MASTER_PASSWORD) \
+		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/sentinel.out -covermode=atomic -tags=integration -run ".*[Ss]entinel.*" ./test/integration/...
+	@echo "==> Redis Sentinel tests completed"
 
 # ==============================================================================
 # gRPC-specific test targets
@@ -641,6 +663,7 @@ help:
 	@echo "  test-integration Run integration tests (requires HTTP and gRPC backends)"
 	@echo "  test-e2e        Run end-to-end tests (requires HTTP and gRPC backends)"
 	@echo "  test-all        Run all tests"
+	@echo "  test-sentinel   Run Redis Sentinel specific tests"
 	@echo ""
 	@echo "gRPC test targets:"
 	@echo "  test-grpc-unit        Run gRPC unit tests"
@@ -736,6 +759,9 @@ help:
 	@echo "  TEST_KEYCLOAK_REALM        Keycloak realm (default: gateway-test)"
 	@echo "  TEST_KEYCLOAK_CLIENT_ID    Keycloak client ID (default: gateway)"
 	@echo "  TEST_KEYCLOAK_CLIENT_SECRET Keycloak client secret (default: gateway-secret)"
+	@echo "  TEST_REDIS_SENTINEL_ADDRS  Redis Sentinel addresses (default: 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381)"
+	@echo "  TEST_REDIS_SENTINEL_MASTER_NAME Redis Sentinel master name (default: mymaster)"
+	@echo "  TEST_REDIS_MASTER_PASSWORD Redis master password (default: password)"
 	@echo "  DOCKER_REGISTRY            Docker registry (default: ghcr.io)"
 	@echo "  DOCKER_IMAGE               Docker image name"
 	@echo "  DOCKER_TAG                 Docker image tag (default: VERSION)"
@@ -802,7 +828,7 @@ operator-generate:
 operator-manifests: operator-generate
 	@echo "==> Generating CRD manifests..."
 	@mkdir -p config/crd/bases
-	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) crd:allowDangerousTypes=true paths="./api/..." output:crd:artifacts:config=config/crd/bases
 	@echo "==> Generating RBAC manifests..."
 	@mkdir -p config/rbac
 	$(CONTROLLER_GEN) rbac:roleName=avapigw-operator-role paths="./internal/operator/controller/..." output:rbac:artifacts:config=config/rbac

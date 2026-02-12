@@ -51,6 +51,18 @@ const (
 	DefaultRedisKeyPrefix = "avapigw:"
 )
 
+// Default Redis TTL jitter configuration constant.
+const (
+	// DefaultRedisTTLJitter is the default TTL jitter factor (0 = no jitter).
+	DefaultRedisTTLJitter = 0.0
+)
+
+// Default Redis Sentinel configuration constants.
+const (
+	// DefaultRedisSentinelDB is the default Redis database for Sentinel connections.
+	DefaultRedisSentinelDB = 0
+)
+
 // Default cache configuration constants.
 const (
 	// DefaultCacheTTL is the default cache TTL.

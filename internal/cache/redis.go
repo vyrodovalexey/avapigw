@@ -5,13 +5,18 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"math"
+	"math/rand"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // Retry configuration constants for Redis operations.
@@ -54,75 +59,343 @@ type redisCache struct {
 	client     *redis.Client
 	keyPrefix  string
 	defaultTTL time.Duration
+	ttlJitter  float64
+	hashKeys   bool
 
 	hits   int64
 	misses int64
 }
 
-// newRedisCache creates a new Redis cache.
-func newRedisCache(cfg *config.CacheConfig, logger observability.Logger) (*redisCache, error) {
-	if cfg.Redis == nil || cfg.Redis.URL == "" {
-		return nil, errors.New("redis URL is required")
+// applyTTLJitter adds random jitter to a TTL value to prevent thundering herd.
+// The jitterFactor controls the maximum percentage of variation (0.0 to 1.0).
+// For example, a jitterFactor of 0.1 means the TTL will vary by ±10%.
+func applyTTLJitter(ttl time.Duration, jitterFactor float64) time.Duration {
+	if jitterFactor <= 0 || ttl <= 0 {
+		return ttl
+	}
+	// Clamp jitter factor to [0, 1]
+	if jitterFactor > 1.0 {
+		jitterFactor = 1.0
+	}
+	// Add random jitter: ttl * (1 ± jitterFactor)
+	// Use math/rand (not crypto/rand) since this is not security-sensitive
+	//nolint:gosec // G404: jitter for cache TTL is not security-sensitive
+	jitter := time.Duration(float64(ttl) * jitterFactor * (2*rand.Float64() - 1))
+	result := ttl + jitter
+	if result <= 0 {
+		return ttl // Safety: never return non-positive TTL
+	}
+	return result
+}
+
+// resolveKey applies key prefix and optional SHA256 hashing.
+func (c *redisCache) resolveKey(key string) string {
+	if c.hashKeys {
+		return c.keyPrefix + HashKey(key)
+	}
+	return c.keyPrefix + key
+}
+
+// hasVaultPasswordPaths checks if any vault password paths are configured.
+func hasVaultPasswordPaths(cfg *config.RedisCacheConfig) bool {
+	if cfg.PasswordVaultPath != "" {
+		return true
+	}
+	if cfg.Sentinel == nil {
+		return false
+	}
+	return cfg.Sentinel.PasswordVaultPath != "" ||
+		cfg.Sentinel.SentinelPasswordVaultPath != ""
+}
+
+// resolveRedisPasswords resolves Redis passwords from Vault if vault paths are configured.
+// It reads secrets from the Vault KV engine and updates the config with the retrieved passwords.
+func resolveRedisPasswords(
+	cfg *config.RedisCacheConfig, vaultClient vault.Client, logger observability.Logger,
+) error {
+	if !hasVaultPasswordPaths(cfg) {
+		return nil
 	}
 
+	if vaultClient == nil || !vaultClient.IsEnabled() {
+		logger.Warn("redis vault paths configured but vault client is not available")
+		return nil
+	}
+
+	// Resolve standalone password from vault
+	if cfg.PasswordVaultPath != "" {
+		if err := resolveStandalonePassword(cfg, vaultClient, logger); err != nil {
+			return err
+		}
+	}
+
+	// Resolve sentinel passwords from vault
+	if cfg.Sentinel != nil {
+		if err := resolveSentinelPasswords(cfg.Sentinel, vaultClient, logger); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// resolveStandalonePassword resolves the standalone Redis password from Vault.
+func resolveStandalonePassword(
+	cfg *config.RedisCacheConfig, vaultClient vault.Client, logger observability.Logger,
+) error {
+	pw, err := readVaultPassword(vaultClient, cfg.PasswordVaultPath)
+	if err != nil {
+		return fmt.Errorf("failed to read redis password from vault path %s: %w",
+			cfg.PasswordVaultPath, err)
+	}
+	if err := applyPasswordToRedisURL(cfg, pw); err != nil {
+		return fmt.Errorf("failed to apply vault password to redis URL: %w", err)
+	}
+	logger.Info("redis password resolved from vault",
+		observability.String("vaultPath", cfg.PasswordVaultPath))
+	return nil
+}
+
+// resolveSentinelPasswords resolves sentinel passwords from Vault.
+func resolveSentinelPasswords(
+	sentinel *config.RedisSentinelConfig, vaultClient vault.Client, logger observability.Logger,
+) error {
+	if sentinel.PasswordVaultPath != "" {
+		pw, err := readVaultPassword(vaultClient, sentinel.PasswordVaultPath)
+		if err != nil {
+			return fmt.Errorf("failed to read redis master password from vault: %w", err)
+		}
+		sentinel.Password = pw
+		logger.Info("redis sentinel master password resolved from vault",
+			observability.String("vaultPath", sentinel.PasswordVaultPath))
+	}
+	if sentinel.SentinelPasswordVaultPath != "" {
+		pw, err := readVaultPassword(vaultClient, sentinel.SentinelPasswordVaultPath)
+		if err != nil {
+			return fmt.Errorf("failed to read sentinel password from vault: %w", err)
+		}
+		sentinel.SentinelPassword = pw
+		logger.Info("redis sentinel password resolved from vault",
+			observability.String("vaultPath", sentinel.SentinelPasswordVaultPath))
+	}
+	return nil
+}
+
+// readVaultPassword reads a password from a Vault KV path.
+// The path format is "mount/path" and the secret must contain a "password" key.
+func readVaultPassword(vaultClient vault.Client, vaultPath string) (string, error) {
+	parts := strings.SplitN(vaultPath, "/", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid vault path format %q, expected mount/path", vaultPath)
+	}
+
+	mount, path := parts[0], parts[1]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	data, err := vaultClient.KV().Read(ctx, mount, path)
+	if err != nil {
+		return "", fmt.Errorf("vault read failed: %w", err)
+	}
+
+	pw, ok := data["password"].(string)
+	if !ok || pw == "" {
+		return "", fmt.Errorf("vault secret at %q does not contain a valid 'password' key", vaultPath)
+	}
+
+	return pw, nil
+}
+
+// applyPasswordToRedisURL updates the Redis URL with the given password.
+func applyPasswordToRedisURL(cfg *config.RedisCacheConfig, password string) error {
+	if cfg.URL == "" {
+		return nil
+	}
+
+	parsedURL, err := url.Parse(cfg.URL)
+	if err != nil {
+		return fmt.Errorf("failed to parse redis URL: %w", err)
+	}
+
+	parsedURL.User = url.UserPassword(parsedURL.User.Username(), password)
+	cfg.URL = parsedURL.String()
+
+	return nil
+}
+
+// newRedisCache creates a new Redis cache.
+// It dispatches between standalone and Sentinel modes based on configuration.
+func newRedisCache(cfg *config.CacheConfig, logger observability.Logger, opts *cacheOptions) (*redisCache, error) {
+	if cfg.Redis == nil {
+		return nil, errors.New("redis configuration is required")
+	}
+
+	// Resolve passwords from Vault before connecting
+	var vaultClient vault.Client
+	if opts != nil {
+		vaultClient = opts.vaultClient
+	}
+	if err := resolveRedisPasswords(cfg.Redis, vaultClient, logger); err != nil {
+		return nil, fmt.Errorf("failed to resolve redis passwords: %w", err)
+	}
+
+	// Sentinel mode takes precedence when configured
+	if cfg.Redis.Sentinel != nil && cfg.Redis.Sentinel.MasterName != "" {
+		return newRedisSentinelCache(cfg, logger, opts)
+	}
+
+	// Standalone mode requires a URL
+	if cfg.Redis.URL == "" {
+		return nil, errors.New("redis URL is required for standalone mode")
+	}
+
+	return newRedisStandaloneCache(cfg, logger)
+}
+
+// newRedisStandaloneCache creates a new Redis cache using standalone mode.
+func newRedisStandaloneCache(cfg *config.CacheConfig, logger observability.Logger) (*redisCache, error) {
 	opts, err := redis.ParseURL(cfg.Redis.URL)
 	if err != nil {
 		return nil, errors.New("invalid redis URL: " + err.Error())
 	}
 
-	// Apply configuration overrides
-	if cfg.Redis.PoolSize > 0 {
-		opts.PoolSize = cfg.Redis.PoolSize
-	}
-
-	if cfg.Redis.ConnectTimeout > 0 {
-		opts.DialTimeout = cfg.Redis.ConnectTimeout.Duration()
-	}
-
-	if cfg.Redis.ReadTimeout > 0 {
-		opts.ReadTimeout = cfg.Redis.ReadTimeout.Duration()
-	}
-
-	if cfg.Redis.WriteTimeout > 0 {
-		opts.WriteTimeout = cfg.Redis.WriteTimeout.Duration()
-	}
+	applyRedisPoolOptions(opts, cfg.Redis)
 
 	// Configure TLS if enabled
 	if cfg.Redis.TLS != nil && cfg.Redis.TLS.Enabled {
-		tlsConfig := &tls.Config{
+		opts.TLSConfig = &tls.Config{
 			InsecureSkipVerify: cfg.Redis.TLS.InsecureSkipVerify, //nolint:gosec // User-configurable
 		}
-		opts.TLSConfig = tlsConfig
 	}
 
 	client := redis.NewClient(opts)
 
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx).Err(); err != nil {
-		_ = client.Close() // Ignore close error during initialization failure
+	if err := pingRedis(client); err != nil {
+		_ = client.Close()
 		return nil, errors.New("redis connection failed: " + err.Error())
 	}
 
-	keyPrefix := cfg.Redis.KeyPrefix
-	if keyPrefix == "" {
-		keyPrefix = "avapigw:"
-	}
+	keyPrefix := resolveKeyPrefix(cfg.Redis.KeyPrefix)
 
 	c := &redisCache{
 		logger:     logger,
 		client:     client,
 		keyPrefix:  keyPrefix,
 		defaultTTL: cfg.TTL.Duration(),
+		ttlJitter:  cfg.Redis.TTLJitter,
+		hashKeys:   cfg.Redis.HashKeys,
 	}
 
-	logger.Info("redis cache initialized",
+	logger.Info("redis standalone cache initialized",
 		observability.String("keyPrefix", keyPrefix),
-		observability.Duration("defaultTTL", c.defaultTTL))
+		observability.Duration("defaultTTL", c.defaultTTL),
+		observability.Float64("ttlJitter", c.ttlJitter),
+		observability.Bool("hashKeys", c.hashKeys))
 
 	return c, nil
+}
+
+// newRedisSentinelCache creates a new Redis cache using Sentinel mode for high availability.
+func newRedisSentinelCache(
+	cfg *config.CacheConfig, logger observability.Logger, cacheOpts *cacheOptions,
+) (*redisCache, error) {
+	sentinel := cfg.Redis.Sentinel
+	if len(sentinel.SentinelAddrs) == 0 {
+		return nil, errors.New("at least one sentinel address is required")
+	}
+
+	opts := &redis.FailoverOptions{
+		MasterName:       sentinel.MasterName,
+		SentinelAddrs:    sentinel.SentinelAddrs,
+		SentinelPassword: sentinel.SentinelPassword,
+		Password:         sentinel.Password,
+		DB:               sentinel.DB,
+	}
+
+	// Apply custom dialer if provided (used in tests for Docker networking)
+	if cacheOpts != nil && cacheOpts.redisDialer != nil {
+		opts.Dialer = cacheOpts.redisDialer
+	}
+
+	// Apply pool/timeout overrides from shared Redis config
+	if cfg.Redis.PoolSize > 0 {
+		opts.PoolSize = cfg.Redis.PoolSize
+	}
+	if cfg.Redis.ConnectTimeout > 0 {
+		opts.DialTimeout = cfg.Redis.ConnectTimeout.Duration()
+	}
+	if cfg.Redis.ReadTimeout > 0 {
+		opts.ReadTimeout = cfg.Redis.ReadTimeout.Duration()
+	}
+	if cfg.Redis.WriteTimeout > 0 {
+		opts.WriteTimeout = cfg.Redis.WriteTimeout.Duration()
+	}
+
+	// Configure TLS if enabled
+	if cfg.Redis.TLS != nil && cfg.Redis.TLS.Enabled {
+		opts.TLSConfig = &tls.Config{
+			InsecureSkipVerify: cfg.Redis.TLS.InsecureSkipVerify, //nolint:gosec // User-configurable
+		}
+	}
+
+	client := redis.NewFailoverClient(opts)
+
+	if err := pingRedis(client); err != nil {
+		_ = client.Close()
+		return nil, errors.New("redis sentinel connection failed: " + err.Error())
+	}
+
+	keyPrefix := resolveKeyPrefix(cfg.Redis.KeyPrefix)
+
+	c := &redisCache{
+		logger:     logger,
+		client:     client,
+		keyPrefix:  keyPrefix,
+		defaultTTL: cfg.TTL.Duration(),
+		ttlJitter:  cfg.Redis.TTLJitter,
+		hashKeys:   cfg.Redis.HashKeys,
+	}
+
+	logger.Info("redis sentinel cache initialized",
+		observability.String("masterName", sentinel.MasterName),
+		observability.Int("sentinelCount", len(sentinel.SentinelAddrs)),
+		observability.String("keyPrefix", keyPrefix),
+		observability.Duration("defaultTTL", c.defaultTTL),
+		observability.Float64("ttlJitter", c.ttlJitter),
+		observability.Bool("hashKeys", c.hashKeys))
+
+	return c, nil
+}
+
+// applyRedisPoolOptions applies pool and timeout configuration overrides to Redis options.
+func applyRedisPoolOptions(opts *redis.Options, redisCfg *config.RedisCacheConfig) {
+	if redisCfg.PoolSize > 0 {
+		opts.PoolSize = redisCfg.PoolSize
+	}
+	if redisCfg.ConnectTimeout > 0 {
+		opts.DialTimeout = redisCfg.ConnectTimeout.Duration()
+	}
+	if redisCfg.ReadTimeout > 0 {
+		opts.ReadTimeout = redisCfg.ReadTimeout.Duration()
+	}
+	if redisCfg.WriteTimeout > 0 {
+		opts.WriteTimeout = redisCfg.WriteTimeout.Duration()
+	}
+}
+
+// pingRedis tests the Redis connection with a timeout.
+func pingRedis(client *redis.Client) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return client.Ping(ctx).Err()
+}
+
+// resolveKeyPrefix returns the key prefix, defaulting to "avapigw:" if empty.
+func resolveKeyPrefix(prefix string) string {
+	if prefix == "" {
+		return "avapigw:"
+	}
+	return prefix
 }
 
 // Get retrieves a value from the cache with exponential backoff retry.
@@ -134,7 +407,7 @@ func (c *redisCache) Get(ctx context.Context, key string) ([]byte, error) {
 	default:
 	}
 
-	fullKey := c.keyPrefix + key
+	fullKey := c.resolveKey(key)
 
 	var result []byte
 	var lastErr error
@@ -191,7 +464,10 @@ func (c *redisCache) Set(ctx context.Context, key string, value []byte, ttl time
 		ttl = c.defaultTTL
 	}
 
-	fullKey := c.keyPrefix + key
+	// Apply TTL jitter to prevent thundering herd
+	ttl = applyTTLJitter(ttl, c.ttlJitter)
+
+	fullKey := c.resolveKey(key)
 
 	var lastErr error
 
@@ -238,7 +514,7 @@ func (c *redisCache) Delete(ctx context.Context, key string) error {
 	default:
 	}
 
-	fullKey := c.keyPrefix + key
+	fullKey := c.resolveKey(key)
 
 	var lastErr error
 
@@ -283,7 +559,7 @@ func (c *redisCache) Exists(ctx context.Context, key string) (bool, error) {
 	default:
 	}
 
-	fullKey := c.keyPrefix + key
+	fullKey := c.resolveKey(key)
 
 	var result int64
 	var lastErr error
@@ -341,7 +617,7 @@ func (c *redisCache) GetWithTTL(ctx context.Context, key string) ([]byte, time.D
 	default:
 	}
 
-	fullKey := c.keyPrefix + key
+	fullKey := c.resolveKey(key)
 
 	// Use pipeline to get value and TTL in one round trip
 	pipe := c.client.Pipeline()
@@ -388,7 +664,10 @@ func (c *redisCache) SetNX(ctx context.Context, key string, value []byte, ttl ti
 		ttl = c.defaultTTL
 	}
 
-	fullKey := c.keyPrefix + key
+	// Apply TTL jitter to prevent thundering herd
+	ttl = applyTTLJitter(ttl, c.ttlJitter)
+
+	fullKey := c.resolveKey(key)
 
 	result, err := c.client.SetNX(ctx, fullKey, value, ttl).Result()
 	if err != nil {
@@ -416,7 +695,7 @@ func (c *redisCache) Expire(ctx context.Context, key string, ttl time.Duration) 
 	default:
 	}
 
-	fullKey := c.keyPrefix + key
+	fullKey := c.resolveKey(key)
 
 	err := c.client.Expire(ctx, fullKey, ttl).Err()
 	if err != nil {

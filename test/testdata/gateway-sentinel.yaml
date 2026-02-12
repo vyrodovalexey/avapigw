@@ -1,0 +1,73 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: sentinel-test-gateway
+  labels:
+    app: avapigw
+    environment: test
+spec:
+  listeners:
+    - name: http
+      port: 18090
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 127.0.0.1
+
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"sentinel-test"}'
+        headers:
+          Content-Type: application/json
+
+    - name: cached-api
+      match:
+        - uri:
+            prefix: /api/v1/
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 100
+      timeout: 30s
+      cache:
+        enabled: true
+        type: redis
+        ttl: 5m
+        redis:
+          keyPrefix: "sentinel-test:"
+          poolSize: 5
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs:
+              - 127.0.0.1:26379
+              - 127.0.0.1:26380
+              - 127.0.0.1:26381
+            password: password
+
+  backends:
+    - name: backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin

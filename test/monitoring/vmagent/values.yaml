@@ -1,0 +1,27 @@
+replicaCount: 1
+
+image:
+  repository: victoriametrics/vmagent
+  tag: "v1.108.1"
+  pullPolicy: IfNotPresent
+
+remoteWrite:
+  url: "http://victoriametrics:8428/api/v1/write"
+
+scrapeConfig:
+  scrapeInterval: 15s
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true

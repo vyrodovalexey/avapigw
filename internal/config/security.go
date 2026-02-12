@@ -262,6 +262,10 @@ type AuthzCacheConfig struct {
 
 	// Type is the cache type (memory, redis).
 	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+
+	// Redis contains Redis-specific configuration for authorization cache.
+	// Only used when Type is "redis".
+	Redis *RedisCacheConfig `yaml:"redis,omitempty" json:"redis,omitempty"`
 }
 
 // SecurityConfig represents security configuration.

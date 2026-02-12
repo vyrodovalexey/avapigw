@@ -2123,6 +2123,195 @@ func TestMiscTypes_DeepCopy(t *testing.T) {
 	})
 }
 
+// TestRedisSentinelSpec_DeepCopy tests the DeepCopy methods for RedisSentinelSpec
+func TestRedisSentinelSpec_DeepCopy(t *testing.T) {
+	t.Run("full config", func(t *testing.T) {
+		original := &RedisSentinelSpec{
+			MasterName:       "mymaster",
+			SentinelAddrs:    []string{"sentinel-0:26379", "sentinel-1:26379", "sentinel-2:26379"},
+			SentinelPassword: "sentinelpass",
+			Password:         "masterpass",
+			DB:               5,
+		}
+
+		copied := original.DeepCopy()
+		if copied == nil {
+			t.Fatal("DeepCopy returned nil")
+		}
+		if copied == original {
+			t.Error("DeepCopy returned same pointer")
+		}
+
+		// Verify values are equal
+		if !reflect.DeepEqual(original, copied) {
+			t.Error("DeepCopy did not create an equal object")
+		}
+
+		// Verify slice independence
+		copied.SentinelAddrs[0] = "modified:26379"
+		if original.SentinelAddrs[0] == "modified:26379" {
+			t.Error("Modifying copy's SentinelAddrs affected original")
+		}
+
+		// Verify scalar independence
+		copied.MasterName = "modified"
+		if original.MasterName == "modified" {
+			t.Error("Modifying copy's MasterName affected original")
+		}
+
+		copied.DB = 10
+		if original.DB == 10 {
+			t.Error("Modifying copy's DB affected original")
+		}
+	})
+
+	t.Run("nil copy", func(t *testing.T) {
+		var nilSpec *RedisSentinelSpec
+		if nilSpec.DeepCopy() != nil {
+			t.Error("DeepCopy of nil should return nil")
+		}
+	})
+
+	t.Run("empty addrs", func(t *testing.T) {
+		original := &RedisSentinelSpec{
+			MasterName: "mymaster",
+		}
+		copied := original.DeepCopy()
+		if copied == nil {
+			t.Fatal("DeepCopy returned nil")
+		}
+		if copied.SentinelAddrs != nil {
+			t.Error("Expected nil SentinelAddrs for empty original")
+		}
+	})
+
+	t.Run("DeepCopyInto", func(t *testing.T) {
+		original := &RedisSentinelSpec{
+			MasterName:    "mymaster",
+			SentinelAddrs: []string{"sentinel-0:26379"},
+			DB:            3,
+		}
+		out := &RedisSentinelSpec{}
+		original.DeepCopyInto(out)
+
+		if !reflect.DeepEqual(original, out) {
+			t.Error("DeepCopyInto did not create an equal object")
+		}
+
+		// Verify independence
+		out.SentinelAddrs[0] = "modified"
+		if original.SentinelAddrs[0] == "modified" {
+			t.Error("Modifying DeepCopyInto target affected original")
+		}
+	})
+}
+
+// TestBackendCacheConfig_DeepCopy_WithSentinel tests DeepCopy for BackendCacheConfig with Sentinel
+func TestBackendCacheConfig_DeepCopy_WithSentinel(t *testing.T) {
+	original := &BackendCacheConfig{
+		Enabled:              true,
+		TTL:                  Duration("10m"),
+		KeyComponents:        []string{"path", "query"},
+		StaleWhileRevalidate: Duration("2m"),
+		Type:                 "redis",
+		Sentinel: &RedisSentinelSpec{
+			MasterName:       "mymaster",
+			SentinelAddrs:    []string{"sentinel-0:26379", "sentinel-1:26379"},
+			SentinelPassword: "sentinelpass",
+			Password:         "masterpass",
+			DB:               3,
+		},
+	}
+
+	copied := original.DeepCopy()
+	if copied == nil {
+		t.Fatal("DeepCopy returned nil")
+	}
+
+	// Verify equality
+	if !reflect.DeepEqual(original, copied) {
+		t.Error("DeepCopy did not create an equal object")
+	}
+
+	// Verify sentinel pointer independence
+	if copied.Sentinel == original.Sentinel {
+		t.Error("Sentinel pointer not deep copied")
+	}
+
+	// Verify sentinel slice independence
+	copied.Sentinel.SentinelAddrs[0] = "modified:26379"
+	if original.Sentinel.SentinelAddrs[0] == "modified:26379" {
+		t.Error("Modifying copy's Sentinel.SentinelAddrs affected original")
+	}
+
+	// Verify KeyComponents independence
+	copied.KeyComponents[0] = "modified"
+	if original.KeyComponents[0] == "modified" {
+		t.Error("Modifying copy's KeyComponents affected original")
+	}
+
+	// Verify sentinel scalar independence
+	copied.Sentinel.MasterName = "modified"
+	if original.Sentinel.MasterName == "modified" {
+		t.Error("Modifying copy's Sentinel.MasterName affected original")
+	}
+}
+
+// TestAuthzCacheConfig_DeepCopy_WithSentinel tests DeepCopy for AuthzCacheConfig with Sentinel
+func TestAuthzCacheConfig_DeepCopy_WithSentinel(t *testing.T) {
+	original := &AuthzCacheConfig{
+		Enabled: true,
+		TTL:     Duration("5m"),
+		MaxSize: 1000,
+		Type:    "redis",
+		Sentinel: &RedisSentinelSpec{
+			MasterName:       "mymaster",
+			SentinelAddrs:    []string{"sentinel-0:26379", "sentinel-1:26379", "sentinel-2:26379"},
+			SentinelPassword: "sentinelpass",
+			Password:         "masterpass",
+			DB:               7,
+		},
+	}
+
+	copied := original.DeepCopy()
+	if copied == nil {
+		t.Fatal("DeepCopy returned nil")
+	}
+
+	// Verify equality
+	if !reflect.DeepEqual(original, copied) {
+		t.Error("DeepCopy did not create an equal object")
+	}
+
+	// Verify sentinel pointer independence
+	if copied.Sentinel == original.Sentinel {
+		t.Error("Sentinel pointer not deep copied")
+	}
+
+	// Verify sentinel slice independence
+	copied.Sentinel.SentinelAddrs[1] = "modified:26379"
+	if original.Sentinel.SentinelAddrs[1] == "modified:26379" {
+		t.Error("Modifying copy's Sentinel.SentinelAddrs affected original")
+	}
+
+	// Verify sentinel scalar independence
+	copied.Sentinel.DB = 0
+	if original.Sentinel.DB == 0 {
+		t.Error("Modifying copy's Sentinel.DB affected original")
+	}
+
+	// Test with nil sentinel
+	originalNoSentinel := &AuthzCacheConfig{
+		Enabled: true,
+		TTL:     Duration("5m"),
+		Type:    "memory",
+	}
+	copiedNoSentinel := originalNoSentinel.DeepCopy()
+	if copiedNoSentinel.Sentinel != nil {
+		t.Error("Expected nil Sentinel when original has nil Sentinel")
+	}
+}
+
 // TestDeepCopyInto_Isolation verifies that DeepCopyInto creates independent copies
 func TestDeepCopyInto_Isolation(t *testing.T) {
 	original := &APIRoute{

@@ -1,0 +1,53 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: sentinel-invalid-test-gateway
+  labels:
+    app: avapigw
+    environment: test
+spec:
+  listeners:
+    - name: http
+      port: 18091
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 127.0.0.1
+
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"sentinel-invalid-test"}'
+        headers:
+          Content-Type: application/json
+
+    - name: invalid-cache-api
+      match:
+        - uri:
+            prefix: /api/v1/
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 100
+      timeout: 30s
+      cache:
+        enabled: true
+        type: redis
+        ttl: 5m
+        redis:
+          # Invalid: both URL and sentinel are configured
+          url: "redis://default:password@127.0.0.1:6379"
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs:
+              - 127.0.0.1:26379
+            password: password

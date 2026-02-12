@@ -19,6 +19,10 @@ func loadAndValidateConfig(configPath string, logger observability.Logger) *conf
 		return nil // unreachable in production; allows test to continue
 	}
 
+	// Apply Redis Sentinel environment variable overrides before validation.
+	// ENV values take priority over file-based configuration.
+	applyRedisSentinelEnvToConfig(cfg)
+
 	warnings, err := config.ValidateConfigWithWarnings(cfg)
 	if err != nil {
 		fatalWithSync(logger, "invalid configuration", observability.Error(err))
