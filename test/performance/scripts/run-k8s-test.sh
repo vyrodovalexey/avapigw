@@ -331,9 +331,10 @@ run_http_test() {
     local results_dir="$PERF_DIR/results/k8s/http_${timestamp}"
     mkdir -p "$results_dir/ammo"
 
-    # Copy config and update port
+    # Copy config and update port (use HTTPS port if available, otherwise HTTP)
     local config_file="$results_dir/load.yaml"
-    sed "s/host.docker.internal:8080/host.docker.internal:${K8S_HTTP_PORT}/g" \
+    local target_port="${K8S_HTTPS_PORT:-$K8S_HTTP_PORT}"
+    sed "s/host.docker.internal:8443/host.docker.internal:${target_port}/g" \
         "$PERF_DIR/configs/k8s-http-throughput.yaml" > "$config_file"
 
     # Copy ammo file
@@ -560,19 +561,24 @@ run_grpc_tls_test() {
 
     log_info "Results: $results_dir"
 
-    # Test configuration
-    local call="api.v1.TestService/Echo"
+    # Test configuration - use Unary method which exists in the proto
+    local call="api.v1.TestService/Unary"
     local concurrency=10
     local total=500
-    local data='{"message":"K8s gRPC TLS performance test","timestamp":"2024-01-01T00:00:00Z"}'
+    local data='{"message":"K8s gRPC TLS performance test"}'
+
+    # Proto file for service definition (gateway doesn't expose backend reflection)
+    local proto_file="$PERF_DIR/proto/test_service.proto"
 
     if [[ "$use_docker" == "true" ]]; then
         local ghz_cmd="docker run --rm"
         ghz_cmd+=" --add-host=host.docker.internal:host-gateway"
         ghz_cmd+=" -v $results_dir:/results"
+        ghz_cmd+=" -v $PERF_DIR/proto:/proto:ro"
         ghz_cmd+=" ghcr.io/bojand/ghz:latest"
         # Use --skipTLS to skip TLS verification for self-signed Vault PKI certs
         ghz_cmd+=" --skipTLS"
+        ghz_cmd+=" --proto /proto/test_service.proto"
         ghz_cmd+=" --call $call"
         ghz_cmd+=" --total $total"
         ghz_cmd+=" --concurrency $concurrency"
@@ -587,6 +593,7 @@ run_grpc_tls_test() {
         local ghz_cmd="ghz"
         # Use --skipTLS to skip TLS verification for self-signed Vault PKI certs
         ghz_cmd+=" --skipTLS"
+        ghz_cmd+=" --proto $proto_file"
         ghz_cmd+=" --call $call"
         ghz_cmd+=" --total $total"
         ghz_cmd+=" --concurrency $concurrency"

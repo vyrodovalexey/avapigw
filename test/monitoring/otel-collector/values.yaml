@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: otel/opentelemetry-collector-contrib
-  tag: "0.115.0"
+  tag: "0.120.0"
   pullPolicy: IfNotPresent
 
 service:
@@ -21,8 +21,12 @@ receivers:
 
 exporters:
   prometheusremotewrite:
-    endpoint: "http://victoriametrics:8428/api/v1/write"
-  logging:
+    endpoint: "http://host.docker.internal:8428/api/v1/write"
+  otlp/tempo:
+    endpoint: "host.docker.internal:4317"
+    tls:
+      insecure: true
+  debug:
     verbosity: normal
 
 processors:
@@ -34,7 +38,7 @@ pipelines:
   traces:
     receivers: ["otlp"]
     processors: ["batch"]
-    exporters: ["logging"]
+    exporters: ["otlp/tempo", "debug"]
   metrics:
     receivers: ["otlp"]
     processors: ["batch"]

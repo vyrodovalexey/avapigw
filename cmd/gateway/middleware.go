@@ -37,12 +37,24 @@ func buildMiddlewareChain(
 
 	if cfg.Spec.RateLimit != nil && cfg.Spec.RateLimit.Enabled {
 		var rateLimitMiddleware func(http.Handler) http.Handler
-		rateLimitMiddleware, rateLimiter = middleware.RateLimitFromConfig(cfg.Spec.RateLimit, logger)
+		rateLimitMiddleware, rateLimiter = middleware.RateLimitFromConfig(
+			cfg.Spec.RateLimit, logger,
+			middleware.WithRateLimitHitCallback(func(route string) {
+				metrics.RecordRateLimitHit(route)
+			}),
+		)
 		h = rateLimitMiddleware(h)
 	}
 
 	if cfg.Spec.CircuitBreaker != nil && cfg.Spec.CircuitBreaker.Enabled {
-		h = middleware.CircuitBreakerFromConfig(cfg.Spec.CircuitBreaker, logger)(h)
+		h = middleware.CircuitBreakerFromConfig(
+			cfg.Spec.CircuitBreaker, logger,
+			middleware.WithCircuitBreakerStateCallback(
+				func(name string, state int) {
+					metrics.SetCircuitBreakerState(name, state)
+				},
+			),
+		)(h)
 	}
 
 	// Max sessions middleware should be applied early to limit concurrent requests

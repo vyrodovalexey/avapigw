@@ -176,6 +176,19 @@ services:
       POSTGRES_USER: keycloak
       POSTGRES_PASSWORD: password
 
+  tempo:
+    image: grafana/tempo:2.7.1
+    container_name: tempo
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+    volumes:
+      - tempo_data:/var/tempo
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    ports:
+      - 3200:3200    # Tempo HTTP API
+      - 4317:4317    # OTLP gRPC receiver
+      - 4318:4318    # OTLP HTTP receiver
+
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.108.1
     container_name: victoriametrics
@@ -206,6 +219,7 @@ services:
       - ../../monitoring/grafana:/var/lib/grafana/dashboards/avapigw:ro
     depends_on:
       - victoriametrics
+      - tempo
 
 volumes:
   postgres_data:
@@ -214,3 +228,4 @@ volumes:
   redis_master_data:
   victoriametrics_data:
   grafana_data:
+  tempo_data:

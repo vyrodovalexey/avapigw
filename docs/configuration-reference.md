@@ -1414,6 +1414,7 @@ The following dependencies have been upgraded for improved performance and secur
 **Go Dependencies:**
 - `go-redis` upgraded to v9.17.3 - Enhanced Redis client with improved connection pooling and Sentinel support
 - `protobuf` upgraded to v1.36.11 - Latest Protocol Buffers implementation with performance improvements
+- **OpenTelemetry** upgraded to v1.40.0 - Latest observability framework with enhanced tracing capabilities and performance improvements
 
 **CI/CD Action Upgrades:**
 - `actions/checkout` upgraded to v6.0.2 - Improved Git checkout performance and security

@@ -2,13 +2,19 @@ package backend
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// HealthStatusFunc is called when a host's health status changes.
+// Parameters: backendName, hostAddress (host:port), healthy.
+type HealthStatusFunc func(backendName, hostAddress string, healthy bool)
 
 // Health check default configuration constants.
 const (
@@ -41,6 +47,8 @@ type HealthChecker struct {
 	unhealthyThreshold int
 	healthyCounts      map[*Host]int
 	unhealthyCounts    map[*Host]int
+	backendName        string
+	onStatusChange     HealthStatusFunc
 }
 
 // HealthCheckOption is a functional option for configuring the health checker.
@@ -57,6 +65,20 @@ func WithHealthCheckLogger(logger observability.Logger) HealthCheckOption {
 func WithHealthCheckClient(client *http.Client) HealthCheckOption {
 	return func(hc *HealthChecker) {
 		hc.client = client
+	}
+}
+
+// WithBackendName sets the backend name for the health checker.
+func WithBackendName(name string) HealthCheckOption {
+	return func(hc *HealthChecker) {
+		hc.backendName = name
+	}
+}
+
+// WithHealthStatusCallback sets a callback for health status changes.
+func WithHealthStatusCallback(fn HealthStatusFunc) HealthCheckOption {
+	return func(hc *HealthChecker) {
+		hc.onStatusChange = fn
 	}
 }
 
@@ -212,6 +234,14 @@ func (hc *HealthChecker) recordSuccess(host *Host) {
 				observability.Int("port", host.Port),
 			)
 			host.SetStatus(StatusHealthy)
+			if hc.onStatusChange != nil {
+				hostAddr := net.JoinHostPort(
+					host.Address, strconv.Itoa(host.Port),
+				)
+				hc.onStatusChange(
+					hc.backendName, hostAddr, true,
+				)
+			}
 		}
 	}
 }
@@ -232,6 +262,14 @@ func (hc *HealthChecker) recordFailure(host *Host, err error) {
 				observability.Error(err),
 			)
 			host.SetStatus(StatusUnhealthy)
+			if hc.onStatusChange != nil {
+				hostAddr := net.JoinHostPort(
+					host.Address, strconv.Itoa(host.Port),
+				)
+				hc.onStatusChange(
+					hc.backendName, hostAddr, false,
+				)
+			}
 		}
 	}
 }

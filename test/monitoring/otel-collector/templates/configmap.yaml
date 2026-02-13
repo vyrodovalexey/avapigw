@@ -6,6 +6,10 @@ metadata:
     {{- include "otel-collector.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
     receivers:
       otlp:
         protocols:
@@ -24,10 +28,17 @@ data:
         endpoint: {{ .Values.exporters.prometheusremotewrite.endpoint | quote }}
         tls:
           insecure: true
-      logging:
-        verbosity: {{ .Values.exporters.logging.verbosity }}
+      {{- if index .Values.exporters "otlp/tempo" }}
+      otlp/tempo:
+        endpoint: {{ index .Values.exporters "otlp/tempo" "endpoint" | quote }}
+        tls:
+          insecure: {{ index .Values.exporters "otlp/tempo" "tls" "insecure" }}
+      {{- end }}
+      debug:
+        verbosity: {{ .Values.exporters.debug.verbosity }}
 
     service:
+      extensions: [health_check]
       pipelines:
         traces:
           receivers: {{ toJson .Values.pipelines.traces.receivers }}

@@ -13,18 +13,10 @@ scrape_configs:
 
   - job_name: 'avapigw-gateway-k8s'
     static_configs:
-      - targets: ['host.docker.internal:30090']
+      - targets: ['host.docker.internal:32066']
         labels:
           instance: 'gateway-k8s'
           component: 'gateway'
-    metrics_path: /metrics
-
-  - job_name: 'avapigw-operator'
-    static_configs:
-      - targets: ['host.docker.internal:30080']
-        labels:
-          instance: 'operator-k8s'
-          component: 'operator'
     metrics_path: /metrics
 
   - job_name: 'rest-backend-1'

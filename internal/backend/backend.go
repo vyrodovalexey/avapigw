@@ -260,6 +260,7 @@ type ServiceBackend struct {
 	authProvider   auth.Provider
 	vaultClient    vault.Client
 	logger         observability.Logger
+	metrics        *observability.Metrics
 	status         atomic.Int32
 	mu             sync.RWMutex
 	maxSessionsCfg *config.MaxSessionsConfig
@@ -302,6 +303,13 @@ func WithVaultClient(client vault.Client) BackendOption {
 	return func(b *ServiceBackend) {
 		// Store vault client for later use in auth provider creation
 		b.vaultClient = client
+	}
+}
+
+// WithMetrics sets the metrics for the backend.
+func WithMetrics(metrics *observability.Metrics) BackendOption {
+	return func(b *ServiceBackend) {
+		b.metrics = metrics
 	}
 }
 
@@ -556,12 +564,37 @@ func (b *ServiceBackend) Start(ctx context.Context) error {
 
 	// Start health checking if configured
 	if b.config.HealthCheck != nil {
-		b.healthCheck = NewHealthChecker(b.hosts, *b.config.HealthCheck, WithHealthCheckLogger(b.logger))
+		opts := []HealthCheckOption{
+			WithHealthCheckLogger(b.logger),
+			WithBackendName(b.name),
+		}
+		if b.metrics != nil {
+			opts = append(opts, WithHealthStatusCallback(
+				func(backendName, hostAddr string, healthy bool) {
+					b.metrics.SetBackendHealth(
+						backendName, hostAddr, healthy,
+					)
+				},
+			))
+		}
+		b.healthCheck = NewHealthChecker(
+			b.hosts, *b.config.HealthCheck, opts...,
+		)
 		b.healthCheck.Start(ctx)
 	} else {
 		// Mark all hosts as healthy if no health check configured
 		for _, host := range b.hosts {
 			host.SetStatus(StatusHealthy)
+			if b.metrics != nil {
+				b.metrics.SetBackendHealth(
+					b.name,
+					net.JoinHostPort(
+						host.Address,
+						strconv.Itoa(host.Port),
+					),
+					true,
+				)
+			}
 		}
 	}
 
@@ -716,14 +749,32 @@ type Registry struct {
 	backends map[string]Backend
 	mu       sync.RWMutex
 	logger   observability.Logger
+	metrics  *observability.Metrics
+}
+
+// RegistryOption is a functional option for configuring a Registry.
+type RegistryOption func(*Registry)
+
+// WithRegistryMetrics sets the metrics for the registry.
+func WithRegistryMetrics(m *observability.Metrics) RegistryOption {
+	return func(r *Registry) {
+		r.metrics = m
+	}
 }
 
 // NewRegistry creates a new backend registry.
-func NewRegistry(logger observability.Logger) *Registry {
-	return &Registry{
+func NewRegistry(
+	logger observability.Logger,
+	opts ...RegistryOption,
+) *Registry {
+	r := &Registry{
 		backends: make(map[string]Backend),
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Register registers a backend.
@@ -839,9 +890,16 @@ func (r *Registry) StopAll(ctx context.Context) error {
 // LoadFromConfig loads backends from configuration.
 func (r *Registry) LoadFromConfig(backends []config.Backend) error {
 	for _, cfg := range backends {
-		b, err := NewBackend(cfg, WithBackendLogger(r.logger))
+		opts := []BackendOption{WithBackendLogger(r.logger)}
+		if r.metrics != nil {
+			opts = append(opts, WithMetrics(r.metrics))
+		}
+		b, err := NewBackend(cfg, opts...)
 		if err != nil {
-			return fmt.Errorf("failed to create backend %s: %w", cfg.Name, err)
+			return fmt.Errorf(
+				"failed to create backend %s: %w",
+				cfg.Name, err,
+			)
 		}
 
 		if err := r.Register(b); err != nil {
@@ -880,10 +938,15 @@ func (r *Registry) ReloadFromConfig(
 			// Context is still valid
 		}
 
-		b, err := NewBackend(cfg, WithBackendLogger(r.logger))
+		opts := []BackendOption{WithBackendLogger(r.logger)}
+		if r.metrics != nil {
+			opts = append(opts, WithMetrics(r.metrics))
+		}
+		b, err := NewBackend(cfg, opts...)
 		if err != nil {
 			return fmt.Errorf(
-				"failed to create backend %s: %w", cfg.Name, err,
+				"failed to create backend %s: %w",
+				cfg.Name, err,
 			)
 		}
 		newMap[cfg.Name] = b

@@ -13,6 +13,9 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8429"
+        prometheus.io/path: "/metrics"
       labels:
         {{- include "vmagent.selectorLabels" . | nindent 8 }}
     spec:
@@ -25,6 +28,7 @@ spec:
         - name: vmagent
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: /vmagent-remotewrite-data
           args:
             - -promscrape.config=/config/scrape.yml
             - -remoteWrite.url={{ .Values.remoteWrite.url }}
@@ -50,6 +54,8 @@ spec:
             - name: config
               mountPath: /config
               readOnly: true
+            - name: data
+              mountPath: /vmagent-remotewrite-data
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -60,3 +66,5 @@ spec:
         - name: config
           configMap:
             name: {{ include "vmagent.fullname" . }}
+        - name: data
+          emptyDir: {}
