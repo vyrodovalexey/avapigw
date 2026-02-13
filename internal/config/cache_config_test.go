@@ -360,3 +360,288 @@ func TestCacheConfig_FullConfiguration(t *testing.T) {
 	assert.False(t, config.Redis.IsEmpty())
 	assert.False(t, config.KeyConfig.IsEmpty())
 }
+
+// --- Redis Sentinel Config Tests ---
+
+func TestRedisSentinelConfig_IsEmpty(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *RedisSentinelConfig
+		expected bool
+	}{
+		{
+			name:     "nil config",
+			config:   nil,
+			expected: true,
+		},
+		{
+			name:     "empty config",
+			config:   &RedisSentinelConfig{},
+			expected: true,
+		},
+		{
+			name: "empty master name",
+			config: &RedisSentinelConfig{
+				MasterName:    "",
+				SentinelAddrs: []string{"localhost:26379"},
+			},
+			expected: true,
+		},
+		{
+			name: "valid config with master name",
+			config: &RedisSentinelConfig{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"localhost:26379"},
+			},
+			expected: false,
+		},
+		{
+			name: "master name only without addrs",
+			config: &RedisSentinelConfig{
+				MasterName: "mymaster",
+			},
+			expected: false,
+		},
+		{
+			name: "full config",
+			config: &RedisSentinelConfig{
+				MasterName:       "mymaster",
+				SentinelAddrs:    []string{"sentinel1:26379", "sentinel2:26379", "sentinel3:26379"},
+				SentinelPassword: "sentinelpass",
+				Password:         "masterpass",
+				DB:               2,
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tt.config.IsEmpty()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestRedisCacheConfig_IsEmpty_WithSentinel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *RedisCacheConfig
+		expected bool
+	}{
+		{
+			name: "sentinel with master name makes config non-empty",
+			config: &RedisCacheConfig{
+				Sentinel: &RedisSentinelConfig{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{"localhost:26379"},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "sentinel without master name is empty",
+			config: &RedisCacheConfig{
+				Sentinel: &RedisSentinelConfig{
+					SentinelAddrs: []string{"localhost:26379"},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "nil sentinel is empty",
+			config: &RedisCacheConfig{
+				Sentinel: nil,
+			},
+			expected: true,
+		},
+		{
+			name: "both URL and sentinel - non-empty",
+			config: &RedisCacheConfig{
+				URL: "redis://localhost:6379",
+				Sentinel: &RedisSentinelConfig{
+					MasterName: "mymaster",
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "URL only - non-empty",
+			config: &RedisCacheConfig{
+				URL: "redis://localhost:6379",
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := tt.config.IsEmpty()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestDefaultRedisSentinelConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultRedisSentinelConfig()
+
+	assert.NotNil(t, cfg)
+	assert.Equal(t, DefaultRedisSentinelDB, cfg.DB)
+	assert.Equal(t, 0, cfg.DB)
+	assert.Empty(t, cfg.MasterName)
+	assert.Nil(t, cfg.SentinelAddrs)
+	assert.Empty(t, cfg.SentinelPassword)
+	assert.Empty(t, cfg.Password)
+}
+
+func TestDefaultRedisSentinelDB_Constant(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 0, DefaultRedisSentinelDB)
+}
+
+func TestRedisSentinelConfig_YAMLMarshalUnmarshal(t *testing.T) {
+	t.Parallel()
+
+	original := &RedisCacheConfig{
+		Sentinel: &RedisSentinelConfig{
+			MasterName:       "mymaster",
+			SentinelAddrs:    []string{"sentinel1:26379", "sentinel2:26379", "sentinel3:26379"},
+			SentinelPassword: "sentinelpass",
+			Password:         "masterpass",
+			DB:               3,
+		},
+		PoolSize:       20,
+		ConnectTimeout: Duration(5 * time.Second),
+		ReadTimeout:    Duration(3 * time.Second),
+		WriteTimeout:   Duration(3 * time.Second),
+		KeyPrefix:      "myapp:",
+	}
+
+	// Marshal to YAML
+	data, err := yaml.Marshal(original)
+	require.NoError(t, err)
+
+	// Unmarshal back
+	var result RedisCacheConfig
+	err = yaml.Unmarshal(data, &result)
+	require.NoError(t, err)
+
+	// Verify sentinel config
+	require.NotNil(t, result.Sentinel)
+	assert.Equal(t, original.Sentinel.MasterName, result.Sentinel.MasterName)
+	assert.Equal(t, original.Sentinel.SentinelAddrs, result.Sentinel.SentinelAddrs)
+	assert.Equal(t, original.Sentinel.SentinelPassword, result.Sentinel.SentinelPassword)
+	assert.Equal(t, original.Sentinel.Password, result.Sentinel.Password)
+	assert.Equal(t, original.Sentinel.DB, result.Sentinel.DB)
+
+	// Verify shared config
+	assert.Equal(t, original.PoolSize, result.PoolSize)
+	assert.Equal(t, original.ConnectTimeout, result.ConnectTimeout)
+	assert.Equal(t, original.ReadTimeout, result.ReadTimeout)
+	assert.Equal(t, original.WriteTimeout, result.WriteTimeout)
+	assert.Equal(t, original.KeyPrefix, result.KeyPrefix)
+}
+
+func TestRedisSentinelConfig_JSONMarshalUnmarshal(t *testing.T) {
+	t.Parallel()
+
+	original := &RedisCacheConfig{
+		Sentinel: &RedisSentinelConfig{
+			MasterName:       "mymaster",
+			SentinelAddrs:    []string{"sentinel1:26379", "sentinel2:26379"},
+			SentinelPassword: "sentinelpass",
+			Password:         "masterpass",
+			DB:               5,
+		},
+		PoolSize:  15,
+		KeyPrefix: "test:",
+	}
+
+	// Marshal to JSON
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	// Unmarshal back
+	var result RedisCacheConfig
+	err = json.Unmarshal(data, &result)
+	require.NoError(t, err)
+
+	// Verify sentinel config
+	require.NotNil(t, result.Sentinel)
+	assert.Equal(t, original.Sentinel.MasterName, result.Sentinel.MasterName)
+	assert.Equal(t, original.Sentinel.SentinelAddrs, result.Sentinel.SentinelAddrs)
+	assert.Equal(t, original.Sentinel.SentinelPassword, result.Sentinel.SentinelPassword)
+	assert.Equal(t, original.Sentinel.Password, result.Sentinel.Password)
+	assert.Equal(t, original.Sentinel.DB, result.Sentinel.DB)
+	assert.Equal(t, original.PoolSize, result.PoolSize)
+	assert.Equal(t, original.KeyPrefix, result.KeyPrefix)
+}
+
+func TestCacheConfig_WithSentinel_YAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := &CacheConfig{
+		Enabled:    true,
+		Type:       CacheTypeRedis,
+		TTL:        Duration(5 * time.Minute),
+		MaxEntries: 10000,
+		Redis: &RedisCacheConfig{
+			Sentinel: &RedisSentinelConfig{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"sentinel1:26379", "sentinel2:26379"},
+				DB:            1,
+			},
+			PoolSize:  20,
+			KeyPrefix: "gw:",
+		},
+	}
+
+	data, err := yaml.Marshal(original)
+	require.NoError(t, err)
+
+	var result CacheConfig
+	err = yaml.Unmarshal(data, &result)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.Enabled, result.Enabled)
+	assert.Equal(t, original.Type, result.Type)
+	require.NotNil(t, result.Redis)
+	require.NotNil(t, result.Redis.Sentinel)
+	assert.Equal(t, "mymaster", result.Redis.Sentinel.MasterName)
+	assert.Equal(t, []string{"sentinel1:26379", "sentinel2:26379"}, result.Redis.Sentinel.SentinelAddrs)
+	assert.Equal(t, 1, result.Redis.Sentinel.DB)
+}
+
+func TestAuthzCacheConfig_RedisField(t *testing.T) {
+	t.Parallel()
+
+	cfg := &AuthzCacheConfig{
+		Enabled: true,
+		TTL:     Duration(5 * time.Minute),
+		MaxSize: 1000,
+		Type:    CacheTypeRedis,
+		Redis: &RedisCacheConfig{
+			Sentinel: &RedisSentinelConfig{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"sentinel1:26379"},
+			},
+			KeyPrefix: "authz:",
+		},
+	}
+
+	assert.True(t, cfg.Enabled)
+	assert.Equal(t, CacheTypeRedis, cfg.Type)
+	require.NotNil(t, cfg.Redis)
+	require.NotNil(t, cfg.Redis.Sentinel)
+	assert.Equal(t, "mymaster", cfg.Redis.Sentinel.MasterName)
+	assert.False(t, cfg.Redis.IsEmpty())
+}

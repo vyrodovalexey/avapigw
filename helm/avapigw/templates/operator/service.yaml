@@ -5,10 +5,13 @@ metadata:
   name: {{ include "avapigw.operator.fullname" . }}
   labels:
     {{- include "avapigw.operator.labels" . | nindent 4 }}
-  {{- with .Values.operator.service.annotations }}
   annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ .Values.operator.metrics.port | default 8080 | quote }}
+    prometheus.io/path: "/metrics"
+    {{- with .Values.operator.service.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   type: {{ .Values.operator.service.type }}
   ports:

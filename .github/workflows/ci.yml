@@ -34,7 +34,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
@@ -56,7 +56,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
@@ -78,7 +78,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
@@ -116,7 +116,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
@@ -222,6 +222,69 @@ jobs:
           LOG_LEVEL: debug
           SHUTDOWN_TIMEOUT: 60s
 
+      # Redis Sentinel setup for sentinel integration tests
+      redis-master:
+        image: bitnami/redis:latest
+        env:
+          REDIS_REPLICATION_MODE: master
+          REDIS_PASSWORD: password
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli -a password ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+
+      redis-replica:
+        image: bitnami/redis:latest
+        env:
+          REDIS_REPLICATION_MODE: slave
+          REDIS_MASTER_HOST: redis-master
+          REDIS_MASTER_PORT_NUMBER: 6379
+          REDIS_MASTER_PASSWORD: password
+          REDIS_PASSWORD: password
+
+      redis-sentinel-1:
+        image: bitnami/redis-sentinel:latest
+        env:
+          REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
+          REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
+          REDIS_SENTINEL_QUORUM: 2
+          REDIS_MASTER_HOST: redis-master
+          REDIS_MASTER_PORT_NUMBER: 6379
+          REDIS_MASTER_PASSWORD: password
+          REDIS_MASTER_SET: mymaster
+        ports:
+          - 26379:26379
+
+      redis-sentinel-2:
+        image: bitnami/redis-sentinel:latest
+        env:
+          REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
+          REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
+          REDIS_SENTINEL_QUORUM: 2
+          REDIS_MASTER_HOST: redis-master
+          REDIS_MASTER_PORT_NUMBER: 6379
+          REDIS_MASTER_PASSWORD: password
+          REDIS_MASTER_SET: mymaster
+        ports:
+          - 26380:26379
+
+      redis-sentinel-3:
+        image: bitnami/redis-sentinel:latest
+        env:
+          REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
+          REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
+          REDIS_SENTINEL_QUORUM: 2
+          REDIS_MASTER_HOST: redis-master
+          REDIS_MASTER_PORT_NUMBER: 6379
+          REDIS_MASTER_PASSWORD: password
+          REDIS_MASTER_SET: mymaster
+        ports:
+          - 26381:26379
+
       # Keycloak DB
       keycloakdb:
         image: postgres:16
@@ -255,7 +318,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
 
       - name: Set up Go
@@ -319,6 +382,17 @@ jobs:
             sleep 5
           done
           
+          # Wait for Redis Sentinel
+          echo "Checking Redis Sentinel..."
+          for i in {1..30}; do
+            if redis-cli -h 127.0.0.1 -p 26379 ping 2>/dev/null | grep -q PONG; then
+              echo "Redis Sentinel is ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for Redis Sentinel..."
+            sleep 2
+          done
+          
           # Final checks
           echo "Running final health checks..."
           curl -s http://127.0.0.1:8200/v1/sys/health | grep -q '"initialized":true' || (echo "Vault not ready" && exit 1)
@@ -327,6 +401,7 @@ jobs:
           grpcurl -plaintext 127.0.0.1:8803 list || (echo "gRPC Backend 1 not ready" && exit 1)
           grpcurl -plaintext 127.0.0.1:8804 list || (echo "gRPC Backend 2 not ready" && exit 1)
           curl -sf http://127.0.0.1:8091/health/ready || (echo "Keycloak not ready" && exit 1)
+          redis-cli -h 127.0.0.1 -p 26379 ping 2>/dev/null | grep -q PONG || echo "Warning: Redis Sentinel not ready (tests may skip sentinel tests)"
           echo "All services are ready!"
 
       - name: Setup Vault for Testing
@@ -532,6 +607,9 @@ jobs:
           TEST_BACKEND2_URL: http://127.0.0.1:8802
           TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803
           TEST_GRPC_BACKEND2_URL: 127.0.0.1:8804
+          TEST_REDIS_SENTINEL_ADDRS: 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381
+          TEST_REDIS_SENTINEL_MASTER_NAME: mymaster
+          TEST_REDIS_MASTER_PASSWORD: password
         run: |
           mkdir -p coverage
           go test -race -coverprofile=coverage/integration.out -covermode=atomic -tags=integration -v -timeout 10m ./test/integration/...
@@ -549,6 +627,9 @@ jobs:
           TEST_BACKEND2_URL: http://127.0.0.1:8802
           TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803
           TEST_GRPC_BACKEND2_URL: 127.0.0.1:8804
+          TEST_REDIS_SENTINEL_ADDRS: 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381
+          TEST_REDIS_SENTINEL_MASTER_NAME: mymaster
+          TEST_REDIS_MASTER_PASSWORD: password
         run: |
           go test -race -coverprofile=coverage/e2e.out -covermode=atomic -tags=e2e -v -timeout 15m ./test/e2e/...
 
@@ -584,7 +665,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0  # Required for SonarCloud
 
@@ -632,7 +713,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
@@ -666,7 +747,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
@@ -698,7 +779,7 @@ jobs:
       packages: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -738,7 +819,7 @@ jobs:
       packages: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -785,7 +866,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
@@ -875,7 +956,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
@@ -945,7 +1026,7 @@ jobs:
       image-tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -954,7 +1035,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ github.actor }}
@@ -1004,7 +1085,7 @@ jobs:
           cosign sign --yes ${images}
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.22.1
+        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
         with:
           image: ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.version }}
           artifact-name: sbom-${{ steps.meta.outputs.version }}.spdx.json
@@ -1033,7 +1114,7 @@ jobs:
       image-tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
@@ -1042,7 +1123,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ github.actor }}
@@ -1092,7 +1173,7 @@ jobs:
           cosign sign --yes ${images}
 
       - name: Generate SBOM for operator
-        uses: anchore/sbom-action@e11c554f704a0b820cbf8c51673f6945e0731532 # v0.22.1
+        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
         with:
           image: ${{ env.DOCKER_IMAGE_OPERATOR }}:${{ steps.meta.outputs.version }}
           artifact-name: sbom-operator-${{ steps.meta.outputs.version }}.spdx.json
@@ -1117,10 +1198,10 @@ jobs:
       security-events: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ github.actor }}
@@ -1136,7 +1217,7 @@ jobs:
           vuln-type: 'os,library'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@ce28f5bb42b7a9f2c824e633a3f6ee835bab6858 # v4.32.0
+        uses: github/codeql-action/upload-sarif@45cbd0c69e560cd9e7cd7f8c32362050c9b7ded2 # v4.32.2
         with:
           sarif_file: 'trivy-results.sarif'
 
@@ -1168,10 +1249,10 @@ jobs:
       security-events: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.DOCKER_REGISTRY }}
           username: ${{ github.actor }}
@@ -1187,7 +1268,7 @@ jobs:
           vuln-type: 'os,library'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@ce28f5bb42b7a9f2c824e633a3f6ee835bab6858 # v4.32.0
+        uses: github/codeql-action/upload-sarif@45cbd0c69e560cd9e7cd7f8c32362050c9b7ded2 # v4.32.2
         with:
           sarif_file: 'trivy-operator-results.sarif'
 
@@ -1213,7 +1294,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Helm
         uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4
@@ -1221,7 +1302,7 @@ jobs:
           version: 'v3.14.0'
 
       - name: Create kind cluster
-        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
         with:
           cluster_name: helm-test
           wait: 120s
@@ -1247,6 +1328,14 @@ jobs:
           echo "==> Running Helm dry-run with Redis enabled..."
           helm install --dry-run --debug avapigw-redis helm/avapigw \
             --set redis.enabled=true
+
+      - name: Helm dry-run with Redis Sentinel
+        run: |
+          echo "==> Running Helm dry-run with Redis Sentinel..."
+          helm install --dry-run --debug avapigw-sentinel helm/avapigw \
+            --set redis.enabled=true \
+            --set redis.architecture=replication \
+            --set redis.sentinel.enabled=true
 
       - name: Install Prometheus Operator CRDs
         run: |
@@ -1324,7 +1413,7 @@ jobs:
       packages: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Helm
         uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4
@@ -1332,7 +1421,7 @@ jobs:
           version: 'v3.14.0'
 
       - name: Create kind cluster
-        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
         with:
           cluster_name: helm-install-test
           wait: 120s

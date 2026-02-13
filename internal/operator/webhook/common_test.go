@@ -1146,6 +1146,388 @@ func TestValidateMTLSAuth(t *testing.T) {
 	}
 }
 
+// Tests for validateRedisSentinelSpec
+
+func TestValidateRedisSentinelSpec(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		sentinel  *avapigwv1alpha1.RedisSentinelSpec
+		fieldPath string
+		wantError bool
+		errSubstr string
+	}{
+		{
+			name:      "nil sentinel",
+			sentinel:  nil,
+			fieldPath: "test.sentinel",
+			wantError: false,
+		},
+		{
+			name: "valid sentinel config",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"sentinel-0:26379", "sentinel-1:26379", "sentinel-2:26379"},
+				DB:            0,
+			},
+			fieldPath: "test.sentinel",
+			wantError: false,
+		},
+		{
+			name: "valid sentinel with all fields",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:       "mymaster",
+				SentinelAddrs:    []string{"sentinel-0:26379"},
+				SentinelPassword: "sentinelpass",
+				Password:         "masterpass",
+				DB:               5,
+			},
+			fieldPath: "cache.sentinel",
+			wantError: false,
+		},
+		{
+			name: "empty masterName",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "",
+				SentinelAddrs: []string{"sentinel-0:26379"},
+			},
+			fieldPath: "test.sentinel",
+			wantError: true,
+			errSubstr: "masterName is required",
+		},
+		{
+			name: "no addresses",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{},
+			},
+			fieldPath: "test.sentinel",
+			wantError: true,
+			errSubstr: "sentinelAddrs must have at least one address",
+		},
+		{
+			name: "nil addresses",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "mymaster",
+				SentinelAddrs: nil,
+			},
+			fieldPath: "test.sentinel",
+			wantError: true,
+			errSubstr: "sentinelAddrs must have at least one address",
+		},
+		{
+			name: "empty address in list",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"sentinel-0:26379", "", "sentinel-2:26379"},
+			},
+			fieldPath: "test.sentinel",
+			wantError: true,
+			errSubstr: "sentinelAddrs[1] cannot be empty",
+		},
+		{
+			name: "invalid DB negative",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"sentinel-0:26379"},
+				DB:            -1,
+			},
+			fieldPath: "test.sentinel",
+			wantError: true,
+			errSubstr: "db must be between 0 and 15",
+		},
+		{
+			name: "invalid DB too high",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"sentinel-0:26379"},
+				DB:            16,
+			},
+			fieldPath: "test.sentinel",
+			wantError: true,
+			errSubstr: "db must be between 0 and 15",
+		},
+		{
+			name: "DB at max boundary",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "mymaster",
+				SentinelAddrs: []string{"sentinel-0:26379"},
+				DB:            15,
+			},
+			fieldPath: "test.sentinel",
+			wantError: false,
+		},
+		{
+			name: "fieldPath prefix in error message",
+			sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+				MasterName:    "",
+				SentinelAddrs: []string{"sentinel-0:26379"},
+			},
+			fieldPath: "authorization.cache.sentinel",
+			wantError: true,
+			errSubstr: "authorization.cache.sentinel.masterName",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateRedisSentinelSpec(tt.sentinel, tt.fieldPath)
+			if (err != nil) != tt.wantError {
+				t.Errorf("validateRedisSentinelSpec() error = %v, wantError %v", err, tt.wantError)
+			}
+			if err != nil && tt.errSubstr != "" {
+				if !contains(err.Error(), tt.errSubstr) {
+					t.Errorf("validateRedisSentinelSpec() error = %q, want substring %q", err.Error(), tt.errSubstr)
+				}
+			}
+		})
+	}
+}
+
+// Tests for validateBackendCache with sentinel
+
+func TestValidateBackendCache_WithSentinel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cache     *avapigwv1alpha1.BackendCacheConfig
+		wantError bool
+		errSubstr string
+	}{
+		{
+			name: "disabled cache with sentinel is ok",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: false,
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{"sentinel-0:26379"},
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "valid redis cache with sentinel",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: true,
+				TTL:     avapigwv1alpha1.Duration("5m"),
+				Type:    "redis",
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{"sentinel-0:26379", "sentinel-1:26379"},
+					DB:            0,
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "sentinel with memory type should fail",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: true,
+				Type:    "memory",
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{"sentinel-0:26379"},
+				},
+			},
+			wantError: true,
+			errSubstr: "sentinel is only valid when cache.type is 'redis'",
+		},
+		{
+			name: "sentinel with empty type should fail",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: true,
+				Type:    "",
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{"sentinel-0:26379"},
+				},
+			},
+			wantError: true,
+			errSubstr: "sentinel is only valid when cache.type is 'redis'",
+		},
+		{
+			name: "sentinel with invalid sentinel config",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: true,
+				Type:    "redis",
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "",
+					SentinelAddrs: []string{"sentinel-0:26379"},
+				},
+			},
+			wantError: true,
+			errSubstr: "masterName is required",
+		},
+		{
+			name: "redis cache without sentinel is valid",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: true,
+				TTL:     avapigwv1alpha1.Duration("5m"),
+				Type:    "redis",
+			},
+			wantError: false,
+		},
+		{
+			name: "invalid TTL",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: true,
+				TTL:     avapigwv1alpha1.Duration("invalid"),
+				Type:    "redis",
+			},
+			wantError: true,
+			errSubstr: "cache.ttl is invalid",
+		},
+		{
+			name: "invalid cache type",
+			cache: &avapigwv1alpha1.BackendCacheConfig{
+				Enabled: true,
+				Type:    "memcached",
+			},
+			wantError: true,
+			errSubstr: "cache.type must be 'memory' or 'redis'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateBackendCache(tt.cache)
+			if (err != nil) != tt.wantError {
+				t.Errorf("validateBackendCache() error = %v, wantError %v", err, tt.wantError)
+			}
+			if err != nil && tt.errSubstr != "" {
+				if !contains(err.Error(), tt.errSubstr) {
+					t.Errorf("validateBackendCache() error = %q, want substring %q", err.Error(), tt.errSubstr)
+				}
+			}
+		})
+	}
+}
+
+// Tests for validateAuthzCacheConfig with sentinel
+
+func TestValidateAuthzCacheConfig_WithSentinel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cache     *avapigwv1alpha1.AuthzCacheConfig
+		wantError bool
+		errSubstr string
+	}{
+		{
+			name: "valid redis authz cache with sentinel",
+			cache: &avapigwv1alpha1.AuthzCacheConfig{
+				Enabled: true,
+				TTL:     avapigwv1alpha1.Duration("5m"),
+				MaxSize: 1000,
+				Type:    "redis",
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{"sentinel-0:26379"},
+					DB:            0,
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "sentinel with memory type should fail",
+			cache: &avapigwv1alpha1.AuthzCacheConfig{
+				Enabled: true,
+				Type:    "memory",
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{"sentinel-0:26379"},
+				},
+			},
+			wantError: true,
+			errSubstr: "sentinel is only valid when type is 'redis'",
+		},
+		{
+			name: "sentinel with invalid sentinel config",
+			cache: &avapigwv1alpha1.AuthzCacheConfig{
+				Enabled: true,
+				Type:    "redis",
+				Sentinel: &avapigwv1alpha1.RedisSentinelSpec{
+					MasterName:    "mymaster",
+					SentinelAddrs: []string{},
+				},
+			},
+			wantError: true,
+			errSubstr: "sentinelAddrs must have at least one address",
+		},
+		{
+			name: "redis authz cache without sentinel is valid",
+			cache: &avapigwv1alpha1.AuthzCacheConfig{
+				Enabled: true,
+				TTL:     avapigwv1alpha1.Duration("5m"),
+				MaxSize: 1000,
+				Type:    "redis",
+			},
+			wantError: false,
+		},
+		{
+			name: "invalid TTL",
+			cache: &avapigwv1alpha1.AuthzCacheConfig{
+				Enabled: true,
+				TTL:     avapigwv1alpha1.Duration("invalid"),
+			},
+			wantError: true,
+			errSubstr: "authorization.cache.ttl is invalid",
+		},
+		{
+			name: "negative maxSize",
+			cache: &avapigwv1alpha1.AuthzCacheConfig{
+				Enabled: true,
+				MaxSize: -1,
+			},
+			wantError: true,
+			errSubstr: "authorization.cache.maxSize must be non-negative",
+		},
+		{
+			name: "invalid cache type",
+			cache: &avapigwv1alpha1.AuthzCacheConfig{
+				Enabled: true,
+				Type:    "memcached",
+			},
+			wantError: true,
+			errSubstr: "authorization.cache.type must be 'memory' or 'redis'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateAuthzCacheConfig(tt.cache)
+			if (err != nil) != tt.wantError {
+				t.Errorf("validateAuthzCacheConfig() error = %v, wantError %v", err, tt.wantError)
+			}
+			if err != nil && tt.errSubstr != "" {
+				if !contains(err.Error(), tt.errSubstr) {
+					t.Errorf("validateAuthzCacheConfig() error = %q, want substring %q", err.Error(), tt.errSubstr)
+				}
+			}
+		})
+	}
+}
+
+// contains checks if a string contains a substring.
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchSubstring(s, substr)
+}
+
+func searchSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
 // Tests for validateAuthentication
 
 func TestValidateAuthentication(t *testing.T) {

@@ -1,0 +1,36 @@
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: sentinel-cache-backend
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: 10.0.1.10
+      port: 8080
+      weight: 50
+    - address: 10.0.1.11
+      port: 8080
+      weight: 50
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  cache:
+    enabled: true
+    ttl: 10m
+    keyComponents:
+      - path
+      - query
+    type: redis
+    sentinel:
+      masterName: mymaster
+      sentinelAddrs:
+        - sentinel-0.sentinel:26379
+        - sentinel-1.sentinel:26379
+        - sentinel-2.sentinel:26379
+      password: redis-master-password
+      db: 0

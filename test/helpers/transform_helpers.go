@@ -4,13 +4,17 @@ package helpers
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/vyrodovalexey/avapigw/internal/cache"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 // Redis test helpers
@@ -139,6 +143,7 @@ func CreateTestGRPCTransformConfig() *config.GRPCTransformConfig {
 }
 
 // CreateTestCacheConfig creates a test cache configuration.
+// Supported cacheTypes: "memory", "redis", "redis-sentinel"
 func CreateTestCacheConfig(cacheType string) *config.CacheConfig {
 	cfg := &config.CacheConfig{
 		Enabled:    true,
@@ -156,6 +161,19 @@ func CreateTestCacheConfig(cacheType string) *config.CacheConfig {
 			URL:       GetRedisURL(),
 			PoolSize:  5,
 			KeyPrefix: "test:",
+		}
+	}
+
+	if cacheType == "redis-sentinel" {
+		cfg.Type = config.CacheTypeRedis
+		cfg.Redis = &config.RedisCacheConfig{
+			PoolSize:  5,
+			KeyPrefix: "test:",
+			Sentinel: &config.RedisSentinelConfig{
+				MasterName:    GetRedisSentinelMasterName(),
+				SentinelAddrs: GetRedisSentinelAddrs(),
+				Password:      GetRedisMasterPassword(),
+			},
 		}
 	}
 
@@ -262,4 +280,100 @@ func GetEnvOrDefault(key, defaultValue string) string {
 // GenerateTestKeyPrefix generates a unique key prefix for test isolation.
 func GenerateTestKeyPrefix(testName string) string {
 	return fmt.Sprintf("test:%s:%d:", testName, time.Now().UnixNano())
+}
+
+// Redis Sentinel test helpers
+
+// GetRedisSentinelAddrs returns the Redis Sentinel addresses from environment or default.
+func GetRedisSentinelAddrs() []string {
+	addrs := getEnvOrDefault("TEST_REDIS_SENTINEL_ADDRS", "127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381")
+	return strings.Split(addrs, ",")
+}
+
+// GetRedisSentinelMasterName returns the Redis Sentinel master name from environment or default.
+func GetRedisSentinelMasterName() string {
+	return getEnvOrDefault("TEST_REDIS_SENTINEL_MASTER_NAME", "mymaster")
+}
+
+// GetRedisMasterPassword returns the Redis master password from environment or default.
+func GetRedisMasterPassword() string {
+	return getEnvOrDefault("TEST_REDIS_MASTER_PASSWORD", "password")
+}
+
+// GetRedisSentinelMasterPort returns the host-mapped port for the Redis Sentinel master.
+// When running tests on the host, sentinel discovers the master at a Docker-internal IP
+// which is unreachable. This port is the host-mapped port for the master container.
+func GetRedisSentinelMasterPort() string {
+	return getEnvOrDefault("TEST_REDIS_SENTINEL_MASTER_PORT", "6380")
+}
+
+// sentinelDialer returns a custom net.Dialer function that intercepts connections to
+// Docker-internal IPs (172.x.x.x) and redirects them to 127.0.0.1 on the host-mapped
+// master port. This is necessary because Redis Sentinel discovers the master at its
+// Docker-internal IP, which is unreachable from the host.
+func sentinelDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	masterPort := GetRedisSentinelMasterPort()
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return net.DialTimeout(network, addr, 2*time.Second)
+		}
+		// If the address is a Docker-internal IP (172.x.x.x or 10.x.x.x),
+		// redirect to localhost on the host-mapped master port.
+		if strings.HasPrefix(host, "172.") || strings.HasPrefix(host, "10.") {
+			addr = "127.0.0.1:" + masterPort
+		}
+		d := net.Dialer{Timeout: 2 * time.Second}
+		return d.DialContext(ctx, network, addr)
+	}
+}
+
+// IsRedisSentinelAvailable checks if Redis Sentinel is available.
+// It uses a custom dialer to handle Docker networking where sentinel discovers
+// the master at a Docker-internal IP unreachable from the host.
+func IsRedisSentinelAvailable() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := redis.NewFailoverClient(&redis.FailoverOptions{
+		MasterName:    GetRedisSentinelMasterName(),
+		SentinelAddrs: GetRedisSentinelAddrs(),
+		Password:      GetRedisMasterPassword(),
+		Dialer:        sentinelDialer(),
+	})
+	defer client.Close()
+
+	return client.Ping(ctx).Err() == nil
+}
+
+// SkipIfRedisSentinelUnavailable skips the test if Redis Sentinel is not available.
+func SkipIfRedisSentinelUnavailable(t *testing.T) {
+	if !IsRedisSentinelAvailable() {
+		t.Skip("Redis Sentinel not available - skipping test")
+	}
+}
+
+// CreateRedisSentinelClient creates a Redis Sentinel client for testing.
+// It uses a custom dialer to handle Docker networking where sentinel discovers
+// the master at a Docker-internal IP unreachable from the host.
+func CreateRedisSentinelClient() (*redis.Client, error) {
+	client := redis.NewFailoverClient(&redis.FailoverOptions{
+		MasterName:    GetRedisSentinelMasterName(),
+		SentinelAddrs: GetRedisSentinelAddrs(),
+		Password:      GetRedisMasterPassword(),
+		Dialer:        sentinelDialer(),
+	})
+	return client, nil
+}
+
+// SentinelDialer returns the custom dialer for sentinel connections.
+// This is exported so integration tests can pass it to cache.New via cache.WithRedisDialer.
+func SentinelDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return sentinelDialer()
+}
+
+// NewSentinelCache creates a new sentinel cache for testing with the custom Docker dialer.
+// This wraps cache.New with the WithRedisDialer option to handle Docker networking.
+func NewSentinelCache(cfg *config.CacheConfig, logger observability.Logger) (cache.Cache, error) {
+	return cache.New(cfg, logger, cache.WithRedisDialer(sentinelDialer()))
 }

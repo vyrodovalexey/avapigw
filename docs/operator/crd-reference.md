@@ -1724,7 +1724,53 @@ spec:
       - "query"
       - "headers.Authorization"
     staleWhileRevalidate: "1m"     # Serve stale while revalidating
-    type: "memory"                 # Cache type (memory, redis)
+    type: "redis"                  # Cache type (memory, redis)
+    
+    # Redis cache configuration
+    redis:
+      # Redis Sentinel configuration (high availability)
+      sentinel:
+        masterName: "mymaster"
+        sentinelAddrs:
+          - "sentinel1.cache.svc.cluster.local:26379"
+          - "sentinel2.cache.svc.cluster.local:26379"
+          - "sentinel3.cache.svc.cluster.local:26379"
+        sentinelPassword: "sentinel-password"
+        password: "redis-master-password"
+        # Vault password integration for sentinel
+        sentinelPasswordVaultPath: "secret/redis-sentinel"
+        passwordVaultPath: "secret/redis-master"
+        db: 0
+      
+      # OR Redis standalone configuration (fallback)
+      address: "redis.cache.svc.cluster.local:6379"
+      password: "redis-password"
+      # Vault password integration for standalone
+      passwordVaultPath: "secret/redis"
+      db: 0
+      
+      # Connection pool settings
+      maxRetries: 3
+      poolSize: 10
+      minIdleConns: 5
+      maxConnAge: "30m"
+      poolTimeout: "5s"
+      idleTimeout: "10m"
+      keyPrefix: "avapigw:cache:"
+      
+      # TTL jitter to prevent thundering herd
+      ttlJitter: 0.1  # ±10% jitter on TTL values
+      
+      # Hash cache keys for privacy and length control
+      hashKeys: true
+      
+      # TLS configuration
+      tls:
+        enabled: true
+        caFile: "/etc/ssl/certs/redis-ca.crt"
+        certFile: "/etc/ssl/certs/redis-client.crt"
+        keyFile: "/etc/ssl/private/redis-client.key"
+        insecureSkipVerify: false
   
   # Backend encoding
   encoding:
@@ -1788,6 +1834,22 @@ spec:
 | `spec.cache.enabled` | `bool` | No | Enable caching |
 | `spec.cache.ttl` | `string` | No | Cache TTL |
 | `spec.cache.type` | `string` | No | Cache type (memory, redis) |
+| `spec.cache.redis.sentinel.masterName` | `string` | No | Redis Sentinel master name |
+| `spec.cache.redis.sentinel.sentinelAddrs` | `[]string` | No | Redis Sentinel addresses |
+| `spec.cache.redis.sentinel.sentinelPassword` | `string` | No | Redis Sentinel password |
+| `spec.cache.redis.sentinel.password` | `string` | No | Redis master password |
+| `spec.cache.redis.sentinel.sentinelPasswordVaultPath` | `string` | No | Vault path for sentinel password |
+| `spec.cache.redis.sentinel.passwordVaultPath` | `string` | No | Vault path for master password |
+| `spec.cache.redis.sentinel.db` | `int` | No | Redis database number |
+| `spec.cache.redis.address` | `string` | No | Redis standalone address |
+| `spec.cache.redis.password` | `string` | No | Redis standalone password |
+| `spec.cache.redis.passwordVaultPath` | `string` | No | Vault path for Redis password |
+| `spec.cache.redis.db` | `int` | No | Redis standalone database |
+| `spec.cache.redis.poolSize` | `int` | No | Redis connection pool size |
+| `spec.cache.redis.keyPrefix` | `string` | No | Redis key prefix |
+| `spec.cache.redis.ttlJitter` | `float64` | No | TTL jitter percentage (0.0-1.0) |
+| `spec.cache.redis.hashKeys` | `bool` | No | Enable SHA256 key hashing |
+| `spec.cache.redis.tls.enabled` | `bool` | No | Enable Redis TLS |
 | `spec.encoding.request.contentType` | `string` | No | Request content type |
 | `spec.encoding.response.contentType` | `string` | No | Response content type |
 | `spec.encoding.response.compression` | `string` | No | Response compression (gzip, deflate, br) |
@@ -1998,6 +2060,115 @@ status:
 | `HealthCheckFailed` | Health check failed |
 | `SyncFailed` | Failed to sync to gateways |
 | `DuplicateFound` | Duplicate configuration detected |
+
+## Redis Sentinel Configuration
+
+The AVAPIGW Operator supports Redis Sentinel for high-availability caching in both Backend and GRPCBackend CRDs. Redis Sentinel provides automatic failover and service discovery for Redis master-replica setups.
+
+### RedisSentinelSpec Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `masterName` | `string` | Yes | Redis Sentinel master name |
+| `sentinelAddrs` | `[]string` | Yes | List of Sentinel addresses (host:port) |
+| `sentinelPassword` | `string` | No | Password for Sentinel authentication |
+| `password` | `string` | No | Password for Redis master authentication |
+| `db` | `int` | No | Redis database number (default: 0) |
+
+### Configuration Precedence
+
+When both Sentinel and standalone Redis configurations are provided:
+
+1. **Sentinel configuration takes precedence** - If `sentinel` is configured, it will be used
+2. **Standalone fallback** - If Sentinel is not configured or fails, standalone Redis is used
+3. **Environment variable override** - Environment variables override YAML configuration
+
+### Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `REDIS_SENTINEL_MASTER_NAME` | Sentinel master name | `mymaster` |
+| `REDIS_SENTINEL_ADDRS` | Comma-separated sentinel addresses | `sentinel1:26379,sentinel2:26379` |
+| `REDIS_SENTINEL_PASSWORD` | Sentinel authentication password | `sentinel-password` |
+| `REDIS_MASTER_PASSWORD` | Redis master password | `redis-master-password` |
+| `REDIS_SENTINEL_DB` | Redis database number | `0` |
+
+### Example Backend with Redis Sentinel Cache
+
+```yaml
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: redis-sentinel-backend
+  namespace: production
+spec:
+  hosts:
+    - address: "api.example.com"
+      port: 8080
+  cache:
+    enabled: true
+    ttl: "10m"
+    type: "redis"
+    keyComponents:
+      - "path"
+      - "query"
+      - "headers.Authorization"
+    staleWhileRevalidate: "2m"
+    redis:
+      # Redis Sentinel configuration (high availability)
+      sentinel:
+        masterName: "mymaster"
+        sentinelAddrs:
+          - "sentinel1.cache.svc.cluster.local:26379"
+          - "sentinel2.cache.svc.cluster.local:26379"
+          - "sentinel3.cache.svc.cluster.local:26379"
+        sentinelPassword: "sentinel-password"
+        password: "redis-master-password"
+        db: 0
+      # Connection pool settings
+      poolSize: 10
+      maxRetries: 3
+      keyPrefix: "avapigw:cache:"
+      # TLS configuration
+      tls:
+        enabled: true
+        caFile: "/etc/ssl/certs/redis-ca.crt"
+        insecureSkipVerify: false
+```
+
+### Validation Rules
+
+The operator validates Redis Sentinel configuration through admission webhooks:
+
+#### Sentinel Address Validation
+- Sentinel addresses must be in `host:port` format
+- Port numbers must be between 1 and 65535
+- At least one sentinel address is required
+- Duplicate sentinel addresses are rejected
+
+#### Master Name Validation
+- Master name is required when Sentinel is configured
+- Master name must be a valid identifier (alphanumeric, hyphens, underscores)
+- Master name cannot be empty or whitespace-only
+
+#### Database Validation
+- Database number must be non-negative integer
+- Database number must be within Redis limits (typically 0-15)
+
+#### Password Validation
+- Passwords are optional but recommended for production
+- Empty passwords are allowed for development environments
+- Passwords should be stored in Kubernetes secrets for production
+
+### High Availability Features
+
+Redis Sentinel provides the following high availability features:
+
+- **Automatic Failover**: When the master becomes unavailable, Sentinel promotes a replica to master
+- **Service Discovery**: Gateway automatically discovers the current master through Sentinel
+- **Connection Pooling**: Optimized connection pooling with exponential backoff retry
+- **Health Monitoring**: Continuous monitoring of Redis master and replica health
+- **Split-brain Protection**: Sentinel quorum prevents split-brain scenarios
 
 ## Examples
 

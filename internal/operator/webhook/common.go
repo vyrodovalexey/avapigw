@@ -39,6 +39,12 @@ const (
 
 	// TotalWeightExpected is the expected total weight when multiple destinations are configured.
 	TotalWeightExpected = 100
+
+	// CacheTypeMemory is the memory cache type.
+	CacheTypeMemory = "memory"
+
+	// CacheTypeRedis is the Redis cache type.
+	CacheTypeRedis = "redis"
 )
 
 // validateDuration validates a duration string using Go's time.ParseDuration.
@@ -752,11 +758,57 @@ func validateAuthzCacheConfig(cache *avapigwv1alpha1.AuthzCacheConfig) error {
 	}
 
 	// Validate cache type
-	if cache.Type != "" {
-		validTypes := map[string]bool{"memory": true, "redis": true}
-		if !validTypes[cache.Type] {
-			return fmt.Errorf("authorization.cache.type must be 'memory' or 'redis'")
+	if err := validateCacheType(cache.Type, "authorization.cache"); err != nil {
+		return err
+	}
+
+	// Validate sentinel configuration for redis cache type
+	if cache.Sentinel != nil {
+		if cache.Type != CacheTypeRedis {
+			return fmt.Errorf("authorization.cache.sentinel is only valid when type is 'redis'")
 		}
+		if err := validateRedisSentinelSpec(cache.Sentinel, "authorization.cache.sentinel"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateCacheType validates that the cache type is valid.
+func validateCacheType(cacheType, fieldPath string) error {
+	if cacheType == "" {
+		return nil
+	}
+	validTypes := map[string]bool{CacheTypeMemory: true, CacheTypeRedis: true}
+	if !validTypes[cacheType] {
+		return fmt.Errorf("%s.type must be 'memory' or 'redis'", fieldPath)
+	}
+	return nil
+}
+
+// validateRedisSentinelSpec validates Redis Sentinel configuration.
+func validateRedisSentinelSpec(sentinel *avapigwv1alpha1.RedisSentinelSpec, fieldPath string) error {
+	if sentinel == nil {
+		return nil
+	}
+
+	if sentinel.MasterName == "" {
+		return fmt.Errorf("%s.masterName is required", fieldPath)
+	}
+
+	if len(sentinel.SentinelAddrs) == 0 {
+		return fmt.Errorf("%s.sentinelAddrs must have at least one address", fieldPath)
+	}
+
+	for i, addr := range sentinel.SentinelAddrs {
+		if addr == "" {
+			return fmt.Errorf("%s.sentinelAddrs[%d] cannot be empty", fieldPath, i)
+		}
+	}
+
+	if sentinel.DB < 0 || sentinel.DB > 15 {
+		return fmt.Errorf("%s.db must be between 0 and 15", fieldPath)
 	}
 
 	return nil
@@ -785,26 +837,58 @@ func validateBackendCache(cache *avapigwv1alpha1.BackendCacheConfig) error {
 		return nil
 	}
 
-	// Validate TTL if specified
+	if err := validateBackendCacheDurations(cache); err != nil {
+		return err
+	}
+
+	if err := validateCacheType(cache.Type, "cache"); err != nil {
+		return err
+	}
+
+	if err := validateBackendCacheRedisConfig(cache); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateBackendCacheDurations validates duration fields in backend cache configuration.
+func validateBackendCacheDurations(cache *avapigwv1alpha1.BackendCacheConfig) error {
 	if cache.TTL != "" {
 		if err := validateDuration(string(cache.TTL)); err != nil {
 			return fmt.Errorf("cache.ttl is invalid: %w", err)
 		}
 	}
 
-	// Validate stale while revalidate if specified
 	if cache.StaleWhileRevalidate != "" {
 		if err := validateDuration(string(cache.StaleWhileRevalidate)); err != nil {
 			return fmt.Errorf("cache.staleWhileRevalidate is invalid: %w", err)
 		}
 	}
 
-	// Validate cache type
-	if cache.Type != "" {
-		validTypes := map[string]bool{"memory": true, "redis": true}
-		if !validTypes[cache.Type] {
-			return fmt.Errorf("cache.type must be 'memory' or 'redis'")
+	return nil
+}
+
+// validateBackendCacheRedisConfig validates Redis-specific backend cache configuration.
+func validateBackendCacheRedisConfig(cache *avapigwv1alpha1.BackendCacheConfig) error {
+	// Validate sentinel configuration for redis cache type
+	if cache.Sentinel != nil {
+		if cache.Type != CacheTypeRedis {
+			return fmt.Errorf("cache.sentinel is only valid when cache.type is 'redis'")
 		}
+		if err := validateRedisSentinelSpec(cache.Sentinel, "cache.sentinel"); err != nil {
+			return err
+		}
+	}
+
+	// Validate TTLJitter if specified (must be between 0.0 and 1.0)
+	if cache.TTLJitter != nil && (*cache.TTLJitter < 0.0 || *cache.TTLJitter > 1.0) {
+		return fmt.Errorf("cache.ttlJitter must be between 0.0 and 1.0")
+	}
+
+	// Validate PasswordVaultPath is only used with redis cache type
+	if cache.PasswordVaultPath != "" && cache.Type != CacheTypeRedis {
+		return fmt.Errorf("cache.passwordVaultPath is only valid when cache.type is 'redis'")
 	}
 
 	return nil

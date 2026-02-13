@@ -149,6 +149,97 @@ services:
       - perftest-network
 
   # ===========================================================================
+  # Redis Cache Performance Tests (Yandex Tank)
+  # ===========================================================================
+
+  tank-sentinel-cache:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-sentinel-cache
+    profiles:
+      - http
+      - cache
+      - sentinel-cache
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/sentinel-cache-throughput.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/cache-get.txt"
+    networks:
+      - perftest-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  tank-redis-standalone-cache:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-redis-standalone-cache
+    profiles:
+      - http
+      - cache
+      - redis-standalone-cache
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/redis-standalone-cache-throughput.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/cache-get.txt"
+    networks:
+      - perftest-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  tank-cache-features:
+    image: yandex/yandex-tank:latest
+    container_name: avapigw-tank-cache-features
+    profiles:
+      - http
+      - cache
+      - cache-features
+    volumes:
+      - ./configs:/var/loadtest/configs:ro
+      - ./ammo:/var/loadtest/ammo:ro
+      - ./results:/var/loadtest/results
+    working_dir: /var/loadtest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      yandex-tank
+      -c /var/loadtest/configs/cache-features-throughput.yaml
+      -o "phantom.ammofile=/var/loadtest/ammo/cache-features.txt"
+    networks:
+      - perftest-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  # ===========================================================================
   # gRPC Performance Tests (ghz)
   # ===========================================================================
   

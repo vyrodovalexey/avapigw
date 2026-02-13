@@ -1,0 +1,59 @@
+# Yandex Tank Configuration: Cache Features Throughput Test
+# Purpose: Measure cache performance with new Redis cache features:
+#   - TTL Jitter (10% jitter to prevent cache stampede)
+#   - Hash Keys (SHA256 hashing of cache keys)
+# Duration: 90 seconds total (30s warmup + 60s sustain)
+# Target: Ramp from 10 to 100 RPS, then sustain 100 RPS
+# Focus: Cache hit latency with TTL jitter and hash keys enabled
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8080
+  load_profile:
+    load_type: rps
+    # Warmup: 30s ramp from 10 to 100 RPS (populate cache with varied TTLs)
+    # Sustain: 60s at 100 RPS (main measurement phase - cache hits with hashed keys)
+    schedule: line(10, 100, 30s) const(100, 60s)
+
+  ammofile: /var/loadtest/ammo/cache-features.txt
+  ammo_type: uri
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+  ssl: false
+  timeout: 10s
+
+  # Instance settings - moderate concurrency for feature testing
+  instances: 500
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-Cache-Features]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: cache-features-throughput]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 10% for 30 seconds
+    - http(5xx,10%,30s)
+    # Stop if 50% of requests exceed 5000ms for 30 seconds
+    - time(5000,50%,30s)
+    # Stop if total network errors exceed 5% for 30 seconds
+    - http(net,5%,30s)

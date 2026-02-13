@@ -623,6 +623,7 @@ redis:
   # -- Enable Redis dependency
   enabled: false
   # -- Redis architecture (standalone or replication)
+  # Use "replication" with sentinel.enabled=true for Redis Sentinel HA
   architecture: standalone
   auth:
     # -- Enable Redis authentication
@@ -633,6 +634,37 @@ redis:
     existingSecret: ""
     # -- Key in existing secret containing password
     existingSecretPasswordKey: "redis-password"
+  # -- Sentinel configuration (only used when architecture=replication)
+  # Redis Sentinel provides high availability through automatic failover
+  sentinel:
+    # -- Enable Redis Sentinel for high availability
+    enabled: false
+    # -- Sentinel master set name (must match REDIS_SENTINEL_MASTER_NAME env var)
+    masterSet: mymaster
+    # -- Number of sentinel replicas (recommended: 3 for production)
+    quorum: 2
+    # -- Sentinel authentication password
+    password: ""
+    # -- Use existing secret for Sentinel password
+    existingSecret: ""
+    # -- Key in existing secret containing Sentinel password
+    existingSecretPasswordKey: "sentinel-password"
+    persistence:
+      enabled: false
+    resources:
+      limits:
+        cpu: 100m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+    # -- Sentinel service configuration
+    service:
+      # -- Sentinel service type
+      type: ClusterIP
+      # -- Sentinel port
+      ports:
+        sentinel: 26379
   master:
     persistence:
       # -- Enable Redis persistence
@@ -646,6 +678,70 @@ redis:
       requests:
         cpu: 100m
         memory: 128Mi
+    # -- Redis master service configuration
+    service:
+      # -- Redis master service type
+      type: ClusterIP
+      # -- Redis master port
+      ports:
+        redis: 6379
+  replica:
+    # -- Number of Redis replicas (only used when architecture=replication)
+    # Recommended: 1-2 replicas for high availability
+    replicaCount: 1
+    persistence:
+      enabled: false
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+    # -- Redis replica service configuration
+    service:
+      # -- Redis replica service type
+      type: ClusterIP
+      # -- Redis replica port
+      ports:
+        redis: 6379
+
+# Redis Sentinel Environment Variables
+# These environment variables configure the gateway's Redis Sentinel client
+# and take precedence over YAML configuration
+redisEnv:
+  # -- Redis Sentinel master name (overrides redis.sentinel.masterSet)
+  sentinelMasterName: ""
+  # -- Comma-separated list of Sentinel addresses (host:port)
+  # Example: "redis-sentinel-0.redis-sentinel:26379,redis-sentinel-1.redis-sentinel:26379"
+  sentinelAddrs: ""
+  # -- Sentinel authentication password
+  sentinelPassword: ""
+  # -- Redis master password
+  masterPassword: ""
+  # -- Redis database number (0-15)
+  sentinelDB: "0"
+  # -- Redis standalone address (fallback when Sentinel is not configured)
+  address: ""
+  # -- Redis standalone password (fallback)
+  password: ""
+  # -- Redis standalone database (fallback)
+  db: "0"
+  # -- TTL jitter percentage (0.0 to 1.0). Adds randomness to TTL values to prevent cache stampede.
+  # Example: 0.1 means ±10% jitter
+  ttlJitter: ""
+  # -- SHA256 hash cache keys before storing in Redis (true/false).
+  # Useful for long keys that might exceed Redis key length limits.
+  hashKeys: ""
+  # -- Vault path for Redis password (standalone mode). Format: mount/path
+  # The secret should have a "password" key.
+  passwordVaultPath: ""
+  # -- Vault path for Redis Sentinel master password. Format: mount/path
+  # The secret should have a "password" key.
+  sentinelPasswordVaultPath: ""
+  # -- Vault path for Sentinel authentication password. Format: mount/path
+  # The secret should have a "password" key.
+  sentinelAuthPasswordVaultPath: ""
 
 # TLS configuration for backend mTLS
 tls:

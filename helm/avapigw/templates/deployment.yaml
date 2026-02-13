@@ -15,6 +15,9 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.service.metricsPort | default 9090 | quote }}
+        prometheus.io/path: {{ .Values.gateway.observability.metrics.path | default "/metrics" | quote }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -85,6 +88,24 @@ spec:
             - name: GATEWAY_ENV
               value: {{ .Values.gateway.environment | quote }}
             {{- if .Values.redis.enabled }}
+            {{- if include "avapigw.redisSentinelEnabled" . }}
+            - name: REDIS_SENTINEL_MASTER_NAME
+              value: {{ include "avapigw.redisSentinelMasterName" . }}
+            - name: REDIS_SENTINEL_ADDRS
+              value: {{ include "avapigw.redisSentinelAddrs" . }}
+            {{- if .Values.redis.auth.enabled }}
+            - name: REDIS_MASTER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.redis.auth.existingSecret }}
+                  name: {{ .Values.redis.auth.existingSecret }}
+                  key: {{ .Values.redis.auth.existingSecretPasswordKey }}
+                  {{- else }}
+                  name: {{ .Release.Name }}-redis
+                  key: redis-password
+                  {{- end }}
+            {{- end }}
+            {{- else }}
             - name: REDIS_HOST
               value: {{ include "avapigw.redisHost" . }}
             - name: REDIS_PORT
@@ -101,6 +122,28 @@ spec:
                   key: redis-password
                   {{- end }}
             {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- /* Redis cache feature environment variables */ -}}
+            {{- if .Values.redisEnv.ttlJitter }}
+            - name: REDIS_TTL_JITTER
+              value: {{ .Values.redisEnv.ttlJitter | quote }}
+            {{- end }}
+            {{- if .Values.redisEnv.hashKeys }}
+            - name: REDIS_HASH_KEYS
+              value: {{ .Values.redisEnv.hashKeys | quote }}
+            {{- end }}
+            {{- if .Values.redisEnv.passwordVaultPath }}
+            - name: REDIS_PASSWORD_VAULT_PATH
+              value: {{ .Values.redisEnv.passwordVaultPath | quote }}
+            {{- end }}
+            {{- if .Values.redisEnv.sentinelPasswordVaultPath }}
+            - name: REDIS_SENTINEL_PASSWORD_VAULT_PATH
+              value: {{ .Values.redisEnv.sentinelPasswordVaultPath | quote }}
+            {{- end }}
+            {{- if .Values.redisEnv.sentinelAuthPasswordVaultPath }}
+            - name: REDIS_SENTINEL_AUTH_PASSWORD_VAULT_PATH
+              value: {{ .Values.redisEnv.sentinelAuthPasswordVaultPath | quote }}
             {{- end }}
             {{- if .Values.vault.enabled }}
             - name: VAULT_ADDR

@@ -90,7 +90,11 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 ### Caching
 - **In-Memory Cache** - Fast local caching with TTL and max entries
-- **Redis Cache** - Distributed caching with Redis
+- **Redis Cache** - Distributed caching with Redis standalone or Sentinel
+- **Redis Sentinel Support** - High availability Redis with automatic failover
+- **TTL Jitter** - Random jitter added to TTL values to prevent thundering herd
+- **Hash Keys** - SHA256 hashing of cache keys for privacy/length control
+- **Vault Password Integration** - Redis passwords resolved from HashiCorp Vault KV secrets
 - **Cache Key Generation** - Configurable cache key components
 - **Cache Control** - Honor Cache-Control headers
 - **Stale-While-Revalidate** - Serve stale data while revalidating
@@ -151,7 +155,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.25.6 (for building from source)
+- Go 1.25.7 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -749,6 +753,60 @@ When audit logging is enabled, the gateway automatically includes audit intercep
 - **Client Address** - Records client IP address from gRPC connection metadata
 
 The gRPC audit interceptor is positioned in the middleware chain as: Recovery → RequestID → Logging → Metrics → Tracing → **Audit** → RateLimit → CircuitBreaker
+
+### Redis Sentinel Configuration
+
+Configure high-availability Redis caching with Sentinel:
+
+```yaml
+spec:
+  backends:
+    - name: api-backend
+      hosts:
+        - address: api.example.com
+          port: 8080
+      cache:
+        enabled: true
+        ttl: "10m"
+        type: "redis"
+        redis:
+          sentinel:
+            masterName: "mymaster"
+            sentinelAddrs:
+              - "sentinel1:26379"
+              - "sentinel2:26379"
+              - "sentinel3:26379"
+            sentinelPassword: "sentinel-password"
+            password: "redis-master-password"
+            # Vault password integration
+            sentinelPasswordVaultPath: "secret/redis-sentinel"
+            passwordVaultPath: "secret/redis-master"
+            db: 0
+          poolSize: 10
+          keyPrefix: "avapigw:cache:"
+          # TTL jitter to prevent thundering herd
+          ttlJitter: 0.1  # ±10% jitter on TTL values
+          # Hash cache keys for privacy and length control
+          hashKeys: true
+```
+
+Environment variable configuration:
+
+```bash
+# Redis Sentinel configuration
+export REDIS_SENTINEL_MASTER_NAME="mymaster"
+export REDIS_SENTINEL_ADDRS="sentinel1:26379,sentinel2:26379,sentinel3:26379"
+export REDIS_SENTINEL_PASSWORD="sentinel-password"
+export REDIS_MASTER_PASSWORD="redis-master-password"
+export REDIS_SENTINEL_DB="0"
+
+# New Redis cache features
+export REDIS_TTL_JITTER="0.1"
+export REDIS_HASH_KEYS="true"
+export REDIS_PASSWORD_VAULT_PATH="secret/redis"
+export REDIS_SENTINEL_PASSWORD_VAULT_PATH="secret/redis-sentinel"
+export REDIS_SENTINEL_SENTINEL_PASSWORD_VAULT_PATH="secret/redis-sentinel-auth"
+```
 
 ### Complete Example Configuration
 

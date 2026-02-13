@@ -55,6 +55,89 @@ services:
     ports:
       - 6379:6379
 
+  # Redis Sentinel setup (master + replica + 3 sentinels)
+  # NOTE: replica-announce-ip/port tells sentinel the host-reachable address of the master,
+  # so that tests running on the host can connect to the master via 127.0.0.1:6380.
+  redis-master:
+    image: bitnami/redis:latest
+    container_name: redis-master
+    environment:
+      REDIS_REPLICATION_MODE: master
+      REDIS_PASSWORD: password
+      REDIS_EXTRA_FLAGS: "--replica-announce-ip 127.0.0.1 --replica-announce-port 6380"
+    ports:
+      - 6380:6379
+    volumes:
+      - redis_master_data:/bitnami/redis/data
+
+  redis-replica:
+    image: bitnami/redis:latest
+    container_name: redis-replica
+    environment:
+      REDIS_REPLICATION_MODE: slave
+      REDIS_MASTER_HOST: redis-master
+      REDIS_MASTER_PORT_NUMBER: 6379
+      REDIS_MASTER_PASSWORD: password
+      REDIS_PASSWORD: password
+    depends_on:
+      - redis-master
+
+  redis-sentinel-1:
+    image: bitnami/redis-sentinel:latest
+    container_name: redis-sentinel-1
+    environment:
+      REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
+      REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
+      REDIS_SENTINEL_QUORUM: 2
+      REDIS_MASTER_HOST: redis-master
+      REDIS_MASTER_PORT_NUMBER: 6379
+      REDIS_MASTER_PASSWORD: password
+      REDIS_MASTER_SET: mymaster
+      REDIS_SENTINEL_ANNOUNCE_IP: 127.0.0.1
+      REDIS_SENTINEL_ANNOUNCE_PORT: 26379
+    depends_on:
+      - redis-master
+      - redis-replica
+    ports:
+      - 26379:26379
+
+  redis-sentinel-2:
+    image: bitnami/redis-sentinel:latest
+    container_name: redis-sentinel-2
+    environment:
+      REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
+      REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
+      REDIS_SENTINEL_QUORUM: 2
+      REDIS_MASTER_HOST: redis-master
+      REDIS_MASTER_PORT_NUMBER: 6379
+      REDIS_MASTER_PASSWORD: password
+      REDIS_MASTER_SET: mymaster
+      REDIS_SENTINEL_ANNOUNCE_IP: 127.0.0.1
+      REDIS_SENTINEL_ANNOUNCE_PORT: 26380
+    depends_on:
+      - redis-master
+      - redis-replica
+    ports:
+      - 26380:26379
+
+  redis-sentinel-3:
+    image: bitnami/redis-sentinel:latest
+    container_name: redis-sentinel-3
+    environment:
+      REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
+      REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
+      REDIS_SENTINEL_QUORUM: 2
+      REDIS_MASTER_HOST: redis-master
+      REDIS_MASTER_PORT_NUMBER: 6379
+      REDIS_MASTER_PASSWORD: password
+      REDIS_MASTER_SET: mymaster
+      REDIS_SENTINEL_ANNOUNCE_IP: 127.0.0.1
+      REDIS_SENTINEL_ANNOUNCE_PORT: 26381
+    depends_on:
+      - redis-master
+      - redis-replica
+    ports:
+      - 26381:26379
 
   keycloak_web:
     image: quay.io/keycloak/keycloak:26.5
@@ -93,7 +176,41 @@ services:
       POSTGRES_USER: keycloak
       POSTGRES_PASSWORD: password
 
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.108.1
+    container_name: victoriametrics
+    ports:
+      - 8428:8428
+    volumes:
+      - victoriametrics_data:/victoria-metrics-data
+      - ./victoriametrics/scrape.yml:/etc/victoriametrics/promscrape.yml:ro
+    command:
+      - --promscrape.config=/etc/victoriametrics/promscrape.yml
+      - --storageDataPath=/victoria-metrics-data
+      - --httpListenAddr=:8428
+      - --retentionPeriod=30d
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    ports:
+      - 3000:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../monitoring/grafana:/var/lib/grafana/dashboards/avapigw:ro
+    depends_on:
+      - victoriametrics
+
 volumes:
   postgres_data:
   vault_data:
   redis_data:
+  redis_master_data:
+  victoriametrics_data:
+  grafana_data:

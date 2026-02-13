@@ -367,7 +367,7 @@ func TestRedisCache_Get_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to make commands fail with a retryable error
@@ -398,7 +398,7 @@ func TestRedisCache_Set_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to make commands fail with a retryable error
@@ -428,7 +428,7 @@ func TestRedisCache_Delete_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to make commands fail with a retryable error
@@ -458,7 +458,7 @@ func TestRedisCache_Exists_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to make commands fail with a retryable error
@@ -494,7 +494,7 @@ func TestRedisCache_Get_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// First attempt: SetError to trigger retryable error
@@ -531,7 +531,7 @@ func TestRedisCache_Set_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	mr.SetError("ERR forced error")
@@ -564,7 +564,7 @@ func TestRedisCache_Delete_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	mr.SetError("ERR forced error")
@@ -597,7 +597,7 @@ func TestRedisCache_Exists_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	mr.SetError("ERR forced error")
@@ -635,7 +635,7 @@ func TestRedisCache_Get_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to make commands fail with a retryable error (fast, no timeout)
@@ -671,7 +671,7 @@ func TestRedisCache_Set_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	mr.SetError("ERR forced error")
@@ -704,7 +704,7 @@ func TestRedisCache_Delete_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	mr.SetError("ERR forced error")
@@ -737,7 +737,7 @@ func TestRedisCache_Exists_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	mr.SetError("ERR forced error")
@@ -774,7 +774,7 @@ func TestRedisCache_GetWithTTL_PipelineError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to trigger pipeline error
@@ -807,7 +807,7 @@ func TestRedisCache_SetNX_Error(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to trigger error
@@ -840,7 +840,7 @@ func TestRedisCache_Expire_Error(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger())
+	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to trigger error
@@ -881,7 +881,7 @@ func TestNewRedisCache_WithTLS(t *testing.T) {
 
 	// This will fail at Ping because miniredis doesn't support TLS,
 	// but the TLS config code path (lines 91-96) is exercised.
-	_, err = newRedisCache(cfg, observability.NopLogger())
+	_, err = newRedisCache(cfg, observability.NopLogger(), nil)
 	// May or may not error depending on miniredis behavior with TLS
 	// The important thing is the TLS config code path is covered.
 	_ = err

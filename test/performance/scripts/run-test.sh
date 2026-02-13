@@ -31,6 +31,11 @@
 #     vault-backend-mtls      - Backend mTLS with Vault client certs
 #     vault-multi-route-sni   - Multi-route SNI with Vault certs
 #
+#   Redis Cache Tests:
+#     sentinel-cache          - Redis Sentinel cache throughput
+#     redis-standalone-cache  - Redis standalone cache throughput (baseline)
+#     cache-features          - Redis cache with TTL jitter + hash keys
+#
 #   all                   - Run all tests sequentially
 #
 # Options:
@@ -257,6 +262,12 @@ start_gateway() {
         config_file="gateway-perftest-secure.yaml"
     elif [ "$USE_FEATURES_CONFIG" = true ]; then
         config_file="gateway-perftest-features.yaml"
+    elif [ "$USE_SENTINEL_CONFIG" = true ]; then
+        config_file="gateway-perftest-sentinel.yaml"
+    elif [ "$USE_REDIS_STANDALONE_CONFIG" = true ]; then
+        config_file="gateway-perftest-redis-standalone.yaml"
+    elif [ "$USE_CACHE_FEATURES_CONFIG" = true ]; then
+        config_file="gateway-perftest-cache-features.yaml"
     fi
     
     # Check if gateway is already running
@@ -412,6 +423,22 @@ get_test_config() {
             AMMO_FILE="vault-multi-route-sni.txt"
             USE_SECURE_CONFIG=true
             ;;
+        # Redis Cache tests
+        sentinel-cache)
+            CONFIG_FILE="sentinel-cache-throughput.yaml"
+            AMMO_FILE="cache-get.txt"
+            USE_SENTINEL_CONFIG=true
+            ;;
+        redis-standalone-cache)
+            CONFIG_FILE="redis-standalone-cache-throughput.yaml"
+            AMMO_FILE="cache-get.txt"
+            USE_REDIS_STANDALONE_CONFIG=true
+            ;;
+        cache-features)
+            CONFIG_FILE="cache-features-throughput.yaml"
+            AMMO_FILE="cache-features.txt"
+            USE_CACHE_FEATURES_CONFIG=true
+            ;;
         *)
             log_error "Unknown test: $test_name"
             echo "Available tests:"
@@ -421,6 +448,7 @@ get_test_config() {
             echo "  Backend: backend-circuit-breaker, backend-jwt-auth, backend-basic-auth"
             echo "  Advanced: max-sessions, smoke-max-sessions, capacity-aware-lb, backend-ratelimit"
             echo "  Vault TLS: vault-tls-handshake, vault-cert-renewal, vault-backend-mtls, vault-multi-route-sni"
+            echo "  Cache: sentinel-cache, redis-standalone-cache, cache-features"
             exit 1
             ;;
     esac

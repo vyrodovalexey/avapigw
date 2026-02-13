@@ -2908,3 +2908,188 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   2. Run conversion benchmarks for both
   3. Compare allocations and time per operation
 - **Expected Results**: gRPC and HTTP conversion have similar performance characteristics
+
+## Redis Cache Features Tests
+
+### Functional Tests
+
+#### TestFunctional_Cache_Features_TTLJitter_ConfigDefaults
+- **Description**: Test that TTLJitter defaults to 0 in RedisCacheConfig
+- **Preconditions**: None (no external dependencies)
+- **Steps**:
+  1. Create empty RedisCacheConfig
+  2. Verify TTLJitter is 0.0
+  3. Verify DefaultRedisCacheConfig has zero TTLJitter
+  4. Verify DefaultRedisTTLJitter constant is 0.0
+- **Expected Results**: TTLJitter defaults to 0 (no jitter)
+
+#### TestFunctional_Cache_Features_TTLJitter_AcceptsValidRange
+- **Description**: Test that TTLJitter accepts values in [0.0, 1.0]
+- **Preconditions**: None
+- **Steps**:
+  1. Set TTLJitter to 0.0, 0.05, 0.1, 0.5, 1.0
+  2. Verify each value is stored correctly
+- **Expected Results**: All valid jitter values are accepted
+
+#### TestFunctional_Cache_Features_TTLJitter_CreateTestCacheConfig
+- **Description**: Test TTLJitter in CacheConfig hierarchy
+- **Preconditions**: None
+- **Steps**:
+  1. Create redis CacheConfig with TTLJitter set
+  2. Create sentinel CacheConfig with TTLJitter set
+  3. Verify TTLJitter is accessible in both
+- **Expected Results**: TTLJitter works in both standalone and sentinel configs
+
+#### TestFunctional_Cache_Features_TTLJitter_ApplyFunction
+- **Description**: Test TTLJitter boundary values in config
+- **Preconditions**: None
+- **Steps**:
+  1. Set TTLJitter > 1.0 (clamped at runtime, stored as-is in config)
+  2. Set TTLJitter < 0.0 (no-op at runtime, stored as-is in config)
+- **Expected Results**: Config stores values; runtime clamping is separate
+
+#### TestFunctional_Cache_Features_HashKeys_ConfigDefaults
+- **Description**: Test that HashKeys defaults to false
+- **Preconditions**: None
+- **Steps**:
+  1. Create empty RedisCacheConfig
+  2. Verify HashKeys is false
+  3. Verify DefaultRedisCacheConfig has HashKeys false
+- **Expected Results**: HashKeys defaults to false
+
+#### TestFunctional_Cache_Features_HashKey_Consistency
+- **Description**: Test HashKey produces consistent SHA256 hashes
+- **Preconditions**: None
+- **Steps**:
+  1. Hash same input twice, verify identical output
+  2. Verify hash is 64 hex characters
+  3. Hash different inputs, verify different outputs
+  4. Hash empty string, verify known SHA256 value
+- **Expected Results**: HashKey is deterministic and produces valid SHA256
+
+#### TestFunctional_Cache_Features_HashKey_DataDriven
+- **Description**: Data-driven test for HashKey with various inputs
+- **Preconditions**: None
+- **Steps**:
+  1. Test short, medium, long keys
+  2. Test keys with special characters
+  3. Test unicode keys
+  4. Verify all hashes are unique
+- **Expected Results**: HashKey handles all input types correctly
+
+#### TestFunctional_Cache_Features_VaultPassword_ConfigFields
+- **Description**: Test PasswordVaultPath fields in config structs
+- **Preconditions**: None
+- **Steps**:
+  1. Set PasswordVaultPath in RedisCacheConfig
+  2. Verify default is empty
+  3. Set PasswordVaultPath in RedisSentinelConfig
+  4. Set SentinelPasswordVaultPath in RedisSentinelConfig
+  5. Set both vault paths in sentinel config
+- **Expected Results**: Vault path fields store values correctly
+
+#### TestFunctional_Cache_Features_VaultPassword_CacheConfigIntegration
+- **Description**: Test vault paths in full CacheConfig hierarchy
+- **Preconditions**: None
+- **Steps**:
+  1. Create standalone redis config with vault path
+  2. Create sentinel config with vault paths
+  3. Create combined config with all vault paths
+- **Expected Results**: Vault paths work in all config levels
+
+#### TestFunctional_Cache_Features_AllFeaturesCombined
+- **Description**: Test all three features configured together
+- **Preconditions**: None
+- **Steps**:
+  1. Create RedisCacheConfig with TTLJitter, HashKeys, and PasswordVaultPath
+  2. Verify all fields are set correctly
+- **Expected Results**: All features coexist in config
+
+### Integration Tests
+
+#### TestIntegration_Cache_Features_TTLJitter_WithRedis
+- **Description**: Test TTL jitter with real Redis
+- **Preconditions**: Redis server running
+- **Steps**:
+  1. Create cache with TTLJitter=0.1 and 10-minute TTL
+  2. Store 20 keys and collect their TTLs via GetWithTTL
+  3. Verify TTLs are not all identical (jitter applied)
+  4. Verify all TTLs are within ±15% of base TTL
+  5. Create cache with TTLJitter=0
+  6. Store 10 keys and verify TTLs are within 2s of base TTL
+- **Expected Results**: Jitter produces varied TTLs; no jitter produces exact TTLs
+
+#### TestIntegration_Cache_Features_TTLJitter_WithSentinel
+- **Description**: Test TTL jitter with Redis Sentinel
+- **Preconditions**: Redis Sentinel running
+- **Steps**:
+  1. Create sentinel cache with TTLJitter=0.1
+  2. Store 15 keys and collect TTLs
+  3. Verify TTLs vary across keys
+- **Expected Results**: TTL jitter works with sentinel cache
+
+#### TestIntegration_Cache_Features_HashKeys_WithRedis
+- **Description**: Test hash keys with real Redis
+- **Preconditions**: Redis server running
+- **Steps**:
+  1. Create cache with HashKeys=true, store and retrieve values
+  2. Verify hashed key exists in Redis via raw client
+  3. Verify plain key does NOT exist when HashKeys=true
+  4. Create cache with HashKeys=false, verify plain key exists
+  5. Verify hashed key does NOT exist when HashKeys=false
+  6. Test multiple keys with HashKeys=true
+- **Expected Results**: Hash keys feature correctly hashes/unhashes keys in Redis
+
+#### TestIntegration_Cache_Features_HashKeys_WithSentinel
+- **Description**: Test hash keys with Redis Sentinel
+- **Preconditions**: Redis Sentinel running
+- **Steps**:
+  1. Create sentinel cache with HashKeys=true
+  2. Store and retrieve values
+  3. Verify hashed key exists in Redis via raw sentinel client
+- **Expected Results**: Hash keys work with sentinel cache
+
+#### TestIntegration_Cache_Features_VaultPassword
+- **Description**: Test Vault password integration with Redis cache
+- **Preconditions**: Redis and Vault running
+- **Steps**:
+  1. Write Redis password to Vault KV
+  2. Create cache with PasswordVaultPath pointing to Vault secret
+  3. Verify cache connects and operations work
+  4. Test invalid vault path returns error
+- **Expected Results**: Cache resolves password from Vault and connects to Redis
+
+### E2E Tests
+
+#### TestE2E_Cache_Features_TTLJitter
+- **Description**: Test gateway with TTL jitter end-to-end
+- **Preconditions**: Redis and backend running
+- **Steps**:
+  1. Start gateway with TTL jitter configured
+  2. Make request through gateway, verify it serves correctly
+  3. Cache multiple entries with short TTL and jitter
+  4. Verify TTLs are within expected jitter range
+  5. Wait for entries to expire, verify all are gone
+- **Expected Results**: TTL jitter works in gateway flow
+
+#### TestE2E_Cache_Features_HashKeys
+- **Description**: Test gateway with hash keys end-to-end
+- **Preconditions**: Redis and backend running
+- **Steps**:
+  1. Start gateway with hash keys enabled
+  2. Cache data and verify retrieval
+  3. Verify keys in Redis are hashed (via raw client)
+  4. Verify plain keys do NOT exist
+  5. Make request through gateway
+  6. Complete cache journey: miss → store → hit → invalidate → miss
+- **Expected Results**: Hash keys work in gateway flow
+
+#### TestE2E_Cache_Features_Combined
+- **Description**: Test TTL jitter and hash keys together end-to-end
+- **Preconditions**: Redis running
+- **Steps**:
+  1. Create cache with both TTLJitter=0.1 and HashKeys=true
+  2. Store and retrieve values
+  3. Verify keys are hashed in Redis
+  4. Verify TTLs vary (jitter applied with hashed keys)
+- **Expected Results**: Both features work together correctly

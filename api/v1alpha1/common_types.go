@@ -832,6 +832,11 @@ type AuthzCacheConfig struct {
 	// +kubebuilder:default=memory
 	// +optional
 	Type string `json:"type,omitempty"`
+
+	// Sentinel configures Redis Sentinel connection for authorization cache.
+	// Only used when Type is "redis". Mutually exclusive with standalone Redis URL.
+	// +optional
+	Sentinel *RedisSentinelSpec `json:"sentinel,omitempty"`
 }
 
 // BackendTransformConfig represents backend transformation configuration.
@@ -875,6 +880,43 @@ type BackendResponseTransform struct {
 	Headers *HeaderOperation `json:"headers,omitempty"`
 }
 
+// RedisSentinelSpec configures Redis Sentinel connection for high availability.
+type RedisSentinelSpec struct {
+	// MasterName is the name of the Redis master monitored by Sentinel.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	MasterName string `json:"masterName"`
+
+	// SentinelAddrs is the list of Sentinel addresses (host:port).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	SentinelAddrs []string `json:"sentinelAddrs"`
+
+	// SentinelPassword is the password for Sentinel authentication.
+	// +optional
+	SentinelPassword string `json:"sentinelPassword,omitempty"`
+
+	// Password is the password for the Redis master.
+	// +optional
+	Password string `json:"password,omitempty"`
+
+	// DB is the Redis database number.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=15
+	// +optional
+	DB int `json:"db,omitempty"`
+
+	// PasswordVaultPath is the Vault path for the Redis master password.
+	// The secret should have a "password" key. Format: mount/path.
+	// +optional
+	PasswordVaultPath string `json:"passwordVaultPath,omitempty"`
+
+	// SentinelPasswordVaultPath is the Vault path for the Sentinel password.
+	// The secret should have a "password" key. Format: mount/path.
+	// +optional
+	SentinelPasswordVaultPath string `json:"sentinelPasswordVaultPath,omitempty"`
+}
+
 // BackendCacheConfig represents backend caching configuration.
 type BackendCacheConfig struct {
 	// Enabled enables caching.
@@ -898,6 +940,26 @@ type BackendCacheConfig struct {
 	// +kubebuilder:default=memory
 	// +optional
 	Type string `json:"type,omitempty"`
+
+	// Sentinel configures Redis Sentinel connection.
+	// Mutually exclusive with standalone Redis URL.
+	// +optional
+	Sentinel *RedisSentinelSpec `json:"sentinel,omitempty"`
+
+	// TTLJitter is the maximum percentage of jitter to add to TTL values (0.0 to 1.0).
+	// For example, 0.1 means ±10% jitter. Default is 0 (no jitter).
+	// +optional
+	TTLJitter *float64 `json:"ttlJitter,omitempty"`
+
+	// HashKeys when true, SHA256-hashes cache keys before storing in Redis.
+	// This is useful for long keys that might exceed Redis key length limits.
+	// +optional
+	HashKeys *bool `json:"hashKeys,omitempty"`
+
+	// PasswordVaultPath is the Vault path for the Redis password (standalone mode).
+	// The secret should have a "password" key. Format: mount/path.
+	// +optional
+	PasswordVaultPath string `json:"passwordVaultPath,omitempty"`
 }
 
 // BackendEncodingConfig represents backend encoding configuration.

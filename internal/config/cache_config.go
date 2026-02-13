@@ -33,9 +33,14 @@ type CacheConfig struct {
 
 // RedisCacheConfig contains Redis-specific cache configuration.
 type RedisCacheConfig struct {
-	// URL is the Redis connection URL.
+	// URL is the Redis connection URL for standalone mode.
 	// Format: redis://[user:password@]host:port[/db]
+	// Mutually exclusive with Sentinel configuration.
 	URL string `yaml:"url" json:"url"`
+
+	// Sentinel contains Redis Sentinel configuration for high availability.
+	// Mutually exclusive with standalone Redis URL.
+	Sentinel *RedisSentinelConfig `yaml:"sentinel,omitempty" json:"sentinel,omitempty"`
 
 	// PoolSize is the maximum number of connections in the pool.
 	PoolSize int `yaml:"poolSize,omitempty" json:"poolSize,omitempty"`
@@ -57,6 +62,45 @@ type RedisCacheConfig struct {
 
 	// Retry contains retry configuration for initial connection.
 	Retry *RedisRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+
+	// TTLJitter is the maximum percentage of jitter to add to TTL values (0.0 to 1.0).
+	// For example, 0.1 means ±10% jitter. Default is 0 (no jitter).
+	TTLJitter float64 `yaml:"ttlJitter,omitempty" json:"ttlJitter,omitempty"`
+
+	// HashKeys when true, SHA256-hashes cache keys before storing in Redis.
+	// This is useful for long keys that might exceed Redis key length limits.
+	HashKeys bool `yaml:"hashKeys,omitempty" json:"hashKeys,omitempty"`
+
+	// PasswordVaultPath is the Vault path for the Redis password (standalone mode).
+	// The secret should have a "password" key. Format: mount/path.
+	PasswordVaultPath string `yaml:"passwordVaultPath,omitempty" json:"passwordVaultPath,omitempty"`
+}
+
+// RedisSentinelConfig contains Redis Sentinel configuration for high availability.
+type RedisSentinelConfig struct {
+	// MasterName is the name of the Redis master monitored by Sentinel.
+	MasterName string `yaml:"masterName" json:"masterName"`
+
+	// SentinelAddrs is the list of Sentinel addresses (host:port).
+	SentinelAddrs []string `yaml:"sentinelAddrs" json:"sentinelAddrs"`
+
+	// SentinelPassword is the password for Sentinel authentication.
+	SentinelPassword string `yaml:"sentinelPassword,omitempty" json:"sentinelPassword,omitempty"`
+
+	// Password is the password for the Redis master.
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+
+	// DB is the Redis database number.
+	DB int `yaml:"db,omitempty" json:"db,omitempty"`
+
+	// PasswordVaultPath is the Vault path for the Redis master password.
+	// The secret should have a "password" key. Format: mount/path.
+	PasswordVaultPath string `yaml:"passwordVaultPath,omitempty" json:"passwordVaultPath,omitempty"`
+
+	// SentinelPasswordVaultPath is the Vault path for the Sentinel password.
+	// The secret should have a "password" key. Format: mount/path.
+	//nolint:lll // struct tag requires full yaml/json names
+	SentinelPasswordVaultPath string `yaml:"sentinelPasswordVaultPath,omitempty" json:"sentinelPasswordVaultPath,omitempty"`
 }
 
 // RedisRetryConfig contains retry configuration for Redis connections.
@@ -163,11 +207,28 @@ func (cc *CacheConfig) IsEmpty() bool {
 }
 
 // IsEmpty returns true if the RedisCacheConfig has no configuration.
+// A RedisCacheConfig is considered non-empty if either a standalone URL
+// or a Sentinel master name is configured.
 func (rcc *RedisCacheConfig) IsEmpty() bool {
 	if rcc == nil {
 		return true
 	}
-	return rcc.URL == ""
+	return rcc.URL == "" && rcc.Sentinel.IsEmpty()
+}
+
+// IsEmpty returns true if the RedisSentinelConfig has no meaningful configuration.
+func (rsc *RedisSentinelConfig) IsEmpty() bool {
+	if rsc == nil {
+		return true
+	}
+	return rsc.MasterName == ""
+}
+
+// DefaultRedisSentinelConfig returns default Redis Sentinel configuration.
+func DefaultRedisSentinelConfig() *RedisSentinelConfig {
+	return &RedisSentinelConfig{
+		DB: DefaultRedisSentinelDB,
+	}
 }
 
 // IsEmpty returns true if the CacheKeyConfig has no configuration.
