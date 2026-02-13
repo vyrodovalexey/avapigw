@@ -240,6 +240,7 @@ main() {
 
   wait_for_grafana || exit 1
   create_datasource
+  create_tempo_datasource
   echo ""
 
   # Publish all dashboards
