@@ -273,6 +273,8 @@ extraEnv:
     value: "30m"                   # Max connection age
   - name: GRPC_MAX_CONNECTION_AGE_GRACE
     value: "5s"                    # Max connection age grace
+  - name: GRPC_GRACEFUL_SHUTDOWN_TIMEOUT
+    value: "30s"                   # Graceful shutdown timeout (default: 30s)
 ```
 
 ## Webhook Configuration

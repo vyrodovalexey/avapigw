@@ -2135,8 +2135,17 @@ func TestBuildGRPCDefaultRoute(t *testing.T) {
 	annotations := map[string]string{
 		AnnotationTimeout: "30s",
 	}
+	backend := networkingv1.IngressBackend{
+		Service: &networkingv1.IngressServiceBackend{
+			Name: "default-svc",
+			Port: networkingv1.ServiceBackendPort{Number: 8080},
+		},
+	}
 
-	route := converter.buildGRPCDefaultRoute("default-grpc-route", annotations)
+	route, err := converter.buildGRPCDefaultRoute("default-grpc-route", backend, annotations)
+	if err != nil {
+		t.Fatalf("buildGRPCDefaultRoute() error = %v", err)
+	}
 
 	if route.Name != "default-grpc-route" {
 		t.Errorf("Route name = %q, want %q", route.Name, "default-grpc-route")
@@ -2152,6 +2161,16 @@ func TestBuildGRPCDefaultRoute(t *testing.T) {
 	}
 	if route.Timeout != config.Duration(30*time.Second) {
 		t.Errorf("Route timeout = %v, want 30s", route.Timeout)
+	}
+	// Verify route destination is set (BUG-1 fix)
+	if len(route.Route) != 1 {
+		t.Fatalf("Route destinations count = %d, want 1", len(route.Route))
+	}
+	if route.Route[0].Destination.Host != "default-svc" {
+		t.Errorf("Route destination host = %q, want %q", route.Route[0].Destination.Host, "default-svc")
+	}
+	if route.Route[0].Destination.Port != 8080 {
+		t.Errorf("Route destination port = %d, want 8080", route.Route[0].Destination.Port)
 	}
 }
 

@@ -4,6 +4,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -100,8 +101,8 @@ func buildLoadBalancerIngress(address string) networkingv1.IngressLoadBalancerIn
 		entry.Hostname = address
 	}
 
-	// Set port 80 as default for HTTP traffic
-	httpPort := int32(80)
+	// Set default HTTP port for traffic
+	httpPort := int32(DefaultHTTPPort)
 	entry.Ports = []networkingv1.IngressPortStatus{
 		{
 			Port:     httpPort,
@@ -124,31 +125,8 @@ func ingressStatusMatches(
 	return current[0].IP == desired.IP && current[0].Hostname == desired.Hostname
 }
 
-// isIPAddress performs a simple check to determine if a string is an IP address.
-// It checks for IPv4 format (contains dots and digits only) or IPv6 format (contains colons).
+// isIPAddress checks whether s is a valid IP address (IPv4 or IPv6)
+// using the standard library net.ParseIP.
 func isIPAddress(s string) bool {
-	if s == "" {
-		return false
-	}
-
-	// IPv6 check: contains colons
-	for _, c := range s {
-		if c == ':' {
-			return true
-		}
-	}
-
-	// IPv4 check: all characters are digits or dots, and contains at least one dot
-	hasDot := false
-	for _, c := range s {
-		if c == '.' {
-			hasDot = true
-			continue
-		}
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-
-	return hasDot
+	return net.ParseIP(s) != nil
 }

@@ -4,6 +4,9 @@ package controller
 // annotationValueTrue is the string value used for boolean true in annotations.
 const annotationValueTrue = "true"
 
+// DefaultHTTPPort is the default HTTP port used when a service port cannot be resolved.
+const DefaultHTTPPort = 80
+
 // IngressClass controller constants.
 const (
 	// IngressControllerName is the controller name used in IngressClass resources

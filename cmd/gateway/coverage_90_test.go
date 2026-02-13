@@ -292,7 +292,7 @@ spec:
 		config:          cfg,
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 	if watcher != nil {
 		// Give it a moment to start
 		time.Sleep(50 * time.Millisecond)
@@ -350,7 +350,7 @@ func TestReloadComponents_WithAllComponents_90(t *testing.T) {
 		MaxConcurrent: 100,
 	}
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 
 	// Verify config was updated
 	assert.Equal(t, newCfg, app.config)
@@ -401,7 +401,7 @@ func TestReloadComponents_WithGRPCConfigChange_90(t *testing.T) {
 	}
 
 	// Should not panic; gRPC config change warning is logged
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 

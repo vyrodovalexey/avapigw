@@ -74,7 +74,7 @@ spec:
 		config:  cfg,
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 	assert.NotNil(t, watcher)
 
 	// Clean up
@@ -787,7 +787,7 @@ func TestReloadComponents_NilRouter(t *testing.T) {
 	newCfg := validGatewayConfig("test-updated")
 
 	// Should not panic; router is nil so route reload is skipped
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -822,7 +822,7 @@ func TestReloadComponents_WithRouterAndRoutes(t *testing.T) {
 	}
 
 	// Should reload routes successfully
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -844,7 +844,7 @@ func TestReloadComponents_NilBackendRegistry(t *testing.T) {
 	newCfg := validGatewayConfig("test-updated")
 
 	// Should not panic; backend registry is nil so backend reload is skipped
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -875,7 +875,7 @@ func TestReloadComponents_BackendReloadError(t *testing.T) {
 	}
 
 	// Should not panic; backend reload error is logged
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	// Config is still updated because gateway.Reload succeeded
 	// but backend reload error is logged
 }
@@ -1106,7 +1106,7 @@ func TestReloadComponents_RouteLoadError(t *testing.T) {
 
 	// Should not panic; gateway.Reload may reject the config with duplicate routes,
 	// or route reload error is logged. Either way, the function should not panic.
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 }
 
 // ============================================================
@@ -1139,7 +1139,7 @@ func TestReloadComponents_RateLimiterUpdate(t *testing.T) {
 		Burst:             1000,
 	}
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -1168,7 +1168,7 @@ func TestReloadComponents_MaxSessionsUpdate(t *testing.T) {
 		MaxConcurrent: 200,
 	}
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -1197,7 +1197,7 @@ func TestReloadComponents_GatewayReloadError(t *testing.T) {
 		Spec:     config.GatewaySpec{},
 	}
 
-	reloadComponents(app, invalidCfg, logger)
+	reloadComponents(context.Background(), app, invalidCfg, logger)
 
 	// Config should NOT be updated since gateway.Reload failed
 	assert.Equal(t, cfg, app.config)

@@ -12,15 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
-)
-
-// ingressClassFieldName is the IngressClass name this webhook validates.
-const ingressClassFieldName = "avapigw"
-
-// Annotation constants for gRPC protocol detection.
-const (
-	annotationProtocol = "avapigw.io/protocol"
-	protocolGRPC       = "grpc"
+	"github.com/vyrodovalexey/avapigw/internal/operator/controller"
 )
 
 // IngressValidator validates Kubernetes Ingress resources assigned to the avapigw IngressClass.
@@ -35,7 +27,7 @@ type IngressValidator struct {
 // SetupIngressWebhook sets up the Ingress validating webhook with the manager.
 func SetupIngressWebhook(mgr ctrl.Manager, ingressClassName string) error {
 	if ingressClassName == "" {
-		ingressClassName = ingressClassFieldName
+		ingressClassName = controller.DefaultIngressClassName
 	}
 
 	validator := &IngressValidator{
@@ -53,32 +45,7 @@ func (v *IngressValidator) ValidateCreate(
 	ctx context.Context,
 	obj *networkingv1.Ingress,
 ) (admission.Warnings, error) {
-	if !v.matchesIngressClass(obj) {
-		// Not our IngressClass, skip validation
-		return nil, nil
-	}
-
-	warnings, err := v.validate(obj)
-	if err != nil {
-		return warnings, err
-	}
-
-	// Check for conflicts with existing CRDs based on protocol
-	if v.DuplicateChecker != nil {
-		if v.isGRPCIngress(obj) {
-			// Check for conflicts with existing GRPCRoute CRDs
-			if conflictErr := v.checkGRPCRouteConflicts(ctx, obj); conflictErr != nil {
-				return warnings, conflictErr
-			}
-		} else {
-			// Check for conflicts with existing APIRoute CRDs
-			if conflictErr := v.checkAPIRouteConflicts(ctx, obj); conflictErr != nil {
-				return warnings, conflictErr
-			}
-		}
-	}
-
-	return warnings, nil
+	return v.validateAndCheckConflicts(ctx, obj)
 }
 
 // ValidateUpdate implements admission.CustomValidator.
@@ -86,26 +53,35 @@ func (v *IngressValidator) ValidateUpdate(
 	ctx context.Context,
 	_, newObj *networkingv1.Ingress,
 ) (admission.Warnings, error) {
-	if !v.matchesIngressClass(newObj) {
+	return v.validateAndCheckConflicts(ctx, newObj)
+}
+
+// validateAndCheckConflicts performs validation and conflict checking for an Ingress.
+// This is the shared logic between ValidateCreate and ValidateUpdate.
+func (v *IngressValidator) validateAndCheckConflicts(
+	ctx context.Context,
+	ingress *networkingv1.Ingress,
+) (admission.Warnings, error) {
+	if !v.matchesIngressClass(ingress) {
 		// Not our IngressClass, skip validation
 		return nil, nil
 	}
 
-	warnings, err := v.validate(newObj)
+	warnings, err := v.validate(ingress)
 	if err != nil {
 		return warnings, err
 	}
 
 	// Check for conflicts with existing CRDs based on protocol
 	if v.DuplicateChecker != nil {
-		if v.isGRPCIngress(newObj) {
+		if v.isGRPCIngress(ingress) {
 			// Check for conflicts with existing GRPCRoute CRDs
-			if conflictErr := v.checkGRPCRouteConflicts(ctx, newObj); conflictErr != nil {
+			if conflictErr := v.checkGRPCRouteConflicts(ctx, ingress); conflictErr != nil {
 				return warnings, conflictErr
 			}
 		} else {
 			// Check for conflicts with existing APIRoute CRDs
-			if conflictErr := v.checkAPIRouteConflicts(ctx, newObj); conflictErr != nil {
+			if conflictErr := v.checkAPIRouteConflicts(ctx, ingress); conflictErr != nil {
 				return warnings, conflictErr
 			}
 		}
@@ -115,11 +91,12 @@ func (v *IngressValidator) ValidateUpdate(
 }
 
 // ValidateDelete implements admission.CustomValidator.
+// No-op: Ingress deletion does not require validation because the gateway
+// controller handles cleanup of derived routes and backends via finalizers.
 func (v *IngressValidator) ValidateDelete(
 	_ context.Context,
 	_ *networkingv1.Ingress,
 ) (admission.Warnings, error) {
-	// No validation needed for delete
 	return nil, nil
 }
 
@@ -294,17 +271,9 @@ func (v *IngressValidator) validateIngressBackend(
 // validateTLS validates Ingress TLS configuration.
 func (v *IngressValidator) validateTLS(
 	tlsConfigs []networkingv1.IngressTLS,
-	rules []networkingv1.IngressRule,
+	_ []networkingv1.IngressRule,
 ) error {
 	var errs []string
-
-	// Collect all hosts from rules for cross-reference
-	ruleHosts := make(map[string]bool)
-	for _, rule := range rules {
-		if rule.Host != "" {
-			ruleHosts[rule.Host] = true
-		}
-	}
 
 	for i, tls := range tlsConfigs {
 		// Validate secret name
@@ -510,11 +479,11 @@ func (v *IngressValidator) isGRPCIngress(ingress *networkingv1.Ingress) bool {
 	if ingress.Annotations == nil {
 		return false
 	}
-	protocol, ok := ingress.Annotations[annotationProtocol]
+	protocol, ok := ingress.Annotations[controller.AnnotationProtocol]
 	if !ok {
 		return false
 	}
-	return strings.EqualFold(protocol, protocolGRPC)
+	return strings.EqualFold(protocol, controller.ProtocolGRPC)
 }
 
 // checkGRPCRouteConflicts checks if the gRPC Ingress conflicts with existing GRPCRoute CRDs.

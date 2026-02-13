@@ -316,7 +316,7 @@ spec:
 	require.NoError(t, err)
 	tmpFile.Close()
 
-	watcher := startConfigWatcher(app, tmpFile.Name(), logger)
+	watcher := startConfigWatcher(context.Background(), app, tmpFile.Name(), logger)
 	if watcher != nil {
 		_ = watcher.Stop()
 	}
@@ -428,7 +428,7 @@ func TestReloadComponents_WithHTTPRouteChangeP90(t *testing.T) {
 	newCfg := config.DefaultConfig()
 	newCfg.Metadata.Name = "test-reload-http-p90"
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 
 	// The stored config pointer should be updated to newCfg
 	assert.Equal(t, newCfg, app.config)

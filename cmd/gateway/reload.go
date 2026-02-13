@@ -11,13 +11,14 @@ import (
 
 // startConfigWatcher starts the configuration watcher.
 func startConfigWatcher(
+	ctx context.Context,
 	app *application,
 	configPath string,
 	logger observability.Logger,
 ) *config.Watcher {
 	watcher, err := config.NewWatcher(configPath, func(newCfg *config.GatewayConfig) {
 		logger.Info("configuration changed, reloading")
-		reloadComponents(app, newCfg, logger)
+		reloadComponents(ctx, app, newCfg, logger)
 	}, config.WithLogger(logger))
 
 	if err != nil {
@@ -25,7 +26,7 @@ func startConfigWatcher(
 		return nil
 	}
 
-	if err := watcher.Start(context.Background()); err != nil {
+	if err := watcher.Start(ctx); err != nil {
 		logger.Warn("failed to start config watcher", observability.Error(err))
 	}
 
@@ -42,6 +43,7 @@ func startConfigWatcher(
 // configuration require a full gateway restart. Only HTTP routes and
 // backends are reloaded here.
 func reloadComponents(
+	ctx context.Context,
 	app *application,
 	newCfg *config.GatewayConfig,
 	logger observability.Logger,
@@ -86,9 +88,7 @@ func reloadComponents(
 
 	// Reload HTTP backends (gRPC backends are NOT reloaded — see function comment)
 	if app.backendRegistry != nil {
-		ctx, cancel := context.WithTimeout(
-			context.Background(), 30*time.Second,
-		)
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
 		if err := app.backendRegistry.ReloadFromConfig(

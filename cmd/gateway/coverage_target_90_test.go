@@ -282,7 +282,7 @@ func TestStartConfigWatcher_WatcherStartError_Target90(t *testing.T) {
 	// Use a path that exists but is a directory (not a file)
 	// This should cause the watcher to fail to start
 	tmpDir := t.TempDir()
-	watcher := startConfigWatcher(app, tmpDir, logger)
+	watcher := startConfigWatcher(context.Background(), app, tmpDir, logger)
 	// The watcher is created but Start fails (error is logged)
 	assert.NotNil(t, watcher)
 }
@@ -325,7 +325,7 @@ spec:
 		config:          cfg,
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 	require.NotNil(t, watcher)
 
 	// Give it a moment to start
@@ -474,7 +474,7 @@ func TestReloadComponents_GatewayReloadError_Target90(t *testing.T) {
 	}
 
 	// Should not panic; gateway.Reload will reject invalid config
-	reloadComponents(app, invalidCfg, logger)
+	reloadComponents(context.Background(), app, invalidCfg, logger)
 
 	// Config should NOT be updated since reload failed
 	assert.Equal(t, cfg, app.config)
@@ -519,7 +519,7 @@ func TestReloadComponents_WithGRPCBackendsChange_Target90(t *testing.T) {
 	}
 
 	// Should not panic; gRPC config change warning is logged
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
