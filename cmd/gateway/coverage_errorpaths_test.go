@@ -129,7 +129,7 @@ spec:
 		config:          cfg,
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 	require.NotNil(t, watcher)
 
 	// Give the watcher time to start
@@ -199,7 +199,7 @@ func TestReloadComponents_BackendReloadErrorWithValidConfig(t *testing.T) {
 	}
 
 	// Should not panic; gateway.Reload rejects the config
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 
 	// Config should NOT be updated because gateway.Reload failed
 	assert.Equal(t, cfg, app.config)
@@ -248,7 +248,7 @@ func TestReloadComponents_RouteLoadErrorWithValidConfig(t *testing.T) {
 		},
 	}
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -385,7 +385,7 @@ func TestReloadComponents_RateLimiterNilConfig(t *testing.T) {
 	newCfg := validGatewayConfig("test-updated")
 	newCfg.Spec.RateLimit = nil
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -413,7 +413,7 @@ func TestReloadComponents_MaxSessionsNilConfig(t *testing.T) {
 	newCfg := validGatewayConfig("test-updated")
 	newCfg.Spec.MaxSessions = nil
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 

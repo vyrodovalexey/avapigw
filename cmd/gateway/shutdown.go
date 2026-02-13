@@ -26,7 +26,7 @@ func runGateway(app *application, configPath string, logger observability.Logger
 	}
 
 	startMetricsServerIfEnabled(app, logger)
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(ctx, app, configPath, logger)
 
 	waitForShutdown(app, watcher, logger)
 }

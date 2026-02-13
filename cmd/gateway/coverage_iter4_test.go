@@ -327,7 +327,7 @@ func TestStartConfigWatcher_NonExistentPath(t *testing.T) {
 	}
 
 	// Non-existent path should cause NewWatcher or Start to fail
-	watcher := startConfigWatcher(app, "/nonexistent/path/to/config.yaml", logger)
+	watcher := startConfigWatcher(context.Background(), app, "/nonexistent/path/to/config.yaml", logger)
 	// The watcher may or may not be nil depending on implementation
 	if watcher != nil {
 		done := make(chan struct{})
@@ -375,7 +375,7 @@ spec:
 		config:  cfg,
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 	require.NotNil(t, watcher, "watcher should be created for valid path")
 
 	// Give it a moment to start
@@ -627,7 +627,7 @@ func TestReloadComponents_BackendReloadErrorAfterGatewaySuccess(t *testing.T) {
 	}
 
 	// Should not panic
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 }
 
 // ============================================================
@@ -675,7 +675,7 @@ func TestReloadComponents_RouteReloadErrorAfterGatewaySuccess(t *testing.T) {
 	}
 
 	// Should not panic - gateway.Reload may reject this config
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 }
 
 // ============================================================

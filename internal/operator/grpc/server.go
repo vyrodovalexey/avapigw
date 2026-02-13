@@ -58,6 +58,9 @@ func DefaultRetryConfig() *RetryConfig {
 	}
 }
 
+// DefaultGracefulShutdownTimeout is the default maximum time to wait for graceful shutdown.
+const DefaultGracefulShutdownTimeout = 30 * time.Second
+
 // ServerConfig contains configuration for the gRPC server.
 type ServerConfig struct {
 	// Port is the port to listen on.
@@ -81,6 +84,10 @@ type ServerConfig struct {
 	// RetryConfig contains retry configuration for Apply/Delete operations.
 	// If nil, default retry configuration is used.
 	RetryConfig *RetryConfig
+
+	// GracefulShutdownTimeout is the maximum time to wait for graceful shutdown.
+	// If zero, DefaultGracefulShutdownTimeout (30s) is used.
+	GracefulShutdownTimeout time.Duration
 }
 
 // Server is the gRPC configuration server.
@@ -359,9 +366,6 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// gracefulShutdownTimeout is the maximum time to wait for graceful shutdown.
-const gracefulShutdownTimeout = 30 * time.Second
-
 // Stop stops the gRPC server with graceful shutdown timeout.
 func (s *Server) Stop() {
 	s.mu.Lock()
@@ -373,6 +377,11 @@ func (s *Server) Stop() {
 	s.closed = true
 
 	if s.grpcServer != nil {
+		timeout := s.config.GracefulShutdownTimeout
+		if timeout == 0 {
+			timeout = DefaultGracefulShutdownTimeout
+		}
+
 		// Use a channel to signal graceful shutdown completion
 		done := make(chan struct{})
 		go func() {
@@ -384,9 +393,9 @@ func (s *Server) Stop() {
 		select {
 		case <-done:
 			s.logger.Info("gRPC server gracefully stopped")
-		case <-time.After(gracefulShutdownTimeout):
+		case <-time.After(timeout):
 			s.logger.Warn("graceful shutdown timeout exceeded, forcing stop",
-				observability.Duration("timeout", gracefulShutdownTimeout),
+				observability.Duration("timeout", timeout),
 			)
 			s.grpcServer.Stop() // Force stop
 		}

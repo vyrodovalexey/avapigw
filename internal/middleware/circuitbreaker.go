@@ -14,10 +14,15 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
+// CircuitBreakerStateFunc is called when the circuit breaker changes state.
+// Parameters: name (circuit breaker name), state (0=closed, 1=half-open, 2=open).
+type CircuitBreakerStateFunc func(name string, state int)
+
 // CircuitBreaker wraps gobreaker.CircuitBreaker.
 type CircuitBreaker struct {
-	cb     *gobreaker.CircuitBreaker
-	logger observability.Logger
+	cb            *gobreaker.CircuitBreaker
+	logger        observability.Logger
+	stateCallback CircuitBreakerStateFunc
 }
 
 // CircuitBreakerOption is a functional option for configuring the circuit breaker.
@@ -27,6 +32,13 @@ type CircuitBreakerOption func(*CircuitBreaker)
 func WithCircuitBreakerLogger(logger observability.Logger) CircuitBreakerOption {
 	return func(cb *CircuitBreaker) {
 		cb.logger = logger
+	}
+}
+
+// WithCircuitBreakerStateCallback sets a callback for circuit breaker state changes.
+func WithCircuitBreakerStateCallback(fn CircuitBreakerStateFunc) CircuitBreakerOption {
+	return func(cb *CircuitBreaker) {
+		cb.stateCallback = fn
 	}
 }
 
@@ -62,6 +74,9 @@ func NewCircuitBreaker(
 				observability.String("from", from.String()),
 				observability.String("to", to.String()),
 			)
+			if cb.stateCallback != nil {
+				cb.stateCallback(name, int(to))
+			}
 		},
 	}
 
@@ -140,9 +155,11 @@ func CircuitBreakerMiddleware(cb *CircuitBreaker) func(http.Handler) http.Handle
 }
 
 // CircuitBreakerFromConfig creates circuit breaker middleware from gateway config.
+// Additional CircuitBreakerOption values are forwarded to NewCircuitBreaker.
 func CircuitBreakerFromConfig(
 	cfg *config.CircuitBreakerConfig,
 	logger observability.Logger,
+	opts ...CircuitBreakerOption,
 ) func(http.Handler) http.Handler {
 	if cfg == nil || !cfg.Enabled {
 		return func(next http.Handler) http.Handler {
@@ -150,11 +167,16 @@ func CircuitBreakerFromConfig(
 		}
 	}
 
+	allOpts := append(
+		[]CircuitBreakerOption{WithCircuitBreakerLogger(logger)},
+		opts...,
+	)
+
 	cb := NewCircuitBreaker(
 		"gateway",
 		cfg.Threshold,
 		cfg.Timeout.Duration(),
-		WithCircuitBreakerLogger(logger),
+		allOpts...,
 	)
 
 	return CircuitBreakerMiddleware(cb)

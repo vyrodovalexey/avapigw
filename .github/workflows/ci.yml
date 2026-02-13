@@ -147,6 +147,66 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
+  # Grafana Dashboard Tests (parallel with integration tests)
+  # ===========================================================================
+
+  grafana-dashboard-tests:
+    name: Grafana Dashboard Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    services:
+      victoriametrics:
+        image: victoriametrics/victoria-metrics:v1.108.1
+        ports:
+          - 8428:8428
+      grafana:
+        image: grafana/grafana:11.5.2
+        ports:
+          - 3000:3000
+        env:
+          GF_SECURITY_ADMIN_USER: admin
+          GF_SECURITY_ADMIN_PASSWORD: admin
+          GF_AUTH_ANONYMOUS_ENABLED: "true"
+          GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+          GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: ""
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Wait for Grafana to be ready
+        run: |
+          echo "Waiting for Grafana..."
+          for i in {1..30}; do
+            if curl -sf -u admin:admin http://127.0.0.1:3000/api/health; then
+              echo ""
+              echo "Grafana is ready!"
+              break
+            fi
+            echo "Attempt $i: Waiting for Grafana..."
+            sleep 2
+          done
+
+      - name: Validate dashboard JSON syntax
+        run: |
+          echo "==> Validating dashboard JSON syntax..."
+          for file in monitoring/grafana/*.json; do
+            if jq empty "$file" 2>/dev/null; then
+              echo "  ✓ $(basename "$file"): valid JSON"
+            else
+              echo "  ✗ $(basename "$file"): invalid JSON"
+              exit 1
+            fi
+          done
+
+      - name: Publish dashboards and validate
+        run: |
+          chmod +x test/monitoring/scripts/publish-dashboards.sh
+          ./test/monitoring/scripts/publish-dashboards.sh \
+            http://127.0.0.1:3000 admin admin
+
+  # ===========================================================================
   # Integration and E2E Tests (with backend services)
   # ===========================================================================
 
@@ -660,7 +720,7 @@ jobs:
     name: SonarCloud Analysis
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [lint, govulncheck, unit-tests, functional-tests, integration-tests]
+    needs: [lint, govulncheck, unit-tests, functional-tests, integration-tests, grafana-dashboard-tests]
     permissions:
       contents: read
     steps:
@@ -1398,6 +1458,32 @@ jobs:
           helm template avapigw helm/avapigw --set operator.enabled=true --set operator.webhook.enabled=false | kubectl apply --dry-run=client -f -
           echo "Kubernetes manifest validation with operator successful!"
 
+      - name: Lint monitoring charts
+        run: |
+          echo "==> Linting test monitoring charts..."
+          helm lint test/monitoring/otel-collector
+          helm lint test/monitoring/vmagent
+
+      - name: Validate monitoring chart templates
+        run: |
+          echo "==> Validating monitoring chart templates..."
+          helm template otel-collector test/monitoring/otel-collector > /dev/null
+          helm template vmagent test/monitoring/vmagent > /dev/null
+          echo "Monitoring chart template validation successful!"
+
+      - name: Dry-run install monitoring charts
+        run: |
+          echo "==> Running Helm dry-run for monitoring charts..."
+          helm install --dry-run --debug otel-collector test/monitoring/otel-collector
+          helm install --dry-run --debug vmagent test/monitoring/vmagent
+
+      - name: Validate monitoring chart Kubernetes manifests
+        run: |
+          echo "==> Validating monitoring chart Kubernetes manifests..."
+          helm template otel-collector test/monitoring/otel-collector | kubectl apply --dry-run=client -f -
+          helm template vmagent test/monitoring/vmagent | kubectl apply --dry-run=client -f -
+          echo "Monitoring chart Kubernetes manifest validation successful!"
+
   # ===========================================================================
   # Helm Chart Install Test (TAG - Full Install)
   # ===========================================================================
@@ -1453,6 +1539,19 @@ jobs:
             --set image.pullPolicy=Never \
             --wait \
             --timeout 5m
+
+      - name: Install monitoring charts
+        run: |
+          echo "==> Installing monitoring charts..."
+          helm install otel-collector test/monitoring/otel-collector \
+            --namespace avapigw-test \
+            --wait \
+            --timeout 3m
+          helm install vmagent test/monitoring/vmagent \
+            --namespace avapigw-test \
+            --wait \
+            --timeout 3m
+          echo "Monitoring charts installed successfully!"
 
       - name: Verify deployment
         run: |

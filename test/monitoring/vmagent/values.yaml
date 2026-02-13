@@ -6,7 +6,7 @@ image:
   pullPolicy: IfNotPresent
 
 remoteWrite:
-  url: "http://victoriametrics:8428/api/v1/write"
+  url: "http://host.docker.internal:8428/api/v1/write"
 
 scrapeConfig:
   scrapeInterval: 15s

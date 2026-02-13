@@ -285,6 +285,7 @@ The operator enables Kubernetes-native configuration management through CRDs wit
 | `operator.leaderElection.resourceName` | Leader election resource name | `avapigw-operator-leader` |
 | `operator.grpc.port` | gRPC server port | `9444` |
 | `operator.grpc.tls.mode` | gRPC TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |
+| `operator.grpc.gracefulShutdownTimeout` | gRPC server graceful shutdown timeout | `30s` |
 | `operator.webhook.enabled` | Enable admission webhooks | `true` |
 | `operator.webhook.port` | Webhook server port | `9443` |
 | `operator.webhook.tls.mode` | Webhook TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |

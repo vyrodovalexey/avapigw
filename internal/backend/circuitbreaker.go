@@ -9,24 +9,46 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// CircuitBreakerManagerOption is a functional option for configuring CircuitBreakerManager.
+type CircuitBreakerManagerOption func(*CircuitBreakerManager)
+
+// WithCircuitBreakerManagerStateCallback sets a callback for circuit breaker state changes.
+func WithCircuitBreakerManagerStateCallback(
+	fn middleware.CircuitBreakerStateFunc,
+) CircuitBreakerManagerOption {
+	return func(m *CircuitBreakerManager) {
+		m.stateCallback = fn
+	}
+}
+
 // CircuitBreakerManager manages per-backend circuit breakers.
 // It creates and caches circuit breakers for each backend based on their configuration.
 type CircuitBreakerManager struct {
-	breakers map[string]*middleware.CircuitBreaker
-	mu       sync.RWMutex
-	logger   observability.Logger
+	breakers      map[string]*middleware.CircuitBreaker
+	mu            sync.RWMutex
+	logger        observability.Logger
+	stateCallback middleware.CircuitBreakerStateFunc
 }
 
 // NewCircuitBreakerManager creates a new circuit breaker manager.
-func NewCircuitBreakerManager(logger observability.Logger) *CircuitBreakerManager {
+func NewCircuitBreakerManager(
+	logger observability.Logger,
+	opts ...CircuitBreakerManagerOption,
+) *CircuitBreakerManager {
 	if logger == nil {
 		logger = observability.NopLogger()
 	}
 
-	return &CircuitBreakerManager{
+	m := &CircuitBreakerManager{
 		breakers: make(map[string]*middleware.CircuitBreaker),
 		logger:   logger,
 	}
+
+	for _, opt := range opts {
+		opt(m)
+	}
+
+	return m
 }
 
 // GetOrCreate returns the circuit breaker for a backend, creating if needed.
@@ -71,14 +93,25 @@ func (m *CircuitBreakerManager) GetOrCreate(backend *config.Backend) *middleware
 }
 
 // createCircuitBreaker creates a new circuit breaker from backend configuration.
-func (m *CircuitBreakerManager) createCircuitBreaker(backend *config.Backend) *middleware.CircuitBreaker {
+func (m *CircuitBreakerManager) createCircuitBreaker(
+	backend *config.Backend,
+) *middleware.CircuitBreaker {
 	cfg := backend.CircuitBreaker
+
+	opts := []middleware.CircuitBreakerOption{
+		middleware.WithCircuitBreakerLogger(m.logger),
+	}
+	if m.stateCallback != nil {
+		opts = append(opts,
+			middleware.WithCircuitBreakerStateCallback(m.stateCallback),
+		)
+	}
 
 	return middleware.NewCircuitBreaker(
 		"backend-"+backend.Name,
 		cfg.Threshold,
 		cfg.Timeout.Duration(),
-		middleware.WithCircuitBreakerLogger(m.logger),
+		opts...,
 	)
 }
 

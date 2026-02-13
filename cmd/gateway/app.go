@@ -40,7 +40,9 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	healthChecker := health.NewChecker(version, logger)
 	auditLogger := initAuditLogger(cfg, logger)
 
-	backendRegistry := backend.NewRegistry(logger)
+	backendRegistry := backend.NewRegistry(
+		logger, backend.WithRegistryMetrics(metrics),
+	)
 	if err := backendRegistry.LoadFromConfig(cfg.Spec.Backends); err != nil {
 		fatalWithSync(logger, "failed to load backends", observability.Error(err))
 		return nil // unreachable in production; allows test to continue

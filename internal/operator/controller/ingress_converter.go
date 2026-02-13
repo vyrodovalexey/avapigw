@@ -12,7 +12,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
-	"github.com/vyrodovalexey/avapigw/internal/operator/keys"
 )
 
 // ConvertedConfig holds the converted configuration from an Ingress resource.
@@ -153,7 +152,10 @@ func (c *IngressConverter) ConvertIngress(
 			routeKey := ingressGRPCDefaultRouteKey(ingress)
 			backendKey := ingressGRPCDefaultBackendKey(ingress)
 
-			grpcRoute := c.buildGRPCDefaultRoute(routeKey, annotations)
+			grpcRoute, err := c.buildGRPCDefaultRoute(routeKey, *ingress.Spec.DefaultBackend, annotations)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build default gRPC route: %w", err)
+			}
 			routeJSON, err := json.Marshal(grpcRoute)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal default gRPC route: %w", err)
@@ -172,7 +174,10 @@ func (c *IngressConverter) ConvertIngress(
 			routeKey := ingressDefaultRouteKey(ingress)
 			backendKey := ingressDefaultBackendKey(ingress)
 
-			route := c.buildDefaultRoute(routeKey, annotations)
+			route, err := c.buildDefaultRoute(routeKey, *ingress.Spec.DefaultBackend, annotations)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build default route: %w", err)
+			}
 			routeJSON, err := json.Marshal(route)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal default route: %w", err)
@@ -247,8 +252,9 @@ func (c *IngressConverter) buildRoute(
 // buildDefaultRoute creates a catch-all route for the default backend.
 func (c *IngressConverter) buildDefaultRoute(
 	name string,
+	backend networkingv1.IngressBackend,
 	annotations map[string]string,
-) *config.Route {
+) (*config.Route, error) {
 	route := &config.Route{
 		Name: name,
 		Match: []config.RouteMatch{
@@ -258,8 +264,17 @@ func (c *IngressConverter) buildDefaultRoute(
 		},
 	}
 
+	// Build route destination from default backend
+	dest, err := buildDestination(backend)
+	if err != nil {
+		return nil, err
+	}
+	route.Route = []config.RouteDestination{
+		{Destination: *dest, Weight: 100},
+	}
+
 	c.applyRouteAnnotations(route, annotations)
-	return route
+	return route, nil
 }
 
 // buildBackend creates a config.Backend from an Ingress backend reference.
@@ -331,27 +346,7 @@ func (c *IngressConverter) applyRetryAnnotations(
 	route *config.Route,
 	annotations map[string]string,
 ) {
-	attemptsStr, hasAttempts := annotations[AnnotationRetryAttempts]
-	perTryTimeout, hasPerTry := annotations[AnnotationRetryPerTryTimeout]
-	retryOn, hasRetryOn := annotations[AnnotationRetryOn]
-
-	if !hasAttempts && !hasPerTry && !hasRetryOn {
-		return
-	}
-
-	retry := &config.RetryPolicy{}
-	if hasAttempts {
-		if v, err := strconv.Atoi(attemptsStr); err == nil {
-			retry.Attempts = v
-		}
-	}
-	if hasPerTry {
-		retry.PerTryTimeout = parseDuration(perTryTimeout)
-	}
-	if hasRetryOn {
-		retry.RetryOn = retryOn
-	}
-	route.Retries = retry
+	route.Retries = parseRetryPolicy(annotations)
 }
 
 // applyRateLimitAnnotations applies rate limit annotations to a route.
@@ -359,30 +354,7 @@ func (c *IngressConverter) applyRateLimitAnnotations(
 	route *config.Route,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationRateLimitEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	rl := &config.RateLimitConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-
-	if v, ok := annotations[AnnotationRateLimitRPS]; ok {
-		if rps, err := strconv.Atoi(v); err == nil {
-			rl.RequestsPerSecond = rps
-		}
-	}
-	if v, ok := annotations[AnnotationRateLimitBurst]; ok {
-		if burst, err := strconv.Atoi(v); err == nil {
-			rl.Burst = burst
-		}
-	}
-	if v, ok := annotations[AnnotationRateLimitPerClient]; ok {
-		rl.PerClient = v == annotationValueTrue
-	}
-
-	route.RateLimit = rl
+	route.RateLimit = parseRateLimitConfig(annotations)
 }
 
 // applyCORSAnnotations applies CORS annotations to a route.
@@ -390,34 +362,7 @@ func (c *IngressConverter) applyCORSAnnotations(
 	route *config.Route,
 	annotations map[string]string,
 ) {
-	origins, hasOrigins := annotations[AnnotationCORSAllowOrigins]
-	if !hasOrigins {
-		return
-	}
-
-	cors := &config.CORSConfig{
-		AllowOrigins: splitCSV(origins),
-	}
-
-	if v, ok := annotations[AnnotationCORSAllowMethods]; ok {
-		cors.AllowMethods = splitCSV(v)
-	}
-	if v, ok := annotations[AnnotationCORSAllowHeaders]; ok {
-		cors.AllowHeaders = splitCSV(v)
-	}
-	if v, ok := annotations[AnnotationCORSExposeHeaders]; ok {
-		cors.ExposeHeaders = splitCSV(v)
-	}
-	if v, ok := annotations[AnnotationCORSMaxAge]; ok {
-		if maxAge, err := strconv.Atoi(v); err == nil {
-			cors.MaxAge = maxAge
-		}
-	}
-	if v, ok := annotations[AnnotationCORSAllowCredentials]; ok {
-		cors.AllowCredentials = v == annotationValueTrue
-	}
-
-	route.CORS = cors
+	route.CORS = parseCORSConfig(annotations)
 }
 
 // applyRewriteAnnotations applies rewrite annotations to a route.
@@ -469,34 +414,7 @@ func (c *IngressConverter) applySecurityAnnotations(
 	route *config.Route,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationSecurityEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	sec := &config.SecurityConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-
-	xFrame, hasXFrame := annotations[AnnotationSecurityXFrameOptions]
-	xContent, hasXContent := annotations[AnnotationSecurityXContentType]
-	xXSS, hasXXSS := annotations[AnnotationSecurityXXSSProtection]
-
-	if hasXFrame || hasXContent || hasXXSS {
-		headers := &config.SecurityHeadersConfig{Enabled: true}
-		if hasXFrame {
-			headers.XFrameOptions = xFrame
-		}
-		if hasXContent {
-			headers.XContentTypeOptions = xContent
-		}
-		if hasXXSS {
-			headers.XXSSProtection = xXSS
-		}
-		sec.Headers = headers
-	}
-
-	route.Security = sec
+	route.Security = parseSecurityConfig(annotations)
 }
 
 // applyEncodingAnnotations applies encoding annotations to a route.
@@ -504,21 +422,7 @@ func (c *IngressConverter) applyEncodingAnnotations(
 	route *config.Route,
 	annotations map[string]string,
 ) {
-	reqCT, hasReq := annotations[AnnotationEncodingRequestContentType]
-	resCT, hasRes := annotations[AnnotationEncodingResponseContentType]
-
-	if !hasReq && !hasRes {
-		return
-	}
-
-	enc := &config.EncodingConfig{}
-	if hasReq {
-		enc.RequestEncoding = reqCT
-	}
-	if hasRes {
-		enc.ResponseEncoding = resCT
-	}
-	route.Encoding = enc
+	route.Encoding = parseEncodingConfig(annotations)
 }
 
 // applyCacheAnnotations applies cache annotations to a route.
@@ -526,18 +430,7 @@ func (c *IngressConverter) applyCacheAnnotations(
 	route *config.Route,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationCacheEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	cache := &config.CacheConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-	if v, ok := annotations[AnnotationCacheTTL]; ok {
-		cache.TTL = parseDuration(v)
-	}
-	route.Cache = cache
+	route.Cache = parseCacheConfig(annotations)
 }
 
 // applyMaxSessionsAnnotations applies max sessions annotations to a route.
@@ -653,28 +546,7 @@ func (c *IngressConverter) applyCircuitBreakerAnnotations(
 	backend *config.Backend,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationCircuitBreakerEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	cb := &config.CircuitBreakerConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-	if v, ok := annotations[AnnotationCircuitBreakerThreshold]; ok {
-		if t, err := strconv.Atoi(v); err == nil {
-			cb.Threshold = t
-		}
-	}
-	if v, ok := annotations[AnnotationCircuitBreakerTimeout]; ok {
-		cb.Timeout = parseDuration(v)
-	}
-	if v, ok := annotations[AnnotationCircuitBreakerHalfOpen]; ok {
-		if h, err := strconv.Atoi(v); err == nil {
-			cb.HalfOpenRequests = h
-		}
-	}
-	backend.CircuitBreaker = cb
+	backend.CircuitBreaker = parseCircuitBreakerConfig(annotations)
 }
 
 // buildURIMatch creates a URIMatch from an Ingress path.
@@ -722,7 +594,7 @@ func resolveServicePort(port networkingv1.ServiceBackendPort) int {
 	}
 	// If only name is specified, use a default port.
 	// The actual resolution would happen at the gateway level.
-	return 80
+	return DefaultHTTPPort
 }
 
 // buildTLSHostSet creates a set of hosts that have TLS configured.
@@ -767,9 +639,8 @@ func ingressDefaultRouteKey(ingress *networkingv1.Ingress) string {
 
 // ingressDefaultBackendKey generates a key for the default backend.
 func ingressDefaultBackendKey(ingress *networkingv1.Ingress) string {
-	nsName := keys.ResourceKey(ingress.Namespace, ingress.Name)
-	return fmt.Sprintf("ingress-%s-default-backend",
-		strings.ReplaceAll(nsName, "/", "-"))
+	return fmt.Sprintf("ingress-%s-%s-default-backend",
+		ingress.Namespace, ingress.Name)
 }
 
 // splitCSV splits a comma-separated string into trimmed parts.
@@ -907,8 +778,9 @@ func buildStringMatch(value, matchType string) *config.StringMatch {
 // buildGRPCDefaultRoute creates a catch-all gRPC route for the default backend.
 func (c *IngressConverter) buildGRPCDefaultRoute(
 	name string,
+	backend networkingv1.IngressBackend,
 	annotations map[string]string,
-) *config.GRPCRoute {
+) (*config.GRPCRoute, error) {
 	route := &config.GRPCRoute{
 		Name: name,
 		Match: []config.GRPCRouteMatch{
@@ -919,8 +791,17 @@ func (c *IngressConverter) buildGRPCDefaultRoute(
 		},
 	}
 
+	// Build route destination from default backend
+	dest, err := buildDestination(backend)
+	if err != nil {
+		return nil, err
+	}
+	route.Route = []config.RouteDestination{
+		{Destination: *dest, Weight: 100},
+	}
+
 	c.applyGRPCRouteAnnotations(route, annotations)
-	return route
+	return route, nil
 }
 
 // buildGRPCBackend creates a config.GRPCBackend from an Ingress backend reference.
@@ -1021,30 +902,7 @@ func (c *IngressConverter) applyGRPCRateLimitAnnotations(
 	route *config.GRPCRoute,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationRateLimitEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	rl := &config.RateLimitConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-
-	if v, ok := annotations[AnnotationRateLimitRPS]; ok {
-		if rps, err := strconv.Atoi(v); err == nil {
-			rl.RequestsPerSecond = rps
-		}
-	}
-	if v, ok := annotations[AnnotationRateLimitBurst]; ok {
-		if burst, err := strconv.Atoi(v); err == nil {
-			rl.Burst = burst
-		}
-	}
-	if v, ok := annotations[AnnotationRateLimitPerClient]; ok {
-		rl.PerClient = v == annotationValueTrue
-	}
-
-	route.RateLimit = rl
+	route.RateLimit = parseRateLimitConfig(annotations)
 }
 
 // applyGRPCCORSAnnotations applies CORS annotations to a gRPC route.
@@ -1052,34 +910,7 @@ func (c *IngressConverter) applyGRPCCORSAnnotations(
 	route *config.GRPCRoute,
 	annotations map[string]string,
 ) {
-	origins, hasOrigins := annotations[AnnotationCORSAllowOrigins]
-	if !hasOrigins {
-		return
-	}
-
-	cors := &config.CORSConfig{
-		AllowOrigins: splitCSV(origins),
-	}
-
-	if v, ok := annotations[AnnotationCORSAllowMethods]; ok {
-		cors.AllowMethods = splitCSV(v)
-	}
-	if v, ok := annotations[AnnotationCORSAllowHeaders]; ok {
-		cors.AllowHeaders = splitCSV(v)
-	}
-	if v, ok := annotations[AnnotationCORSExposeHeaders]; ok {
-		cors.ExposeHeaders = splitCSV(v)
-	}
-	if v, ok := annotations[AnnotationCORSMaxAge]; ok {
-		if maxAge, err := strconv.Atoi(v); err == nil {
-			cors.MaxAge = maxAge
-		}
-	}
-	if v, ok := annotations[AnnotationCORSAllowCredentials]; ok {
-		cors.AllowCredentials = v == annotationValueTrue
-	}
-
-	route.CORS = cors
+	route.CORS = parseCORSConfig(annotations)
 }
 
 // applyGRPCSecurityAnnotations applies security annotations to a gRPC route.
@@ -1087,34 +918,7 @@ func (c *IngressConverter) applyGRPCSecurityAnnotations(
 	route *config.GRPCRoute,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationSecurityEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	sec := &config.SecurityConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-
-	xFrame, hasXFrame := annotations[AnnotationSecurityXFrameOptions]
-	xContent, hasXContent := annotations[AnnotationSecurityXContentType]
-	xXSS, hasXXSS := annotations[AnnotationSecurityXXSSProtection]
-
-	if hasXFrame || hasXContent || hasXXSS {
-		headers := &config.SecurityHeadersConfig{Enabled: true}
-		if hasXFrame {
-			headers.XFrameOptions = xFrame
-		}
-		if hasXContent {
-			headers.XContentTypeOptions = xContent
-		}
-		if hasXXSS {
-			headers.XXSSProtection = xXSS
-		}
-		sec.Headers = headers
-	}
-
-	route.Security = sec
+	route.Security = parseSecurityConfig(annotations)
 }
 
 // applyGRPCEncodingAnnotations applies encoding annotations to a gRPC route.
@@ -1122,21 +926,7 @@ func (c *IngressConverter) applyGRPCEncodingAnnotations(
 	route *config.GRPCRoute,
 	annotations map[string]string,
 ) {
-	reqCT, hasReq := annotations[AnnotationEncodingRequestContentType]
-	resCT, hasRes := annotations[AnnotationEncodingResponseContentType]
-
-	if !hasReq && !hasRes {
-		return
-	}
-
-	enc := &config.EncodingConfig{}
-	if hasReq {
-		enc.RequestEncoding = reqCT
-	}
-	if hasRes {
-		enc.ResponseEncoding = resCT
-	}
-	route.Encoding = enc
+	route.Encoding = parseEncodingConfig(annotations)
 }
 
 // applyGRPCCacheAnnotations applies cache annotations to a gRPC route.
@@ -1144,18 +934,7 @@ func (c *IngressConverter) applyGRPCCacheAnnotations(
 	route *config.GRPCRoute,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationCacheEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	cache := &config.CacheConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-	if v, ok := annotations[AnnotationCacheTTL]; ok {
-		cache.TTL = parseDuration(v)
-	}
-	route.Cache = cache
+	route.Cache = parseCacheConfig(annotations)
 }
 
 // applyGRPCTLSAnnotations applies TLS-related annotations to a gRPC route.
@@ -1235,28 +1014,7 @@ func (c *IngressConverter) applyGRPCCircuitBreakerAnnotations(
 	backend *config.GRPCBackend,
 	annotations map[string]string,
 ) {
-	enabledStr, hasEnabled := annotations[AnnotationCircuitBreakerEnabled]
-	if !hasEnabled {
-		return
-	}
-
-	cb := &config.CircuitBreakerConfig{
-		Enabled: enabledStr == annotationValueTrue,
-	}
-	if v, ok := annotations[AnnotationCircuitBreakerThreshold]; ok {
-		if t, err := strconv.Atoi(v); err == nil {
-			cb.Threshold = t
-		}
-	}
-	if v, ok := annotations[AnnotationCircuitBreakerTimeout]; ok {
-		cb.Timeout = parseDuration(v)
-	}
-	if v, ok := annotations[AnnotationCircuitBreakerHalfOpen]; ok {
-		if h, err := strconv.Atoi(v); err == nil {
-			cb.HalfOpenRequests = h
-		}
-	}
-	backend.CircuitBreaker = cb
+	backend.CircuitBreaker = parseCircuitBreakerConfig(annotations)
 }
 
 // applyGRPCConnectionPoolAnnotations applies connection pool annotations to a gRPC backend.
@@ -1320,7 +1078,6 @@ func ingressGRPCDefaultRouteKey(ingress *networkingv1.Ingress) string {
 
 // ingressGRPCDefaultBackendKey generates a key for the default gRPC backend.
 func ingressGRPCDefaultBackendKey(ingress *networkingv1.Ingress) string {
-	nsName := keys.ResourceKey(ingress.Namespace, ingress.Name)
-	return fmt.Sprintf("ingress-grpc-%s-default-backend",
-		strings.ReplaceAll(nsName, "/", "-"))
+	return fmt.Sprintf("ingress-grpc-%s-%s-default-backend",
+		ingress.Namespace, ingress.Name)
 }

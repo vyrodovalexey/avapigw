@@ -325,9 +325,9 @@ gateway:
       path: /metrics
       port: 9090
     tracing:
-      enabled: false
+      enabled: true
       samplingRate: 1.0
-      otlpEndpoint: ""
+      otlpEndpoint: "otel-collector.avapigw-test.svc:4317"
       serviceName: avapigw
     logging:
       level: info

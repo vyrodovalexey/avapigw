@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"reflect"
 	"sync/atomic"
@@ -412,7 +413,7 @@ spec:
 		config:  cfg,
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 	assert.NotNil(t, watcher)
 
 	if watcher != nil {

@@ -124,6 +124,8 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
 - **Boolean ENV Override Support** - Symmetric true/false/yes/no/1/0 handling for all boolean environment variables (case-insensitive)
 - **Circuit Breaker Limitation** - Circuit breaker does not support runtime reconfiguration (requires restart)
+- **Shared Annotation Parsers** - Consolidated HTTP/gRPC annotation handling for consistent ingress controller behavior
+- **Configurable gRPC Shutdown** - Configurable graceful shutdown timeout for operator gRPC server (default: 30s)
 - **High Test Coverage** - 94.1% overall test coverage with 96.6% for proxy package
 
 ## 📋 Table of Contents

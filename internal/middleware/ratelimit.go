@@ -36,18 +36,22 @@ type clientEntry struct {
 
 // RateLimiter provides rate limiting functionality.
 type RateLimiter struct {
-	limiter    *rate.Limiter
-	perClient  bool
-	clients    map[string]*clientEntry
-	mu         sync.RWMutex
-	rps        int
-	burst      int
-	logger     observability.Logger
-	clientTTL  time.Duration
-	maxClients int
-	stopCh     chan struct{}
-	stopped    bool
+	limiter     *rate.Limiter
+	perClient   bool
+	clients     map[string]*clientEntry
+	mu          sync.RWMutex
+	rps         int
+	burst       int
+	logger      observability.Logger
+	clientTTL   time.Duration
+	maxClients  int
+	stopCh      chan struct{}
+	stopped     bool
+	hitCallback RateLimitHitFunc
 }
+
+// RateLimitHitFunc is called when a rate limit hit occurs.
+type RateLimitHitFunc func(route string)
 
 // RateLimiterOption is a functional option for configuring the rate limiter.
 type RateLimiterOption func(*RateLimiter)
@@ -70,6 +74,13 @@ func WithClientTTL(ttl time.Duration) RateLimiterOption {
 func WithMaxClients(maxClients int) RateLimiterOption {
 	return func(rl *RateLimiter) {
 		rl.maxClients = maxClients
+	}
+}
+
+// WithRateLimitHitCallback sets a callback invoked when a rate limit hit occurs.
+func WithRateLimitHitCallback(fn RateLimitHitFunc) RateLimiterOption {
+	return func(rl *RateLimiter) {
+		rl.hitCallback = fn
 	}
 }
 
@@ -187,6 +198,10 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 					observability.String("path", r.URL.Path),
 				)
 
+				if rl.hitCallback != nil {
+					rl.hitCallback(r.URL.Path)
+				}
+
 				w.Header().Set(HeaderContentType, ContentTypeJSON)
 				w.Header().Set(HeaderRetryAfter, "1")
 				w.WriteHeader(http.StatusTooManyRequests)
@@ -202,9 +217,11 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 // RateLimitFromConfig creates rate limit middleware from gateway config.
 // Returns the middleware and the rate limiter for lifecycle management.
 // The caller should call Stop() on the rate limiter during shutdown.
+// Additional RateLimiterOption values are forwarded to NewRateLimiter.
 func RateLimitFromConfig(
 	cfg *config.RateLimitConfig,
 	logger observability.Logger,
+	opts ...RateLimiterOption,
 ) (func(http.Handler) http.Handler, *RateLimiter) {
 	if cfg == nil || !cfg.Enabled {
 		return func(next http.Handler) http.Handler {
@@ -212,7 +229,11 @@ func RateLimitFromConfig(
 		}, nil
 	}
 
-	rl := NewRateLimiter(cfg.RequestsPerSecond, cfg.Burst, cfg.PerClient, WithRateLimiterLogger(logger))
+	allOpts := append(
+		[]RateLimiterOption{WithRateLimiterLogger(logger)},
+		opts...,
+	)
+	rl := NewRateLimiter(cfg.RequestsPerSecond, cfg.Burst, cfg.PerClient, allOpts...)
 
 	// Start automatic cleanup for per-client rate limiting to prevent memory leaks
 	if cfg.PerClient {

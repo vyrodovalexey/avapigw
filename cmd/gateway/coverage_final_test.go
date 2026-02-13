@@ -287,7 +287,7 @@ func TestReloadComponents_WithRouterError(t *testing.T) {
 	}
 
 	// Should not panic; error is logged
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 }
 
 func TestReloadComponents_WithBackendError(t *testing.T) {
@@ -329,7 +329,7 @@ func TestReloadComponents_WithBackendError(t *testing.T) {
 	}
 
 	// Should not panic
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -351,7 +351,7 @@ func TestStartConfigWatcher_InvalidPath(t *testing.T) {
 
 	// Non-existent path - watcher is created but Start fails (logged as warning)
 	// The function still returns the watcher (it's created successfully, just can't start)
-	watcher := startConfigWatcher(app, "/non/existent/path.yaml", logger)
+	watcher := startConfigWatcher(context.Background(), app, "/non/existent/path.yaml", logger)
 	// The watcher is returned even if Start fails (error is logged)
 	// Note: We don't call Stop() here because the watch goroutine was never started
 	// (Start failed), so Stop would hang waiting for stoppedCh
@@ -391,7 +391,7 @@ spec:
 		config:  cfg,
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 	if watcher != nil {
 		_ = watcher.Stop()
 	}
@@ -629,7 +629,7 @@ spec:
 		auditLogger:     audit.NewNoopLogger(),
 	}
 
-	watcher := startConfigWatcher(app, configPath, logger)
+	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
 
 	done := make(chan struct{})
 	go func() {

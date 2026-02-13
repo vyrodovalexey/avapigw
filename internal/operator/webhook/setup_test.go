@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/operator/controller"
 )
 
 // mockManager implements a minimal ctrl.Manager for testing webhook setup.
@@ -128,7 +129,7 @@ func TestSetupIngressWebhook_ValidatorCreation(t *testing.T) {
 		{
 			name:             "default ingress class name",
 			ingressClassName: "",
-			wantClassName:    ingressClassFieldName,
+			wantClassName:    controller.DefaultIngressClassName,
 		},
 		{
 			name:             "custom ingress class name",
@@ -153,7 +154,7 @@ func TestSetupIngressWebhook_ValidatorCreation(t *testing.T) {
 			// Determine the expected class name
 			expectedClassName := tt.ingressClassName
 			if expectedClassName == "" {
-				expectedClassName = ingressClassFieldName
+				expectedClassName = controller.DefaultIngressClassName
 			}
 
 			validator := &IngressValidator{
@@ -308,28 +309,28 @@ func TestIngressValidator_IsGRPCIngress(t *testing.T) {
 		{
 			name: "grpc protocol annotation",
 			annotations: map[string]string{
-				annotationProtocol: protocolGRPC,
+				controller.AnnotationProtocol: controller.ProtocolGRPC,
 			},
 			want: true,
 		},
 		{
 			name: "grpc protocol annotation uppercase",
 			annotations: map[string]string{
-				annotationProtocol: "GRPC",
+				controller.AnnotationProtocol: "GRPC",
 			},
 			want: true,
 		},
 		{
 			name: "grpc protocol annotation mixed case",
 			annotations: map[string]string{
-				annotationProtocol: "GrPc",
+				controller.AnnotationProtocol: "GrPc",
 			},
 			want: true,
 		},
 		{
 			name: "http protocol annotation",
 			annotations: map[string]string{
-				annotationProtocol: "http",
+				controller.AnnotationProtocol: "http",
 			},
 			want: false,
 		},

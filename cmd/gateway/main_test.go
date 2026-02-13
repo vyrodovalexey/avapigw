@@ -1312,7 +1312,7 @@ func TestReloadComponents_GRPCConfigChanged(t *testing.T) {
 	}
 
 	// Should not panic; gRPC config change warning is logged
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -1382,7 +1382,7 @@ func TestReloadComponents_AllComponents(t *testing.T) {
 		MaxConcurrent: 100,
 	}
 
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 
 	// Verify config was updated
 	assert.Equal(t, newCfg, app.config)
@@ -1406,7 +1406,7 @@ func TestReloadComponents_NilMiddleware(t *testing.T) {
 	newCfg := validGatewayConfig("test-updated")
 
 	// Should not panic with nil components
-	reloadComponents(app, newCfg, logger)
+	reloadComponents(context.Background(), app, newCfg, logger)
 	assert.Equal(t, newCfg, app.config)
 }
 
@@ -1431,7 +1431,7 @@ func TestReloadComponents_InvalidConfig(t *testing.T) {
 	}
 
 	// Should not panic; gateway.Reload will reject invalid config
-	reloadComponents(app, invalidCfg, logger)
+	reloadComponents(context.Background(), app, invalidCfg, logger)
 
 	// Config should NOT be updated since reload failed
 	assert.Equal(t, cfg, app.config)

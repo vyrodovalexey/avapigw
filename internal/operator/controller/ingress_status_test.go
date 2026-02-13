@@ -364,7 +364,7 @@ func TestIsIPAddress_TableDriven(t *testing.T) {
 		{"hostname", "example.com", false},
 		{"hostname with subdomain", "lb.example.com", false},
 		{"empty string", "", false},
-		{"just dots", "...", true}, // technically passes the heuristic
+		{"just dots", "...", false},
 		{"single number", "80", false},
 		{"hostname with numbers", "host123.example.com", false},
 	}

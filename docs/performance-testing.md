@@ -797,5 +797,5 @@ go tool pprof http://localhost:9090/debug/pprof/goroutine
 
 - **[Performance Test Infrastructure](../test/performance/README.md)** - Detailed testing infrastructure documentation
 - **[Configuration Reference](configuration-reference.md)** - Gateway configuration options
-- **[Monitoring Guide](../docs/observability.md)** - Monitoring and metrics setup
+- **[Configuration Reference](configuration-reference.md)** - Gateway configuration options including observability settings
 - **[Troubleshooting Guide](../docs/troubleshooting.md)** - General troubleshooting information
