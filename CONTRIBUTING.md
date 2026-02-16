@@ -60,7 +60,7 @@ If you experience or witness unacceptable behavior, please report it to the proj
 
 Before contributing, ensure you have the following installed:
 
-- **Go 1.25+** - [Download Go](https://golang.org/dl/)
+- **Go 1.25.7+** - [Download Go](https://golang.org/dl/)
 - **Docker** - [Install Docker](https://docs.docker.com/get-docker/)
 - **kubectl** - [Install kubectl](https://kubernetes.io/docs/tasks/tools/)
 - **Helm 3.x** - [Install Helm](https://helm.sh/docs/intro/install/)
@@ -277,278 +277,129 @@ func myMiddleware() gin.HandlerFunc {
 }
 ```
 
-### Running Tests Locally
+### Adding New Metrics
 
-Before submitting changes, ensure all tests pass:
+When adding new Prometheus metrics, follow these guidelines:
 
-```bash
-# Run unit tests
-make test-unit
+#### Metric Design Principles
 
-# Run functional tests
-make test-functional
-
-# Run all tests (requires test backends)
-make test-all
-
-# Run operator tests
-make test-operator-unit
-make test-operator-functional
-make test-operator-integration
-
-# Run ingress controller tests
-make test-ingress-unit
-make test-ingress-functional
-
-# Generate coverage report
-make test-coverage
-
-# Test Helm chart with different modes
-make helm-template                # Gateway-only
-make helm-template-with-operator  # With operator
-make helm-template-ingress        # With ingress controller
-```
-
-## Testing Requirements
-
-### Test Coverage Requirements
-
-- **Minimum coverage**: 93%+ for new code (current project standard)
-- **Unit tests**: Required for all new functions and methods
-- **Integration tests**: Required for new features that interact with external systems
-- **End-to-end tests**: Required for new API endpoints or major features
-- **Cross-CRD tests**: Required for features that interact between different CRD types
-- **Ingress controller tests**: Required for ingress-related functionality
-
-### Test Categories
-
-#### 1. Unit Tests (`make test-unit`)
-- Test individual functions and methods in isolation
-- Use mocks for external dependencies
-- Fast execution (< 1 second per test)
-- No external dependencies required
-
-#### 2. Functional Tests (`make test-functional`)
-- Test feature functionality with minimal external dependencies
-- Use in-memory implementations where possible
-- Medium execution time (< 10 seconds per test)
-
-#### 3. Integration Tests (`make test-integration`)
-- Test integration with external systems
-- Require test backends on ports 8801, 8802 (HTTP) and 8803, 8804 (gRPC)
-- Test real network communication
-- Longer execution time acceptable
-
-#### 4. End-to-End Tests (`make test-e2e`)
-- Test complete user workflows
-- Test the full system including configuration loading
-- Require all external dependencies
-- Longest execution time acceptable
-
-#### 5. Operator Tests
-- **Unit tests** (`make test-operator-unit`) - Test operator controllers in isolation
-- **Functional tests** (`make test-operator-functional`) - Test operator functionality with minimal dependencies
-- **Integration tests** (`make test-operator-integration`) - Test operator with real Kubernetes API
-
-#### 6. Ingress Controller Tests
-- **Unit tests** (`make test-ingress-unit`) - Test ingress controller logic
-- **Functional tests** (`make test-ingress-functional`) - Test ingress resource conversion
-
-### Writing Tests
-
-#### Test File Naming
-- Unit tests: `*_test.go` in the same package
-- Integration tests: `*_integration_test.go` with `//go:build integration` tag
-- E2E tests: `*_e2e_test.go` with `//go:build e2e` tag
-
-#### Test Structure
-```go
-func TestFunctionName(t *testing.T) {
-    // Arrange
-    input := "test input"
-    expected := "expected output"
-    
-    // Act
-    result, err := FunctionToTest(input)
-    
-    // Assert
-    require.NoError(t, err)
-    assert.Equal(t, expected, result)
-}
-```
-
-#### Table-Driven Tests
-```go
-func TestValidateConfig(t *testing.T) {
-    tests := []struct {
-        name    string
-        config  Config
-        wantErr bool
-    }{
-        {
-            name:    "valid config",
-            config:  Config{Port: 8080},
-            wantErr: false,
-        },
-        {
-            name:    "invalid port",
-            config:  Config{Port: -1},
-            wantErr: true,
-        },
-    }
-    
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            err := ValidateConfig(tt.config)
-            if tt.wantErr {
-                assert.Error(t, err)
-            } else {
-                assert.NoError(t, err)
-            }
-        })
-    }
-}
-```
-
-### Test Environment Setup
-
-For integration and e2e tests, you'll need test backends:
-
-```bash
-# Start test HTTP backends
-go run test/backends/http/main.go -port 8801 &
-go run test/backends/http/main.go -port 8802 &
-
-# Start test gRPC backends
-go run test/backends/grpc/main.go -port 8803 &
-go run test/backends/grpc/main.go -port 8804 &
-
-# Run integration tests
-make test-integration
-
-# Run e2e tests
-make test-e2e
-
-# Clean up
-pkill -f "test/backends"
-```
-
-## Pull Request Process
-
-### Before Submitting
-
-1. **Sync with upstream**:
-   ```bash
-   git fetch upstream
-   git rebase upstream/main
+1. **Bounded Cardinality**: Ensure metric labels have bounded cardinality to prevent memory issues
+   ```go
+   // Good: bounded cardinality
+   requestsTotal.WithLabelValues(method, routeName, statusCode)
+   
+   // Bad: unbounded cardinality (user IDs can be infinite)
+   requestsTotal.WithLabelValues(method, userID, statusCode)
    ```
 
-2. **Run all checks**:
-   ```bash
-   make ci
+2. **Meaningful Labels**: Use labels that provide actionable insights
+   ```go
+   // Good: actionable labels
+   authRequests.WithLabelValues("jwt", "success")
+   
+   // Bad: too granular
+   authRequests.WithLabelValues("jwt", "RS256", "issuer.example.com", "success")
    ```
 
-3. **Update documentation** if needed
-4. **Add or update tests** for your changes
-5. **Update CHANGELOG.md** if applicable
+3. **Consistent Naming**: Follow Prometheus naming conventions
+   ```go
+   // Good: follows conventions
+   gateway_requests_total
+   gateway_request_duration_seconds
+   gateway_cache_hits_total
+   
+   // Bad: inconsistent naming
+   gateway_total_requests
+   gateway_request_time_ms
+   gateway_cache_hit_count
+   ```
 
-### Pull Request Template
+#### Implementation Steps
 
-When creating a pull request, include:
+1. **Define the metric** in the appropriate metrics file:
+   ```go
+   // internal/auth/metrics.go
+   authTokenValidations := promauto.NewCounterVec(
+       prometheus.CounterOpts{
+           Namespace: "gateway",
+           Subsystem: "auth",
+           Name:      "token_validations_total",
+           Help:      "Total number of token validations",
+       },
+       []string{"provider", "status"},
+   )
+   ```
 
-```markdown
-## Description
-Brief description of the changes and why they're needed.
+2. **Add metric recording** in the business logic:
+   ```go
+   // Record successful validation
+   authTokenValidations.WithLabelValues("jwt", "success").Inc()
+   
+   // Record failed validation
+   authTokenValidations.WithLabelValues("jwt", "failed").Inc()
+   ```
 
-## Type of Change
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
+3. **Add tests** for the metric:
+   ```go
+   func TestAuthMetrics(t *testing.T) {
+       // Reset metrics
+       authTokenValidations.Reset()
+       
+       // Perform operation that should record metric
+       err := validateToken(validToken)
+       require.NoError(t, err)
+       
+       // Verify metric was recorded
+       metric := testutil.ToFloat64(authTokenValidations.WithLabelValues("jwt", "success"))
+       assert.Equal(t, 1.0, metric)
+   }
+   ```
 
-## Testing
-- [ ] Unit tests pass
-- [ ] Integration tests pass (if applicable)
-- [ ] E2E tests pass (if applicable)
-- [ ] Manual testing completed
+4. **Update documentation** in `docs/features/metrics.md`
 
-## Checklist
-- [ ] My code follows the project's style guidelines
-- [ ] I have performed a self-review of my code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
-```
+5. **Add to configuration** if the metric should be configurable
 
-### Review Process
+#### Metric Categories
 
-1. **Automated checks** must pass (CI/CD pipeline)
-2. **Code review** by at least one maintainer
-3. **Testing** verification by reviewers
-4. **Documentation** review if applicable
-5. **Final approval** by project maintainer
+The gateway organizes metrics into these categories:
+- **Core Gateway**: Request processing, build info, uptime
+- **Middleware**: Rate limiting, circuit breaker, timeouts, retries
+- **Cache**: Hits, misses, evictions, size, duration
+- **Authentication**: JWT, API key, OIDC, mTLS validation
+- **Authorization**: RBAC, ABAC, external authorization
+- **TLS**: Handshakes, certificate lifecycle
+- **Vault**: API requests, authentication, secret retrieval
+- **Backend Auth**: Backend authentication operations
+- **Proxy**: Backend communication, errors, duration
+- **WebSocket**: Connections, messages, errors
+- **gRPC**: Requests, streaming, method-level tracking
+- **Config Reload**: Hot reload operations
+- **Health Check**: Backend health monitoring
+- **Operator**: Controller, webhook, certificate metrics
 
-### CI Checks That Must Pass
+### Performance Testing Procedures
 
-- **Linting**: `golangci-lint` with no errors
-- **Security**: `govulncheck` with no vulnerabilities
-- **Tests**: All unit and functional tests pass
-- **Build**: Binary builds successfully
-- **Format**: Code is properly formatted
+When making changes that may affect performance:
 
-## Code Quality Standards
+1. **Run baseline tests** before your changes:
+   ```bash
+   make perf-test-http
+   make perf-test-grpc-unary
+   ```
 
-### Linting Requirements
+2. **Run tests after your changes** and compare results:
+   ```bash
+   # Compare with baseline
+   ./test/performance/scripts/analyze-results.sh results/baseline/ --compare=results/latest/
+   ```
 
-We use `golangci-lint` with strict settings:
+3. **Performance regression thresholds**:
+   - HTTP throughput: < 5% reduction
+   - HTTP latency P95: < 10% increase
+   - gRPC throughput: < 5% reduction
+   - Memory usage: < 10% increase
 
-```bash
-# Run linter
-make lint
-
-# Auto-fix issues where possible
-make lint-fix
-```
-
-### Security Scanning
-
-All code must pass security scanning:
-
-```bash
-# Run vulnerability check
-make vuln
-```
-
-### Documentation Requirements
-
-#### Code Documentation
-- All exported functions and types must have comments
-- Comments should explain the "why", not just the "what"
-- Use proper Go doc comment format
-
-Example:
-```go
-// AuthenticateRequest validates the authentication credentials in the request
-// and returns the authenticated user information. It supports JWT, API key,
-// and mTLS authentication methods based on the gateway configuration.
-//
-// Returns an error if authentication fails or if the request is malformed.
-func AuthenticateRequest(req *http.Request, config *AuthConfig) (*User, error) {
-    // Implementation...
-}
-```
-
-#### API Documentation
-- Update OpenAPI/Swagger specs for API changes
-- Include request/response examples
-- Document error codes and messages
-
-#### Configuration Documentation
-- Document new configuration options
-- Provide examples for complex configurations
-- Update the main README.md if needed
+4. **Document performance impact** in your PR if changes affect performance
 
 ### Performance Considerations
 
@@ -559,6 +410,8 @@ func AuthenticateRequest(req *http.Request, config *AuthConfig) (*User, error) {
 - **Resource cleanup**: Always clean up timers, goroutines, and other resources
 - **Timer management**: Use defer statements to prevent timer leaks (see config watcher implementation)
 - **Hot-reload limitations**: Be aware that gRPC routes/backends do NOT support hot-reload and require restart
+- **Metrics impact**: Consider the performance impact of new metrics (use bounded cardinality)
+- **Performance testing**: Run performance tests for changes that may affect throughput or latency
 
 Example benchmark:
 ```go

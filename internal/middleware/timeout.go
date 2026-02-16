@@ -129,6 +129,10 @@ func writeTimeoutResponse(
 		observability.Duration("timeout", timeout),
 	)
 
+	GetMiddlewareMetrics().timeoutsTotal.WithLabelValues(
+		r.URL.Path,
+	).Inc()
+
 	w.Header().Set(HeaderContentType, ContentTypeJSON)
 	w.WriteHeader(http.StatusGatewayTimeout)
 	_, _ = io.WriteString(w, ErrGatewayTimeout)

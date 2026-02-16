@@ -1,16 +1,17 @@
 #!/bin/bash
 # run-k8s-test.sh - Kubernetes Performance Test Runner
-# Usage: ./run-k8s-test.sh [http|grpc|websocket|all] [options]
+# Usage: ./run-k8s-test.sh [http|https|grpc|grpc-tls|websocket|auth|all] [options]
 #
 # Discovers K8s NodePort services and runs performance tests against
 # the gateway deployed in local Kubernetes (Docker Desktop).
 #
 # Test types:
-#   http        - HTTP throughput test via Yandex Tank (default)
-#   https       - HTTPS throughput test via Yandex Tank
-#   grpc        - gRPC unary test via ghz
+#   http        - HTTP throughput test via Yandex Tank (no TLS)
+#   https       - HTTPS throughput test via Yandex Tank (TLS enabled)
+#   grpc        - gRPC unary test via ghz (no TLS)
 #   grpc-tls    - gRPC TLS unary test via ghz
-#   websocket   - WebSocket message test via k6
+#   websocket   - WebSocket message test via k6 (WSS if HTTPS available)
+#   auth        - Authenticated HTTPS test with JWT from Keycloak
 #   all         - Run all available tests sequentially
 #
 # Options:
@@ -310,20 +311,21 @@ check_k8s_pods() {
 }
 
 # ==============================================================================
-# HTTP Test (Yandex Tank)
+# HTTP Test (Yandex Tank) - No TLS
 # ==============================================================================
 
 run_http_test() {
     log_info "=========================================="
-    log_info "Running K8s HTTP Throughput Test"
+    log_info "Running K8s HTTP Throughput Test (No TLS)"
     log_info "=========================================="
 
-    local test_port="${K8S_HTTPS_PORT:-$K8S_HTTP_PORT}"
-    local test_scheme="http"
-    if [[ -n "$K8S_HTTPS_PORT" ]]; then
-        test_scheme="https"
+    # HTTP test requires HTTP port (no TLS)
+    if [[ -z "$K8S_HTTP_PORT" ]]; then
+        log_error "HTTP NodePort not discovered. Is the HTTP port exposed?"
+        return 1
     fi
-    log_info "Target: ${test_scheme}://127.0.0.1:${test_port}"
+
+    log_info "Target: http://127.0.0.1:${K8S_HTTP_PORT}"
 
     # Create results directory
     local timestamp
@@ -331,10 +333,9 @@ run_http_test() {
     local results_dir="$PERF_DIR/results/k8s/http_${timestamp}"
     mkdir -p "$results_dir/ammo"
 
-    # Copy config and update port (use HTTPS port if available, otherwise HTTP)
+    # Copy config and update port
     local config_file="$results_dir/load.yaml"
-    local target_port="${K8S_HTTPS_PORT:-$K8S_HTTP_PORT}"
-    sed "s/host.docker.internal:8443/host.docker.internal:${target_port}/g" \
+    sed "s/host.docker.internal:8443/host.docker.internal:${K8S_HTTP_PORT}/g" \
         "$PERF_DIR/configs/k8s-http-throughput.yaml" > "$config_file"
 
     # Copy ammo file
@@ -378,6 +379,79 @@ run_http_test() {
         log_info "Results saved to: $results_dir"
     else
         log_error "HTTP test failed with exit code: $exit_code"
+        return 1
+    fi
+}
+
+# ==============================================================================
+# HTTPS Test (Yandex Tank) - TLS Enabled
+# ==============================================================================
+
+run_https_test() {
+    log_info "=========================================="
+    log_info "Running K8s HTTPS Throughput Test (TLS)"
+    log_info "=========================================="
+
+    # HTTPS test requires HTTPS port
+    if [[ -z "$K8S_HTTPS_PORT" ]]; then
+        log_error "HTTPS NodePort not discovered. Is TLS enabled with Vault PKI?"
+        return 1
+    fi
+
+    log_info "Target: https://127.0.0.1:${K8S_HTTPS_PORT}"
+
+    # Create results directory
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local results_dir="$PERF_DIR/results/k8s/https_${timestamp}"
+    mkdir -p "$results_dir/ammo"
+
+    # Copy HTTPS config and update port
+    local config_file="$results_dir/load.yaml"
+    sed "s/host.docker.internal:32300/host.docker.internal:${K8S_HTTPS_PORT}/g" \
+        "$PERF_DIR/configs/k8s-https-throughput.yaml" > "$config_file"
+
+    # Copy HTTPS ammo file (uri-style with headers)
+    cp "$PERF_DIR/ammo/https-get.txt" "$results_dir/ammo/http-get.txt"
+
+    log_info "Config: $config_file (ssl: true)"
+    log_info "Results: $results_dir"
+
+    # Build Docker command
+    local docker_cmd="docker run --rm"
+    docker_cmd+=" -v $results_dir:/var/loadtest"
+    docker_cmd+=" -v $results_dir/ammo:/var/loadtest/ammo"
+    docker_cmd+=" --add-host=host.docker.internal:host-gateway"
+    docker_cmd+=" -w /var/loadtest"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        docker_cmd+=" -e VERBOSE=1"
+    fi
+
+    docker_cmd+=" yandex/yandex-tank:latest"
+    docker_cmd+=" -c /var/loadtest/load.yaml"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "Dry run - would execute:"
+        echo "$docker_cmd"
+        return 0
+    fi
+
+    # Check Yandex Tank image
+    if ! docker image inspect yandex/yandex-tank:latest &> /dev/null; then
+        log_info "Pulling Yandex Tank image..."
+        docker pull yandex/yandex-tank:latest
+    fi
+
+    log_info "Starting Yandex Tank..."
+    eval $docker_cmd
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_success "HTTPS test completed successfully"
+        log_info "Results saved to: $results_dir"
+    else
+        log_error "HTTPS test failed with exit code: $exit_code"
         return 1
     fi
 }
@@ -648,14 +722,31 @@ run_grpc_tls_test() {
 }
 
 # ==============================================================================
-# WebSocket Test (k6)
+# WebSocket Test (k6) - Uses WSS if HTTPS available
 # ==============================================================================
 
 run_websocket_test() {
     log_info "=========================================="
     log_info "Running K8s WebSocket Message Test"
     log_info "=========================================="
-    log_info "Target: ws://127.0.0.1:${K8S_HTTP_PORT}/ws"
+
+    # Determine if we should use WSS (TLS) or WS (no TLS)
+    local use_tls=false
+    local ws_port="${K8S_HTTP_PORT}"
+    local ws_scheme="ws"
+    local k6_script="websocket-message.js"
+    
+    if [[ -n "$K8S_HTTPS_PORT" ]]; then
+        use_tls=true
+        ws_port="${K8S_HTTPS_PORT}"
+        ws_scheme="wss"
+        k6_script="websocket-k8s-tls.js"
+        log_info "Using WSS (TLS) - HTTPS port available"
+    else
+        log_info "Using WS (no TLS) - HTTPS port not available"
+    fi
+
+    log_info "Target: ${ws_scheme}://127.0.0.1:${ws_port}/ws"
 
     # Check if k6 is available (native or Docker)
     local use_docker=false
@@ -683,7 +774,7 @@ run_websocket_test() {
 
     log_info "Results: $results_dir"
 
-    local ws_url="ws://host.docker.internal:${K8S_HTTP_PORT}/ws"
+    local ws_url="${ws_scheme}://host.docker.internal:${ws_port}/ws"
 
     if [[ "$use_docker" == "true" ]]; then
         local k6_cmd="docker run --rm"
@@ -694,13 +785,14 @@ run_websocket_test() {
         k6_cmd+=" grafana/k6:latest run"
         k6_cmd+=" --duration 30s"
         k6_cmd+=" --vus 10"
-        k6_cmd+=" /scripts/websocket-message.js"
+        k6_cmd+=" /scripts/${k6_script}"
     else
+        local native_ws_url="${ws_scheme}://127.0.0.1:${ws_port}/ws"
         local k6_cmd="k6 run"
-        k6_cmd+=" -e WS_URL=ws://127.0.0.1:${K8S_HTTP_PORT}/ws"
+        k6_cmd+=" -e WS_URL=${native_ws_url}"
         k6_cmd+=" --duration 30s"
         k6_cmd+=" --vus 10"
-        k6_cmd+=" $PERF_DIR/configs/websocket/websocket-message.js"
+        k6_cmd+=" $PERF_DIR/configs/websocket/${k6_script}"
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -723,6 +815,204 @@ run_websocket_test() {
 }
 
 # ==============================================================================
+# Auth Test (Yandex Tank) - JWT Authentication over HTTPS
+# ==============================================================================
+
+# Keycloak configuration
+KEYCLOAK_URL="${KEYCLOAK_URL:-http://127.0.0.1:8090}"
+KEYCLOAK_REALM="${KEYCLOAK_REALM:-gateway-test}"
+KEYCLOAK_CLIENT="${KEYCLOAK_CLIENT:-gateway}"
+KEYCLOAK_SECRET="${KEYCLOAK_SECRET:-gateway-secret}"
+KEYCLOAK_USER="${KEYCLOAK_USER:-perftest-user-1}"
+KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-perftest123}"
+
+get_jwt_token() {
+    log_info "Getting JWT token from Keycloak..."
+    
+    local token_url="${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+    
+    local response
+    response=$(curl -s -X POST "$token_url" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=password" \
+        -d "client_id=${KEYCLOAK_CLIENT}" \
+        -d "client_secret=${KEYCLOAK_SECRET}" \
+        -d "username=${KEYCLOAK_USER}" \
+        -d "password=${KEYCLOAK_PASSWORD}" \
+        2>/dev/null)
+    
+    if [[ -z "$response" ]]; then
+        log_error "Failed to get response from Keycloak at $token_url"
+        return 1
+    fi
+    
+    # Extract access_token using jq if available, otherwise use grep/sed
+    local token
+    if command -v jq &> /dev/null; then
+        token=$(echo "$response" | jq -r '.access_token // empty')
+    else
+        token=$(echo "$response" | grep -o '"access_token":"[^"]*"' | sed 's/"access_token":"//;s/"$//')
+    fi
+    
+    if [[ -z "$token" ]] || [[ "$token" == "null" ]]; then
+        log_error "Failed to extract JWT token from Keycloak response"
+        if [[ "$VERBOSE" == "true" ]]; then
+            log_error "Response: $response"
+        fi
+        return 1
+    fi
+    
+    echo "$token"
+}
+
+generate_auth_ammo() {
+    local jwt_token="$1"
+    local output_file="$2"
+    
+    # Read the template ammo file and replace ${JWT_TOKEN}
+    local template_file="$PERF_DIR/ammo/http-auth.txt"
+    
+    if [[ ! -f "$template_file" ]]; then
+        log_error "Auth ammo template not found: $template_file"
+        return 1
+    fi
+    
+    # For Yandex Tank phantom-style ammo, each request needs a size prefix
+    # Format: <size> <tag>\n<request>\r\n\r\n
+    # We need to process each request block and add the size prefix
+    
+    # Use a temp file to avoid issues with special characters in the token
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Replace ${JWT_TOKEN} with actual token using perl (handles special chars better)
+    perl -pe "s/\\\$\{JWT_TOKEN\}/$jwt_token/g" "$template_file" > "$temp_file"
+    
+    # Process the content to add size prefixes for phantom-style ammo
+    # Each request block is separated by blank lines
+    local output=""
+    local current_request=""
+    local request_num=1
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -z "$line" ]] && [[ -n "$current_request" ]]; then
+            # End of a request block - calculate size and output
+            # Add CRLF at the end of request (HTTP spec requires \r\n\r\n at end)
+            current_request="${current_request}"$'\r\n'
+            local size=${#current_request}
+            # Phantom ammo format: <size> <tag>\n<request>
+            output+="${size} auth_req_${request_num}"$'\n'"${current_request}"
+            current_request=""
+            ((request_num++))
+        elif [[ -n "$line" ]]; then
+            # Add line to current request with CRLF
+            if [[ -n "$current_request" ]]; then
+                current_request+=$'\r\n'
+            fi
+            current_request+="$line"
+        fi
+    done < "$temp_file"
+    
+    # Handle last request if file doesn't end with blank line
+    if [[ -n "$current_request" ]]; then
+        current_request="${current_request}"$'\r\n'
+        local size=${#current_request}
+        output+="${size} auth_req_${request_num}"$'\n'"${current_request}"
+    fi
+    
+    # Clean up temp file
+    rm -f "$temp_file"
+    
+    # Write the output file
+    printf '%s' "$output" > "$output_file"
+}
+
+run_auth_test() {
+    log_info "=========================================="
+    log_info "Running K8s Auth Throughput Test (JWT + HTTPS)"
+    log_info "=========================================="
+
+    # Auth test requires HTTPS port (gateway with TLS)
+    if [[ -z "$K8S_HTTPS_PORT" ]]; then
+        log_error "HTTPS NodePort not discovered. Auth test requires TLS."
+        return 1
+    fi
+
+    log_info "Target: https://127.0.0.1:${K8S_HTTPS_PORT}"
+
+    # Get JWT token from Keycloak
+    local jwt_token
+    jwt_token=$(get_jwt_token)
+    if [[ $? -ne 0 ]] || [[ -z "$jwt_token" ]]; then
+        log_error "Failed to obtain JWT token from Keycloak"
+        log_error "Ensure Keycloak is running at ${KEYCLOAK_URL}"
+        return 1
+    fi
+    log_success "JWT token obtained successfully"
+
+    # Create results directory
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local results_dir="$PERF_DIR/results/k8s/auth_${timestamp}"
+    mkdir -p "$results_dir/ammo"
+
+    # Generate ammo file with actual JWT token
+    local ammo_file="$results_dir/ammo/http-auth.txt"
+    log_info "Generating auth ammo file with JWT token..."
+    if ! generate_auth_ammo "$jwt_token" "$ammo_file"; then
+        log_error "Failed to generate auth ammo file"
+        return 1
+    fi
+    log_success "Auth ammo file generated: $ammo_file"
+
+    # Copy config and update port
+    local config_file="$results_dir/load.yaml"
+    sed "s/host.docker.internal:32300/host.docker.internal:${K8S_HTTPS_PORT}/g" \
+        "$PERF_DIR/configs/k8s-auth-throughput.yaml" > "$config_file"
+
+    log_info "Config: $config_file (ssl: true)"
+    log_info "Results: $results_dir"
+
+    # Build Docker command
+    local docker_cmd="docker run --rm"
+    docker_cmd+=" -v $results_dir:/var/loadtest"
+    docker_cmd+=" -v $results_dir/ammo:/var/loadtest/ammo"
+    docker_cmd+=" --add-host=host.docker.internal:host-gateway"
+    docker_cmd+=" -w /var/loadtest"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        docker_cmd+=" -e VERBOSE=1"
+    fi
+
+    docker_cmd+=" yandex/yandex-tank:latest"
+    docker_cmd+=" -c /var/loadtest/load.yaml"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "Dry run - would execute:"
+        echo "$docker_cmd"
+        return 0
+    fi
+
+    # Check Yandex Tank image
+    if ! docker image inspect yandex/yandex-tank:latest &> /dev/null; then
+        log_info "Pulling Yandex Tank image..."
+        docker pull yandex/yandex-tank:latest
+    fi
+
+    log_info "Starting Yandex Tank..."
+    eval $docker_cmd
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_success "Auth test completed successfully"
+        log_info "Results saved to: $results_dir"
+    else
+        log_error "Auth test failed with exit code: $exit_code"
+        return 1
+    fi
+}
+
+# ==============================================================================
 # Run All Tests
 # ==============================================================================
 
@@ -730,25 +1020,16 @@ run_all_tests() {
     local failed_tests=()
 
     log_info "Running all K8s performance tests..."
+    log_info "Test suite: https, grpc-tls, websocket (WSS), auth"
 
-    # HTTP test (always available - uses Yandex Tank via Docker)
-    if ! run_http_test; then
-        failed_tests+=("http")
-    fi
-    sleep 3
-
-    # gRPC test (requires ghz)
-    if [[ -n "$K8S_GRPC_PORT" ]]; then
-        if command -v ghz &> /dev/null || docker image inspect ghcr.io/bojand/ghz:latest &> /dev/null 2>&1; then
-            if ! run_grpc_test; then
-                failed_tests+=("grpc")
-            fi
-            sleep 3
-        else
-            log_warn "Skipping gRPC test: ghz not available (install: brew install ghz)"
+    # HTTPS test (requires HTTPS port with Vault PKI TLS)
+    if [[ -n "$K8S_HTTPS_PORT" ]]; then
+        if ! run_https_test; then
+            failed_tests+=("https")
         fi
+        sleep 3
     else
-        log_warn "Skipping gRPC test: gRPC NodePort not discovered"
+        log_warn "Skipping HTTPS test: HTTPS NodePort not discovered"
     fi
 
     # gRPC TLS test (requires ghz and grpcs port)
@@ -765,13 +1046,23 @@ run_all_tests() {
         log_warn "Skipping gRPC TLS test: gRPC TLS NodePort (grpcs) not discovered"
     fi
 
-    # WebSocket test (requires k6)
+    # WebSocket test (uses WSS if HTTPS available, requires k6)
     if command -v k6 &> /dev/null || docker image inspect grafana/k6:latest &> /dev/null 2>&1; then
         if ! run_websocket_test; then
             failed_tests+=("websocket")
         fi
+        sleep 3
     else
         log_warn "Skipping WebSocket test: k6 not available (install: brew install k6)"
+    fi
+
+    # Auth test (requires HTTPS port and Keycloak)
+    if [[ -n "$K8S_HTTPS_PORT" ]]; then
+        if ! run_auth_test; then
+            failed_tests+=("auth")
+        fi
+    else
+        log_warn "Skipping Auth test: HTTPS NodePort not discovered"
     fi
 
     echo ""
@@ -798,15 +1089,16 @@ K8s Performance Test Runner
 Discovers NodePort services from Kubernetes and runs performance tests
 against the gateway deployed in local K8s (Docker Desktop).
 
-Usage: run-k8s-test.sh [http|https|grpc|grpc-tls|websocket|all] [options]
+Usage: run-k8s-test.sh [http|https|grpc|grpc-tls|websocket|auth|all] [options]
 
 Test types:
-  http        HTTP throughput test via Yandex Tank (default)
-  https       HTTPS throughput test via Yandex Tank (requires HTTPS NodePort)
-  grpc        gRPC unary test via ghz
+  http        HTTP throughput test via Yandex Tank (no TLS)
+  https       HTTPS throughput test via Yandex Tank (TLS enabled)
+  grpc        gRPC unary test via ghz (no TLS)
   grpc-tls    gRPC TLS unary test via ghz (requires grpcs NodePort)
-  websocket   WebSocket message test via k6
-  all         Run all available tests sequentially
+  websocket   WebSocket message test via k6 (WSS if HTTPS available)
+  auth        Authenticated HTTPS test with JWT from Keycloak
+  all         Run: https, grpc-tls, websocket (WSS), auth
 
 Options:
   --dry-run         Show commands without running
@@ -815,17 +1107,28 @@ Options:
   --namespace=<ns>  K8s namespace (default: avapigw-test)
   --service=<name>  K8s service name (default: avapigw)
 
+Environment variables for auth test:
+  KEYCLOAK_URL      Keycloak URL (default: http://127.0.0.1:8090)
+  KEYCLOAK_REALM    Keycloak realm (default: gateway-test)
+  KEYCLOAK_CLIENT   Client ID (default: gateway)
+  KEYCLOAK_SECRET   Client secret (default: gateway-secret)
+  KEYCLOAK_USER     Username (default: perftest-user-1)
+  KEYCLOAK_PASSWORD Password (default: perftest123)
+
 Prerequisites:
   - kubectl configured and connected to cluster
   - Docker (for Yandex Tank)
   - ghz (for gRPC tests) - optional, skipped if not available
   - k6 (for WebSocket tests) - optional, skipped if not available
+  - Keycloak (for auth test) - running at KEYCLOAK_URL
 
 Results are saved to: test/performance/results/k8s/
 
 Examples:
   ./run-k8s-test.sh http
+  ./run-k8s-test.sh https
   ./run-k8s-test.sh grpc-tls --dry-run
+  ./run-k8s-test.sh auth --verbose
   ./run-k8s-test.sh all --verbose
   ./run-k8s-test.sh http --namespace=avapigw-test --service=avapigw
 
@@ -865,12 +1168,11 @@ main() {
             run_http_test
             ;;
         https)
-            # HTTPS test uses the same function but targets HTTPS port
             if [[ -z "$K8S_HTTPS_PORT" ]]; then
                 log_error "HTTPS NodePort not discovered. Is TLS enabled?"
                 exit 1
             fi
-            run_http_test
+            run_https_test
             ;;
         grpc)
             run_grpc_test
@@ -881,12 +1183,19 @@ main() {
         websocket)
             run_websocket_test
             ;;
+        auth)
+            if [[ -z "$K8S_HTTPS_PORT" ]]; then
+                log_error "HTTPS NodePort not discovered. Auth test requires TLS."
+                exit 1
+            fi
+            run_auth_test
+            ;;
         all)
             run_all_tests
             ;;
         *)
             log_error "Unknown test type: $TEST_TYPE"
-            echo "Available types: http, https, grpc, grpc-tls, websocket, all"
+            echo "Available types: http, https, grpc, grpc-tls, websocket, auth, all"
             exit 1
             ;;
     esac

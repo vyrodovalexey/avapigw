@@ -188,6 +188,8 @@ func (msl *MaxSessionsLimiter) Stop() {
 func MaxSessions(msl *MaxSessionsLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mm := GetMiddlewareMetrics()
+
 			if !msl.Acquire(r.Context()) {
 				msl.logger.Warn("max sessions exceeded",
 					observability.String("path", r.URL.Path),
@@ -196,6 +198,8 @@ func MaxSessions(msl *MaxSessionsLimiter) func(http.Handler) http.Handler {
 					observability.Int64("max", msl.MaxConcurrent()),
 				)
 
+				mm.maxSessionsRejected.Inc()
+
 				w.Header().Set(HeaderContentType, ContentTypeJSON)
 				w.Header().Set(HeaderRetryAfter, "1")
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -203,7 +207,16 @@ func MaxSessions(msl *MaxSessionsLimiter) func(http.Handler) http.Handler {
 				return
 			}
 
-			defer msl.Release()
+			mm.maxSessionsCurrent.Set(
+				float64(msl.Current()),
+			)
+
+			defer func() {
+				msl.Release()
+				mm.maxSessionsCurrent.Set(
+					float64(msl.Current()),
+				)
+			}()
 			next.ServeHTTP(w, r)
 		})
 	}

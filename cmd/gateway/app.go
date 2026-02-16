@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/gateway"
@@ -24,6 +25,7 @@ type application struct {
 	router             *router.Router
 	healthChecker      *health.Checker
 	metrics            *observability.Metrics
+	reloadMetrics      *reloadMetrics
 	metricsServer      *http.Server
 	tracer             *observability.Tracer
 	config             *config.GatewayConfig
@@ -31,14 +33,18 @@ type application struct {
 	maxSessionsLimiter *middleware.MaxSessionsLimiter
 	auditLogger        audit.Logger
 	vaultClient        vault.Client
+	authMetrics        *auth.Metrics
 }
 
 // initApplication initializes all application components.
 func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *application {
 	metrics := observability.NewMetrics("gateway")
+	metrics.SetBuildInfo(version, gitCommit, buildTime)
 	tracer := initTracer(cfg, logger)
 	healthChecker := health.NewChecker(version, logger)
-	auditLogger := initAuditLogger(cfg, logger)
+	auditLogger := initAuditLogger(cfg, logger,
+		audit.WithLoggerRegisterer(metrics.Registry()),
+	)
 
 	backendRegistry := backend.NewRegistry(
 		logger, backend.WithRegistryMetrics(metrics),
@@ -54,6 +60,12 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		return nil // unreachable in production; allows test to continue
 	}
 
+	// Create auth metrics registered with the gateway's custom registry
+	// so they appear on the gateway's /metrics endpoint. This shared
+	// instance is passed to authenticators via WithAuthenticatorMetrics
+	// to avoid the fallback to prometheus.DefaultRegisterer.
+	authMetrics := auth.NewMetricsWithRegisterer("gateway", metrics.Registry())
+
 	// Initialize Vault client if any listener/route needs Vault TLS
 	var vaultClient vault.Client
 	var vaultFactory tlspkg.VaultProviderFactory
@@ -63,13 +75,23 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		logger.Info("vault provider factory created for TLS certificate management")
 	}
 
-	reverseProxy := proxy.NewReverseProxy(r, backendRegistry, proxy.WithProxyLogger(logger))
+	reverseProxy := proxy.NewReverseProxy(r, backendRegistry,
+		proxy.WithProxyLogger(logger),
+		proxy.WithMetricsRegistry(metrics.Registry()),
+	)
 	middlewareResult := buildMiddlewareChain(reverseProxy, cfg, logger, metrics, tracer, auditLogger)
+
+	// Create TLS metrics registered with the gateway's custom registry
+	// so they appear on the gateway's /metrics endpoint.
+	tlsMetrics := tlspkg.NewMetrics("gateway", tlspkg.WithRegistry(metrics.Registry()))
 
 	gwOpts := []gateway.Option{
 		gateway.WithLogger(logger),
 		gateway.WithRouteHandler(middlewareResult.handler),
 		gateway.WithShutdownTimeout(30 * time.Second),
+		gateway.WithAuditLogger(auditLogger),
+		gateway.WithMetricsRegistry(metrics.Registry()),
+		gateway.WithGatewayTLSMetrics(tlsMetrics),
 	}
 	if vaultFactory != nil {
 		gwOpts = append(gwOpts, gateway.WithGatewayVaultProviderFactory(vaultFactory))
@@ -87,12 +109,14 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		router:             r,
 		healthChecker:      healthChecker,
 		metrics:            metrics,
+		reloadMetrics:      newReloadMetrics(metrics),
 		tracer:             tracer,
 		config:             cfg,
 		rateLimiter:        middlewareResult.rateLimiter,
 		maxSessionsLimiter: middlewareResult.maxSessionsLimiter,
 		auditLogger:        auditLogger,
 		vaultClient:        vaultClient,
+		authMetrics:        authMetrics,
 	}
 }
 

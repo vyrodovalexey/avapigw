@@ -7,12 +7,19 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/vyrodovalexey/avapigw/internal/auth/apikey"
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
 	"github.com/vyrodovalexey/avapigw/internal/auth/oidc"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// authTracer is the OTEL tracer used for authentication operations.
+var authTracer = otel.Tracer("avapigw/auth")
 
 // Authenticator handles authentication for HTTP requests.
 type Authenticator interface {
@@ -176,8 +183,18 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	start := time.Now()
 	ctx := r.Context()
 
+	ctx, span := authTracer.Start(ctx, "auth.authenticate",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("auth.path", r.URL.Path),
+			attribute.String("auth.method", r.Method),
+		),
+	)
+	defer span.End()
+
 	// Check if path should be skipped
 	if a.config.ShouldSkipPath(r.URL.Path) {
+		span.SetAttributes(attribute.String("auth.result", "skipped"))
 		return AnonymousIdentity(), nil
 	}
 
@@ -188,6 +205,11 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsMTLSEnabled() && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		identity, authErr = a.authenticateMTLS(ctx, r)
 		if authErr == nil {
+			span.SetAttributes(
+				attribute.String("auth.type", string(AuthTypeMTLS)),
+				attribute.String("auth.result", "success"),
+				attribute.String("auth.subject", identity.Subject),
+			)
 			a.metrics.RecordRequest("http", string(AuthTypeMTLS), "success", time.Since(start))
 			a.metrics.RecordSuccess(string(AuthTypeMTLS))
 			return identity, nil
@@ -199,6 +221,11 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsJWTEnabled() {
 		identity, authErr = a.authenticateJWT(ctx, r)
 		if authErr == nil {
+			span.SetAttributes(
+				attribute.String("auth.type", string(AuthTypeJWT)),
+				attribute.String("auth.result", "success"),
+				attribute.String("auth.subject", identity.Subject),
+			)
 			a.metrics.RecordRequest("http", string(AuthTypeJWT), "success", time.Since(start))
 			a.metrics.RecordSuccess(string(AuthTypeJWT))
 			return identity, nil
@@ -212,6 +239,11 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsAPIKeyEnabled() {
 		identity, authErr = a.authenticateAPIKey(ctx, r)
 		if authErr == nil {
+			span.SetAttributes(
+				attribute.String("auth.type", string(AuthTypeAPIKey)),
+				attribute.String("auth.result", "success"),
+				attribute.String("auth.subject", identity.Subject),
+			)
 			a.metrics.RecordRequest("http", string(AuthTypeAPIKey), "success", time.Since(start))
 			a.metrics.RecordSuccess(string(AuthTypeAPIKey))
 			return identity, nil
@@ -223,6 +255,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 
 	// If no credentials were provided and anonymous access is allowed
 	if a.config.AllowAnonymous && errors.Is(authErr, ErrNoCredentials) {
+		span.SetAttributes(attribute.String("auth.result", "anonymous"))
 		return AnonymousIdentity(), nil
 	}
 
@@ -230,6 +263,11 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if authErr == nil {
 		authErr = ErrNoCredentials
 	}
+
+	span.SetAttributes(
+		attribute.String("auth.result", "failure"),
+		attribute.String("auth.error", authErr.Error()),
+	)
 
 	a.metrics.RecordRequest("http", "unknown", "failure", time.Since(start))
 	a.metrics.RecordFailure("unknown", "no_valid_credentials")

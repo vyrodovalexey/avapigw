@@ -5,10 +5,18 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// transformTracer is the OTEL tracer used for transform operations.
+var transformTracer = otel.Tracer("avapigw/transform")
 
 // requestTransformer implements the RequestTransformer interface.
 type requestTransformer struct {
@@ -76,9 +84,24 @@ func (rt *requestTransformer) TransformRequest(
 		return request, nil
 	}
 
+	ctx, span := transformTracer.Start(ctx, "transform.request",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Bool("transform.passthrough", cfg.PassthroughBody),
+			attribute.Bool("transform.has_body_template", cfg.BodyTemplate != ""),
+			attribute.Int("transform.inject_fields_count", len(cfg.InjectFields)),
+			attribute.Int("transform.remove_fields_count", len(cfg.RemoveFields)),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
+	metrics := GetTransformMetrics()
+
 	// If passthrough is enabled, return the request as-is
 	if cfg.PassthroughBody {
 		rt.logger.Debug("passthrough mode enabled, returning request as-is")
+		metrics.RecordOperation("request", "passthrough")
 		return request, nil
 	}
 
@@ -135,10 +158,14 @@ func (rt *requestTransformer) TransformRequest(
 		var err error
 		data, err = rt.injectFields(ctx, data, cfg.InjectFields)
 		if err != nil {
+			metrics.RecordOperation("request", "error")
+			metrics.RecordError("request", "field_injection")
 			return nil, fmt.Errorf("field injection failed: %w", err)
 		}
 	}
 
+	metrics.operationDuration.WithLabelValues("request").Observe(time.Since(start).Seconds())
+	metrics.RecordOperation("request", "success")
 	rt.logger.Debug("request transformation completed")
 
 	return data, nil

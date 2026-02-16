@@ -165,6 +165,14 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	if spec.MaxSessions != nil {
 		v.validateMaxSessions(spec.MaxSessions, "spec.maxSessions")
 	}
+
+	if spec.Authentication != nil {
+		v.validateAuthentication(spec.Authentication, "spec.authentication")
+	}
+
+	if spec.Authorization != nil {
+		v.validateAuthorization(spec.Authorization, "spec.authorization")
+	}
 }
 
 // validateListeners validates listener configurations.
@@ -722,6 +730,239 @@ func (v *Validator) validateObservability(obs *ObservabilityConfig, path string)
 
 		if !validFormats[strings.ToLower(obs.Logging.Format)] {
 			v.addError(path+".logging.format", fmt.Sprintf("invalid log format: %s", obs.Logging.Format))
+		}
+	}
+}
+
+// validateAuthentication validates authentication configuration.
+func (v *Validator) validateAuthentication(auth *AuthenticationConfig, path string) {
+	if !auth.Enabled {
+		return
+	}
+
+	v.validateAuthMethodsConfigured(auth, path)
+	v.validateAuthMethods(auth, path)
+}
+
+// validateAuthMethodsConfigured checks that at least one auth method is configured.
+func (v *Validator) validateAuthMethodsConfigured(auth *AuthenticationConfig, path string) {
+	hasMethod := (auth.JWT != nil && auth.JWT.Enabled) ||
+		(auth.APIKey != nil && auth.APIKey.Enabled) ||
+		(auth.MTLS != nil && auth.MTLS.Enabled) ||
+		(auth.OIDC != nil && auth.OIDC.Enabled)
+
+	if !hasMethod && !auth.AllowAnonymous {
+		v.addWarning(path, "authentication is enabled but no authentication method is configured")
+	}
+}
+
+// validateAuthMethods validates individual authentication methods.
+func (v *Validator) validateAuthMethods(auth *AuthenticationConfig, path string) {
+	if auth.JWT != nil && auth.JWT.Enabled {
+		v.validateJWTAuth(auth.JWT, path+".jwt")
+	}
+
+	if auth.APIKey != nil && auth.APIKey.Enabled {
+		v.validateAPIKeyAuth(auth.APIKey, path+".apiKey")
+	}
+
+	if auth.MTLS != nil && auth.MTLS.Enabled {
+		v.validateMTLSAuth(auth.MTLS, path+".mtls")
+	}
+
+	if auth.OIDC != nil && auth.OIDC.Enabled {
+		v.validateOIDCAuth(auth.OIDC, path+".oidc")
+	}
+}
+
+// validateJWTAuth validates JWT authentication configuration.
+func (v *Validator) validateJWTAuth(jwt *JWTAuthConfig, path string) {
+	// JWT requires at least one key source: JWKS URL, secret, or public key
+	if jwt.JWKSURL == "" && jwt.Secret == "" && jwt.PublicKey == "" {
+		v.addError(path, "JWT requires at least one of jwksUrl, secret, or publicKey")
+	}
+}
+
+// validateAPIKeyAuth validates API key authentication configuration.
+func (v *Validator) validateAPIKeyAuth(apiKey *APIKeyAuthConfig, path string) {
+	// API key requires at least one location: header or query
+	if apiKey.Header == "" && apiKey.Query == "" {
+		v.addError(path, "API key requires at least one of header or query parameter name")
+	}
+}
+
+// validateMTLSAuth validates mTLS authentication configuration.
+func (v *Validator) validateMTLSAuth(mtls *MTLSAuthConfig, path string) {
+	if mtls.CAFile == "" {
+		v.addError(path+".caFile", "caFile is required for mTLS authentication")
+	}
+}
+
+// validateOIDCAuth validates OIDC authentication configuration.
+func (v *Validator) validateOIDCAuth(oidc *OIDCAuthConfig, path string) {
+	if len(oidc.Providers) == 0 {
+		v.addError(path+".providers", "at least one OIDC provider is required")
+		return
+	}
+
+	names := make(map[string]bool)
+	for i, provider := range oidc.Providers {
+		providerPath := fmt.Sprintf("%s.providers[%d]", path, i)
+
+		switch {
+		case provider.Name == "":
+			v.addError(providerPath+".name", "provider name is required")
+		case names[provider.Name]:
+			v.addError(providerPath+".name",
+				fmt.Sprintf("duplicate OIDC provider name: %s", provider.Name))
+		default:
+			names[provider.Name] = true
+		}
+
+		if provider.IssuerURL == "" {
+			v.addError(providerPath+".issuerUrl", "issuerUrl is required for OIDC provider")
+		}
+
+		if provider.ClientID == "" {
+			v.addError(providerPath+".clientId", "clientId is required for OIDC provider")
+		}
+	}
+}
+
+// validateAuthorization validates authorization configuration.
+func (v *Validator) validateAuthorization(authz *AuthorizationConfig, path string) {
+	if !authz.Enabled {
+		return
+	}
+
+	// Validate default policy
+	if authz.DefaultPolicy != "" {
+		validPolicies := map[string]bool{
+			"allow": true,
+			"deny":  true,
+		}
+		if !validPolicies[authz.DefaultPolicy] {
+			v.addError(path+".defaultPolicy",
+				fmt.Sprintf("invalid default policy: %s (must be 'allow' or 'deny')",
+					authz.DefaultPolicy))
+		}
+	}
+
+	if authz.RBAC != nil && authz.RBAC.Enabled {
+		v.validateRBACConfig(authz.RBAC, path+".rbac")
+	}
+
+	if authz.ABAC != nil && authz.ABAC.Enabled {
+		v.validateABACConfig(authz.ABAC, path+".abac")
+	}
+
+	if authz.External != nil && authz.External.Enabled {
+		v.validateExternalAuthzConfig(authz.External, path+".external")
+	}
+
+	if authz.Cache != nil && authz.Cache.Enabled {
+		v.validateAuthzCacheConfig(authz.Cache, path+".cache")
+	}
+}
+
+// validateRBACConfig validates RBAC configuration.
+func (v *Validator) validateRBACConfig(rbac *RBACConfig, path string) {
+	if len(rbac.Policies) == 0 {
+		v.addWarning(path+".policies", "RBAC is enabled but no policies are defined")
+	}
+
+	names := make(map[string]bool)
+	for i, policy := range rbac.Policies {
+		policyPath := fmt.Sprintf("%s.policies[%d]", path, i)
+
+		switch {
+		case policy.Name == "":
+			v.addError(policyPath+".name", "policy name is required")
+		case names[policy.Name]:
+			v.addError(policyPath+".name",
+				fmt.Sprintf("duplicate RBAC policy name: %s", policy.Name))
+		default:
+			names[policy.Name] = true
+		}
+
+		if len(policy.Roles) == 0 {
+			v.addError(policyPath+".roles",
+				"at least one role is required for RBAC policy")
+		}
+
+		if policy.Effect != "" {
+			v.validatePolicyEffect(policy.Effect, policyPath)
+		}
+	}
+}
+
+// validateABACConfig validates ABAC configuration.
+func (v *Validator) validateABACConfig(abac *ABACConfig, path string) {
+	if len(abac.Policies) == 0 {
+		v.addWarning(path+".policies", "ABAC is enabled but no policies are defined")
+	}
+
+	names := make(map[string]bool)
+	for i, policy := range abac.Policies {
+		policyPath := fmt.Sprintf("%s.policies[%d]", path, i)
+
+		switch {
+		case policy.Name == "":
+			v.addError(policyPath+".name", "policy name is required")
+		case names[policy.Name]:
+			v.addError(policyPath+".name",
+				fmt.Sprintf("duplicate ABAC policy name: %s", policy.Name))
+		default:
+			names[policy.Name] = true
+		}
+
+		if policy.Expression == "" {
+			v.addError(policyPath+".expression",
+				"expression is required for ABAC policy")
+		}
+
+		if policy.Effect != "" {
+			v.validatePolicyEffect(policy.Effect, policyPath)
+		}
+	}
+}
+
+// validatePolicyEffect validates that a policy effect is valid.
+func (v *Validator) validatePolicyEffect(effect, path string) {
+	validEffects := map[string]bool{"allow": true, "deny": true}
+	if !validEffects[effect] {
+		v.addError(path+".effect",
+			fmt.Sprintf("invalid effect: %s (must be 'allow' or 'deny')", effect))
+	}
+}
+
+// validateExternalAuthzConfig validates external authorization configuration.
+func (v *Validator) validateExternalAuthzConfig(ext *ExternalAuthzConfig, path string) {
+	if ext.OPA != nil {
+		if ext.OPA.URL == "" {
+			v.addError(path+".opa.url", "OPA URL is required when external authorization is enabled")
+		}
+	}
+
+	if ext.Timeout.Duration() < 0 {
+		v.addError(path+".timeout", "timeout cannot be negative")
+	}
+}
+
+// validateAuthzCacheConfig validates authorization cache configuration.
+func (v *Validator) validateAuthzCacheConfig(cache *AuthzCacheConfig, path string) {
+	if cache.TTL.Duration() < 0 {
+		v.addError(path+".ttl", "TTL cannot be negative")
+	}
+
+	if cache.MaxSize < 0 {
+		v.addError(path+".maxSize", "maxSize cannot be negative")
+	}
+
+	if cache.Type != "" {
+		validTypes := map[string]bool{"memory": true, "redis": true}
+		if !validTypes[cache.Type] {
+			v.addError(path+".type", fmt.Sprintf("invalid cache type: %s (must be 'memory' or 'redis')", cache.Type))
 		}
 	}
 }

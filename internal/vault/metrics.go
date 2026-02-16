@@ -5,6 +5,15 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// defaultMetrics holds the singleton Metrics instance registered with the default global registry.
+// This ensures metrics are only registered once with the default Prometheus registry,
+// avoiding duplicate registration panics.
+var (
+	defaultMetrics     *Metrics
+	defaultMetricsOnce sync.Once
 )
 
 // Metrics holds Prometheus metrics for Vault operations.
@@ -24,7 +33,8 @@ type Metrics struct {
 // MetricsOption is a functional option for configuring Metrics.
 type MetricsOption func(*Metrics)
 
-// WithMetricsRegistry sets a custom Prometheus registry.
+// WithMetricsRegistry sets a custom Prometheus registry for backward compatibility.
+// When not set, metrics are automatically registered with the default global registry via promauto.
 func WithMetricsRegistry(registry *prometheus.Registry) MetricsOption {
 	return func(m *Metrics) {
 		m.registry = registry
@@ -32,6 +42,9 @@ func WithMetricsRegistry(registry *prometheus.Registry) MetricsOption {
 }
 
 // NewMetrics creates a new Metrics instance with the given namespace.
+// By default, metrics are registered with the default global Prometheus registry via promauto
+// using a singleton pattern to avoid duplicate registration panics.
+// Use WithMetricsRegistry to register with a custom registry instead.
 func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 	if namespace == "" {
 		namespace = "gateway"
@@ -43,11 +56,27 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		opt(m)
 	}
 
-	if m.registry == nil {
-		m.registry = prometheus.NewRegistry()
+	// When a custom registry is provided, create a new Metrics instance with that registry.
+	// Otherwise, return the singleton instance registered with the default global registry.
+	if m.registry != nil {
+		factory := promauto.With(m.registry)
+		m.initWithFactory(namespace, factory)
+		return m
 	}
 
-	m.requestsTotal = prometheus.NewCounterVec(
+	// Use singleton pattern for the default global registry to prevent duplicate registration.
+	defaultMetricsOnce.Do(func() {
+		defaultMetrics = &Metrics{}
+		factory := promauto.With(prometheus.DefaultRegisterer)
+		defaultMetrics.initWithFactory(namespace, factory)
+	})
+
+	return defaultMetrics
+}
+
+// initWithFactory initializes all metrics using the given promauto factory.
+func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
+	m.requestsTotal = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "vault",
@@ -57,7 +86,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"operation", "status"},
 	)
 
-	m.requestDuration = prometheus.NewHistogramVec(
+	m.requestDuration = factory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: "vault",
@@ -68,7 +97,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"operation"},
 	)
 
-	m.tokenTTL = prometheus.NewGauge(
+	m.tokenTTL = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "vault",
@@ -77,7 +106,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		},
 	)
 
-	m.cacheHits = prometheus.NewCounter(
+	m.cacheHits = factory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "vault",
@@ -86,7 +115,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		},
 	)
 
-	m.cacheMisses = prometheus.NewCounter(
+	m.cacheMisses = factory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "vault",
@@ -95,7 +124,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		},
 	)
 
-	m.authAttempts = prometheus.NewCounterVec(
+	m.authAttempts = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "vault",
@@ -105,7 +134,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"method", "status"},
 	)
 
-	m.errors = prometheus.NewCounterVec(
+	m.errors = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "vault",
@@ -114,19 +143,6 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		},
 		[]string{"type"},
 	)
-
-	// Register all metrics
-	m.registry.MustRegister(
-		m.requestsTotal,
-		m.requestDuration,
-		m.tokenTTL,
-		m.cacheHits,
-		m.cacheMisses,
-		m.authAttempts,
-		m.errors,
-	)
-
-	return m
 }
 
 // RecordRequest records a Vault request.

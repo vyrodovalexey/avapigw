@@ -41,12 +41,20 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
+            {{- if and .Values.gateway.operatorMode .Values.gateway.operatorMode.enabled }}
+            - "-operator-mode"
+            - "-log-level"
+            - "{{ .Values.gateway.logLevel }}"
+            - "-log-format"
+            - "{{ .Values.gateway.logFormat }}"
+            {{- else }}
             - "-config"
             - "/app/configs/gateway.yaml"
             - "-log-level"
             - "{{ .Values.gateway.logLevel }}"
             - "-log-format"
             - "{{ .Values.gateway.logFormat }}"
+            {{- end }}
           ports:
             {{- if or (and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled) (and .Values.gateway.listeners.http.tls .Values.gateway.listeners.http.tls.enabled) }}
             - name: https
@@ -200,6 +208,39 @@ spec:
               value: {{ .Values.tls.mountPath | default "/app/certs" }}/ca
             {{- end }}
             {{- end }}
+            {{- if and .Values.gateway.operatorMode .Values.gateway.operatorMode.enabled }}
+            - name: GATEWAY_OPERATOR_MODE
+              value: "true"
+            - name: GATEWAY_OPERATOR_ADDRESS
+              value: "{{ include "avapigw.operator.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.operator.grpc.port | default 9444 }}"
+            - name: GATEWAY_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: GATEWAY_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- $operatorTLS := true }}
+            {{- if and .Values.gateway.operatorMode (hasKey .Values.gateway.operatorMode "tls") }}
+              {{- $operatorTLS = .Values.gateway.operatorMode.tls }}
+            {{- end }}
+            {{- if $operatorTLS }}
+            - name: GATEWAY_OPERATOR_TLS
+              value: "true"
+            {{- $operatorTLSInsecure := false }}
+            {{- if and .Values.gateway.operatorMode (hasKey .Values.gateway.operatorMode "tlsInsecure") }}
+              {{- $operatorTLSInsecure = .Values.gateway.operatorMode.tlsInsecure }}
+            {{- end }}
+            {{- if $operatorTLSInsecure }}
+            - name: GATEWAY_OPERATOR_TLS_INSECURE
+              value: "true"
+            {{- else }}
+            - name: GATEWAY_OPERATOR_CA_FILE
+              value: "/app/operator-ca/ca.crt"
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -245,6 +286,21 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- if and .Values.gateway.operatorMode .Values.gateway.operatorMode.enabled }}
+            {{- $operatorTLS := true }}
+            {{- if hasKey .Values.gateway.operatorMode "tls" }}
+              {{- $operatorTLS = .Values.gateway.operatorMode.tls }}
+            {{- end }}
+            {{- $operatorTLSInsecure := false }}
+            {{- if and .Values.gateway.operatorMode (hasKey .Values.gateway.operatorMode "tlsInsecure") }}
+              {{- $operatorTLSInsecure = .Values.gateway.operatorMode.tlsInsecure }}
+            {{- end }}
+            {{- if and $operatorTLS (not $operatorTLSInsecure) }}
+            - name: operator-ca
+              mountPath: /app/operator-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -278,6 +334,24 @@ spec:
           secret:
             secretName: {{ .caSecretName }}
         {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if and .Values.gateway.operatorMode .Values.gateway.operatorMode.enabled }}
+        {{- $operatorTLS := true }}
+        {{- if hasKey .Values.gateway.operatorMode "tls" }}
+          {{- $operatorTLS = .Values.gateway.operatorMode.tls }}
+        {{- end }}
+        {{- $operatorTLSInsecure := false }}
+        {{- if and .Values.gateway.operatorMode (hasKey .Values.gateway.operatorMode "tlsInsecure") }}
+          {{- $operatorTLSInsecure = .Values.gateway.operatorMode.tlsInsecure }}
+        {{- end }}
+        {{- if and $operatorTLS (not $operatorTLSInsecure) }}
+        - name: operator-ca
+          secret:
+            secretName: {{ .Values.gateway.operatorMode.caSecret | default (printf "%s-grpc-cert" (include "avapigw.operator.fullname" .)) }}
+            items:
+              - key: ca.crt
+                path: ca.crt
         {{- end }}
         {{- end }}
         {{- with .Values.volumes }}

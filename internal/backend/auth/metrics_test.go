@@ -205,8 +205,8 @@ func TestMetrics_MustRegister(t *testing.T) {
 			"credential_cache_hits_total metric should be present")
 		assert.True(t, metricNames["test_must_register_backend_auth_credential_cache_misses_total"],
 			"credential_cache_misses_total metric should be present")
-		assert.True(t, metricNames["test_must_register_backend_auth_token_expiry_timestamp_seconds"],
-			"token_expiry_timestamp_seconds metric should be present")
+		assert.True(t, metricNames["test_must_register_backend_auth_token_expiry_seconds"],
+			"token_expiry_seconds metric should be present")
 	})
 }
 

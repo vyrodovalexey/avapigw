@@ -87,6 +87,12 @@ gateway:
   logFormat: json
   environment: local-k8s
 
+  # Operator mode - gateway connects to operator via gRPC with mTLS
+  operatorMode:
+    enabled: true
+    tls: true
+    tlsInsecure: true  # Use insecure TLS for local testing (skip CA verification)
+
   listeners:
     http:
       enabled: true
@@ -385,16 +391,27 @@ operator:
     retryPeriod: 2s
     resourceName: avapigw-operator-leader.avapigw.io
 
-  # gRPC server configuration
+  # gRPC server configuration - Vault PKI TLS with gateway
   grpc:
     port: 9444
+    requireClientCert: false
     tls:
-      mode: selfsigned
-      selfsigned:
-        validity: 8760h
+      mode: vault
+      vault:
+        pkiMount: pki
+        role: test-role
+        commonName: avapigw-operator.local
+        altNames:
+          - localhost
+          - avapigw-operator.local
+          - "*.avapigw-operator.local"
+        ttl: 24h
 
-  # Webhook configuration - disabled for local testing
-  # Enable if you want to test webhook validation
+  # Webhook configuration - disabled for local testing.
+  # Enable if you want to test webhook validation.
+  # NOTE: Webhook metrics (avapigw_operator_webhook_*) are only emitted
+  # when webhooks are enabled. Set enabled: true and configure cert-manager
+  # or use selfsigned TLS to see webhook validation metrics on /metrics.
   webhook:
     enabled: false
     port: 9443
@@ -403,13 +420,12 @@ operator:
       selfsigned:
         validity: 8760h
 
-  # Vault integration - disabled for local testing
-  # Enable if you have Vault running in docker-compose
+  # Vault integration - enabled for Vault PKI certificate management
   vault:
-    enabled: false
+    enabled: true
     address: "http://host.docker.internal:8200"
     authMethod: kubernetes
-    role: avapigw-operator
+    role: avapigw
     kubernetesMountPath: kubernetes
 
   # Metrics configuration

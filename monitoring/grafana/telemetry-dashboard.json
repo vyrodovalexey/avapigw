@@ -1346,10 +1346,21 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "sum by (job) (rate(scrape_series_added[$__rate_interval]))",
-          "legendFormat": "{{job}}",
+          "expr": "sum by (job) (scrape_samples_scraped - scrape_samples_post_metric_relabeling)",
+          "legendFormat": "{{job}} dropped",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "count by (job) (up == 0)",
+          "legendFormat": "{{job}} down",
+          "range": true,
+          "refId": "B"
         }
       ],
       "title": "Scrape Errors",

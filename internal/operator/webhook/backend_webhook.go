@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,27 +36,56 @@ func SetupBackendWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerConfig)
 		Complete()
 }
 
+// SetupBackendWebhookWithConfigAndContext sets up the Backend webhook with context-based
+// lifecycle management for the DuplicateChecker cleanup goroutine.
+func SetupBackendWebhookWithConfigAndContext(ctx context.Context, mgr ctrl.Manager, cfg DuplicateCheckerConfig) error {
+	validator := &BackendValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: NewDuplicateCheckerFromConfigWithContext(ctx, mgr.GetClient(), cfg),
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.Backend{}).
+		WithValidator(validator).
+		Complete()
+}
+
+// SetupBackendWebhookWithChecker sets up the Backend webhook with a shared DuplicateChecker.
+// This avoids creating multiple DuplicateChecker instances (and cleanup goroutines) across webhooks.
+func SetupBackendWebhookWithChecker(mgr ctrl.Manager, dc *DuplicateChecker) error {
+	validator := &BackendValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: dc,
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.Backend{}).
+		WithValidator(validator).
+		Complete()
+}
+
 // ValidateCreate implements admission.CustomValidator.
 func (v *BackendValidator) ValidateCreate(
 	ctx context.Context,
 	obj *avapigwv1alpha1.Backend,
 ) (admission.Warnings, error) {
+	start := time.Now()
 	warnings, err := v.validate(obj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation("Backend", "create", "rejected", time.Since(start), len(warnings))
 		return warnings, err
 	}
 
 	if v.DuplicateChecker != nil {
 		// Check for duplicates within the same CRD type
 		if dupErr := v.DuplicateChecker.CheckBackendDuplicate(ctx, obj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation("Backend", "create", "rejected", time.Since(start), len(warnings))
 			return warnings, dupErr
 		}
 		// Check for cross-CRD host:port conflicts with GRPCBackends
 		if crossErr := v.DuplicateChecker.CheckBackendCrossConflicts(ctx, obj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation("Backend", "create", "rejected", time.Since(start), len(warnings))
 			return warnings, crossErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation("Backend", "create", "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
 
@@ -64,28 +94,34 @@ func (v *BackendValidator) ValidateUpdate(
 	ctx context.Context,
 	_, newObj *avapigwv1alpha1.Backend,
 ) (admission.Warnings, error) {
+	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation("Backend", "update", "rejected", time.Since(start), len(warnings))
 		return warnings, err
 	}
 
 	if v.DuplicateChecker != nil {
 		// Check for duplicates within the same CRD type (excluding self)
 		if dupErr := v.DuplicateChecker.CheckBackendDuplicate(ctx, newObj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation("Backend", "update", "rejected", time.Since(start), len(warnings))
 			return warnings, dupErr
 		}
 		// Check for cross-CRD host:port conflicts with GRPCBackends
 		if crossErr := v.DuplicateChecker.CheckBackendCrossConflicts(ctx, newObj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation("Backend", "update", "rejected", time.Since(start), len(warnings))
 			return warnings, crossErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation("Backend", "update", "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
 
 // ValidateDelete implements admission.CustomValidator.
+// No-op: Backend deletion does not require validation because the gateway
+// controller handles cleanup of derived configuration via finalizers.
 func (v *BackendValidator) ValidateDelete(_ context.Context, _ *avapigwv1alpha1.Backend) (admission.Warnings, error) {
-	// No validation needed for delete
 	return nil, nil
 }
 

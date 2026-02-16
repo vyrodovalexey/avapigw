@@ -6,11 +6,17 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// rlTracer is the OTEL tracer used for rate limiting operations.
+var rlTracer = otel.Tracer("avapigw/ratelimit")
 
 // Rate limiter default configuration constants.
 const (
@@ -190,9 +196,24 @@ func (rl *RateLimiter) evictOldestLocked() {
 func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, span := rlTracer.Start(r.Context(), "ratelimit.check",
+				trace.WithSpanKind(trace.SpanKindInternal),
+				trace.WithAttributes(
+					attribute.String("ratelimit.path", r.URL.Path),
+				),
+			)
+			defer span.End()
+			r = r.WithContext(ctx)
+
 			clientIP := getClientIP(r)
+			span.SetAttributes(attribute.String("ratelimit.client_ip", clientIP))
 
 			if !rl.Allow(clientIP) {
+				span.SetAttributes(
+					attribute.Bool("ratelimit.allowed", false),
+					attribute.String("ratelimit.decision", "rejected"),
+				)
+
 				rl.logger.Warn("rate limit exceeded",
 					observability.String("client_ip", clientIP),
 					observability.String("path", r.URL.Path),
@@ -202,12 +223,26 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 					rl.hitCallback(r.URL.Path)
 				}
 
+				mm := GetMiddlewareMetrics()
+				mm.rateLimitRejected.WithLabelValues(
+					r.URL.Path,
+				).Inc()
+
 				w.Header().Set(HeaderContentType, ContentTypeJSON)
 				w.Header().Set(HeaderRetryAfter, "1")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = io.WriteString(w, ErrRateLimitExceeded)
 				return
 			}
+
+			span.SetAttributes(
+				attribute.Bool("ratelimit.allowed", true),
+				attribute.String("ratelimit.decision", "allowed"),
+			)
+
+			GetMiddlewareMetrics().rateLimitAllowed.WithLabelValues(
+				r.URL.Path,
+			).Inc()
 
 			next.ServeHTTP(w, r)
 		})

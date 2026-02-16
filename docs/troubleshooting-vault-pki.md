@@ -703,4 +703,38 @@ curl http://localhost:9090/health/vault
 curl http://localhost:9090/health/pki
 ```
 
+## Recent Improvements
+
+### Enhanced Boolean Environment Variable Parsing (DEV-006)
+
+The latest refactoring session improved boolean environment variable parsing, including `VAULT_SKIP_VERIFY`:
+
+**Supported Values:**
+- **True values:** `true`, `TRUE`, `yes`, `YES`, `1`, `on`, `ON`
+- **False values:** `false`, `FALSE`, `no`, `NO`, `0`, `off`, `OFF`
+
+**Examples:**
+```bash
+# All of these are equivalent for enabling skip verify
+export VAULT_SKIP_VERIFY=true
+export VAULT_SKIP_VERIFY=yes
+export VAULT_SKIP_VERIFY=1
+
+# All of these are equivalent for disabling skip verify
+export VAULT_SKIP_VERIFY=false
+export VAULT_SKIP_VERIFY=no
+export VAULT_SKIP_VERIFY=0
+```
+
+**Troubleshooting Boolean Parsing:**
+```bash
+# Check current environment variable value
+echo $VAULT_SKIP_VERIFY
+
+# Test with different boolean formats
+export VAULT_SKIP_VERIFY=yes && ./bin/gateway -config config.yaml
+export VAULT_SKIP_VERIFY=1 && ./bin/gateway -config config.yaml
+export VAULT_SKIP_VERIFY=true && ./bin/gateway -config config.yaml
+```
+
 This troubleshooting guide provides comprehensive coverage of common Vault PKI integration issues and their solutions, enabling quick diagnosis and resolution of certificate management problems.

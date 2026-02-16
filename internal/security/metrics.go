@@ -1,9 +1,26 @@
 package security
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+// defaultSecurityMetrics holds the singleton Metrics instance registered with the default global registry.
+var (
+	defaultSecurityMetrics     *Metrics
+	defaultSecurityMetricsOnce sync.Once
+)
+
+// GetSecurityMetrics returns the singleton security metrics instance.
+// It initializes the metrics on first call (singleton pattern).
+func GetSecurityMetrics() *Metrics {
+	defaultSecurityMetricsOnce.Do(func() {
+		defaultSecurityMetrics = NewMetrics("gateway")
+	})
+	return defaultSecurityMetrics
+}
 
 // Metrics contains security metrics.
 type Metrics struct {

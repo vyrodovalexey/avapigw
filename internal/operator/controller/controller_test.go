@@ -232,8 +232,9 @@ func TestAPIRouteReconciler_Reconcile_AddFinalizer(t *testing.T) {
 	if err != nil {
 		t.Errorf("Reconcile() error = %v, want nil", err)
 	}
-	if !result.Requeue {
-		t.Error("Reconcile() should requeue after adding finalizer")
+	// Patch triggers a watch event automatically; no explicit requeue needed.
+	if result.Requeue {
+		t.Error("Reconcile() should not requeue after adding finalizer (Patch triggers watch event)")
 	}
 
 	// Verify finalizer was added
@@ -551,8 +552,9 @@ func TestGRPCRouteReconciler_Reconcile_AddFinalizer(t *testing.T) {
 	if err != nil {
 		t.Errorf("Reconcile() error = %v, want nil", err)
 	}
-	if !result.Requeue {
-		t.Error("Reconcile() should requeue after adding finalizer")
+	// Patch triggers a watch event automatically; no explicit requeue needed.
+	if result.Requeue {
+		t.Error("Reconcile() should not requeue after adding finalizer (Patch triggers watch event)")
 	}
 
 	// Verify finalizer was added
@@ -804,8 +806,9 @@ func TestBackendReconciler_Reconcile_AddFinalizer(t *testing.T) {
 	if err != nil {
 		t.Errorf("Reconcile() error = %v, want nil", err)
 	}
-	if !result.Requeue {
-		t.Error("Reconcile() should requeue after adding finalizer")
+	// Patch triggers a watch event automatically; no explicit requeue needed.
+	if result.Requeue {
+		t.Error("Reconcile() should not requeue after adding finalizer (Patch triggers watch event)")
 	}
 
 	// Verify finalizer was added
@@ -1095,8 +1098,9 @@ func TestGRPCBackendReconciler_Reconcile_AddFinalizer(t *testing.T) {
 	if err != nil {
 		t.Errorf("Reconcile() error = %v, want nil", err)
 	}
-	if !result.Requeue {
-		t.Error("Reconcile() should requeue after adding finalizer")
+	// Patch triggers a watch event automatically; no explicit requeue needed.
+	if result.Requeue {
+		t.Error("Reconcile() should not requeue after adding finalizer (Patch triggers watch event)")
 	}
 
 	// Verify finalizer was added
@@ -2395,6 +2399,7 @@ type testErrorClient struct {
 	client.Client
 	getErr          error
 	updateErr       error
+	patchErr        error
 	statusUpdateErr error
 }
 
@@ -2410,6 +2415,13 @@ func (e *testErrorClient) Update(ctx context.Context, obj client.Object, opts ..
 		return e.updateErr
 	}
 	return e.Client.Update(ctx, obj, opts...)
+}
+
+func (e *testErrorClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if e.patchErr != nil {
+		return e.patchErr
+	}
+	return e.Client.Patch(ctx, obj, patch, opts...)
 }
 
 func (e *testErrorClient) Status() client.SubResourceWriter {
@@ -2480,7 +2492,7 @@ func TestAPIRouteReconciler_Reconcile_GetError(t *testing.T) {
 	}
 }
 
-// TestAPIRouteReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer update fails
+// TestAPIRouteReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer patch fails
 func TestAPIRouteReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 	scheme := newTestScheme()
 
@@ -2498,8 +2510,8 @@ func TestAPIRouteReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &APIRouteReconciler{
@@ -2734,8 +2746,8 @@ func TestAPIRouteReconciler_Deletion_RemoveFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &APIRouteReconciler{
@@ -2919,7 +2931,7 @@ func TestGRPCBackendReconciler_Deletion_WithOtherFinalizer(t *testing.T) {
 	}
 }
 
-// TestGRPCRouteReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer update fails
+// TestGRPCRouteReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer patch fails
 func TestGRPCRouteReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 	scheme := newTestScheme()
 
@@ -2937,8 +2949,8 @@ func TestGRPCRouteReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &GRPCRouteReconciler{
@@ -2962,7 +2974,7 @@ func TestGRPCRouteReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 	}
 }
 
-// TestBackendReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer update fails
+// TestBackendReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer patch fails
 func TestBackendReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 	scheme := newTestScheme()
 
@@ -2984,8 +2996,8 @@ func TestBackendReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &BackendReconciler{
@@ -3009,7 +3021,7 @@ func TestBackendReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 	}
 }
 
-// TestGRPCBackendReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer update fails
+// TestGRPCBackendReconciler_Reconcile_UpdateFinalizerError tests error handling when finalizer patch fails
 func TestGRPCBackendReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 	scheme := newTestScheme()
 
@@ -3031,8 +3043,8 @@ func TestGRPCBackendReconciler_Reconcile_UpdateFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &GRPCBackendReconciler{
@@ -3081,8 +3093,8 @@ func TestGRPCRouteReconciler_Deletion_RemoveFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &GRPCRouteReconciler{
@@ -3131,8 +3143,8 @@ func TestBackendReconciler_Deletion_RemoveFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &BackendReconciler{
@@ -3181,8 +3193,8 @@ func TestGRPCBackendReconciler_Deletion_RemoveFinalizerError(t *testing.T) {
 		Build()
 
 	errClient := &testErrorClient{
-		Client:    fakeClient,
-		updateErr: errors.NewInternalError(fmt.Errorf("update error")),
+		Client:   fakeClient,
+		patchErr: errors.NewInternalError(fmt.Errorf("patch error")),
 	}
 
 	reconciler := &GRPCBackendReconciler{

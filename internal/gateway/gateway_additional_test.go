@@ -373,6 +373,85 @@ func TestGateway_GetGRPCListenersEmpty(t *testing.T) {
 	assert.Empty(t, grpcListeners)
 }
 
+// TestGateway_Start_CleanupOnListenerStartFailure verifies that when starting the second
+// listener fails, the first (already started) listener is properly stopped/cleaned up
+// via stopListeners().
+func TestGateway_Start_CleanupOnListenerStartFailure(t *testing.T) {
+	t.Parallel()
+
+	// Configure two HTTP listeners: first with valid port 0 (random), second with invalid port.
+	// Both listeners will be created successfully by createListeners(), but the second
+	// will fail at Start() time, triggering stopListeners() cleanup of the first.
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway-cleanup"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http-ok", Port: 0, Protocol: config.ProtocolHTTP},
+				{Name: "http-fail", Port: -1, Protocol: config.ProtocolHTTP}, // Invalid port fails at Start
+			},
+		},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+
+	// Start should fail because the second listener has an invalid port
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to start listener")
+	assert.Equal(t, StateStopped, gw.State())
+
+	// The gateway should have listeners assigned (they were created), but they should
+	// all be stopped. Verify the gateway is in stopped state.
+	assert.NotNil(t, gw.GetListeners(), "listeners are created before start fails")
+	assert.Len(t, gw.GetListeners(), 2, "both listeners should have been created")
+}
+
+// TestGateway_CreateListeners_CleanupOnHTTPSCreationError verifies cleanup when an HTTPS
+// listener creation fails (due to invalid TLS config) after an HTTP listener was already
+// created. The cleanupOnError function in createListeners() should stop the already-created
+// HTTP listener.
+func TestGateway_CreateListeners_CleanupOnHTTPSCreationError(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway-https-cleanup"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http-ok", Port: 0, Protocol: config.ProtocolHTTP},
+				{
+					Name:     "https-fail",
+					Port:     0,
+					Protocol: "HTTPS",
+					TLS: &config.ListenerTLSConfig{
+						Mode:     "simple",
+						CertFile: "/nonexistent/cert.pem",
+						KeyFile:  "/nonexistent/key.pem",
+					},
+				},
+			},
+		},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+
+	// Start should fail because createListeners() fails on the HTTPS listener
+	// due to invalid TLS cert files. The cleanupOnError function should have been called.
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to create listener")
+	assert.Equal(t, StateStopped, gw.State())
+
+	// After createListeners() fails, g.listeners is NOT assigned (the function returns error
+	// before assigning), so GetListeners() should return nil
+	assert.Nil(t, gw.GetListeners(), "listeners should be nil when createListeners fails")
+}
+
 func TestGateway_ConfigConcurrentAccess(t *testing.T) {
 	t.Parallel()
 

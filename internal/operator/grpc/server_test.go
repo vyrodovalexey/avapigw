@@ -29,6 +29,7 @@ func getTestServer(t *testing.T) *Server {
 	testServer.grpcRoutes = make(map[string][]byte)
 	testServer.backends = make(map[string][]byte)
 	testServer.grpcBackends = make(map[string][]byte)
+	testServer.configNotify = make(chan struct{})
 	testServer.gateways = make(map[string]*gatewayConnection)
 	testServer.mu.Unlock()
 	return testServer

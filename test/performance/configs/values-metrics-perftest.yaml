@@ -1,0 +1,541 @@
+# Metrics Performance Test Values
+# Comprehensive deployment for exercising 70%+ of gateway metrics
+#
+# Features enabled:
+#   - TLS for HTTP & gRPC via Vault PKI
+#   - External Redis Sentinel for rate limiting and caching
+#   - Keycloak authentication
+#   - Operator with CRD-based configuration
+#   - Full observability (metrics, tracing, audit)
+#   - Rate limiting, circuit breaker, security headers, CORS
+#
+# Deploy with:
+#   helm upgrade --install avapigw helm/avapigw/ \
+#     -f test/performance/configs/values-metrics-perftest.yaml \
+#     -n avapigw-test --create-namespace
+#
+# Prerequisites:
+#   - Docker Desktop Kubernetes
+#   - Vault running at http://host.docker.internal:8200 with K8s auth configured
+#   - Redis Sentinel running via docker-compose (ports 26379-26381)
+#   - Keycloak running at http://host.docker.internal:8090
+#   - Backend services running via docker-compose (ports 8801-8804)
+#   - OTEL collector deployed in avapigw-test namespace
+
+namespace: avapigw-test
+
+replicaCount: 1
+
+image:
+  repository: avapigw
+  pullPolicy: Never
+  tag: "test"
+
+service:
+  type: NodePort
+  httpPort: 8080
+  httpsPort: 8443
+  grpcPort: 9000
+  grpcTlsPort: 9443
+  metricsPort: 9090
+
+# Security context for local testing
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# =============================================================================
+# Gateway Configuration
+# =============================================================================
+gateway:
+  logLevel: info
+  logFormat: json
+  environment: metrics-perftest
+
+  # Operator mode - gateway receives config from operator via gRPC
+  operatorMode:
+    enabled: true
+    tls: true
+    tlsInsecure: true  # Skip TLS cert verification (operator uses self-signed certs)
+
+  # Listener configuration
+  listeners:
+    http:
+      enabled: true
+      port: 8080
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+    grpc:
+      enabled: true
+      port: 9000
+      bind: "0.0.0.0"
+      hosts:
+        - "*"
+      maxConcurrentStreams: 500
+      maxRecvMsgSize: 4194304
+      maxSendMsgSize: 4194304
+      reflection: true
+      healthCheck: true
+
+  # HTTP Routes
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy"}'
+        headers:
+          Content-Type: application/json
+
+    - name: items-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+          weight: 50
+        - destination:
+            host: host.docker.internal
+            port: 8802
+          weight: 50
+      timeout: 30s
+
+    - name: websocket
+      match:
+        - uri:
+            exact: /ws
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+      timeout: 0s
+
+    - name: backend-health
+      match:
+        - uri:
+            prefix: /backend/health
+          methods:
+            - GET
+      rewrite:
+        uri: /health
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8801
+
+  # HTTP Backends with rate limiting and caching
+  backends:
+    - name: backend-service-1
+      hosts:
+        - address: host.docker.internal
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      # Backend-level rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 50
+        burst: 100
+      # Backend-level caching
+      cache:
+        enabled: true
+        ttl: 30s
+      # Backend-level circuit breaker
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+
+    - name: backend-service-2
+      hosts:
+        - address: host.docker.internal
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  # gRPC Routes
+  grpcRoutes:
+    - name: test-service-route
+      match:
+        - service:
+            exact: api.v1.TestService
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8803
+          weight: 50
+        - destination:
+            host: host.docker.internal
+            port: 8804
+          weight: 50
+      timeout: 30s
+
+    - name: catch-all-grpc
+      match:
+        - service:
+            prefix: "/"
+      route:
+        - destination:
+            host: host.docker.internal
+            port: 8803
+
+  # gRPC Backends
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: host.docker.internal
+          port: 8803
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 10s
+        timeout: 5s
+      connectionPool:
+        maxConnections: 100
+        connectTimeout: 5s
+
+    - name: grpc-backend-2
+      hosts:
+        - address: host.docker.internal
+          port: 8804
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 10s
+        timeout: 5s
+      connectionPool:
+        maxConnections: 100
+        connectTimeout: 5s
+
+  # Global Rate Limiting (100 rps, burst 200)
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+
+  # Circuit Breaker (threshold 5, timeout 30s)
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+    halfOpenRequests: 3
+
+  # Security Headers
+  security:
+    enabled: true
+    headers:
+      enabled: true
+      xFrameOptions: "DENY"
+      xContentTypeOptions: "nosniff"
+      xXSSProtection: "1; mode=block"
+    hsts:
+      enabled: false
+
+  # CORS Configuration
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 86400
+    allowCredentials: false
+
+  # Audit Logging
+  audit:
+    enabled: true
+    output: stdout
+    format: json
+    level: info
+    events:
+      authentication: true
+      authorization: true
+      request: true
+      response: true
+      configuration: true
+      security: true
+    skipPaths:
+      - /health
+      - /metrics
+      - /ready
+      - /live
+    redactFields:
+      - password
+      - secret
+      - token
+      - authorization
+      - cookie
+
+  # Full Observability
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: true
+      samplingRate: 1.0
+      otlpEndpoint: "otel-collector.avapigw-test.svc:4317"
+      serviceName: avapigw
+    logging:
+      level: info
+      format: json
+
+# =============================================================================
+# Vault Configuration - TLS via PKI
+# =============================================================================
+vault:
+  enabled: true
+  address: "http://host.docker.internal:8200"
+  authMethod: kubernetes
+  role: avapigw
+  kubernetesMountPath: "kubernetes"
+  pki:
+    enabled: true
+    pkiMount: "pki"
+    role: "test-role"
+    commonName: "avapigw.local"
+    altNames:
+      - "localhost"
+      - "avapigw.local"
+      - "*.avapigw.local"
+    ttl: "24h"
+    renewBefore: "1h"
+    # gRPC TLS via Vault PKI
+    grpc:
+      enabled: true
+
+# =============================================================================
+# Redis Configuration - External Sentinel (NOT included in helm chart)
+# =============================================================================
+# Redis Sentinel is running externally via docker-compose
+# Do NOT deploy Bitnami Redis subchart
+redis:
+  enabled: false
+
+# External Redis Sentinel configuration via environment variables
+redisEnv:
+  # Sentinel addresses from docker-compose
+  sentinelAddrs: "host.docker.internal:26379,host.docker.internal:26380,host.docker.internal:26381"
+  sentinelMasterName: "mymaster"
+  masterPassword: "password"
+  sentinelDB: "0"
+  # TTL jitter for cache stampede prevention
+  ttlJitter: "0.1"
+
+# =============================================================================
+# Keycloak Configuration - External
+# =============================================================================
+keycloak:
+  enabled: true
+  url: "http://host.docker.internal:8090"
+  realm: "gateway-test"
+  clientId: "gateway"
+  clientSecret: "gateway-secret"
+
+# =============================================================================
+# Operator Configuration
+# =============================================================================
+operator:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: avapigw-operator
+    pullPolicy: Never
+    tag: "latest"
+
+  leaderElection:
+    enabled: true
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+    resourceName: avapigw-operator-leader.avapigw.io
+
+  grpc:
+    port: 9444
+    tls:
+      mode: selfsigned
+      selfsigned:
+        validity: 8760h
+
+  webhook:
+    enabled: false
+    port: 9443
+    tls:
+      mode: selfsigned
+      selfsigned:
+        validity: 8760h
+
+  vault:
+    enabled: false
+    address: "http://host.docker.internal:8200"
+    authMethod: kubernetes
+    role: avapigw-operator
+    kubernetesMountPath: kubernetes
+
+  metrics:
+    enabled: true
+    port: 8080
+
+  health:
+    port: 8081
+
+  service:
+    type: ClusterIP
+    annotations: {}
+
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: health
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    capabilities:
+      drop:
+        - ALL
+
+  serviceAccount:
+    create: true
+    automount: true
+    annotations: {}
+    name: ""
+
+  podDisruptionBudget:
+    enabled: false
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  ingressController:
+    enabled: false
+    className: avapigw
+    isDefaultClass: false
+    lbAddress: ""
+
+  serviceMonitor:
+    enabled: false
+
+  networkPolicy:
+    enabled: false

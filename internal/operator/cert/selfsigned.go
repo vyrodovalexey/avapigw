@@ -154,7 +154,10 @@ func (p *selfSignedProvider) GetCA(ctx context.Context) (*x509.CertPool, error) 
 }
 
 // RotateCertificate rotates the certificate for the given request.
-func (p *selfSignedProvider) RotateCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
+func (p *selfSignedProvider) RotateCertificate(
+	ctx context.Context,
+	req *CertificateRequest,
+) (*Certificate, error) {
 	// Check context cancellation at the start
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("context canceled: %w", err)
@@ -167,6 +170,10 @@ func (p *selfSignedProvider) RotateCertificate(ctx context.Context, req *Certifi
 	if req == nil || req.CommonName == "" {
 		return nil, fmt.Errorf("common name is required")
 	}
+
+	GetCertMetrics().rotationsTotal.WithLabelValues(
+		"selfsigned",
+	).Inc()
 
 	return p.issueCertificate(ctx, req)
 }
@@ -246,25 +253,16 @@ func (p *selfSignedProvider) generateCA() (*Certificate, error) {
 }
 
 // issueCertificate issues a new certificate signed by the CA.
+// RSA key generation and certificate creation are performed outside the lock
+// to avoid blocking concurrent certificate reads during expensive crypto operations.
+// Only the final assignment to the cache is done under the write lock.
 func (p *selfSignedProvider) issueCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
-	// Check context before acquiring lock
+	// Check context before expensive operations
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("context canceled before acquiring lock: %w", err)
+		return nil, fmt.Errorf("context canceled before key generation: %w", err)
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Check context after acquiring lock
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("context canceled after acquiring lock: %w", err)
-	}
-
-	if p.ca == nil {
-		return nil, fmt.Errorf("CA certificate not available")
-	}
-
-	// Generate private key (expensive operation)
+	// Generate private key OUTSIDE the lock (expensive crypto operation)
 	privateKey, err := rsa.GenerateKey(rand.Reader, p.config.KeySize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
@@ -275,10 +273,25 @@ func (p *selfSignedProvider) issueCertificate(ctx context.Context, req *Certific
 		return nil, fmt.Errorf("context canceled after key generation: %w", err)
 	}
 
-	// Generate serial number
+	// Generate serial number (cheap, but no reason to hold lock)
 	serialNumber, err := generateSerialNumber()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	// Read CA data under read lock to build the certificate
+	p.mu.RLock()
+	if p.ca == nil {
+		p.mu.RUnlock()
+		return nil, fmt.Errorf("CA certificate not available")
+	}
+	caCert := p.ca.Certificate
+	caKey, ok := p.ca.PrivateKey.(*rsa.PrivateKey)
+	caPEM := p.ca.CertificatePEM
+	p.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("CA private key is not RSA")
 	}
 
 	validity := p.config.CertValidity
@@ -313,18 +326,13 @@ func (p *selfSignedProvider) issueCertificate(ctx context.Context, req *Certific
 		}
 	}
 
-	// Sign with CA
-	caKey, ok := p.ca.PrivateKey.(*rsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("CA private key is not RSA")
-	}
-
 	// Check context before certificate creation
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("context canceled before certificate creation: %w", err)
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, p.ca.Certificate, &privateKey.PublicKey, caKey)
+	// Sign with CA OUTSIDE the lock (crypto operation)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &privateKey.PublicKey, caKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create certificate: %w", err)
 	}
@@ -351,13 +359,21 @@ func (p *selfSignedProvider) issueCertificate(ctx context.Context, req *Certific
 		PrivateKey:     privateKey,
 		CertificatePEM: certPEM,
 		PrivateKeyPEM:  keyPEM,
-		CAChainPEM:     p.ca.CertificatePEM,
+		CAChainPEM:     caPEM,
 		SerialNumber:   serialNumber.String(),
 		Expiration:     cert.NotAfter,
 	}
 
-	// Cache the certificate
+	// Acquire write lock ONLY for the cache assignment
+	p.mu.Lock()
 	p.certs[req.CommonName] = certificate
+	p.mu.Unlock()
+
+	cm := GetCertMetrics()
+	cm.issuedTotal.WithLabelValues("selfsigned").Inc()
+	cm.expirySeconds.WithLabelValues(
+		req.CommonName,
+	).Set(time.Until(cert.NotAfter).Seconds())
 
 	p.logger.Info("certificate issued",
 		observability.String("common_name", req.CommonName),

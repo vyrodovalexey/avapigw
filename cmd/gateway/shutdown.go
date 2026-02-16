@@ -11,6 +11,19 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// shutdownTimeout is the maximum time allowed for graceful shutdown.
+const shutdownTimeout = 30 * time.Second
+
+// drainWaitDuration is the time to wait after marking health endpoints as
+// unhealthy, giving load balancers time to detect the change and stop
+// sending new traffic before connections are drained.
+const drainWaitDuration = 5 * time.Second
+
+// shutdownHook is a function executed during graceful shutdown before
+// the common application components are stopped. It receives the
+// shutdown context so it can respect the overall deadline.
+type shutdownHook func(ctx context.Context, logger observability.Logger)
+
 // runGateway runs the gateway and handles shutdown.
 func runGateway(app *application, configPath string, logger observability.Logger) {
 	ctx := context.Background()
@@ -33,28 +46,83 @@ func runGateway(app *application, configPath string, logger observability.Logger
 
 // waitForShutdown waits for shutdown signal and performs graceful shutdown.
 func waitForShutdown(app *application, watcher *config.Watcher, logger observability.Logger) {
+	hook := func(_ context.Context, _ observability.Logger) {
+		// Stop config watcher before shutting down the gateway so no
+		// further reloads are triggered during the drain phase.
+		if watcher != nil {
+			_ = watcher.Stop()
+		}
+	}
+	gracefulShutdown(app, logger, hook)
+}
+
+// gracefulShutdown waits for a termination signal, runs optional
+// pre-shutdown hooks, and then tears down all common application
+// components in the correct order. Both standalone and operator
+// modes share this function to avoid duplicating shutdown logic.
+func gracefulShutdown(app *application, logger observability.Logger, hooks ...shutdownHook) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigCh
 	logger.Info("received shutdown signal", observability.String("signal", sig.String()))
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if watcher != nil {
-		_ = watcher.Stop()
+	// Step 1: Mark health endpoints as unhealthy (draining) BEFORE draining
+	// connections. This allows load balancers to detect the change and stop
+	// sending new traffic.
+	waitForDrain(shutdownCtx, app, logger)
+
+	// Step 2: Execute pre-shutdown hooks (e.g. stop config watcher, operator client).
+	for _, h := range hooks {
+		h(shutdownCtx, logger)
 	}
 
+	// Step 3: Stop core services and cleanup resources.
+	stopCoreServices(shutdownCtx, app, logger)
+
+	logger.Info("gateway stopped")
+}
+
+// waitForDrain marks health endpoints as draining and waits for load balancers
+// to detect the unhealthy status before connections are drained.
+func waitForDrain(ctx context.Context, app *application, logger observability.Logger) {
+	if app.healthChecker == nil {
+		return
+	}
+
+	app.healthChecker.SetDraining(true)
+	logger.Info("health endpoints marked as draining, waiting for LB detection",
+		observability.Duration("drain_wait", drainWaitDuration),
+	)
+
+	// Wait for load balancers to detect the unhealthy status.
+	// Use a timer that respects the shutdown context deadline.
+	drainTimer := time.NewTimer(drainWaitDuration)
+	select {
+	case <-drainTimer.C:
+		// Drain wait completed normally
+	case <-ctx.Done():
+		drainTimer.Stop()
+		logger.Warn("shutdown context expired during drain wait")
+	}
+}
+
+// stopCoreServices shuts down the gateway, backends, tracer, and other
+// application components in the correct order.
+func stopCoreServices(ctx context.Context, app *application, logger observability.Logger) {
 	// Shutdown metrics server if running
 	if app.metricsServer != nil {
 		logger.Info("stopping metrics server")
-		if err := app.metricsServer.Shutdown(shutdownCtx); err != nil {
+		if err := app.metricsServer.Shutdown(ctx); err != nil {
 			logger.Error("failed to stop metrics server gracefully", observability.Error(err))
 		}
 	}
 
-	if err := app.gateway.Stop(shutdownCtx); err != nil {
+	// Stop gateway (drains existing connections)
+	if err := app.gateway.Stop(ctx); err != nil {
 		logger.Error("failed to stop gateway gracefully", observability.Error(err))
 	}
 
@@ -66,11 +134,11 @@ func waitForShutdown(app *application, watcher *config.Watcher, logger observabi
 		}
 	}
 
-	if err := app.backendRegistry.StopAll(shutdownCtx); err != nil {
+	if err := app.backendRegistry.StopAll(ctx); err != nil {
 		logger.Error("failed to stop backends", observability.Error(err))
 	}
 
-	if err := app.tracer.Shutdown(shutdownCtx); err != nil {
+	if err := app.tracer.Shutdown(ctx); err != nil {
 		logger.Error("failed to shutdown tracer", observability.Error(err))
 	}
 
@@ -90,6 +158,4 @@ func waitForShutdown(app *application, watcher *config.Watcher, logger observabi
 			logger.Error("failed to close audit logger", observability.Error(err))
 		}
 	}
-
-	logger.Info("gateway stopped")
 }

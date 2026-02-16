@@ -72,6 +72,10 @@ type ServerConfig struct {
 	// CertManager is the certificate manager for client validation.
 	CertManager cert.Manager
 
+	// MetricsRegisterer is the Prometheus registerer for server metrics.
+	// If nil, metrics are registered with the default registerer.
+	MetricsRegisterer prometheus.Registerer
+
 	// MaxConcurrentStreams is the maximum number of concurrent streams.
 	MaxConcurrentStreams uint32
 
@@ -105,6 +109,11 @@ type Server struct {
 	backends     map[string][]byte
 	grpcBackends map[string][]byte
 
+	// Configuration change notification.
+	// configNotify is closed to broadcast a change to all waiting goroutines,
+	// then replaced with a new channel for the next broadcast cycle.
+	configNotify chan struct{}
+
 	// Connected gateways
 	gateways map[string]*gatewayConnection
 
@@ -132,12 +141,24 @@ type serverMetrics struct {
 	retryAttempts     *prometheus.CounterVec
 }
 
-// newServerMetrics returns the singleton server metrics instance.
-// This ensures metrics are only registered once with the default Prometheus registry.
-func newServerMetrics() *serverMetrics {
+// initServerMetrics initializes the singleton server metrics instance with the
+// given Prometheus registerer. If registerer is nil, metrics are registered
+// with the default registerer. Must be called before getServerMetrics;
+// subsequent calls are no-ops (sync.Once).
+func initServerMetrics(registerer prometheus.Registerer) {
 	defaultMetricsOnce.Do(func() {
-		defaultMetrics = newServerMetricsWithFactory(promauto.With(prometheus.DefaultRegisterer))
+		if registerer == nil {
+			registerer = prometheus.DefaultRegisterer
+		}
+		defaultMetrics = newServerMetricsWithFactory(promauto.With(registerer))
 	})
+}
+
+// getServerMetrics returns the singleton server metrics instance.
+// If initServerMetrics has not been called, metrics are lazily
+// initialized with the default registerer.
+func getServerMetrics() *serverMetrics {
+	initServerMetrics(nil)
 	return defaultMetrics
 }
 
@@ -214,14 +235,19 @@ func newServerMetricsWithFactory(factory promauto.Factory) *serverMetrics {
 
 // NewServer creates a new gRPC server.
 func NewServer(config *ServerConfig) (*Server, error) {
-	return newServerInternal(config, newServerMetrics())
+	var registerer prometheus.Registerer
+	if config != nil {
+		registerer = config.MetricsRegisterer
+	}
+	initServerMetrics(registerer)
+	return newServerInternal(config, getServerMetrics())
 }
 
 // NewServerWithRegistry creates a new gRPC server using a custom Prometheus registry.
 // This is useful for testing to avoid duplicate metric registration panics.
 func NewServerWithRegistry(config *ServerConfig, registry *prometheus.Registry) (*Server, error) {
-	metrics := newServerMetricsWithFactory(promauto.With(registry))
-	return newServerInternal(config, metrics)
+	m := newServerMetricsWithFactory(promauto.With(registry))
+	return newServerInternal(config, m)
 }
 
 // newServerInternal creates a new gRPC server with the given metrics.
@@ -266,6 +292,7 @@ func newServerInternal(config *ServerConfig, metrics *serverMetrics) (*Server, e
 		grpcRoutes:   make(map[string][]byte),
 		backends:     make(map[string][]byte),
 		grpcBackends: make(map[string][]byte),
+		configNotify: make(chan struct{}),
 		gateways:     make(map[string]*gatewayConnection),
 	}
 
@@ -336,8 +363,20 @@ func (s *Server) Start(ctx context.Context) error {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
 	}
 
+	// Add gRPC server metrics interceptors for request counting, duration, and stream tracking
+	initGRPCServerMetrics(s.config.MetricsRegisterer)
+	grpcSrvMetrics := getGRPCServerMetrics()
+	opts = append(opts,
+		grpc.ChainUnaryInterceptor(grpcSrvMetrics.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(grpcSrvMetrics.StreamServerInterceptor()),
+	)
+
 	// Create gRPC server and assign under mutex to prevent data race with Stop()
 	grpcSrv := grpc.NewServer(opts...)
+
+	// Register the ConfigurationService with the gRPC server
+	registerConfigurationService(grpcSrv, s)
+
 	s.mu.Lock()
 	s.grpcServer = grpcSrv
 	s.mu.Unlock()
@@ -428,6 +467,8 @@ func (s *Server) ApplyAPIRoute(ctx context.Context, name, namespace string, conf
 		observability.String("namespace", namespace),
 	)
 
+	s.NotifyConfigChanged()
+
 	return nil
 }
 
@@ -468,6 +509,8 @@ func (s *Server) DeleteAPIRoute(ctx context.Context, name, namespace string) err
 		observability.String("name", name),
 		observability.String("namespace", namespace),
 	)
+
+	s.NotifyConfigChanged()
 
 	return nil
 }
@@ -510,6 +553,8 @@ func (s *Server) ApplyGRPCRoute(ctx context.Context, name, namespace string, con
 		observability.String("namespace", namespace),
 	)
 
+	s.NotifyConfigChanged()
+
 	return nil
 }
 
@@ -550,6 +595,8 @@ func (s *Server) DeleteGRPCRoute(ctx context.Context, name, namespace string) er
 		observability.String("name", name),
 		observability.String("namespace", namespace),
 	)
+
+	s.NotifyConfigChanged()
 
 	return nil
 }
@@ -592,6 +639,8 @@ func (s *Server) ApplyBackend(ctx context.Context, name, namespace string, confi
 		observability.String("namespace", namespace),
 	)
 
+	s.NotifyConfigChanged()
+
 	return nil
 }
 
@@ -632,6 +681,8 @@ func (s *Server) DeleteBackend(ctx context.Context, name, namespace string) erro
 		observability.String("name", name),
 		observability.String("namespace", namespace),
 	)
+
+	s.NotifyConfigChanged()
 
 	return nil
 }
@@ -674,6 +725,8 @@ func (s *Server) ApplyGRPCBackend(ctx context.Context, name, namespace string, c
 		observability.String("namespace", namespace),
 	)
 
+	s.NotifyConfigChanged()
+
 	return nil
 }
 
@@ -714,6 +767,8 @@ func (s *Server) DeleteGRPCBackend(ctx context.Context, name, namespace string) 
 		observability.String("name", name),
 		observability.String("namespace", namespace),
 	)
+
+	s.NotifyConfigChanged()
 
 	return nil
 }
@@ -800,6 +855,26 @@ func (s *Server) GetGatewayCount() int {
 	return len(s.gateways)
 }
 
+// NotifyConfigChanged broadcasts a configuration change to all waiting streams.
+// It closes the current configNotify channel (waking all goroutines blocked on it)
+// and replaces it with a fresh channel for the next broadcast cycle.
+// This method must be called outside of the data mutex to avoid deadlocks.
+func (s *Server) NotifyConfigChanged() {
+	s.mu.Lock()
+	ch := s.configNotify
+	s.configNotify = make(chan struct{})
+	s.mu.Unlock()
+	close(ch)
+}
+
+// WaitForConfigChange returns a channel that will be closed when the configuration changes.
+// Callers should select on this channel along with their context's Done channel.
+func (s *Server) WaitForConfigChange() <-chan struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configNotify
+}
+
 // checkContextCancellation checks if the context is canceled or deadline exceeded.
 // Returns the appropriate error if canceled, nil otherwise.
 func (s *Server) checkContextCancellation(ctx context.Context, operation string) error {
@@ -863,15 +938,20 @@ func (s *Server) recordCanceledOperation(operation string, err error) {
 	)
 }
 
-// contextLockPollInterval is the interval for polling TryLock when waiting for the mutex.
-const contextLockPollInterval = time.Millisecond
+// contextLockPollInterval constants for exponential backoff when polling TryLock.
+const (
+	contextLockInitialInterval = time.Millisecond
+	contextLockMaxInterval     = 100 * time.Millisecond
+	contextLockBackoffFactor   = 2
+)
 
 // withContextLock acquires the mutex with context cancellation support.
 // Returns a cleanup function that must be called to release the lock, or an error
 // if the context was canceled before or during lock acquisition.
 //
-// This implementation uses sync.Mutex.TryLock() in a loop with context checking
-// to avoid spawning goroutines that could leak if the context is canceled.
+// This implementation uses sync.Mutex.TryLock() in a loop with exponential backoff
+// (starting at 1ms, doubling up to 100ms) and context checking to avoid spawning
+// goroutines that could leak if the context is canceled.
 func (s *Server) withContextLock(ctx context.Context) (unlock func(), err error) {
 	// Check context first to fail fast
 	if err := ctx.Err(); err != nil {
@@ -888,15 +968,19 @@ func (s *Server) withContextLock(ctx context.Context) (unlock func(), err error)
 		return s.mu.Unlock, nil
 	}
 
-	// Poll TryLock with context checking to avoid goroutine leaks
-	ticker := time.NewTicker(contextLockPollInterval)
-	defer ticker.Stop()
-
+	// Poll TryLock with exponential backoff and context checking to avoid goroutine leaks
+	backoff := contextLockInitialInterval
 	for {
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			// Stop the timer and drain the channel to prevent resource leaks
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return nil, ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
+			// Timer already fired, no need to stop/drain
 			if s.mu.TryLock() {
 				// Check context again after acquiring lock
 				if err := ctx.Err(); err != nil {
@@ -904,6 +988,11 @@ func (s *Server) withContextLock(ctx context.Context) (unlock func(), err error)
 					return nil, err
 				}
 				return s.mu.Unlock, nil
+			}
+			// Exponential backoff: double the interval up to the maximum
+			backoff *= contextLockBackoffFactor
+			if backoff > contextLockMaxInterval {
+				backoff = contextLockMaxInterval
 			}
 		}
 	}

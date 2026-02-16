@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -55,6 +56,9 @@ func NewRouterDirector(r *router.Router, pool *ConnectionPool, opts ...DirectorO
 
 // Direct returns the backend connection and context for a request.
 func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context.Context, *grpc.ClientConn, error) {
+	start := time.Now()
+	metrics := getGRPCProxyMetrics()
+
 	// Extract metadata from incoming context
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
@@ -68,17 +72,30 @@ func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context
 			observability.String("method", fullMethod),
 			observability.Error(err),
 		)
+		metrics.directRequests.WithLabelValues(fullMethod, "no_route").Inc()
+		metrics.directDuration.WithLabelValues(fullMethod).Observe(time.Since(start).Seconds())
 		return ctx, nil, fmt.Errorf("no matching route for %s: %w", fullMethod, err)
 	}
 
 	// Select destination
 	dest := d.selectDestination(result.Route.Config.Route)
 	if dest == nil {
+		metrics.directRequests.WithLabelValues(fullMethod, "no_destination").Inc()
+		metrics.directDuration.WithLabelValues(fullMethod).Observe(time.Since(start).Seconds())
 		return ctx, nil, fmt.Errorf("no destination available for route %s", result.Route.Name)
 	}
 
 	// Build target address
 	target := fmt.Sprintf("%s:%d", dest.Destination.Host, dest.Destination.Port)
+
+	// Record backend selection decision
+	selectionStrategy := "weighted"
+	if len(result.Route.Config.Route) == 1 {
+		selectionStrategy = "single"
+	}
+	metrics.backendSelections.WithLabelValues(
+		result.Route.Name, target, selectionStrategy,
+	).Inc()
 
 	// Get connection from pool
 	conn, err := d.connPool.Get(ctx, target)
@@ -87,11 +104,16 @@ func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context
 			observability.String("target", target),
 			observability.Error(err),
 		)
+		metrics.directRequests.WithLabelValues(fullMethod, "connection_error").Inc()
+		metrics.directDuration.WithLabelValues(fullMethod).Observe(time.Since(start).Seconds())
 		return ctx, nil, fmt.Errorf("failed to connect to %s: %w", target, err)
 	}
 
 	// Create outgoing context with metadata
 	outCtx := d.createOutgoingContext(ctx, md, result.Route.Name)
+
+	metrics.directRequests.WithLabelValues(fullMethod, "success").Inc()
+	metrics.directDuration.WithLabelValues(fullMethod).Observe(time.Since(start).Seconds())
 
 	d.logger.Debug("directing request",
 		observability.String("method", fullMethod),

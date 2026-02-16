@@ -1425,4 +1425,428 @@ The following dependencies have been upgraded for improved performance and secur
 
 These upgrades provide enhanced security, performance improvements, and better compatibility with modern infrastructure.
 
-This configuration reference provides comprehensive coverage of all route-level authentication, authorization, backend transformation, caching, encoding options, and security features, enabling secure and efficient API gateway operations.
+## Metrics Configuration Reference
+
+The AV API Gateway provides 54+ Prometheus metrics across all components. This section documents all available metrics configuration options.
+
+### Core Gateway Metrics Configuration
+
+```yaml
+spec:
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+      namespace: gateway        # Prometheus namespace for metrics
+      
+      # Core gateway metrics configuration
+      core:
+        enabled: true
+        buildInfo: true         # Include build information
+        uptime: true           # Include uptime metrics
+        
+      # Middleware metrics configuration
+      middleware:
+        enabled: true
+        rateLimit: true        # Rate limiting metrics
+        circuitBreaker: true   # Circuit breaker metrics
+        timeout: true          # Request timeout metrics
+        retry: true            # Retry attempt metrics
+        bodyLimit: true        # Body size limit metrics
+        maxSessions: true      # Max sessions metrics
+        recovery: true         # Panic recovery metrics
+        cors: true             # CORS request metrics
+        
+      # Cache metrics configuration
+      cache:
+        enabled: true
+        hits: true             # Cache hit metrics
+        misses: true           # Cache miss metrics
+        evictions: true        # Cache eviction metrics
+        size: true             # Cache size metrics
+        duration: true         # Cache operation duration
+        errors: true           # Cache error metrics
+        
+      # Authentication metrics configuration
+      auth:
+        enabled: true
+        jwt: true              # JWT authentication metrics
+        apiKey: true           # API key authentication metrics
+        oidc: true             # OIDC authentication metrics
+        mtls: true             # mTLS authentication metrics
+        
+      # Authorization metrics configuration
+      authz:
+        enabled: true
+        rbac: true             # RBAC authorization metrics
+        abac: true             # ABAC authorization metrics
+        external: true         # External authorization metrics
+        
+      # TLS metrics configuration
+      tls:
+        enabled: true
+        handshakes: true       # TLS handshake metrics
+        certificates: true     # Certificate lifecycle metrics
+        
+      # Vault metrics configuration
+      vault:
+        enabled: true
+        requests: true         # Vault API request metrics
+        auth: true             # Vault authentication metrics
+        secrets: true          # Secret retrieval metrics
+        
+      # Backend authentication metrics
+      backendAuth:
+        enabled: true
+        jwt: true              # Backend JWT auth metrics
+        basic: true            # Backend basic auth metrics
+        mtls: true             # Backend mTLS auth metrics
+        
+      # Proxy metrics configuration
+      proxy:
+        enabled: true
+        errors: true           # Proxy error metrics
+        duration: true         # Backend request duration
+        
+      # WebSocket metrics configuration
+      websocket:
+        enabled: true
+        connections: true      # Connection metrics
+        messages: true         # Message throughput metrics
+        errors: true           # WebSocket error metrics
+        
+      # gRPC metrics configuration
+      grpc:
+        enabled: true
+        requests: true         # gRPC request metrics
+        streaming: true        # Streaming metrics
+        methods: true          # Method-level metrics
+        
+      # Config reload metrics
+      configReload:
+        enabled: true
+        success: true          # Successful reload metrics
+        errors: true           # Reload error metrics
+        duration: true         # Reload duration metrics
+        
+      # Health check metrics
+      healthCheck:
+        enabled: true
+        probes: true           # Health probe metrics
+        backends: true         # Backend health metrics
+```
+
+### Operator Metrics Configuration
+
+Configure operator-specific metrics:
+
+```yaml
+operator:
+  metrics:
+    enabled: true
+    port: 8080
+    path: /metrics
+    
+    # Controller metrics
+    controller:
+      enabled: true
+      reconciliation: true     # Reconciliation metrics
+      errors: true             # Controller error metrics
+      duration: true           # Reconciliation duration
+      
+    # Webhook metrics
+    webhook:
+      enabled: true
+      requests: true           # Webhook request metrics
+      validation: true         # Validation metrics
+      duration: true           # Webhook processing duration
+      
+    # Certificate management metrics
+    certificates:
+      enabled: true
+      renewals: true           # Certificate renewal metrics
+      errors: true             # Certificate error metrics
+      lifecycle: true          # Certificate lifecycle metrics
+      
+    # gRPC communication metrics
+    grpc:
+      enabled: true
+      connections: true        # gRPC connection metrics
+      requests: true           # gRPC request metrics
+      errors: true             # gRPC error metrics
+```
+
+### Environment Variable Overrides
+
+All metrics can be controlled via environment variables:
+
+```bash
+# Core metrics
+export METRICS_ENABLED=true
+export METRICS_PORT=9090
+export METRICS_PATH=/metrics
+export METRICS_NAMESPACE=gateway
+
+# Middleware metrics
+export METRICS_MIDDLEWARE_ENABLED=true
+export METRICS_RATE_LIMIT_ENABLED=true
+export METRICS_CIRCUIT_BREAKER_ENABLED=true
+export METRICS_TIMEOUT_ENABLED=true
+export METRICS_RETRY_ENABLED=true
+export METRICS_BODY_LIMIT_ENABLED=true
+export METRICS_MAX_SESSIONS_ENABLED=true
+export METRICS_RECOVERY_ENABLED=true
+export METRICS_CORS_ENABLED=true
+
+# Cache metrics
+export METRICS_CACHE_ENABLED=true
+export METRICS_CACHE_HITS_ENABLED=true
+export METRICS_CACHE_MISSES_ENABLED=true
+export METRICS_CACHE_EVICTIONS_ENABLED=true
+export METRICS_CACHE_SIZE_ENABLED=true
+export METRICS_CACHE_DURATION_ENABLED=true
+export METRICS_CACHE_ERRORS_ENABLED=true
+
+# Authentication metrics
+export METRICS_AUTH_ENABLED=true
+export METRICS_AUTH_JWT_ENABLED=true
+export METRICS_AUTH_APIKEY_ENABLED=true
+export METRICS_AUTH_OIDC_ENABLED=true
+export METRICS_AUTH_MTLS_ENABLED=true
+
+# Authorization metrics
+export METRICS_AUTHZ_ENABLED=true
+export METRICS_AUTHZ_RBAC_ENABLED=true
+export METRICS_AUTHZ_ABAC_ENABLED=true
+export METRICS_AUTHZ_EXTERNAL_ENABLED=true
+
+# TLS metrics
+export METRICS_TLS_ENABLED=true
+export METRICS_TLS_HANDSHAKES_ENABLED=true
+export METRICS_TLS_CERTIFICATES_ENABLED=true
+
+# Vault metrics
+export METRICS_VAULT_ENABLED=true
+export METRICS_VAULT_REQUESTS_ENABLED=true
+export METRICS_VAULT_AUTH_ENABLED=true
+export METRICS_VAULT_SECRETS_ENABLED=true
+
+# Backend authentication metrics
+export METRICS_BACKEND_AUTH_ENABLED=true
+export METRICS_BACKEND_AUTH_JWT_ENABLED=true
+export METRICS_BACKEND_AUTH_BASIC_ENABLED=true
+export METRICS_BACKEND_AUTH_MTLS_ENABLED=true
+
+# Proxy metrics
+export METRICS_PROXY_ENABLED=true
+export METRICS_PROXY_ERRORS_ENABLED=true
+export METRICS_PROXY_DURATION_ENABLED=true
+
+# WebSocket metrics
+export METRICS_WEBSOCKET_ENABLED=true
+export METRICS_WEBSOCKET_CONNECTIONS_ENABLED=true
+export METRICS_WEBSOCKET_MESSAGES_ENABLED=true
+export METRICS_WEBSOCKET_ERRORS_ENABLED=true
+
+# gRPC metrics
+export METRICS_GRPC_ENABLED=true
+export METRICS_GRPC_REQUESTS_ENABLED=true
+export METRICS_GRPC_STREAMING_ENABLED=true
+export METRICS_GRPC_METHODS_ENABLED=true
+
+# Config reload metrics
+export METRICS_CONFIG_RELOAD_ENABLED=true
+export METRICS_CONFIG_RELOAD_SUCCESS_ENABLED=true
+export METRICS_CONFIG_RELOAD_ERRORS_ENABLED=true
+export METRICS_CONFIG_RELOAD_DURATION_ENABLED=true
+
+# Health check metrics
+export METRICS_HEALTH_CHECK_ENABLED=true
+export METRICS_HEALTH_CHECK_PROBES_ENABLED=true
+export METRICS_HEALTH_CHECK_BACKENDS_ENABLED=true
+
+# Operator metrics
+export OPERATOR_METRICS_ENABLED=true
+export OPERATOR_METRICS_PORT=8080
+export OPERATOR_METRICS_PATH=/metrics
+export OPERATOR_METRICS_CONTROLLER_ENABLED=true
+export OPERATOR_METRICS_WEBHOOK_ENABLED=true
+export OPERATOR_METRICS_CERTIFICATES_ENABLED=true
+export OPERATOR_METRICS_GRPC_ENABLED=true
+```
+
+## OTLP Exporter TLS Configuration
+
+The OpenTelemetry Protocol (OTLP) exporter supports comprehensive TLS configuration for secure trace export to collectors like Jaeger, Zipkin, or OTEL Collector.
+
+### Basic TLS Configuration
+
+```yaml
+spec:
+  observability:
+    tracing:
+      enabled: true
+      otlpEndpoint: "https://jaeger-collector:14250"
+      serviceName: avapigw
+      
+      # Enable secure connection (DEV-003)
+      otlpInsecure: false
+      
+      # Server certificate verification
+      otlpTLSCAFile: "/etc/ssl/certs/jaeger-ca.crt"
+```
+
+### Mutual TLS (mTLS) Configuration
+
+```yaml
+spec:
+  observability:
+    tracing:
+      enabled: true
+      otlpEndpoint: "https://jaeger-collector:14250"
+      serviceName: avapigw
+      
+      # Enable secure connection with client authentication
+      otlpInsecure: false
+      
+      # Client certificate and key for mTLS
+      otlpTLSCertFile: "/etc/ssl/certs/gateway-client.crt"
+      otlpTLSKeyFile: "/etc/ssl/private/gateway-client.key"
+      
+      # CA certificate for server verification
+      otlpTLSCAFile: "/etc/ssl/certs/jaeger-ca.crt"
+```
+
+### Environment Variable Overrides
+
+OTLP TLS configuration can be overridden using environment variables:
+
+```bash
+# Basic TLS settings
+export OTLP_INSECURE=false
+export OTLP_TLS_CA_FILE=/etc/ssl/certs/ca.crt
+
+# mTLS settings
+export OTLP_TLS_CERT_FILE=/etc/ssl/certs/client.crt
+export OTLP_TLS_KEY_FILE=/etc/ssl/private/client.key
+```
+
+### OTLP Configuration Reference
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `otlpInsecure` | boolean | true | Use insecure gRPC connection (plaintext) |
+| `otlpTLSCertFile` | string | "" | Path to client certificate file for mTLS |
+| `otlpTLSKeyFile` | string | "" | Path to client private key file for mTLS |
+| `otlpTLSCAFile` | string | "" | Path to CA certificate file for server verification |
+
+**Note:** For backward compatibility, `otlpInsecure` defaults to `true`. Set to `false` for production deployments with TLS-enabled OTLP collectors.
+
+### Production Example with Vault PKI
+
+```yaml
+spec:
+  observability:
+    tracing:
+      enabled: true
+      otlpEndpoint: "https://otel-collector.monitoring.svc.cluster.local:4317"
+      serviceName: avapigw
+      
+      # Secure connection with Vault-managed certificates
+      otlpInsecure: false
+      otlpTLSCertFile: "/vault/secrets/otlp-client.crt"
+      otlpTLSKeyFile: "/vault/secrets/otlp-client.key"
+      otlpTLSCAFile: "/vault/secrets/otlp-ca.crt"
+```
+
+## Enhanced Configuration Reload
+
+The AV API Gateway supports hot configuration reload with enhanced capabilities from the latest refactoring session (TASK-010).
+
+### Enhanced Reload Behavior
+
+The configuration reload system now supports reloading additional components without restart:
+
+**Components Supporting Hot Reload:**
+- **CORS Configuration** - Cross-Origin Resource Sharing settings
+- **Security Headers** - Security header injection policies
+- **Audit Configuration** - Audit logging settings and output destinations
+- **Rate Limiting** - Rate limiting policies and thresholds
+- **Max Sessions** - Concurrent session limits and queue settings
+- **Backend Configuration** - Backend hosts, health checks, and load balancing
+- **Route Configuration** - HTTP and gRPC route definitions
+
+**Components Requiring Restart:**
+- **gRPC Routes/Backends** - gRPC configuration changes require full restart (documented limitation)
+- **Circuit Breaker** - Circuit breaker configuration requires restart (documented limitation)
+- **TLS Listeners** - TLS certificate and listener changes require restart
+
+### Configuration Reload Metrics
+
+Monitor configuration reload operations with these metrics:
+
+```prometheus
+# Configuration reload attempts
+gateway_config_reload_total{status="success"} 15
+gateway_config_reload_total{status="failure"} 1
+
+# Configuration reload duration
+gateway_config_reload_duration_seconds 0.050
+
+# Component-specific reload operations
+gateway_config_reload_component_total{component="cors",status="success"} 8
+gateway_config_reload_component_total{component="security",status="success"} 6
+gateway_config_reload_component_total{component="audit",status="success"} 4
+
+# Configuration watcher status
+gateway_config_watcher_running 1
+```
+
+### Reload Trigger Methods
+
+**File-Based Reload:**
+```bash
+# Modify configuration file - automatic reload via file watcher
+vim /app/configs/gateway.yaml
+
+# Manual reload via API
+curl -X POST http://localhost:9090/admin/reload
+```
+
+**CRD-Based Reload (with Operator):**
+```bash
+# Update CRD resources - automatic reload via operator
+kubectl apply -f updated-apiroute.yaml
+kubectl patch backend api-backend --type='merge' -p='{"spec":{"hosts":[{"address":"new-backend.com","port":8080}]}}'
+```
+
+### Reload Configuration
+
+```yaml
+spec:
+  observability:
+    # Enable configuration file watcher
+    configWatcher:
+      enabled: true
+      debounceInterval: 1s
+      
+    # Reload-specific metrics
+    metrics:
+      configReload:
+        enabled: true
+        success: true
+        errors: true
+        duration: true
+        components: true
+```
+
+### Best Practices
+
+1. **Test Configuration** - Validate configuration before applying
+2. **Monitor Reload Metrics** - Track reload success/failure rates
+3. **Use Gradual Rollouts** - Apply changes incrementally
+4. **Backup Configuration** - Keep backup of working configuration
+5. **Plan for Restarts** - Some changes still require full restart
+
+This configuration reference provides comprehensive coverage of all route-level authentication, authorization, backend transformation, caching, encoding options, security features, OTLP TLS configuration, enhanced configuration reload, and metrics configuration, enabling secure and efficient API gateway operations with full observability.

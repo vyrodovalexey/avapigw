@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
@@ -17,6 +18,9 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 )
+
+// defaultGracefulStopTimeout is the default timeout for gracefully stopping the gRPC server.
+const defaultGracefulStopTimeout = 30 * time.Second
 
 // GRPCListener represents a gRPC listener.
 type GRPCListener struct {
@@ -34,6 +38,7 @@ type GRPCListener struct {
 	auditLogger          audit.Logger
 	rateLimiter          *grpcmiddleware.GRPCRateLimiter
 	circuitBreaker       *grpcmiddleware.GRPCCircuitBreaker
+	metricsRegistry      *prometheus.Registry
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -111,6 +116,17 @@ func WithGRPCCircuitBreaker(cb *grpcmiddleware.GRPCCircuitBreaker) GRPCListenerO
 	}
 }
 
+// WithGRPCMetricsRegistry sets the Prometheus registry for gRPC proxy
+// metrics. When provided, gRPC proxy metrics (connection pool, direct
+// requests, streaming, etc.) are registered with this registry instead
+// of the default global registerer, ensuring they appear on the
+// gateway's /metrics endpoint.
+func WithGRPCMetricsRegistry(registry *prometheus.Registry) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.metricsRegistry = registry
+	}
+}
+
 // NewGRPCListener creates a new gRPC listener.
 func NewGRPCListener(
 	cfg config.Listener,
@@ -130,10 +146,15 @@ func NewGRPCListener(
 		l.router = grpcrouter.New()
 	}
 
-	// Create proxy
-	l.proxy = grpcproxy.New(l.router,
+	// Create proxy with metrics registry so gRPC proxy metrics
+	// appear on the gateway's /metrics endpoint.
+	proxyOpts := []grpcproxy.ProxyOption{
 		grpcproxy.WithProxyLogger(l.logger),
-	)
+	}
+	if l.metricsRegistry != nil {
+		proxyOpts = append(proxyOpts, grpcproxy.WithMetricsRegistry(l.metricsRegistry))
+	}
+	l.proxy = grpcproxy.New(l.router, proxyOpts...)
 
 	// Build interceptors
 	unaryInterceptors, streamInterceptors := l.buildInterceptors()
@@ -503,7 +524,7 @@ func (l *GRPCListener) Stop(ctx context.Context) error {
 	// Create timeout context if not already set
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, defaultGracefulStopTimeout)
 		defer cancel()
 	}
 

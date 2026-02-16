@@ -88,13 +88,29 @@ func (r *GRPCRouteReconciler) callbacks() *ReconcileCallbacks {
 func (r *GRPCRouteReconciler) reconcileGRPCRoute(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) error {
 	configJSON, err := json.Marshal(grpcRoute.Spec)
 	if err != nil {
+		r.Recorder.Eventf(grpcRoute, "Warning", EventReasonReconcileFailed,
+			"Failed to marshal GRPCRoute spec: %v", err)
 		return fmt.Errorf("failed to marshal GRPCRoute spec: %w", err)
+	}
+
+	// Inject the resource name into the JSON spec.
+	// CRD specs don't have a "name" field (it's in ObjectMeta), but the gateway
+	// config types expect a "name" field for route identification.
+	configJSON, err = injectName(configJSON, grpcRoute.Name)
+	if err != nil {
+		r.Recorder.Eventf(grpcRoute, "Warning", EventReasonReconcileFailed,
+			"Failed to inject name into GRPCRoute spec: %v", err)
+		return fmt.Errorf("failed to inject name into GRPCRoute spec: %w", err)
 	}
 
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.ApplyGRPCRoute(ctx, grpcRoute.Name, grpcRoute.Namespace, configJSON); err != nil {
+			r.Recorder.Eventf(grpcRoute, "Warning", EventReasonReconcileFailed,
+				"Failed to apply GRPCRoute to gateway: %v", err)
 			return fmt.Errorf("failed to apply GRPCRoute to gateway: %w", err)
 		}
+		r.Recorder.Event(grpcRoute, "Normal", EventReasonConfigApplied,
+			"GRPCRoute configuration applied to gateway")
 	}
 
 	return nil
@@ -104,8 +120,12 @@ func (r *GRPCRouteReconciler) reconcileGRPCRoute(ctx context.Context, grpcRoute 
 func (r *GRPCRouteReconciler) cleanupGRPCRoute(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) error {
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.DeleteGRPCRoute(ctx, grpcRoute.Name, grpcRoute.Namespace); err != nil {
+			r.Recorder.Eventf(grpcRoute, "Warning", EventReasonCleanupFailed,
+				"Failed to delete GRPCRoute from gateway: %v", err)
 			return fmt.Errorf("failed to delete GRPCRoute from gateway: %w", err)
 		}
+		r.Recorder.Event(grpcRoute, "Normal", EventReasonDeleted,
+			"GRPCRoute configuration removed from gateway")
 	}
 
 	return nil

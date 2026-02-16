@@ -377,7 +377,15 @@ func TestGatewayConfigApplier_ApplyFullConfig_Targeted(t *testing.T) {
 
 	err = applier.ApplyFullConfig(ctx, newCfg)
 	assert.NoError(t, err)
-	assert.Equal(t, newCfg, opApp.config)
+
+	// ApplyFullConfig merges operator resources into the existing config,
+	// preserving the original Metadata (gateway identity), Listeners, etc.
+	// So the stored config should have the original name "test" (not "test-updated")
+	// but the new routes and backends from the operator.
+	assert.Equal(t, "test", opApp.config.Metadata.Name)
+	assert.Equal(t, newCfg.Spec.Routes, opApp.config.Spec.Routes)
+	assert.Equal(t, newCfg.Spec.Backends, opApp.config.Spec.Backends)
+	assert.Equal(t, cfg.Spec.Listeners, opApp.config.Spec.Listeners)
 }
 
 func TestGatewayConfigApplier_ApplyFullConfig_WithGRPC_Targeted(t *testing.T) {

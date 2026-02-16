@@ -524,10 +524,13 @@ func TestE2E_GatewayIntegration_HotReload(t *testing.T) {
 			WithStatusSubresource(route).
 			Build()
 
+		// Use a large buffer for the FakeRecorder to avoid blocking.
+		// Each reconcile fires 2 events (ConfigApplied + Reconciled),
+		// and we do 1 initial + 5 update reconciles = 12 events minimum.
 		reconciler := &controller.APIRouteReconciler{
 			Client:        client,
 			Scheme:        scheme,
-			Recorder:      record.NewFakeRecorder(10),
+			Recorder:      record.NewFakeRecorder(100),
 			GRPCServer:    grpcServer,
 			StatusUpdater: controller.NewStatusUpdater(client),
 		}

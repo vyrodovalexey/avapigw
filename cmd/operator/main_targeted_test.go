@@ -65,7 +65,7 @@ func TestSetupWebhooksIfEnabled_Disabled_Targeted(t *testing.T) {
 		EnableWebhooks: false,
 	}
 
-	err := setupWebhooksIfEnabled(nil, cfg)
+	err := setupWebhooksIfEnabled(context.Background(), nil, cfg)
 	assert.NoError(t, err)
 }
 

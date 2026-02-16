@@ -750,3 +750,144 @@ func TestRateLimitFromConfig_PerClient(t *testing.T) {
 	assert.NotNil(t, rl)
 	assert.True(t, rl.perClient)
 }
+
+// TestWithRateLimitHitCallback tests the WithRateLimitHitCallback option.
+func TestWithRateLimitHitCallback(t *testing.T) {
+	t.Parallel()
+
+	var hitRoute string
+	callback := func(route string) {
+		hitRoute = route
+	}
+
+	rl := NewRateLimiter(1, 1, false, WithRateLimitHitCallback(callback))
+	t.Cleanup(func() {
+		rl.Stop()
+	})
+
+	assert.NotNil(t, rl.hitCallback)
+
+	// First request allowed (burst)
+	assert.True(t, rl.Allow("192.168.1.1"))
+
+	// Second request denied - callback should be invoked via middleware
+	middleware := RateLimit(rl)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	req.RemoteAddr = "192.168.1.1:12345"
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, "/api/test", hitRoute)
+}
+
+// TestWithRateLimitHitCallback_NilCallback tests that nil callback doesn't panic.
+func TestWithRateLimitHitCallback_NilCallback(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(1, 1, false, WithRateLimitHitCallback(nil))
+	t.Cleanup(func() {
+		rl.Stop()
+	})
+
+	assert.Nil(t, rl.hitCallback)
+
+	// Exhaust burst
+	rl.Allow("192.168.1.1")
+
+	// Rate limited request should not panic with nil callback
+	middleware := RateLimit(rl)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	req.RemoteAddr = "192.168.1.1:12345"
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+}
+
+// TestRateLimitFromConfig_WithHitCallback tests RateLimitFromConfig with a hit callback option.
+func TestRateLimitFromConfig_WithHitCallback(t *testing.T) {
+	t.Parallel()
+
+	var hitCount int
+	callback := func(_ string) {
+		hitCount++
+	}
+
+	cfg := &config.RateLimitConfig{
+		Enabled:           true,
+		RequestsPerSecond: 1,
+		Burst:             1,
+		PerClient:         false,
+	}
+
+	logger := observability.NopLogger()
+	mw, rl := RateLimitFromConfig(cfg, logger, WithRateLimitHitCallback(callback))
+	t.Cleanup(func() {
+		if rl != nil {
+			rl.Stop()
+		}
+	})
+
+	assert.NotNil(t, mw)
+	assert.NotNil(t, rl)
+	assert.NotNil(t, rl.hitCallback)
+
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// First request - allowed
+	req1 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	assert.Equal(t, http.StatusOK, rec1.Code)
+	assert.Equal(t, 0, hitCount)
+
+	// Second request - rate limited, callback invoked
+	req2 := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusTooManyRequests, rec2.Code)
+	assert.Equal(t, 1, hitCount)
+}
+
+// TestRateLimit_OTELSpanAttributes tests that OTEL tracing spans have correct attributes.
+func TestRateLimit_OTELSpanAttributes(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter(1, 1, false)
+	t.Cleanup(func() {
+		rl.Stop()
+	})
+
+	middleware := RateLimit(rl)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Allowed request - should set ratelimit.allowed=true
+	req1 := httptest.NewRequest(http.MethodGet, "/api/v1/resource", nil)
+	req1.RemoteAddr = "10.0.0.1:12345"
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	assert.Equal(t, http.StatusOK, rec1.Code)
+
+	// Rejected request - should set ratelimit.allowed=false
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/resource", nil)
+	req2.RemoteAddr = "10.0.0.1:12345"
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Equal(t, http.StatusTooManyRequests, rec2.Code)
+	assert.Equal(t, "1", rec2.Header().Get("Retry-After"))
+}

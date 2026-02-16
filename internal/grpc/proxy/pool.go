@@ -169,13 +169,18 @@ func (p *ConnectionPool) Get(ctx context.Context, target string) (*grpc.ClientCo
 		observability.String("target", target),
 	)
 
+	metrics := getGRPCProxyMetrics()
+
 	// Use grpc.NewClient (non-blocking) instead of deprecated DialContext
 	conn, err := grpc.NewClient(target, p.dialOpts...)
 	if err != nil {
+		metrics.connectionErrors.WithLabelValues(target, "dial").Inc()
 		return nil, fmt.Errorf("failed to create client for %s: %w", target, err)
 	}
 
 	p.conns[target] = conn
+	metrics.connectionCreated.WithLabelValues(target).Inc()
+	metrics.poolSize.Set(float64(len(p.conns)))
 
 	p.logger.Info("created gRPC connection",
 		observability.String("target", target),
@@ -189,6 +194,7 @@ func (p *ConnectionPool) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	metrics := getGRPCProxyMetrics()
 	var lastErr error
 	for target, conn := range p.conns {
 		if err := conn.Close(); err != nil {
@@ -198,9 +204,11 @@ func (p *ConnectionPool) Close() error {
 			)
 			lastErr = err
 		}
+		metrics.connectionClosed.WithLabelValues(target).Inc()
 	}
 
 	p.conns = make(map[string]*grpc.ClientConn)
+	metrics.poolSize.Set(0)
 	return lastErr
 }
 
@@ -215,6 +223,9 @@ func (p *ConnectionPool) CloseConn(target string) error {
 	}
 
 	delete(p.conns, target)
+	metrics := getGRPCProxyMetrics()
+	metrics.connectionClosed.WithLabelValues(target).Inc()
+	metrics.poolSize.Set(float64(len(p.conns)))
 	return conn.Close()
 }
 

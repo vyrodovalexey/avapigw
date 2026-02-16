@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -14,12 +15,13 @@ import (
 
 // Proxy is the main gRPC reverse proxy.
 type Proxy struct {
-	router         *router.Router
-	director       Director
-	streamHandler  *StreamHandler
-	connPool       *ConnectionPool
-	logger         observability.Logger
-	defaultTimeout time.Duration
+	router          *router.Router
+	director        Director
+	streamHandler   *StreamHandler
+	connPool        *ConnectionPool
+	logger          observability.Logger
+	defaultTimeout  time.Duration
+	metricsRegistry *prometheus.Registry
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -53,6 +55,16 @@ func WithDefaultTimeout(timeout time.Duration) ProxyOption {
 	}
 }
 
+// WithMetricsRegistry sets the Prometheus registry for gRPC proxy
+// metrics. When provided, all gRPC proxy metrics are registered with
+// this registry instead of the default global registerer, ensuring
+// they appear on the gateway's /metrics endpoint.
+func WithMetricsRegistry(registry *prometheus.Registry) ProxyOption {
+	return func(p *Proxy) {
+		p.metricsRegistry = registry
+	}
+}
+
 // New creates a new gRPC proxy.
 func New(r *router.Router, opts ...ProxyOption) *Proxy {
 	p := &Proxy{
@@ -64,6 +76,12 @@ func New(r *router.Router, opts ...ProxyOption) *Proxy {
 	for _, opt := range opts {
 		opt(p)
 	}
+
+	// Initialize gRPC proxy metrics with the configured registry so
+	// they appear on the gateway's /metrics endpoint. When
+	// metricsRegistry is nil the metrics fall back to the default
+	// global registerer (e.g. in tests).
+	InitGRPCProxyMetrics(p.metricsRegistry)
 
 	// Create connection pool if not provided
 	if p.connPool == nil {
@@ -104,10 +122,18 @@ func (p *Proxy) handleStream(srv interface{}, stream grpc.ServerStream) error {
 		observability.String("method", fullMethod),
 	)
 
-	// Apply route-level timeout if configured
-	ctx, cancel := p.applyTimeout(ctx, fullMethod)
+	// Apply route-level timeout if configured.
+	// If the route does not match, return early with an Unimplemented
+	// error instead of creating a timeout context for an unmatched route.
+	ctx, cancel, matched := p.applyTimeout(ctx, fullMethod)
 	if cancel != nil {
 		defer cancel()
+	}
+	if !matched {
+		p.logger.Warn("no matching route for gRPC request",
+			observability.String("method", fullMethod),
+		)
+		return status.Errorf(codes.Unimplemented, "no route for method %s", fullMethod)
 	}
 
 	// Wrap stream with new context
@@ -120,28 +146,49 @@ func (p *Proxy) handleStream(srv interface{}, stream grpc.ServerStream) error {
 			observability.String("method", fullMethod),
 			observability.Error(err),
 		)
+
+		// Track timeout occurrences
+		if ctx.Err() == context.DeadlineExceeded {
+			metrics := getGRPCProxyMetrics()
+			metrics.timeoutOccurrences.WithLabelValues(fullMethod).Inc()
+		}
 	}
 
 	return err
 }
 
 // applyTimeout applies route-level or default timeout.
-func (p *Proxy) applyTimeout(ctx context.Context, fullMethod string) (context.Context, context.CancelFunc) {
+// It only creates a context with timeout when a route matches or the
+// context does not already carry a deadline. For unmatched routes the
+// caller should return an appropriate error instead of allocating a
+// timeout that will never be used.
+func (p *Proxy) applyTimeout(ctx context.Context, fullMethod string) (context.Context, context.CancelFunc, bool) {
 	// Check if context already has a deadline
 	if _, ok := ctx.Deadline(); ok {
-		return ctx, nil
+		return ctx, nil, true
 	}
 
 	// Try to get route-specific timeout
 	timeout := p.defaultTimeout
 
-	// Get metadata for route matching
+	// Get metadata for route matching — if the route does not match,
+	// return early so the caller can reject the request without
+	// creating a context with timeout for an unmatched route.
 	result, err := p.router.Match(fullMethod, nil)
-	if err == nil && result.Route.Config.Timeout.Duration() > 0 {
+	if err != nil {
+		p.logger.Debug("no matching route for timeout lookup",
+			observability.String("method", fullMethod),
+			observability.Error(err),
+		)
+		return ctx, nil, false
+	}
+
+	if result.Route.Config.Timeout.Duration() > 0 {
 		timeout = result.Route.Config.Timeout.Duration()
 	}
 
-	return context.WithTimeout(ctx, timeout)
+	newCtx, cancel := context.WithTimeout(ctx, timeout)
+	return newCtx, cancel, true
 }
 
 // Close closes the proxy and releases resources.

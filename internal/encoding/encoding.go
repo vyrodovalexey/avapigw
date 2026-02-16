@@ -93,13 +93,17 @@ func (f *codecFactory) GetCodec(contentType string) (Codec, error) {
 	// Normalize content type (remove parameters)
 	ct := normalizeContentType(contentType)
 
+	metrics := GetEncodingMetrics()
+
 	codec, exists := f.codecs[ct]
 	if !exists {
 		f.logger.Debug("unsupported content type",
 			observability.String("contentType", contentType))
+		metrics.RecordNegotiation(ct, "unsupported")
 		return nil, ErrUnsupportedContentType
 	}
 
+	metrics.RecordNegotiation(ct, "success")
 	return codec, nil
 }
 

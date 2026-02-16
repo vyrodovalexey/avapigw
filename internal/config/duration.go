@@ -3,6 +3,26 @@ package config
 import "time"
 
 // Duration is a wrapper around time.Duration that supports YAML/JSON marshaling.
+// It enables human-readable duration strings (e.g., "30s", "5m", "1h30m") in
+// configuration files while preserving type safety in Go code.
+//
+// Supported formats follow Go's time.ParseDuration syntax:
+//   - "300ms"  → 300 milliseconds
+//   - "30s"    → 30 seconds
+//   - "5m"     → 5 minutes
+//   - "1h30m"  → 1 hour and 30 minutes
+//
+// An empty string or JSON null unmarshals to zero duration.
+//
+// Example YAML usage:
+//
+//	timeout: "30s"
+//	interval: "5m"
+//
+// Example Go usage:
+//
+//	d := config.Duration(5 * time.Second)
+//	fmt.Println(d.Duration()) // 5s
 type Duration time.Duration
 
 // UnmarshalYAML implements yaml.Unmarshaler.

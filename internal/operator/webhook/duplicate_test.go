@@ -286,6 +286,8 @@ func TestDuplicateChecker_CheckAPIRouteDuplicate_EmptyMatch(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = avapigwv1alpha1.AddToScheme(scheme)
 
+	// An existing route with empty match is a catch-all route.
+	// It should overlap with any other route.
 	existingRoute := &avapigwv1alpha1.APIRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "existing-route",
@@ -320,8 +322,8 @@ func TestDuplicateChecker_CheckAPIRouteDuplicate_EmptyMatch(t *testing.T) {
 	}
 
 	err := checker.CheckAPIRouteDuplicate(context.Background(), newRoute)
-	if err != nil {
-		t.Errorf("CheckAPIRouteDuplicate() should not return error when existing has empty match, got %v", err)
+	if err == nil {
+		t.Error("CheckAPIRouteDuplicate() should return error when existing has empty match (catch-all overlaps with any route)")
 	}
 }
 
@@ -1480,6 +1482,7 @@ func TestDuplicateChecker_BackendsConflict_EmptyHosts(t *testing.T) {
 func TestDuplicateChecker_RoutesOverlap_EmptyMatch(t *testing.T) {
 	checker := &DuplicateChecker{}
 
+	// Empty match means catch-all — it should overlap with any other route
 	a := &avapigwv1alpha1.APIRoute{
 		Spec: avapigwv1alpha1.APIRouteSpec{
 			Match: []avapigwv1alpha1.RouteMatch{},
@@ -1494,14 +1497,15 @@ func TestDuplicateChecker_RoutesOverlap_EmptyMatch(t *testing.T) {
 	}
 
 	result := checker.routesOverlap(a, b)
-	if result {
-		t.Error("routesOverlap() should return false when match is empty")
+	if !result {
+		t.Error("routesOverlap() should return true when match is empty (catch-all)")
 	}
 }
 
 func TestDuplicateChecker_GRPCRoutesOverlap_EmptyMatch(t *testing.T) {
 	checker := &DuplicateChecker{}
 
+	// Empty match means catch-all — it should overlap with any other route
 	a := &avapigwv1alpha1.GRPCRoute{
 		Spec: avapigwv1alpha1.GRPCRouteSpec{
 			Match: []avapigwv1alpha1.GRPCRouteMatch{},
@@ -1516,8 +1520,8 @@ func TestDuplicateChecker_GRPCRoutesOverlap_EmptyMatch(t *testing.T) {
 	}
 
 	result := checker.grpcRoutesOverlap(a, b)
-	if result {
-		t.Error("grpcRoutesOverlap() should return false when match is empty")
+	if !result {
+		t.Error("grpcRoutesOverlap() should return true when match is empty (catch-all)")
 	}
 }
 

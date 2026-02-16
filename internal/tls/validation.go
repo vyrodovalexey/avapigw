@@ -1,6 +1,7 @@
 package tls
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
 	"net"
@@ -343,10 +344,8 @@ func GetCertificateFingerprint(cert *x509.Certificate) string {
 
 // sha256Sum computes SHA-256 hash.
 func sha256Sum(data []byte) []byte {
-	// Import crypto/sha256 would be needed here
-	// For now, we'll use a placeholder
-	// In production, use: h := sha256.Sum256(data); return h[:]
-	return nil
+	h := sha256.Sum256(data)
+	return h[:]
 }
 
 // formatFingerprint formats a hash as a colon-separated hex string.

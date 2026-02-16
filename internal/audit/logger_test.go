@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
@@ -893,4 +896,428 @@ func TestLogger_FormatText_AllFields(t *testing.T) {
 	assert.Contains(t, output, "duration=")
 	assert.Contains(t, output, "error=test error")
 	assert.True(t, strings.HasSuffix(output, "\n"))
+}
+
+// ============================================================================
+// NewMetrics / NewMetricsWithRegisterer / WithLoggerRegisterer tests
+// ============================================================================
+
+func TestNewMetrics(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		namespace string
+	}{
+		{
+			name:      "with custom namespace",
+			namespace: "test_audit_ns",
+		},
+		{
+			name:      "with empty namespace defaults to gateway",
+			namespace: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Use a custom registerer to avoid polluting the default one
+			reg := prometheus.NewRegistry()
+			m := NewMetricsWithRegisterer(tt.namespace, reg)
+
+			require.NotNil(t, m)
+			require.NotNil(t, m.eventsTotal)
+
+			// Verify the metric is registered by recording an event
+			m.RecordEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+
+			// Gather metrics to verify registration
+			families, err := reg.Gather()
+			require.NoError(t, err)
+			assert.NotEmpty(t, families)
+		})
+	}
+}
+
+func TestNewMetrics_DefaultRegisterer(t *testing.T) {
+	// This test verifies NewMetrics uses the default registerer.
+	// We can't run it in parallel because it touches the global default registerer.
+	m := NewMetrics("test_newmetrics_default")
+	require.NotNil(t, m)
+	require.NotNil(t, m.eventsTotal)
+}
+
+func TestNewMetricsWithRegisterer_NilRegisterer(t *testing.T) {
+	t.Parallel()
+
+	// When registerer is nil, should fall back to default registerer
+	m := NewMetricsWithRegisterer("test_nil_reg", nil)
+	require.NotNil(t, m)
+	require.NotNil(t, m.eventsTotal)
+}
+
+func TestNewMetricsWithRegisterer_EmptyNamespace(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m := NewMetricsWithRegisterer("", reg)
+	require.NotNil(t, m)
+	require.NotNil(t, m.eventsTotal)
+
+	// Record and verify
+	m.RecordEvent(EventTypeSecurity, ActionSuspiciousActivity, OutcomeFailure)
+	families, err := reg.Gather()
+	require.NoError(t, err)
+
+	found := false
+	for _, f := range families {
+		if strings.Contains(f.GetName(), "audit_events_total") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected gateway_audit_events_total metric to be registered")
+}
+
+func TestNewMetricsWithRegisterer_DuplicateRegistration(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+
+	// Register once
+	m1 := NewMetricsWithRegisterer("dup_test", reg)
+	require.NotNil(t, m1)
+
+	// Register again with same descriptors — should not panic
+	m2 := NewMetricsWithRegisterer("dup_test", reg)
+	require.NotNil(t, m2)
+}
+
+func TestMetrics_RecordEvent_WithRegisteredMetrics(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m := NewMetricsWithRegisterer("rec_test", reg)
+
+	// Record multiple events
+	m.RecordEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	m.RecordEvent(EventTypeAuthentication, ActionLogin, OutcomeFailure)
+	m.RecordEvent(EventTypeAuthorization, ActionAccess, OutcomeDenied)
+	m.RecordEvent(EventTypeSecurity, ActionBruteForceDetected, OutcomeFailure)
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	assert.NotEmpty(t, families)
+}
+
+func TestWithLoggerRegisterer(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	var buf bytes.Buffer
+
+	config := &Config{
+		Enabled: true,
+		Format:  "json",
+		Events: &EventsConfig{
+			Authentication: true,
+		},
+	}
+
+	l, err := NewLogger(config,
+		WithLoggerWriter(&buf),
+		WithLoggerRegisterer(reg),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, l)
+
+	// Log an event to exercise the metrics path
+	event := NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	l.LogEvent(context.Background(), event)
+
+	// Verify the event was written
+	assert.NotEmpty(t, buf.String())
+
+	// Verify metrics were registered with the custom registry
+	families, err := reg.Gather()
+	require.NoError(t, err)
+
+	found := false
+	for _, f := range families {
+		if strings.Contains(f.GetName(), "audit_events_total") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "audit metrics should be registered with custom registry")
+
+	_ = l.Close()
+}
+
+// ============================================================================
+// createWriter tests — file path branch
+// ============================================================================
+
+func TestLogger_CreateWriter_FilePath(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	logFile := filepath.Join(tmpDir, "audit.log")
+
+	config := &Config{
+		Enabled: true,
+		Output:  logFile,
+		Format:  "json",
+		Events: &EventsConfig{
+			Authentication: true,
+		},
+	}
+
+	l, err := NewLogger(config, WithLoggerMetrics(newNoopMetrics()))
+	require.NoError(t, err)
+	require.NotNil(t, l)
+
+	// Log an event
+	event := NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	l.LogEvent(context.Background(), event)
+
+	// Close to flush
+	err = l.Close()
+	require.NoError(t, err)
+
+	// Verify the file was created and has content
+	data, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	assert.NotEmpty(t, data)
+
+	// Verify it's valid JSON
+	var output map[string]interface{}
+	err = json.Unmarshal(data, &output)
+	require.NoError(t, err)
+	assert.Equal(t, "authentication", output["type"])
+}
+
+func TestLogger_CreateWriter_InvalidFilePath(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Output:  "/nonexistent/directory/audit.log",
+	}
+
+	l, err := NewLogger(config, WithLoggerMetrics(newNoopMetrics()))
+	assert.Error(t, err)
+	assert.Nil(t, l)
+	assert.Contains(t, err.Error(), "failed to open audit log file")
+}
+
+// ============================================================================
+// writeEvent — default format branch
+// ============================================================================
+
+func TestLogger_WriteEvent_DefaultFormat(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	config := &Config{
+		Enabled: true,
+		Format:  "unknown_format", // triggers default branch in writeEvent
+		Events: &EventsConfig{
+			Authentication: true,
+		},
+	}
+
+	l, err := NewLogger(config, WithLoggerWriter(&buf), WithLoggerMetrics(newNoopMetrics()))
+	require.NoError(t, err)
+
+	event := NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	l.LogEvent(context.Background(), event)
+
+	// Default format should produce JSON output
+	var output map[string]interface{}
+	err = json.Unmarshal(buf.Bytes(), &output)
+	require.NoError(t, err)
+	assert.Equal(t, "authentication", output["type"])
+
+	_ = l.Close()
+}
+
+// ============================================================================
+// Noop logger method coverage
+// ============================================================================
+
+func TestNoopLogger_AllMethods(t *testing.T) {
+	t.Parallel()
+
+	l := NewNoopLogger()
+	require.NotNil(t, l)
+
+	ctx := context.Background()
+
+	// Exercise every method on the noop logger
+	l.LogEvent(ctx, NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess))
+	l.LogEvent(ctx, nil) // nil event should not panic
+
+	l.LogAuthentication(ctx, ActionLogin, OutcomeSuccess, &Subject{ID: "user1"})
+	l.LogAuthentication(ctx, ActionLogout, OutcomeFailure, nil)
+
+	l.LogAuthorization(ctx, OutcomeSuccess, &Subject{ID: "user1"}, &Resource{Path: "/api"})
+	l.LogAuthorization(ctx, OutcomeDenied, nil, nil)
+
+	l.LogSecurity(ctx, ActionSuspiciousActivity, OutcomeFailure, &Subject{ID: "user1"}, map[string]interface{}{"key": "val"})
+	l.LogSecurity(ctx, ActionBruteForceDetected, OutcomeFailure, nil, nil)
+
+	err := l.Close()
+	assert.NoError(t, err)
+}
+
+// ============================================================================
+// shouldAudit — unknown event type branch
+// ============================================================================
+
+func TestLogger_ShouldAudit_UnknownEventType(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	config := &Config{
+		Enabled: true,
+		Format:  "json",
+		Events: &EventsConfig{
+			Authentication: false,
+			Authorization:  false,
+			Request:        false,
+			Response:       false,
+			Configuration:  false,
+			Administrative: false,
+			Security:       false,
+		},
+	}
+
+	l, err := NewLogger(config, WithLoggerWriter(&buf), WithLoggerMetrics(newNoopMetrics()))
+	require.NoError(t, err)
+
+	// Unknown event type should default to true (be logged)
+	event := NewEvent(EventType("custom_type"), ActionAccess, OutcomeSuccess)
+	l.LogEvent(context.Background(), event)
+
+	assert.NotEmpty(t, buf.String(), "unknown event type should be logged (default: true)")
+
+	_ = l.Close()
+}
+
+// ============================================================================
+// NewLogger — metrics auto-initialization
+// ============================================================================
+
+func TestNewLogger_MetricsAutoInitialized(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	config := &Config{
+		Enabled: true,
+		Format:  "json",
+		Events: &EventsConfig{
+			Authentication: true,
+		},
+	}
+
+	// Don't pass WithLoggerMetrics — metrics should be auto-initialized
+	l, err := NewLogger(config, WithLoggerWriter(&buf))
+	require.NoError(t, err)
+	require.NotNil(t, l)
+
+	// Log an event to exercise the auto-initialized metrics
+	event := NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	l.LogEvent(context.Background(), event)
+
+	assert.NotEmpty(t, buf.String())
+	_ = l.Close()
+}
+
+// ============================================================================
+// Close — with closer (file writer)
+// ============================================================================
+
+func TestLogger_Close_WithCloser(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	logFile := filepath.Join(tmpDir, "close_test.log")
+
+	config := &Config{
+		Enabled: true,
+		Output:  logFile,
+		Format:  "json",
+	}
+
+	l, err := NewLogger(config, WithLoggerMetrics(newNoopMetrics()))
+	require.NoError(t, err)
+
+	// Close should close the file
+	err = l.Close()
+	assert.NoError(t, err)
+
+	// Closing again should be safe (file already closed)
+	// The second close will fail but we're testing the first one
+}
+
+// ============================================================================
+// writeEvent — error handling for write failures
+// ============================================================================
+
+type failWriter struct{}
+
+func (fw *failWriter) Write(_ []byte) (int, error) {
+	return 0, assert.AnError
+}
+
+func TestLogger_WriteEvent_WriteError(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Format:  "json",
+		Events: &EventsConfig{
+			Authentication: true,
+		},
+	}
+
+	l, err := NewLogger(config,
+		WithLoggerWriter(&failWriter{}),
+		WithLoggerMetrics(newNoopMetrics()),
+		WithLoggerLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// Should not panic even when write fails
+	event := NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	l.LogEvent(context.Background(), event)
+
+	_ = l.Close()
+}
+
+func TestLogger_WriteEvent_TextFormat_WriteError(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		Enabled: true,
+		Format:  "text",
+		Events: &EventsConfig{
+			Authentication: true,
+		},
+	}
+
+	l, err := NewLogger(config,
+		WithLoggerWriter(&failWriter{}),
+		WithLoggerMetrics(newNoopMetrics()),
+		WithLoggerLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	event := NewEvent(EventTypeAuthentication, ActionLogin, OutcomeSuccess)
+	l.LogEvent(context.Background(), event)
+
+	_ = l.Close()
 }

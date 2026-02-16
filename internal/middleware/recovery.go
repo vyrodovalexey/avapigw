@@ -25,6 +25,8 @@ func Recovery(logger observability.Logger) func(http.Handler) http.Handler {
 						observability.String("stack", string(stack)),
 					)
 
+					GetMiddlewareMetrics().panicsRecovered.Inc()
+
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusInternalServerError)
 					_, _ = io.WriteString(w, `{"error":"internal server error"}`)

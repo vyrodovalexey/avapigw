@@ -42,20 +42,19 @@ const (
 type HostRateLimiter struct {
 	rps       int
 	burst     int
-	tokens    atomic.Int64
-	lastCheck atomic.Int64
+	tokens    int64
+	lastCheck int64
 	mu        sync.Mutex
 }
 
 // NewHostRateLimiter creates a new host rate limiter.
 func NewHostRateLimiter(rps, burst int) *HostRateLimiter {
-	rl := &HostRateLimiter{
-		rps:   rps,
-		burst: burst,
+	return &HostRateLimiter{
+		rps:       rps,
+		burst:     burst,
+		tokens:    int64(burst),
+		lastCheck: time.Now().UnixNano(),
 	}
-	rl.tokens.Store(int64(burst))
-	rl.lastCheck.Store(time.Now().UnixNano())
-	return rl
 }
 
 // Allow checks if a request is allowed based on rate limiting.
@@ -64,12 +63,11 @@ func (rl *HostRateLimiter) Allow() bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now().UnixNano()
-	last := rl.lastCheck.Load()
-	elapsed := time.Duration(now - last)
+	elapsed := time.Duration(now - rl.lastCheck)
 
 	// Calculate tokens to add based on elapsed time
 	tokensToAdd := int64(float64(rl.rps) * elapsed.Seconds())
-	currentTokens := rl.tokens.Load() + tokensToAdd
+	currentTokens := rl.tokens + tokensToAdd
 
 	// Cap at burst limit
 	if currentTokens > int64(rl.burst) {
@@ -80,8 +78,8 @@ func (rl *HostRateLimiter) Allow() bool {
 		return false
 	}
 
-	rl.tokens.Store(currentTokens - 1)
-	rl.lastCheck.Store(now)
+	rl.tokens = currentTokens - 1
+	rl.lastCheck = now
 	return true
 }
 

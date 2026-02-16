@@ -2181,6 +2181,69 @@ func TestBackendValidator_ValidateCreate_BasicAuthDisabled(t *testing.T) {
 	}
 }
 
+func TestBackendValidator_ValidateUpdate_Invalid(t *testing.T) {
+	validator := &BackendValidator{}
+	oldBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{
+					Address: "backend-service",
+					Port:    8080,
+					Weight:  100,
+				},
+			},
+		},
+	}
+	newBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{}, // No hosts - invalid
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid new backend (no hosts)")
+	}
+}
+
+func TestBackendValidator_ValidateUpdate_InvalidPort(t *testing.T) {
+	validator := &BackendValidator{}
+	oldBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+	}
+	newBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{
+					Address: "backend-service",
+					Port:    0, // Invalid port
+					Weight:  100,
+				},
+			},
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid port")
+	}
+}
+
 func TestBackendValidator_ValidateCreate_MTLSAuthDisabled(t *testing.T) {
 	validator := &BackendValidator{}
 	backend := &avapigwv1alpha1.Backend{

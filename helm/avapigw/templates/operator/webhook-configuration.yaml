@@ -158,4 +158,40 @@ webhooks:
         scope: Namespaced
     sideEffects: None
     timeoutSeconds: 10
+  
+  {{- if .Values.operator.ingressController.enabled }}
+  # ==========================================================================
+  # Ingress Validation Webhook
+  # ==========================================================================
+  - name: vingress.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      {{- if and (ne .Values.operator.webhook.tls.mode "cert-manager") .Values.operator.webhook.tls.caBundle }}
+      caBundle: {{ .Values.operator.webhook.tls.caBundle }}
+      {{- else if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+      caBundle: Cg==
+      {{- else }}
+      caBundle: Cg==
+      {{- end }}
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-networking-k8s-io-v1-ingress
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups:
+          - networking.k8s.io
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - ingresses
+        scope: Namespaced
+    sideEffects: None
+    timeoutSeconds: 10
+  {{- end }}
 {{- end }}

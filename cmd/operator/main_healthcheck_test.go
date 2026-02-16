@@ -187,7 +187,7 @@ func TestSetupWebhooksIfEnabled_EnabledNilManager(t *testing.T) {
 				err = errors.New("panic recovered")
 			}
 		}()
-		err = setupWebhooksIfEnabled(nil, cfg)
+		err = setupWebhooksIfEnabled(context.Background(), nil, cfg)
 	}()
 
 	// Either returns error or panics (both are acceptable)

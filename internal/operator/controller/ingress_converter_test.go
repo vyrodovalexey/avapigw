@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -66,6 +67,86 @@ func TestNewIngressConverter(t *testing.T) {
 	converter := NewIngressConverter()
 	if converter == nil {
 		t.Error("NewIngressConverter() returned nil")
+	}
+}
+
+func TestNewIngressConverter_WithLogger(t *testing.T) {
+	logger := logr.Discard()
+	converter := NewIngressConverter(WithLogger(logger))
+	if converter == nil {
+		t.Error("NewIngressConverter(WithLogger()) returned nil")
+	}
+	if !converter.hasLogger {
+		t.Error("hasLogger should be true when WithLogger is used")
+	}
+}
+
+func TestIngressConverter_GetLogger_FallsBackToGlobal(t *testing.T) {
+	converter := NewIngressConverter()
+	if converter.hasLogger {
+		t.Error("hasLogger should be false when no logger is provided")
+	}
+	// getLogger should not panic even without explicit logger
+	_ = converter.getLogger()
+}
+
+func TestIngressConverter_GetLogger_ReturnsInjectedLogger(t *testing.T) {
+	logger := logr.Discard()
+	converter := NewIngressConverter(WithLogger(logger))
+	got := converter.getLogger()
+	// Verify the injected logger is returned, not the global fallback
+	if got != logger {
+		t.Error("getLogger() should return the injected logger")
+	}
+}
+
+func TestNewIngressConverter_WithoutOptions(t *testing.T) {
+	// Verify default state when no options are provided
+	converter := NewIngressConverter()
+	if converter == nil {
+		t.Fatal("NewIngressConverter() returned nil")
+	}
+	if converter.hasLogger {
+		t.Error("hasLogger should be false when no options are provided")
+	}
+	// The zero-value logr.Logger should be stored
+	if converter.logger.GetSink() != nil {
+		t.Error("logger sink should be nil for zero-value logger")
+	}
+}
+
+func TestNewIngressConverter_WithLogger_ConvertIngressUsesInjectedLogger(t *testing.T) {
+	// Verify that ConvertIngress works correctly with an injected logger
+	// (the logger is used internally for logging during conversion)
+	logger := logr.Discard()
+	converter := NewIngressConverter(WithLogger(logger))
+
+	ingress := newTestIngress("logger-test", "default")
+	result, err := converter.ConvertIngress(ingress)
+	if err != nil {
+		t.Fatalf("ConvertIngress() with injected logger error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("ConvertIngress() with injected logger returned nil result")
+	}
+	if len(result.Routes) != 1 {
+		t.Errorf("ConvertIngress() routes = %d, want 1", len(result.Routes))
+	}
+}
+
+func TestWithLogger_FunctionalOption(t *testing.T) {
+	// Verify WithLogger is a proper functional option
+	logger := logr.Discard()
+	opt := WithLogger(logger)
+
+	converter := &IngressConverter{}
+	opt(converter)
+
+	if !converter.hasLogger {
+		t.Error("WithLogger should set hasLogger to true")
+	}
+	if converter.logger != logger {
+		t.Error("WithLogger should set the logger field")
 	}
 }
 

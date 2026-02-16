@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -198,8 +199,8 @@ func TestIntegration_BackendTLS_VaultClientCert_Metrics(t *testing.T) {
 	server.StartTLS()
 	defer server.Close()
 
-	// Create metrics
-	metrics := internaltls.NewMetrics("gateway_backend_test")
+	// Create metrics with a custom registry so Registry() returns non-nil
+	metrics := internaltls.NewMetrics("gateway_backend_test", internaltls.WithRegistry(prometheus.NewRegistry()))
 
 	backendTLSCfg := &config.BackendTLSConfig{
 		Enabled:            true,

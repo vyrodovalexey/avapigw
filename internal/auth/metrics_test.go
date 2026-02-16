@@ -42,7 +42,7 @@ func TestNewMetrics(t *testing.T) {
 			assert.NotNil(t, m.authFailureTotal)
 			assert.NotNil(t, m.cacheHits)
 			assert.NotNil(t, m.cacheMisses)
-			assert.NotNil(t, m.registry)
+			assert.NotNil(t, m.registerer)
 		})
 	}
 }

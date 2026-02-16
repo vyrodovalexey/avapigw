@@ -30,6 +30,9 @@ const (
 
 	// AnnotationAppliedRoutes tracks the routes applied by this Ingress for cleanup.
 	AnnotationAppliedRoutes = AnnotationPrefix + "applied-routes"
+
+	// AnnotationObservedGeneration tracks the last reconciled generation for skip logic.
+	AnnotationObservedGeneration = AnnotationPrefix + "observed-generation"
 )
 
 // Timeout and retry annotations.

@@ -4,6 +4,8 @@
 
 This document describes the architectural design and implementation of Vault PKI integration in the AV API Gateway. The integration provides automated certificate management across three key areas: listener TLS, route-level TLS, and backend mTLS authentication.
 
+**Recent Improvements:** The latest refactoring session (DEV-006) enhanced boolean environment variable parsing, including `VAULT_SKIP_VERIFY`, to support flexible true/false/yes/no/1/0 values for improved operational flexibility.
+
 ## Architecture Principles
 
 ### 1. Separation of Concerns

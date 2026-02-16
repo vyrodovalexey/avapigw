@@ -2,11 +2,12 @@
 
 ## Overview
 
-The AV API Gateway provides comprehensive integration with HashiCorp Vault's PKI (Public Key Infrastructure) secrets engine for dynamic certificate management. This integration enables automatic certificate issuance, renewal, and rotation without manual intervention, supporting three key use cases:
+The AV API Gateway provides comprehensive integration with HashiCorp Vault's PKI (Public Key Infrastructure) secrets engine for dynamic certificate management. This integration enables automatic certificate issuance, renewal, and rotation without manual intervention, supporting four key use cases:
 
 1. **Listener-level TLS** - Gateway's own TLS certificates with automatic renewal
 2. **Route-level TLS** - Per-route certificates for SNI-based selection with automatic renewal  
 3. **Backend mTLS** - Client certificates for mutual TLS authentication to backends with automatic renewal
+4. **Operator gRPC TLS** - mTLS certificates for secure operator-gateway communication
 
 All certificate operations include **Prometheus metrics** for expiry monitoring and support **hot-reload** without gateway restart.
 
@@ -32,6 +33,23 @@ This pattern allows the `tls` package to remain independent while enabling Vault
 
 ## Vault PKI Setup
 
+### Automated Setup Scripts
+
+For quick setup, use the provided automation scripts:
+
+```bash
+# Complete Vault PKI setup for performance testing
+make perf-setup-vault
+
+# Setup Vault PKI for operator mode
+./scripts/setup-vault-pki.sh --operator-mode
+
+# Setup Kubernetes auth for both gateway and operator
+./scripts/setup-vault-k8s-auth.sh --namespace avapigw-system
+```
+
+### Manual Setup
+
 ### 1. Enable PKI Secrets Engine
 
 ```bash
@@ -52,10 +70,10 @@ vault write pki/config/urls \
     crl_distribution_points="http://vault.example.com:8200/v1/pki/crl"
 ```
 
-### 2. Create PKI Role
+### 2. Create PKI Roles
 
 ```bash
-# Create role for gateway certificates
+# Create role for gateway server certificates
 vault write pki/roles/gateway-server \
     allowed_domains="example.com,*.example.com" \
     allow_subdomains=true \
@@ -69,9 +87,18 @@ vault write pki/roles/gateway-client \
     max_ttl="24h" \
     generate_lease=true \
     client_flag=true
+
+# Create role for operator gRPC TLS certificates
+vault write pki/roles/operator-certs \
+    allowed_domains="avapigw-operator.avapigw-system.svc,*.avapigw-system.svc.cluster.local" \
+    allow_subdomains=true \
+    max_ttl="24h" \
+    generate_lease=true \
+    server_flag=true \
+    client_flag=true  # Enable mTLS
 ```
 
-### 3. Configure Vault Policy
+### 3. Configure Vault Policies
 
 ```hcl
 # Gateway policy for PKI operations
@@ -86,6 +113,44 @@ path "pki/issue/gateway-client" {
 path "pki/cert/ca" {
   capabilities = ["read"]
 }
+
+# Operator policy for gRPC TLS certificates
+path "pki/issue/operator-certs" {
+  capabilities = ["create", "update"]
+}
+
+path "pki/cert/ca" {
+  capabilities = ["read"]
+}
+```
+
+### 4. Setup Kubernetes Authentication
+
+For both gateway and operator service accounts:
+
+```bash
+# Enable Kubernetes auth method
+vault auth enable kubernetes
+
+# Configure Kubernetes auth
+vault write auth/kubernetes/config \
+    token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+    kubernetes_host="https://kubernetes.default.svc:443" \
+    kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+# Create role for gateway service account
+vault write auth/kubernetes/role/avapigw-gateway \
+    bound_service_account_names=avapigw-gateway \
+    bound_service_account_namespaces=avapigw-system \
+    policies=gateway-pki \
+    ttl=24h
+
+# Create role for operator service account
+vault write auth/kubernetes/role/avapigw-operator \
+    bound_service_account_names=avapigw-operator \
+    bound_service_account_namespaces=avapigw-system \
+    policies=operator-pki \
+    ttl=24h
 ```
 
 ## Gateway Configuration
@@ -229,6 +294,50 @@ spec:
           - tenant-b.example.com
         minVersion: "1.3"
 ```
+
+### Operator gRPC TLS with Vault PKI
+
+Configure mTLS certificates for secure operator-gateway communication:
+
+```yaml
+# Operator configuration with Vault PKI for gRPC TLS
+operator:
+  enabled: true
+  grpc:
+    port: 9444
+    tls:
+      mode: vault
+      vault:
+        enabled: true
+        pkiMount: pki
+        role: operator-certs
+        commonName: avapigw-operator.avapigw-system.svc
+        altNames:
+          - avapigw-operator
+          - avapigw-operator.avapigw-system
+        ttl: 24h
+        renewBefore: 1h
+
+# Gateway configuration for operator gRPC client
+gateway:
+  operator:
+    grpc:
+      address: avapigw-operator.avapigw-system.svc:9444
+      tls:
+        enabled: true
+        vault:
+          enabled: true
+          pkiMount: pki
+          role: operator-certs
+          commonName: avapigw-gateway.avapigw-system.svc
+          ttl: 24h
+```
+
+**Key Features:**
+- **Mutual TLS Authentication** - Both operator and gateway authenticate each other
+- **Automatic Certificate Rotation** - Certificates renewed before expiry
+- **Secure Communication** - All operator-gateway communication encrypted
+- **Vault Integration** - Centralized certificate management
 
 ### Backend mTLS with Vault PKI
 
@@ -708,7 +817,7 @@ vault:
   tls:
     enabled: true
     caSecretName: vault-ca-cert
-    skipVerify: false
+    skipVerify: false  # Can also be set via VAULT_SKIP_VERIFY environment variable (DEV-006: now supports true/false/yes/no/1/0)
   
   pki:
     enabled: true

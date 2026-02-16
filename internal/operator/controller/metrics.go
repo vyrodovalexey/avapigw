@@ -11,12 +11,14 @@ import (
 
 // ControllerMetrics contains Prometheus metrics for controllers.
 type ControllerMetrics struct {
-	reconcileDuration   *prometheus.HistogramVec
-	reconcileTotal      *prometheus.CounterVec
-	reconcileErrors     *prometheus.CounterVec
-	resourcesTotal      *prometheus.GaugeVec
-	resourceCondition   *prometheus.GaugeVec
-	finalizerOperations *prometheus.CounterVec
+	reconcileDuration         *prometheus.HistogramVec
+	reconcileTotal            *prometheus.CounterVec
+	reconcileErrors           *prometheus.CounterVec
+	resourcesTotal            *prometheus.GaugeVec
+	resourceCondition         *prometheus.GaugeVec
+	finalizerOperations       *prometheus.CounterVec
+	ingressResourcesProcessed *prometheus.CounterVec
+	ingressConversionErrors   *prometheus.CounterVec
 
 	mu sync.RWMutex
 }
@@ -112,6 +114,22 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelController, labelOperation},
 		),
+		ingressResourcesProcessed: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "avapigw_operator",
+				Name:      "ingress_resources_processed_total",
+				Help:      "Total number of Ingress resources processed by the controller",
+			},
+			[]string{labelResult},
+		),
+		ingressConversionErrors: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "avapigw_operator",
+				Name:      "ingress_conversion_errors_total",
+				Help:      "Total number of Ingress-to-gateway conversion errors",
+			},
+			[]string{labelNamespace, labelName},
+		),
 	}
 }
 
@@ -162,6 +180,22 @@ func (m *ControllerMetrics) RecordFinalizerOperation(controller, operation strin
 	defer m.mu.RUnlock()
 
 	m.finalizerOperations.WithLabelValues(controller, operation).Inc()
+}
+
+// RecordIngressProcessed records a processed Ingress resource with the given result.
+func (m *ControllerMetrics) RecordIngressProcessed(result string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	m.ingressResourcesProcessed.WithLabelValues(result).Inc()
+}
+
+// RecordIngressConversionError records an Ingress conversion error.
+func (m *ControllerMetrics) RecordIngressConversionError(namespace, name string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	m.ingressConversionErrors.WithLabelValues(namespace, name).Inc()
 }
 
 // DeleteResourceConditionMetrics deletes all condition metrics for a resource.

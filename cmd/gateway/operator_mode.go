@@ -2,12 +2,7 @@ package main
 
 import (
 	"context"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/gateway/operator"
@@ -47,9 +42,11 @@ func runOperatorMode(flags cliFlags, logger observability.Logger) {
 		return
 	}
 
-	// Create a minimal initial configuration for the gateway
-	// The actual configuration will come from the operator
-	initialCfg := createMinimalConfig(flags)
+	// Load initial configuration from config file if available.
+	// The config file (from Helm configmap) contains correct listener config
+	// (TLS, ports, etc.), observability, security, and other settings.
+	// Routes and backends will be provided by the operator via CRDs.
+	initialCfg := loadOperatorInitialConfig(flags, logger)
 
 	// Initialize client IP extractor with empty trusted proxies
 	// This will be updated when configuration is received from operator
@@ -75,13 +72,12 @@ func runOperatorMode(flags cliFlags, logger observability.Logger) {
 		operator.WithHandlerLogger(logger),
 	)
 
-	// Create metrics registry for operator client
-	registry := prometheus.NewRegistry()
-
+	// Use the gateway's existing metrics registry so operator-mode metrics
+	// are visible on the same metrics HTTP server that scrapes gateway metrics.
 	// Create operator client
 	client, err := operator.NewClient(operatorCfg,
 		operator.WithLogger(logger),
-		operator.WithMetricsRegistry(registry),
+		operator.WithMetricsRegistry(app.metrics.Registry()),
 		operator.WithConfigUpdateHandler(opApp.configHandler.HandleUpdate),
 		operator.WithSnapshotHandler(opApp.configHandler.HandleSnapshot),
 	)
@@ -103,6 +99,39 @@ func createMinimalConfig(flags cliFlags) *config.GatewayConfig {
 
 	// Keep default listener for health checks and metrics
 	// The operator will provide the actual listener configuration
+
+	return cfg
+}
+
+// loadOperatorInitialConfig loads the initial gateway configuration for operator mode.
+// It tries to load from the config file first (which contains correct listener/TLS settings
+// from the Helm configmap), falling back to a minimal default config.
+// Routes and backends are cleared since they will come from the operator.
+func loadOperatorInitialConfig(flags cliFlags, logger observability.Logger) *config.GatewayConfig {
+	cfg, err := config.LoadConfig(flags.configPath)
+	if err != nil {
+		logger.Warn("failed to load config file for operator mode, using minimal config",
+			observability.String("config_path", flags.configPath),
+			observability.Error(err),
+		)
+		return createMinimalConfig(flags)
+	}
+
+	logger.Info("loaded base configuration from file for operator mode",
+		observability.String("config_path", flags.configPath),
+		observability.Int("listeners", len(cfg.Spec.Listeners)),
+	)
+
+	// Clear routes and backends - these will come from the operator via CRDs
+	cfg.Spec.Routes = nil
+	cfg.Spec.Backends = nil
+	cfg.Spec.GRPCRoutes = nil
+	cfg.Spec.GRPCBackends = nil
+
+	// Override gateway name if provided via flags
+	if flags.gatewayName != "" {
+		cfg.Metadata.Name = flags.gatewayName
+	}
 
 	return cfg
 }
@@ -142,72 +171,17 @@ func runOperatorGateway(opApp *operatorApplication, logger observability.Logger)
 
 // waitForOperatorShutdown waits for shutdown signal and performs graceful shutdown.
 func waitForOperatorShutdown(opApp *operatorApplication, logger observability.Logger) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	sig := <-sigCh
-	logger.Info("received shutdown signal", observability.String("signal", sig.String()))
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Stop operator client first
-	if opApp.operatorClient != nil {
-		logger.Info("stopping operator client")
-		if err := opApp.operatorClient.Stop(); err != nil {
-			logger.Error("failed to stop operator client", observability.Error(err))
+	hook := func(_ context.Context, log observability.Logger) {
+		// Stop operator client first so no further config updates arrive
+		// during the drain phase.
+		if opApp.operatorClient != nil {
+			log.Info("stopping operator client")
+			if err := opApp.operatorClient.Stop(); err != nil {
+				log.Error("failed to stop operator client", observability.Error(err))
+			}
 		}
 	}
-
-	// Shutdown metrics server if running
-	if opApp.metricsServer != nil {
-		logger.Info("stopping metrics server")
-		if err := opApp.metricsServer.Shutdown(shutdownCtx); err != nil {
-			logger.Error("failed to stop metrics server gracefully", observability.Error(err))
-		}
-	}
-
-	// Stop gateway
-	if err := opApp.gateway.Stop(shutdownCtx); err != nil {
-		logger.Error("failed to stop gateway gracefully", observability.Error(err))
-	}
-
-	// Close Vault client after gateway stops
-	if opApp.vaultClient != nil {
-		logger.Info("closing vault client")
-		if err := opApp.vaultClient.Close(); err != nil {
-			logger.Error("failed to close vault client", observability.Error(err))
-		}
-	}
-
-	// Stop backends
-	if err := opApp.backendRegistry.StopAll(shutdownCtx); err != nil {
-		logger.Error("failed to stop backends", observability.Error(err))
-	}
-
-	// Shutdown tracer
-	if err := opApp.tracer.Shutdown(shutdownCtx); err != nil {
-		logger.Error("failed to shutdown tracer", observability.Error(err))
-	}
-
-	// Stop rate limiter cleanup goroutine
-	if opApp.rateLimiter != nil {
-		opApp.rateLimiter.Stop()
-	}
-
-	// Stop max sessions limiter
-	if opApp.maxSessionsLimiter != nil {
-		opApp.maxSessionsLimiter.Stop()
-	}
-
-	// Close audit logger
-	if opApp.auditLogger != nil {
-		if err := opApp.auditLogger.Close(); err != nil {
-			logger.Error("failed to close audit logger", observability.Error(err))
-		}
-	}
-
-	logger.Info("gateway stopped")
+	gracefulShutdown(opApp.application, logger, hook)
 }
 
 // gatewayConfigApplier implements operator.ConfigApplier for the gateway.
@@ -217,13 +191,19 @@ type gatewayConfigApplier struct {
 }
 
 // ApplyRoutes applies HTTP route configuration.
-func (a *gatewayConfigApplier) ApplyRoutes(ctx context.Context, routes []config.Route) error {
+func (a *gatewayConfigApplier) ApplyRoutes(_ context.Context, routes []config.Route) error {
 	a.logger.Info("applying routes from operator",
 		observability.Int("count", len(routes)),
 	)
 
+	rm := ensureReloadMetrics(a.app.application)
+
 	if a.app.router != nil {
-		return a.app.router.LoadRoutes(routes)
+		if err := a.app.router.LoadRoutes(routes); err != nil {
+			rm.configReloadComponentTotal.WithLabelValues("routes", "error").Inc()
+			return err
+		}
+		rm.configReloadComponentTotal.WithLabelValues("routes", "success").Inc()
 	}
 	return nil
 }
@@ -234,19 +214,38 @@ func (a *gatewayConfigApplier) ApplyBackends(ctx context.Context, backends []con
 		observability.Int("count", len(backends)),
 	)
 
+	rm := ensureReloadMetrics(a.app.application)
+
 	if a.app.backendRegistry != nil {
-		return a.app.backendRegistry.ReloadFromConfig(ctx, backends)
+		if err := a.app.backendRegistry.ReloadFromConfig(ctx, backends); err != nil {
+			rm.configReloadComponentTotal.WithLabelValues("backends", "error").Inc()
+			return err
+		}
+		rm.configReloadComponentTotal.WithLabelValues("backends", "success").Inc()
 	}
 	return nil
 }
 
 // ApplyGRPCRoutes applies gRPC route configuration.
-// Note: gRPC routes require gateway restart for full effect.
-func (a *gatewayConfigApplier) ApplyGRPCRoutes(ctx context.Context, routes []config.GRPCRoute) error {
-	a.logger.Warn("gRPC routes received from operator - gRPC routes are NOT hot-reloaded",
+// gRPC routes are hot-reloaded via the router's thread-safe LoadRoutes method.
+func (a *gatewayConfigApplier) ApplyGRPCRoutes(_ context.Context, routes []config.GRPCRoute) error {
+	a.logger.Info("applying gRPC routes from operator",
 		observability.Int("count", len(routes)),
 	)
-	// gRPC routes cannot be hot-reloaded, log a warning
+
+	rm := ensureReloadMetrics(a.app.application)
+
+	for _, listener := range a.app.gateway.GetGRPCListeners() {
+		if err := listener.LoadRoutes(routes); err != nil {
+			a.logger.Error("failed to reload gRPC routes on listener",
+				observability.String("listener", listener.Name()),
+				observability.Error(err),
+			)
+			rm.configReloadComponentTotal.WithLabelValues("grpc_routes", "error").Inc()
+			return err
+		}
+	}
+	rm.configReloadComponentTotal.WithLabelValues("grpc_routes", "success").Inc()
 	return nil
 }
 
@@ -260,8 +259,99 @@ func (a *gatewayConfigApplier) ApplyGRPCBackends(ctx context.Context, backends [
 	return nil
 }
 
+// mergeOperatorConfig merges operator-provided resources into the existing
+// gateway config to preserve required fields (APIVersion, Kind, Metadata,
+// Listeners) that were initialized from the config file or createMinimalConfig().
+func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *config.GatewayConfig {
+	existing := a.app.config
+	if existing == nil {
+		existing = config.DefaultConfig()
+	}
+
+	return &config.GatewayConfig{
+		APIVersion: existing.APIVersion,
+		Kind:       existing.Kind,
+		Metadata:   existing.Metadata,
+		Spec: config.GatewaySpec{
+			Listeners:      existing.Spec.Listeners,
+			Routes:         cfg.Spec.Routes,
+			Backends:       cfg.Spec.Backends,
+			GRPCRoutes:     cfg.Spec.GRPCRoutes,
+			GRPCBackends:   cfg.Spec.GRPCBackends,
+			RateLimit:      cfg.Spec.RateLimit,
+			CircuitBreaker: existing.Spec.CircuitBreaker,
+			CORS:           existing.Spec.CORS,
+			Observability:  existing.Spec.Observability,
+			Authentication: existing.Spec.Authentication,
+			Authorization:  existing.Spec.Authorization,
+			Security:       existing.Spec.Security,
+			Audit:          existing.Spec.Audit,
+			RequestLimits:  existing.Spec.RequestLimits,
+			MaxSessions:    cfg.Spec.MaxSessions,
+			TrustedProxies: existing.Spec.TrustedProxies,
+		},
+	}
+}
+
+// applyMergedComponents applies routes, backends, gRPC routes, and middleware
+// updates from the merged configuration.
+func (a *gatewayConfigApplier) applyMergedComponents(
+	ctx context.Context, merged *config.GatewayConfig,
+) error {
+	if a.app.router != nil && len(merged.Spec.Routes) > 0 {
+		if err := a.app.router.LoadRoutes(merged.Spec.Routes); err != nil {
+			a.logger.Error("failed to apply routes", observability.Error(err))
+			return err
+		}
+	}
+
+	if a.app.backendRegistry != nil && len(merged.Spec.Backends) > 0 {
+		if err := a.app.backendRegistry.ReloadFromConfig(ctx, merged.Spec.Backends); err != nil {
+			a.logger.Error("failed to apply backends", observability.Error(err))
+			return err
+		}
+	}
+
+	// Hot-reload gRPC routes via the router's thread-safe LoadRoutes method.
+	if len(merged.Spec.GRPCRoutes) > 0 {
+		for _, listener := range a.app.gateway.GetGRPCListeners() {
+			if err := listener.LoadRoutes(merged.Spec.GRPCRoutes); err != nil {
+				a.logger.Error("failed to reload gRPC routes",
+					observability.String("listener", listener.Name()),
+					observability.Error(err),
+				)
+				return err
+			}
+		}
+	}
+
+	// gRPC backends involve connection pools that cannot be safely
+	// hot-reloaded; log a warning so operators know a restart is needed.
+	if len(merged.Spec.GRPCBackends) > 0 {
+		a.logger.Warn("gRPC backends received from operator - gRPC backends are NOT hot-reloaded",
+			observability.Int("grpc_backends", len(merged.Spec.GRPCBackends)),
+		)
+	}
+
+	if a.app.rateLimiter != nil && merged.Spec.RateLimit != nil {
+		a.app.rateLimiter.UpdateConfig(merged.Spec.RateLimit)
+	}
+
+	if a.app.maxSessionsLimiter != nil && merged.Spec.MaxSessions != nil {
+		a.app.maxSessionsLimiter.UpdateConfig(merged.Spec.MaxSessions)
+	}
+
+	return nil
+}
+
 // ApplyFullConfig applies a complete configuration.
+// It merges operator-provided resources (routes, backends, etc.) into the existing
+// gateway config to preserve required fields (APIVersion, Kind, Metadata, Listeners)
+// that were initialized from the config file or createMinimalConfig().
 func (a *gatewayConfigApplier) ApplyFullConfig(ctx context.Context, cfg *config.GatewayConfig) error {
+	start := time.Now()
+	rm := ensureReloadMetrics(a.app.application)
+
 	a.logger.Info("applying full configuration from operator",
 		observability.Int("routes", len(cfg.Spec.Routes)),
 		observability.Int("backends", len(cfg.Spec.Backends)),
@@ -269,48 +359,28 @@ func (a *gatewayConfigApplier) ApplyFullConfig(ctx context.Context, cfg *config.
 		observability.Int("grpc_backends", len(cfg.Spec.GRPCBackends)),
 	)
 
-	// Apply HTTP routes
-	if a.app.router != nil && len(cfg.Spec.Routes) > 0 {
-		if err := a.app.router.LoadRoutes(cfg.Spec.Routes); err != nil {
-			a.logger.Error("failed to apply routes", observability.Error(err))
-			return err
-		}
-	}
+	merged := a.mergeOperatorConfig(cfg)
 
-	// Apply HTTP backends
-	if a.app.backendRegistry != nil && len(cfg.Spec.Backends) > 0 {
-		if err := a.app.backendRegistry.ReloadFromConfig(ctx, cfg.Spec.Backends); err != nil {
-			a.logger.Error("failed to apply backends", observability.Error(err))
-			return err
-		}
-	}
-
-	// Warn about gRPC configuration
-	if len(cfg.Spec.GRPCRoutes) > 0 || len(cfg.Spec.GRPCBackends) > 0 {
-		a.logger.Warn("gRPC configuration received from operator - gRPC routes/backends are NOT hot-reloaded",
-			observability.Int("grpc_routes", len(cfg.Spec.GRPCRoutes)),
-			observability.Int("grpc_backends", len(cfg.Spec.GRPCBackends)),
-		)
-	}
-
-	// Update rate limiter if configured
-	if a.app.rateLimiter != nil && cfg.Spec.RateLimit != nil {
-		a.app.rateLimiter.UpdateConfig(cfg.Spec.RateLimit)
-	}
-
-	// Update max sessions limiter if configured
-	if a.app.maxSessionsLimiter != nil && cfg.Spec.MaxSessions != nil {
-		a.app.maxSessionsLimiter.UpdateConfig(cfg.Spec.MaxSessions)
-	}
-
-	// Update gateway config
-	if err := a.app.gateway.Reload(cfg); err != nil {
-		a.logger.Error("failed to reload gateway config", observability.Error(err))
+	if err := a.applyMergedComponents(ctx, merged); err != nil {
+		rm.configReloadTotal.WithLabelValues("error").Inc()
+		rm.configReloadDuration.Observe(time.Since(start).Seconds())
 		return err
 	}
 
-	// Update stored config
-	a.app.config = cfg
+	// Reload gateway with the merged config that includes all required fields
+	if err := a.app.gateway.Reload(merged); err != nil {
+		a.logger.Error("failed to reload gateway config", observability.Error(err))
+		rm.configReloadTotal.WithLabelValues("error").Inc()
+		rm.configReloadDuration.Observe(time.Since(start).Seconds())
+		return err
+	}
+
+	// Update stored config with the merged result
+	a.app.config = merged
+
+	rm.configReloadTotal.WithLabelValues("success").Inc()
+	rm.configReloadDuration.Observe(time.Since(start).Seconds())
+	rm.configReloadLastSuccess.SetToCurrentTime()
 
 	a.logger.Info("full configuration applied successfully")
 	return nil

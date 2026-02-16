@@ -175,6 +175,7 @@ type DuplicateChecker struct {
 	// Cleanup goroutine lifecycle
 	stopCleanup chan struct{}
 	cleanupDone chan struct{}
+	stopOnce    sync.Once
 }
 
 // NewDuplicateChecker creates a new DuplicateChecker with a background context.
@@ -298,16 +299,17 @@ func (c *DuplicateChecker) InvalidateCache() {
 }
 
 // Stop gracefully shuts down the cache cleanup goroutine.
-// This should be called when the DuplicateChecker is no longer needed.
+// This method is safe to call multiple times.
 func (c *DuplicateChecker) Stop() {
 	if !c.cacheEnabled {
 		return
 	}
 
-	close(c.stopCleanup)
-	<-c.cleanupDone
-
-	c.logger.Info("duplicate checker cache cleanup stopped")
+	c.stopOnce.Do(func() {
+		close(c.stopCleanup)
+		<-c.cleanupDone
+		c.logger.Info("duplicate checker cache cleanup stopped")
+	})
 }
 
 // runCleanupLoopWithContext runs the background cache cleanup loop with context support.
@@ -706,10 +708,10 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 
 // routesOverlap checks if two APIRoutes have overlapping match conditions.
 func (c *DuplicateChecker) routesOverlap(a, b *avapigwv1alpha1.APIRoute) bool {
-	// If either route has no match conditions, they don't overlap
-	// (empty match means catch-all, but we allow multiple catch-alls)
+	// An empty match list means "catch-all" — it matches everything.
+	// If either route is a catch-all, it overlaps with any other route.
 	if len(a.Spec.Match) == 0 || len(b.Spec.Match) == 0 {
-		return false
+		return true
 	}
 
 	// Check if any match conditions overlap
@@ -807,9 +809,10 @@ func (c *DuplicateChecker) backendsConflict(a, b *avapigwv1alpha1.Backend) bool 
 
 // grpcRoutesOverlap checks if two GRPCRoutes have overlapping match conditions.
 func (c *DuplicateChecker) grpcRoutesOverlap(a, b *avapigwv1alpha1.GRPCRoute) bool {
-	// If either route has no match conditions, they don't overlap
+	// An empty match list means "catch-all" — it matches everything.
+	// If either route is a catch-all, it overlaps with any other route.
 	if len(a.Spec.Match) == 0 || len(b.Spec.Match) == 0 {
-		return false
+		return true
 	}
 
 	// Check if service/method combinations overlap

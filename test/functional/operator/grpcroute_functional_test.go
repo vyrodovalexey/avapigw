@@ -4,6 +4,7 @@
 package operator_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,14 +20,14 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 
 	t.Run("valid basic gRPC route", func(t *testing.T) {
 		route := createBasicGRPCRoute()
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
 
 	t.Run("valid gRPC route with all fields", func(t *testing.T) {
 		route := createFullGRPCRoute()
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -37,7 +38,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 			Exact:  "api.v1.UserService",
 			Prefix: "api.v1",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "only one of exact, prefix, or regex")
 	})
@@ -47,7 +48,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 		route.Spec.Match[0].Service = &avapigwv1alpha1.StringMatch{
 			Regex: "[invalid",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "regex is invalid")
 	})
@@ -58,7 +59,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 			Exact:  "GetUser",
 			Prefix: "Get",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "only one of exact, prefix, or regex")
 	})
@@ -66,7 +67,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 	t.Run("invalid destination port", func(t *testing.T) {
 		route := createBasicGRPCRoute()
 		route.Spec.Route[0].Destination.Port = 0
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "port must be between 1 and 65535")
 	})
@@ -74,7 +75,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 	t.Run("invalid weight - negative", func(t *testing.T) {
 		route := createBasicGRPCRoute()
 		route.Spec.Route[0].Weight = -1
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "weight must be between 0 and 100")
 	})
@@ -82,7 +83,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 	t.Run("invalid timeout duration", func(t *testing.T) {
 		route := createBasicGRPCRoute()
 		route.Spec.Timeout = "invalid"
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid timeout")
 	})
@@ -92,7 +93,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 		route.Spec.Retries = &avapigwv1alpha1.GRPCRetryPolicy{
 			Attempts: 0,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "attempts must be between 1 and 10")
 	})
@@ -103,7 +104,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 			Attempts: 3,
 			RetryOn:  "invalid-condition",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "retries.retryOn contains invalid gRPC status")
 	})
@@ -114,7 +115,7 @@ func TestFunctional_GRPCRoute_Validation(t *testing.T) {
 			Attempts: 3,
 			RetryOn:  "unavailable,resource-exhausted,internal",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -128,7 +129,7 @@ func TestFunctional_GRPCRoute_MetadataMatch(t *testing.T) {
 		route.Spec.Match[0].Metadata = []avapigwv1alpha1.MetadataMatch{
 			{Name: "x-tenant-id", Exact: "tenant-123"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -138,7 +139,7 @@ func TestFunctional_GRPCRoute_MetadataMatch(t *testing.T) {
 		route.Spec.Match[0].Metadata = []avapigwv1alpha1.MetadataMatch{
 			{Name: "x-tenant-id", Present: &present},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -148,7 +149,7 @@ func TestFunctional_GRPCRoute_MetadataMatch(t *testing.T) {
 		route.Spec.Match[0].Metadata = []avapigwv1alpha1.MetadataMatch{
 			{Name: "x-internal", Absent: &absent},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -157,7 +158,7 @@ func TestFunctional_GRPCRoute_MetadataMatch(t *testing.T) {
 		route.Spec.Match[0].Metadata = []avapigwv1alpha1.MetadataMatch{
 			{Name: "", Exact: "value"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "name is required")
 	})
@@ -167,7 +168,7 @@ func TestFunctional_GRPCRoute_MetadataMatch(t *testing.T) {
 		route.Spec.Match[0].Metadata = []avapigwv1alpha1.MetadataMatch{
 			{Name: "x-tenant-id", Regex: "[invalid"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "regex is invalid")
 	})
@@ -182,7 +183,7 @@ func TestFunctional_GRPCRoute_Authority(t *testing.T) {
 		route.Spec.Match[0].Authority = &avapigwv1alpha1.StringMatch{
 			Exact: "grpc.example.com",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -191,7 +192,7 @@ func TestFunctional_GRPCRoute_Authority(t *testing.T) {
 		route.Spec.Match[0].Authority = &avapigwv1alpha1.StringMatch{
 			Prefix: "grpc.",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -201,7 +202,7 @@ func TestFunctional_GRPCRoute_Authority(t *testing.T) {
 			Exact:  "grpc.example.com",
 			Prefix: "grpc.",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "only one of exact, prefix, or regex")
 	})
@@ -218,7 +219,7 @@ func TestFunctional_GRPCRoute_Transform(t *testing.T) {
 				Paths: []string{"user.id", "user.name"},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -234,7 +235,7 @@ func TestFunctional_GRPCRoute_Transform(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -250,7 +251,7 @@ func TestFunctional_GRPCRoute_RateLimit(t *testing.T) {
 			RequestsPerSecond: 100,
 			Burst:             200,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -271,7 +272,7 @@ func TestFunctional_GRPCRoute_TLS(t *testing.T) {
 				TTL:        "24h",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -371,7 +372,7 @@ func TestFunctional_GRPCRoute_Authentication(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			route := createBasicGRPCRoute()
 			route.Spec.Authentication = tt.auth
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -485,7 +486,7 @@ func TestFunctional_GRPCRoute_Authorization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			route := createBasicGRPCRoute()
 			route.Spec.Authorization = tt.authz
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -558,7 +559,7 @@ func TestFunctional_GRPCRoute_MaxSessions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			route := createBasicGRPCRoute()
 			route.Spec.MaxSessions = tt.maxSessions
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -622,7 +623,7 @@ func TestFunctional_GRPCRoute_RequestLimits(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			route := createBasicGRPCRoute()
 			route.Spec.RequestLimits = tt.requestLimits
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -674,7 +675,7 @@ func TestFunctional_GRPCRoute_CombinedNewFields(t *testing.T) {
 			MaxBodySize:   4194304,
 			MaxHeaderSize: 65536,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -709,7 +710,7 @@ func TestFunctional_GRPCRoute_CombinedNewFields(t *testing.T) {
 		route.Spec.RequestLimits = &avapigwv1alpha1.RequestLimitsConfig{
 			MaxBodySize: 10485760,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -722,7 +723,7 @@ func TestFunctional_GRPCRoute_Update(t *testing.T) {
 		oldRoute := createBasicGRPCRoute()
 		newRoute := createBasicGRPCRoute()
 		newRoute.Spec.Timeout = "60s"
-		warnings, err := validator.ValidateUpdate(nil, oldRoute, newRoute)
+		warnings, err := validator.ValidateUpdate(context.Background(), oldRoute, newRoute)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
@@ -731,7 +732,7 @@ func TestFunctional_GRPCRoute_Update(t *testing.T) {
 		oldRoute := createBasicGRPCRoute()
 		newRoute := createBasicGRPCRoute()
 		newRoute.Spec.Route[0].Destination.Port = 0
-		_, err := validator.ValidateUpdate(nil, oldRoute, newRoute)
+		_, err := validator.ValidateUpdate(context.Background(), oldRoute, newRoute)
 		assert.Error(t, err)
 	})
 }
@@ -742,7 +743,7 @@ func TestFunctional_GRPCRoute_Delete(t *testing.T) {
 
 	t.Run("delete always succeeds", func(t *testing.T) {
 		route := createBasicGRPCRoute()
-		warnings, err := validator.ValidateDelete(nil, route)
+		warnings, err := validator.ValidateDelete(context.Background(), route)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})

@@ -12,11 +12,17 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/retry"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
+
+// certTracerName is the OpenTelemetry tracer name for certificate operations.
+const certTracerName = "avapigw-operator/cert"
 
 // Default retry configuration constants for Vault authentication.
 const (
@@ -86,6 +92,13 @@ type VaultProviderConfig struct {
 	// RetryMaxDelay is the maximum delay for exponential backoff.
 	// Default is 30 seconds.
 	RetryMaxDelay time.Duration
+
+	// KubernetesRole is the Vault role for Kubernetes authentication.
+	KubernetesRole string
+
+	// KubernetesMountPath is the mount path for the Kubernetes auth method.
+	// Defaults to "kubernetes".
+	KubernetesMountPath string
 }
 
 // vaultProvider implements Manager using Vault PKI.
@@ -142,12 +155,15 @@ func NewVaultProvider(ctx context.Context, config *VaultProviderConfig) (Manager
 	logger := observability.GetGlobalLogger().With(observability.String("component", "vault-cert-manager"))
 	metrics := getVaultAuthMetrics()
 
-	// Create Vault client
+	// Create Vault client with Kubernetes authentication configuration
 	vaultClient, err := vault.New(&vault.Config{
-		Enabled: true,
-		Address: config.Address,
-		// Auth will be configured via environment or Kubernetes service account
+		Enabled:    true,
+		Address:    config.Address,
 		AuthMethod: vault.AuthMethodKubernetes,
+		Kubernetes: &vault.KubernetesAuthConfig{
+			Role:      config.KubernetesRole,
+			MountPath: config.KubernetesMountPath,
+		},
 	}, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create vault client: %w", err)
@@ -214,20 +230,15 @@ func authenticateWithRetry(
 	if err != nil {
 		metrics.authRetriesTotal.WithLabelValues("exhausted").Inc()
 
-		// Build aggregated error message
-		errMsg := fmt.Sprintf("failed to authenticate with vault after %d attempts", attemptCount+1)
-		if len(authErrors) > 0 {
-			errMsg += ": "
-			for i, e := range authErrors {
-				if i > 0 {
-					errMsg += "; "
-				}
-				errMsg += fmt.Sprintf("attempt %d: %v", i+1, e)
-			}
+		// Build aggregated error using errors.Join for structured error composition
+		allErrors := make([]error, 0, len(authErrors)+2)
+		allErrors = append(allErrors, fmt.Errorf("failed to authenticate with vault after %d attempts", attemptCount+1))
+		for i, e := range authErrors {
+			allErrors = append(allErrors, fmt.Errorf("attempt %d: %w", i+1, e))
 		}
-		errMsg += fmt.Sprintf("; final error: %v", err)
+		allErrors = append(allErrors, fmt.Errorf("final error: %w", err))
 
-		return errors.New(errMsg)
+		return errors.Join(allErrors...)
 	}
 
 	metrics.authRetriesTotal.WithLabelValues("success").Inc()
@@ -300,6 +311,8 @@ func (p *vaultProvider) RotateCertificate(ctx context.Context, req *CertificateR
 		return nil, fmt.Errorf("common name is required")
 	}
 
+	GetCertMetrics().rotationsTotal.WithLabelValues("vault").Inc()
+
 	return p.issueCertificate(ctx, req)
 }
 
@@ -320,6 +333,16 @@ func (p *vaultProvider) Close() error {
 
 // issueCertificate issues a new certificate from Vault PKI.
 func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
+	tracer := otel.Tracer(certTracerName)
+	ctx, span := tracer.Start(ctx, "VaultProvider.IssueCertificate",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("cert.common_name", req.CommonName),
+			attribute.String("cert.provider", "vault"),
+		),
+	)
+	defer span.End()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -337,6 +360,7 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 		TTL:        ttl,
 	})
 	if err != nil {
+		GetCertMetrics().errorsTotal.WithLabelValues("vault", "issue").Inc()
 		return nil, fmt.Errorf("failed to issue certificate from vault: %w", err)
 	}
 
@@ -352,6 +376,13 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 
 	// Cache the certificate
 	p.certs[req.CommonName] = certificate
+
+	// Record certificate metrics
+	cm := GetCertMetrics()
+	cm.issuedTotal.WithLabelValues("vault").Inc()
+	cm.expirySeconds.WithLabelValues(
+		req.CommonName,
+	).Set(time.Until(certificate.Expiration).Seconds())
 
 	p.logger.Info("certificate issued from vault",
 		observability.String("common_name", req.CommonName),

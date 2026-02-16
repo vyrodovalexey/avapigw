@@ -1,8 +1,14 @@
 package observability
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -14,6 +20,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/credentials"
 )
 
 // OTLP exporter retry configuration defaults.
@@ -40,6 +47,19 @@ type TracerConfig struct {
 	OTLPEndpoint string
 	SamplingRate float64
 	Enabled      bool
+
+	// OTLPInsecure controls whether the OTLP gRPC connection uses plaintext.
+	// Default is true for backward compatibility.
+	OTLPInsecure bool
+
+	// OTLPTLSCertFile is the path to the TLS client certificate file for OTLP exporter.
+	OTLPTLSCertFile string
+
+	// OTLPTLSKeyFile is the path to the TLS client key file for OTLP exporter.
+	OTLPTLSKeyFile string
+
+	// OTLPTLSCAFile is the path to the TLS CA certificate file for OTLP exporter.
+	OTLPTLSCAFile string
 
 	// Retry configuration for OTLP exporter.
 	// If nil, defaults will be used.
@@ -143,20 +163,67 @@ func createSampler(rate float64) sdktrace.Sampler {
 
 // buildOTLPExporterOptions builds OTLP gRPC exporter options with retry configuration.
 func buildOTLPExporterOptions(cfg TracerConfig) []otlptracegrpc.Option {
-	// Preallocate with capacity for all options (4 base + 1 retry)
-	opts := make([]otlptracegrpc.Option, 0, 5)
+	// Preallocate with capacity for all options (4 base + 1 retry + 1 TLS)
+	opts := make([]otlptracegrpc.Option, 0, 6)
 	opts = append(opts,
 		otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
-		otlptracegrpc.WithInsecure(),
 		otlptracegrpc.WithTimeout(DefaultOTLPTimeout),
 		otlptracegrpc.WithReconnectionPeriod(DefaultOTLPReconnectionPeriod),
 	)
+
+	// Configure TLS or insecure connection
+	if cfg.OTLPInsecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	} else {
+		tlsCfg, err := buildOTLPTLSConfig(cfg)
+		if err == nil && tlsCfg != nil {
+			opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
+		}
+		// If no TLS files are configured and insecure is false,
+		// use system default TLS (no explicit option needed).
+	}
 
 	// Configure retry with exponential backoff
 	retryConfig := buildRetryConfig(cfg.RetryConfig)
 	opts = append(opts, otlptracegrpc.WithRetry(retryConfig))
 
 	return opts
+}
+
+// buildOTLPTLSConfig builds a TLS configuration from the provided cert/key/CA files.
+// Returns nil if no TLS files are configured.
+func buildOTLPTLSConfig(cfg TracerConfig) (*tls.Config, error) {
+	if cfg.OTLPTLSCertFile == "" && cfg.OTLPTLSKeyFile == "" && cfg.OTLPTLSCAFile == "" {
+		return nil, nil
+	}
+
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Load client certificate and key if provided
+	if cfg.OTLPTLSCertFile != "" && cfg.OTLPTLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.OTLPTLSCertFile, cfg.OTLPTLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load OTLP TLS client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	// Load CA certificate if provided
+	if cfg.OTLPTLSCAFile != "" {
+		caCert, err := os.ReadFile(cfg.OTLPTLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read OTLP TLS CA file: %w", err)
+		}
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse OTLP TLS CA certificate")
+		}
+		tlsCfg.RootCAs = caCertPool
+	}
+
+	return tlsCfg, nil
 }
 
 // buildRetryConfig builds the retry configuration for OTLP exporter.
@@ -282,6 +349,16 @@ func (rw *tracingResponseWriter) Flush() {
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack implements http.Hijacker interface for WebSocket support.
+// It delegates to the underlying ResponseWriter if it implements http.Hijacker,
+// which is required for WebSocket connections that pass through tracing middleware.
+func (rw *tracingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
 
 // InjectTraceContext injects trace context into outgoing request headers.

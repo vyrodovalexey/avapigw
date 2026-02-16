@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -15,6 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
@@ -24,16 +31,17 @@ import (
 )
 
 // hopHeaders are headers that should not be forwarded.
-var hopHeaders = []string{
-	"Connection",
-	"Proxy-Connection",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Authorization",
-	"Te",
-	"Trailer",
-	"Transfer-Encoding",
-	"Upgrade",
+// Using a map for O(1) lookup instead of iterating a slice.
+var hopHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Proxy-Connection":    {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
 }
 
 // ReverseProxy handles proxying requests to backend services.
@@ -47,6 +55,7 @@ type ReverseProxy struct {
 	errorHandler          func(http.ResponseWriter, *http.Request, error)
 	modifyResponse        func(*http.Response) error
 	flushInterval         time.Duration
+	metricsRegistry       *prometheus.Registry
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -101,6 +110,16 @@ func WithGlobalCircuitBreaker(manager *backend.CircuitBreakerManager) ProxyOptio
 	}
 }
 
+// WithMetricsRegistry sets the Prometheus registry for proxy metrics.
+// When provided, proxy and WebSocket metrics are registered with this
+// registry instead of the default global registerer, ensuring they
+// appear on the gateway's /metrics endpoint.
+func WithMetricsRegistry(registry *prometheus.Registry) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.metricsRegistry = registry
+	}
+}
+
 // NewReverseProxy creates a new reverse proxy.
 func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...ProxyOption) *ReverseProxy {
 	p := &ReverseProxy{
@@ -113,6 +132,13 @@ func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...Proxy
 	for _, opt := range opts {
 		opt(p)
 	}
+
+	// Initialize proxy and WebSocket metrics with the configured
+	// registry so they appear on the gateway's /metrics endpoint.
+	// When metricsRegistry is nil the metrics fall back to the
+	// default global registerer (e.g. in tests).
+	initProxyMetrics(p.metricsRegistry)
+	initWebSocketMetrics(p.metricsRegistry)
 
 	if p.errorHandler == nil {
 		p.errorHandler = p.defaultErrorHandler
@@ -160,12 +186,40 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.proxyRequest(w, r, route)
 }
 
+// proxyTracerName is the OpenTelemetry tracer name for proxy operations.
+const proxyTracerName = "avapigw/proxy"
+
+// URL scheme constants to avoid duplicated string literals.
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
+
 // proxyRequest proxies the request to a backend.
-func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, route *router.CompiledRoute) {
+func (p *ReverseProxy) proxyRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	route *router.CompiledRoute,
+) {
 	if len(route.Config.Route) == 0 {
 		p.errorHandler(w, r, NewNoDestinationError(route.Name))
 		return
 	}
+
+	// Extract incoming trace context and start a proxy span
+	propagator := otel.GetTextMapPropagator()
+	ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	tracer := otel.Tracer(proxyTracerName)
+	ctx, span := tracer.Start(ctx, "proxy "+r.Method+" "+route.Name,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("http.request.method", r.Method),
+			attribute.String("url.path", r.URL.Path),
+			attribute.String("proxy.route", route.Name),
+		),
+	)
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	// Select destination using weighted random selection
 	dest := p.selectDestination(route.Config.Route)
@@ -174,11 +228,15 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		return
 	}
 
+	span.SetAttributes(attribute.String("proxy.backend", dest.Destination.Host))
+
 	// Get backend and target URL
 	serviceBackend := p.getServiceBackend(dest.Destination.Host)
 	target, err := p.buildTargetURL(dest, serviceBackend)
 	if err != nil {
-		p.errorHandler(w, r, NewInvalidTargetError(route.Name, dest.Destination.Host, err))
+		p.errorHandler(w, r, NewInvalidTargetError(
+			route.Name, dest.Destination.Host, err,
+		))
 		return
 	}
 
@@ -187,11 +245,22 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		r = p.applyRewrite(r, route.Config.Rewrite)
 	}
 
-	// Create and execute reverse proxy
-	proxy := p.createReverseProxy(target, r, dest.Destination.Host, serviceBackend)
+	// Create and execute reverse proxy with duration tracking
+	proxy := p.createReverseProxy(
+		target, r, dest.Destination.Host, serviceBackend,
+	)
 	r, cancel := p.applyTimeout(r, route.Config.Timeout.Duration())
 	defer cancel()
-	p.executeProxy(w, r, proxy, dest.Destination.Host)
+
+	backendStart := time.Now()
+	p.executeProxy(w, r, proxy, dest.Destination.Host, target)
+	duration := time.Since(backendStart)
+	getProxyMetrics().backendDuration.WithLabelValues(
+		dest.Destination.Host,
+	).Observe(duration.Seconds())
+
+	// Set span attributes for the response
+	span.SetAttributes(attribute.Float64("proxy.backend_duration_ms", float64(duration.Milliseconds())))
 }
 
 // getServiceBackend retrieves the service backend from the registry.
@@ -212,9 +281,9 @@ func (p *ReverseProxy) buildTargetURL(
 	dest *config.RouteDestination,
 	serviceBackend *backend.ServiceBackend,
 ) (*url.URL, error) {
-	scheme := "http"
+	scheme := schemeHTTP
 	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
-		scheme = "https"
+		scheme = schemeHTTPS
 	}
 	targetURL := scheme + "://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
 	return url.Parse(targetURL)
@@ -258,18 +327,21 @@ func (p *ReverseProxy) applyTimeout(r *http.Request, timeout time.Duration) (*ht
 }
 
 // executeProxy executes the proxy request with optional circuit breaker protection.
+// The target URL is passed through for WebSocket message-level proxying.
 func (p *ReverseProxy) executeProxy(
 	w http.ResponseWriter,
 	r *http.Request,
 	proxy *httputil.ReverseProxy,
 	backendName string,
+	target *url.URL,
 ) {
 	cb := p.getCircuitBreaker(backendName)
 
 	// WebSocket upgrades require direct access to the underlying connection (Hijacker)
-	// and cannot be wrapped by the circuit breaker's response recorder
+	// and cannot be wrapped by the circuit breaker's response recorder.
+	// The gorilla/websocket message-level proxy is used for per-message metrics.
 	if isWebSocketRequest(r) {
-		p.executeWebSocket(w, r, proxy, backendName)
+		p.executeWebSocket(w, r, backendName, target)
 		return
 	}
 
@@ -280,24 +352,71 @@ func (p *ReverseProxy) executeProxy(
 	}
 }
 
-// executeWebSocket executes a WebSocket proxy request with metrics tracking.
+// executeWebSocket executes a WebSocket proxy request with message-level metrics and tracing.
+// It uses gorilla/websocket for bidirectional message relay, enabling per-message counting.
 func (p *ReverseProxy) executeWebSocket(
 	w http.ResponseWriter,
 	r *http.Request,
-	proxy *httputil.ReverseProxy,
 	backendName string,
+	target *url.URL,
 ) {
 	wsMetrics := getWebSocketMetrics()
 	wsMetrics.connectionsTotal.WithLabelValues(backendName).Inc()
 	wsMetrics.connectionsActive.WithLabelValues(backendName).Inc()
-	defer wsMetrics.connectionsActive.WithLabelValues(backendName).Dec()
+	connStart := time.Now()
+	defer func() {
+		wsMetrics.connectionsActive.WithLabelValues(backendName).Dec()
+		wsMetrics.connectionDuration.WithLabelValues(backendName).Observe(
+			time.Since(connStart).Seconds(),
+		)
+	}()
+
+	// Start a tracing span for the WebSocket connection
+	tracer := otel.Tracer(proxyTracerName)
+	ctx, span := tracer.Start(r.Context(), "websocket "+r.URL.Path,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String("websocket.backend", backendName),
+			attribute.String("url.path", r.URL.Path),
+			attribute.String("network.protocol.name", "websocket"),
+		),
+	)
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	p.logger.Debug("websocket connection established",
 		observability.String("backend", backendName),
 		observability.String("path", r.URL.Path),
 	)
 
-	proxy.ServeHTTP(w, r)
+	// Use message-level WebSocket proxy for metrics tracking
+	wp := &websocketProxy{logger: p.logger}
+	sent, received, wsErr := wp.proxyWebSocket(w, r, target, p.transport)
+
+	// Record message metrics
+	if sent > 0 {
+		wsMetrics.messagesSentTotal.WithLabelValues(backendName).Add(float64(sent))
+	}
+	if received > 0 {
+		wsMetrics.messagesReceivedTotal.WithLabelValues(backendName).Add(float64(received))
+	}
+
+	// Record span attributes for message counts
+	span.SetAttributes(
+		attribute.Int64("websocket.messages_sent", sent),
+		attribute.Int64("websocket.messages_received", received),
+	)
+
+	if wsErr != nil {
+		wsMetrics.errorsTotal.WithLabelValues(backendName, "proxy_error").Inc()
+		// Only log at debug level - WebSocket close is normal
+		p.logger.Debug("websocket proxy completed",
+			observability.String("backend", backendName),
+			observability.Error(wsErr),
+			observability.Int64("messages_sent", sent),
+			observability.Int64("messages_received", received),
+		)
+	}
 }
 
 // isWebSocketRequest checks if the request is a WebSocket upgrade request.
@@ -367,7 +486,13 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
 
-	// Preserve the original path if not rewritten
+	// Inject trace context into outgoing request headers for distributed tracing
+	otel.GetTextMapPropagator().Inject(originalReq.Context(), propagation.HeaderCarrier(req.Header))
+
+	// Set the path from the original request only when the outgoing request
+	// has no path (e.g., the request was constructed without one). When a
+	// rewrite has been applied, req.URL.Path is already set to the rewritten
+	// value and should not be overridden.
 	if req.URL.Path == "" {
 		req.URL.Path = originalReq.URL.Path
 	}
@@ -383,7 +508,7 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	// ReverseProxy.ServeHTTP checks upgradeType(outreq.Header) AFTER Director
 	// returns, then strips hop-by-hop headers itself and re-adds Upgrade/Connection
 	// if an upgrade was detected.
-	for _, h := range hopHeaders {
+	for h := range hopHeaders {
 		if h == "Upgrade" || h == "Connection" {
 			continue
 		}
@@ -399,9 +524,9 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	}
 
 	if originalReq.TLS != nil {
-		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-Proto", schemeHTTPS)
 	} else {
-		req.Header.Set("X-Forwarded-Proto", "http")
+		req.Header.Set("X-Forwarded-Proto", schemeHTTP)
 	}
 
 	req.Header.Set("X-Forwarded-Host", originalReq.Host)
@@ -458,8 +583,12 @@ func secureRandomInt(maxVal int) int {
 
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// Fallback to 0 on error (will select first destination)
-		return 0
+		// Fallback to math/rand/v2 on crypto/rand failure
+		observability.GetGlobalLogger().Warn("crypto/rand failure, falling back to math/rand",
+			observability.Error(err),
+		)
+		getProxyMetrics().cryptoRandFailures.Inc()
+		return mathrand.IntN(maxVal) //nolint:gosec // fallback when crypto/rand is unavailable
 	}
 
 	// Convert to uint64 and take modulo
@@ -468,7 +597,13 @@ func secureRandomInt(maxVal int) int {
 }
 
 // applyRewrite applies URL rewriting to the request.
+// It clones the URL before modifying to avoid mutating shared state.
 func (p *ReverseProxy) applyRewrite(r *http.Request, rewrite *config.RewriteConfig) *http.Request {
+	// Clone the URL to avoid mutating the original request's URL,
+	// which could be shared with other middleware or logging.
+	clonedURL := *r.URL
+	r.URL = &clonedURL
+
 	if rewrite.URI != "" {
 		// Get path params from context
 		params := util.PathParamsFromContext(r.Context())
@@ -568,7 +703,7 @@ func isRedirectSafe(u *url.URL) bool {
 	}
 
 	scheme := strings.ToLower(u.Scheme)
-	return scheme == "http" || scheme == "https"
+	return scheme == schemeHTTP || scheme == schemeHTTPS
 }
 
 // handleRouteNotFound handles route not found errors.
@@ -585,12 +720,20 @@ func (p *ReverseProxy) handleRouteNotFound(w http.ResponseWriter, r *http.Reques
 }
 
 // defaultErrorHandler is the default error handler.
-func (p *ReverseProxy) defaultErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
+func (p *ReverseProxy) defaultErrorHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+	err error,
+) {
 	p.logger.Error("proxy error",
 		observability.String("path", r.URL.Path),
 		observability.String("method", r.Method),
 		observability.Error(err),
 	)
+
+	getProxyMetrics().errorsTotal.WithLabelValues(
+		"unknown", "proxy_error",
+	).Inc()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)

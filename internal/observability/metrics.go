@@ -17,6 +17,10 @@ import (
 // match any configured route, ensuring bounded cardinality.
 const unmatchedRoute = "unmatched"
 
+// inFlightRoute is the label value used for tracking in-flight
+// requests before the route is known.
+const inFlightRoute = "in_flight"
+
 // Metrics holds all Prometheus metrics for the gateway.
 type Metrics struct {
 	requestsTotal   *prometheus.CounterVec
@@ -27,6 +31,8 @@ type Metrics struct {
 	backendHealth   *prometheus.GaugeVec
 	circuitBreaker  *prometheus.GaugeVec
 	rateLimitHits   *prometheus.CounterVec
+	buildInfo       *prometheus.GaugeVec
+	startTime       prometheus.Gauge
 	registry        *prometheus.Registry
 }
 
@@ -126,7 +132,27 @@ func NewMetrics(namespace string) *Metrics {
 		[]string{"route"},
 	)
 
+	m.buildInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "build_info",
+			Help:      "Build information for the gateway",
+		},
+		[]string{"version", "commit", "build_time"},
+	)
+
+	m.startTime = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "start_time_seconds",
+			Help: "Start time of the gateway " +
+				"in unix seconds",
+		},
+	)
+
 	m.registerCollectors()
+
+	m.startTime.SetToCurrentTime()
 
 	return m
 }
@@ -143,6 +169,8 @@ func (m *Metrics) registerCollectors() {
 		m.backendHealth,
 		m.circuitBreaker,
 		m.rateLimitHits,
+		m.buildInfo,
+		m.startTime,
 	)
 
 	m.registry.MustRegister(collectors.NewGoCollector())
@@ -210,6 +238,15 @@ func (m *Metrics) SetCircuitBreakerState(
 	m.circuitBreaker.WithLabelValues(name).Set(float64(state))
 }
 
+// SetBuildInfo sets the build information metric.
+func (m *Metrics) SetBuildInfo(
+	version, commit, buildTime string,
+) {
+	m.buildInfo.WithLabelValues(
+		version, commit, buildTime,
+	).Set(1)
+}
+
 // RecordRateLimitHit records a rate limit hit.
 // Uses route label instead of client_ip to prevent unbounded
 // cardinality. Client IP tracking should be done via logs.
@@ -230,6 +267,21 @@ func (m *Metrics) Registry() *prometheus.Registry {
 	return m.registry
 }
 
+// RegisterCollector registers an additional collector with the custom
+// registry. It returns an error if the collector is already registered
+// or conflicts with an existing one. This allows external packages
+// (e.g. reload metrics, audit metrics) to share the same registry
+// that backs the /metrics endpoint.
+func (m *Metrics) RegisterCollector(c prometheus.Collector) error {
+	return m.registry.Register(c)
+}
+
+// MustRegisterCollector registers an additional collector with the
+// custom registry, panicking on error.
+func (m *Metrics) MustRegisterCollector(c prometheus.Collector) {
+	m.registry.MustRegister(c)
+}
+
 // MetricsMiddleware returns a middleware that records metrics.
 // It extracts the route name from context (set by the proxy/router)
 // instead of using the raw request path, preventing metrics
@@ -248,15 +300,19 @@ func MetricsMiddleware(
 					status:         http.StatusOK,
 				}
 
+				// Track active requests (route not yet known)
+				metrics.activeRequests.WithLabelValues(
+					method, inFlightRoute,
+				).Inc()
+
 				next.ServeHTTP(rw, r)
+
+				metrics.activeRequests.WithLabelValues(
+					method, inFlightRoute,
+				).Dec()
 
 				route := routeFromRequest(r)
 				duration := time.Since(start)
-
-				metrics.IncrementActiveRequests(method, route)
-				defer metrics.DecrementActiveRequests(
-					method, route,
-				)
 
 				metrics.RecordRequest(
 					method, route, rw.status,

@@ -453,10 +453,25 @@ func TestGatewayConfigApplier_ApplyFullConfig_GatewayReloadError(t *testing.T) {
 	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
 	require.NoError(t, err)
 
+	// Set the existing config to have an invalid APIVersion so that the merged
+	// config fails validation during gateway.Reload. ApplyFullConfig merges
+	// operator resources into the existing config, preserving fields like
+	// APIVersion, Kind, Metadata, and Listeners from the existing config.
+	invalidExisting := &config.GatewayConfig{
+		APIVersion: "invalid-version",
+		Kind:       "Gateway",
+		Metadata:   config.Metadata{Name: "test"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 8080, Protocol: config.ProtocolHTTP},
+			},
+		},
+	}
+
 	opApp := &operatorApplication{
 		application: &application{
 			gateway: gw,
-			config:  cfg,
+			config:  invalidExisting,
 		},
 	}
 
@@ -467,13 +482,13 @@ func TestGatewayConfigApplier_ApplyFullConfig_GatewayReloadError(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Invalid config that should cause gateway.Reload to fail
-	invalidCfg := &config.GatewayConfig{
-		Metadata: config.Metadata{Name: ""},
-		Spec:     config.GatewaySpec{},
+	// Operator config with valid resources - but the merge with the invalid
+	// existing config will produce an invalid merged config
+	operatorCfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{},
 	}
 
-	err = applier.ApplyFullConfig(ctx, invalidCfg)
+	err = applier.ApplyFullConfig(ctx, operatorCfg)
 	assert.Error(t, err)
 }
 

@@ -39,6 +39,7 @@ export default function () {
         socket.on('open', function () {
             // Send messages at regular intervals
             for (let i = 0; i < MESSAGES_PER_CONNECTION; i++) {
+                // k6 setTimeout requires timeout > 0, so use (i+1) * interval
                 socket.setTimeout(function () {
                     const msgId = `${__VU}-${__ITER}-${i}`;
                     const message = JSON.stringify({
@@ -56,13 +57,13 @@ export default function () {
                     pendingMessages.set(msgId, Date.now());
                     socket.send(message);
                     messagesSent.add(1);
-                }, i * MESSAGE_INTERVAL_MS);
+                }, (i + 1) * MESSAGE_INTERVAL_MS);
             }
             
             // Close connection after all messages sent + buffer time
             socket.setTimeout(function () {
                 socket.close();
-            }, MESSAGES_PER_CONNECTION * MESSAGE_INTERVAL_MS + 1000);
+            }, (MESSAGES_PER_CONNECTION + 1) * MESSAGE_INTERVAL_MS + 1000);
         });
         
         socket.on('message', function (message) {

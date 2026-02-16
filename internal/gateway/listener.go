@@ -14,6 +14,9 @@ import (
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 )
 
+// defaultHSTSMaxAge is the default HSTS max-age value in seconds (1 year).
+const defaultHSTSMaxAge = 31536000
+
 // Listener represents an HTTP/HTTPS listener.
 type Listener struct {
 	config               config.Listener
@@ -231,6 +234,9 @@ func (l *Listener) Start(ctx context.Context) error {
 		}
 	}
 
+	// Install TLS connection metrics via VerifyConnection callback
+	l.installTLSConnectionMetrics()
+
 	// Create listener with context
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", addr)
@@ -272,7 +278,7 @@ func (l *Listener) hstsMiddleware(next http.Handler) http.Handler {
 	hsts := l.config.TLS.HSTS
 	maxAge := hsts.MaxAge
 	if maxAge == 0 {
-		maxAge = 31536000 // Default: 1 year
+		maxAge = defaultHSTSMaxAge
 	}
 	value := fmt.Sprintf("max-age=%d", maxAge)
 	if hsts.IncludeSubDomains {
@@ -358,6 +364,31 @@ func (l *Listener) httpsRedirectMiddleware(next http.Handler) http.Handler {
 		target := "https://" + redirectHost + r.URL.RequestURI()
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	})
+}
+
+// installTLSConnectionMetrics wraps the TLS config's VerifyConnection callback
+// to record connection metrics. VerifyConnection fires synchronously after each
+// TLS handshake completes, giving direct access to the negotiated tls.ConnectionState.
+func (l *Listener) installTLSConnectionMetrics() {
+	if l.server.TLSConfig == nil || l.tlsMetrics == nil {
+		return
+	}
+
+	origVerify := l.server.TLSConfig.VerifyConnection
+	l.server.TLSConfig.VerifyConnection = func(cs tls.ConnectionState) error {
+		// Determine TLS mode from peer certificates
+		mode := tlspkg.TLSModeSimple
+		if len(cs.PeerCertificates) > 0 {
+			mode = tlspkg.TLSModeMutual
+		}
+		l.tlsMetrics.RecordConnection(cs.Version, cs.CipherSuite, mode)
+
+		// Call original VerifyConnection if set
+		if origVerify != nil {
+			return origVerify(cs)
+		}
+		return nil
+	}
 }
 
 // serve starts serving requests.

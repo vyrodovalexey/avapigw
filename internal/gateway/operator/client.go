@@ -27,10 +27,14 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	operatorv1alpha1 "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1"
 )
+
+// clientStopTimeout is the timeout for waiting for operator client goroutines to stop.
+const clientStopTimeout = 5 * time.Second
 
 // Client errors.
 var (
@@ -347,7 +351,7 @@ func (c *Client) Stop() error {
 	case <-done:
 		// All goroutines stopped cleanly
 		c.logger.Debug("all operator client goroutines stopped")
-	case <-time.After(5 * time.Second):
+	case <-time.After(clientStopTimeout):
 		c.logger.Warn("timeout waiting for operator client goroutines to stop")
 	}
 
@@ -664,6 +668,10 @@ func (c *Client) handleUpdate(ctx context.Context, update *operatorv1alpha1.Conf
 	c.metrics.setLastConfigVersion(update.Sequence)
 	if update.Timestamp != nil {
 		c.metrics.setLastConfigTimestamp(float64(update.Timestamp.AsTime().Unix()))
+	} else {
+		// For snapshots and updates without an explicit timestamp, use the
+		// current time so the metric never stays at epoch 0 (1970-01-01).
+		c.metrics.setLastConfigTimestamp(float64(time.Now().Unix()))
 	}
 
 	// Send acknowledgment
@@ -809,7 +817,7 @@ func (c *Client) buildGatewayStatus(lastConfigApplied time.Time) *operatorv1alph
 	}
 
 	if !lastConfigApplied.IsZero() {
-		status.LastConfigApplied = nil // Would need timestamppb import
+		status.LastConfigApplied = timestamppb.New(lastConfigApplied)
 	}
 
 	if c.statusProvider != nil {

@@ -119,6 +119,9 @@ func (h *StreamHandler) proxyStreams(serverStream grpc.ServerStream, clientStrea
 
 // forwardServerToClient forwards messages from server stream to client stream.
 func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, clientStream grpc.ClientStream) error {
+	metrics := getGRPCProxyMetrics()
+	fullMethod, _ := grpc.Method(serverStream.Context())
+
 	for {
 		frame := &Frame{}
 		if err := serverStream.RecvMsg(frame); err != nil {
@@ -129,6 +132,10 @@ func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, cl
 			return err
 		}
 
+		// Record request message size and count
+		metrics.requestSize.WithLabelValues(fullMethod).Observe(float64(len(frame.payload)))
+		metrics.streamMsgSent.WithLabelValues(fullMethod).Inc()
+
 		if err := clientStream.SendMsg(frame); err != nil {
 			return err
 		}
@@ -137,6 +144,9 @@ func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, cl
 
 // forwardClientToServer forwards messages from client stream to server stream.
 func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, serverStream grpc.ServerStream) error {
+	metrics := getGRPCProxyMetrics()
+	fullMethod, _ := grpc.Method(serverStream.Context())
+
 	headerSent := false
 	for {
 		frame := &Frame{}
@@ -146,6 +156,10 @@ func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, se
 			}
 			return err
 		}
+
+		// Record response message size and count
+		metrics.responseSize.WithLabelValues(fullMethod).Observe(float64(len(frame.payload)))
+		metrics.streamMsgReceived.WithLabelValues(fullMethod).Inc()
 
 		// Forward headers before the first message (non-blocking after first RecvMsg)
 		if !headerSent {

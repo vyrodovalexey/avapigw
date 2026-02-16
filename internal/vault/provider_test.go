@@ -350,7 +350,7 @@ func TestNewVaultProvider_WithOptions(t *testing.T) {
 	}
 
 	customLogger := observability.NopLogger()
-	customMetrics := NewMetrics("custom")
+	customMetrics := newTestMetrics("custom")
 
 	provider, err := NewVaultProvider(
 		client,
@@ -560,7 +560,7 @@ func TestWithVaultProviderLogger(t *testing.T) {
 }
 
 func TestWithVaultProviderMetrics(t *testing.T) {
-	metrics := NewMetrics("test")
+	metrics := newTestMetrics("test")
 	opt := WithVaultProviderMetrics(metrics)
 
 	provider := &VaultProvider{}

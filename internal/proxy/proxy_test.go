@@ -507,16 +507,16 @@ func TestReverseProxy_ProxyToBackend(t *testing.T) {
 func TestHopHeaders(t *testing.T) {
 	t.Parallel()
 
-	expectedHeaders := []string{
-		"Connection",
-		"Proxy-Connection",
-		"Keep-Alive",
-		"Proxy-Authenticate",
-		"Proxy-Authorization",
-		"Te",
-		"Trailer",
-		"Transfer-Encoding",
-		"Upgrade",
+	expectedHeaders := map[string]struct{}{
+		"Connection":          {},
+		"Proxy-Connection":    {},
+		"Keep-Alive":          {},
+		"Proxy-Authenticate":  {},
+		"Proxy-Authorization": {},
+		"Te":                  {},
+		"Trailer":             {},
+		"Transfer-Encoding":   {},
+		"Upgrade":             {},
 	}
 
 	assert.Equal(t, expectedHeaders, hopHeaders)
@@ -588,14 +588,62 @@ func TestReverseProxy_ApplyRewrite(t *testing.T) {
 				req = req.WithContext(ctx)
 			}
 
+			// Capture original URL path before rewrite
+			originalPath := req.URL.Path
+			originalURL := req.URL
+
 			result := proxy.applyRewrite(req, tt.rewrite)
 
 			assert.Equal(t, tt.expectedPath, result.URL.Path)
 			if tt.expectedHost != "" {
 				assert.Equal(t, tt.expectedHost, result.Host)
 			}
+
+			// Verify the original URL pointer is not the same as the result URL pointer
+			// (URL was cloned, not mutated in place)
+			if tt.rewrite.URI != "" {
+				assert.NotSame(t, originalURL, result.URL,
+					"applyRewrite should clone the URL, not mutate the original")
+				// The original URL path should remain unchanged
+				assert.Equal(t, originalPath, originalURL.Path,
+					"original URL path should not be mutated after rewrite")
+			}
 		})
 	}
+}
+
+// TestReverseProxy_ApplyRewrite_OriginalURLNotMutated specifically tests that
+// the original request URL is not mutated when applyRewrite is called.
+func TestReverseProxy_ApplyRewrite_OriginalURLNotMutated(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	proxy := NewReverseProxy(r, registry)
+
+	req := httptest.NewRequest(http.MethodGet, "/original/path", nil)
+
+	// Save a reference to the original URL
+	originalURL := req.URL
+	originalPath := req.URL.Path
+
+	rewrite := &config.RewriteConfig{
+		URI: "/rewritten/path",
+	}
+
+	result := proxy.applyRewrite(req, rewrite)
+
+	// The rewritten request should have the new path
+	assert.Equal(t, "/rewritten/path", result.URL.Path)
+
+	// The original URL object should NOT have been mutated
+	assert.Equal(t, originalPath, originalURL.Path,
+		"original URL path must not be mutated by applyRewrite")
+
+	// The result URL should be a different pointer than the original
+	assert.NotSame(t, originalURL, result.URL,
+		"applyRewrite must clone the URL, not modify the original")
 }
 
 func TestReverseProxy_Director(t *testing.T) {
@@ -753,7 +801,7 @@ func TestReverseProxy_Director_RemovesHopHeaders(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	// Add hop-by-hop headers
-	for _, h := range hopHeaders {
+	for h := range hopHeaders {
 		req.Header.Set(h, "some-value")
 	}
 
@@ -762,7 +810,7 @@ func TestReverseProxy_Director_RemovesHopHeaders(t *testing.T) {
 	// Verify hop headers are removed, except Upgrade and Connection
 	// which are preserved for WebSocket support (httputil.ReverseProxy
 	// handles them after Director returns, checking for protocol upgrades first).
-	for _, h := range hopHeaders {
+	for h := range hopHeaders {
 		if h == "Upgrade" || h == "Connection" {
 			assert.NotEmpty(t, req.Header.Get(h),
 				"hop header %s should be preserved for WebSocket support", h)

@@ -61,8 +61,14 @@ spec:
             - --cert-namespace={{ .Release.Namespace }}
             {{- else }}
             - --enable-webhooks=false
+            - --cert-provider={{ .Values.operator.grpc.tls.mode | default "selfsigned" }}
+            - --cert-service-name={{ include "avapigw.operator.fullname" . }}
+            - --cert-namespace={{ .Release.Namespace }}
             {{- end }}
             - --grpc-port={{ .Values.operator.grpc.port }}
+            {{- if .Values.operator.grpc.requireClientCert }}
+            - --grpc-require-client-cert=true
+            {{- end }}
             {{- if .Values.operator.ingressController.enabled }}
             - --enable-ingress-controller=true
             - --ingress-class-name={{ .Values.operator.ingressController.className | default "avapigw" }}
@@ -97,6 +103,21 @@ spec:
             - name: VAULT_K8S_MOUNT_PATH
               value: {{ .Values.operator.vault.kubernetesMountPath | default "kubernetes" | quote }}
             {{- end }}
+            {{- if eq (.Values.operator.grpc.tls.mode | default "selfsigned") "vault" }}
+            - name: VAULT_PKI_MOUNT
+              value: {{ .Values.operator.grpc.tls.vault.pkiMount | default "pki" | quote }}
+            - name: VAULT_PKI_ROLE
+              value: {{ .Values.operator.grpc.tls.vault.role | quote }}
+            {{- end }}
+            {{- if .Values.operator.webhook.enabled }}
+            - name: CERT_SERVICE_NAME
+              value: {{ include "avapigw.operator.webhookServiceName" . | quote }}
+            {{- else }}
+            - name: CERT_SERVICE_NAME
+              value: {{ include "avapigw.operator.fullname" . | quote }}
+            {{- end }}
+            - name: CERT_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
             {{- end }}
             {{- if .Values.operator.webhook.duplicateDetection }}
             {{- if .Values.operator.webhook.duplicateDetection.clusterWide }}

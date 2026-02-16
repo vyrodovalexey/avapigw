@@ -180,12 +180,13 @@ func TestProxy_ApplyTimeout_NoDeadline(t *testing.T) {
 	defer p.Close()
 
 	ctx := context.Background()
-	newCtx, cancel := p.applyTimeout(ctx, "/test.Service/Method")
-	defer cancel()
-
-	deadline, ok := newCtx.Deadline()
-	assert.True(t, ok)
-	assert.True(t, deadline.After(time.Now()))
+	newCtx, cancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
+	// No route configured, so matched should be false
+	assert.False(t, matched)
+	assert.Nil(t, cancel)
+	// Context should be unchanged when route is not matched
+	_, hasDeadline := newCtx.Deadline()
+	assert.False(t, hasDeadline)
 }
 
 func TestProxy_ApplyTimeout_ExistingDeadline(t *testing.T) {
@@ -198,7 +199,8 @@ func TestProxy_ApplyTimeout_ExistingDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	newCtx, newCancel := p.applyTimeout(ctx, "/test.Service/Method")
+	newCtx, newCancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
+	assert.True(t, matched)
 	assert.Nil(t, newCancel)
 	assert.Equal(t, ctx, newCtx)
 }
@@ -223,7 +225,9 @@ func TestProxy_ApplyTimeout_RouteTimeout(t *testing.T) {
 	defer p.Close()
 
 	ctx := context.Background()
-	newCtx, cancel := p.applyTimeout(ctx, "/test.Service/Method")
+	newCtx, cancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
+	assert.True(t, matched)
+	require.NotNil(t, cancel)
 	defer cancel()
 
 	deadline, ok := newCtx.Deadline()

@@ -91,7 +91,7 @@ func NewMetrics(namespace string) *Metrics {
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "backend_auth",
-			Name:      "token_expiry_timestamp_seconds",
+			Name:      "token_expiry_seconds",
 			Help:      "Token expiry timestamp in seconds since epoch",
 		},
 		[]string{"provider", "auth_type"},

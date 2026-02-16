@@ -12,7 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -614,4 +616,70 @@ func TestSetupTracingIfEnabled_FullSamplingRate_90(t *testing.T) {
 	if err == nil && shutdown != nil {
 		shutdown()
 	}
+}
+
+// ============================================================================
+// setupWebhookCAInjectorIfEnabled Tests
+// ============================================================================
+
+func TestSetupWebhookCAInjectorIfEnabled_WebhooksDisabled(t *testing.T) {
+	cfg := &Config{
+		EnableWebhooks: false,
+	}
+
+	ctx := context.Background()
+	injector, err := setupWebhookCAInjectorIfEnabled(ctx, nil, cfg, nil)
+	assert.NoError(t, err)
+	assert.Nil(t, injector)
+}
+
+func TestSetupWebhookCAInjectorIfEnabled_WebhooksEnabled(t *testing.T) {
+	// Create a test HTTP server to simulate K8s API
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"kind":"APIVersions","versions":["v1"]}`))
+	}))
+	defer ts.Close()
+
+	// Create a scheme with our types
+	testScheme := runtime.NewScheme()
+	require.NoError(t, avapigwv1alpha1.AddToScheme(testScheme))
+	require.NoError(t, clientgoscheme.AddToScheme(testScheme))
+	require.NoError(t, networkingv1.AddToScheme(testScheme))
+
+	// Create a real manager with a test REST config
+	restConfig := &rest.Config{
+		Host: ts.URL,
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme: testScheme,
+		Metrics: metricsserver.Options{
+			BindAddress: "0", // Disable metrics
+		},
+		HealthProbeBindAddress: "0", // Disable health probes
+	})
+	require.NoError(t, err)
+
+	// Create a self-signed cert manager
+	certManager, err := cert.NewSelfSignedProvider(&cert.SelfSignedProviderConfig{
+		CACommonName: "test-ca-webhook-injector",
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	defer certManager.Close()
+
+	cfg := &Config{
+		EnableWebhooks: true,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	injector, err := setupWebhookCAInjectorIfEnabled(ctx, mgr, cfg, certManager)
+	assert.NoError(t, err)
+	assert.NotNil(t, injector)
+
+	// Cancel context to stop the background goroutine
+	cancel()
 }

@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -23,6 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -43,11 +47,28 @@ type tracerShutdowner interface {
 // setupTracingFunc is the function used to create a tracer.
 // It is a package-level variable to allow overriding in tests
 // where OpenTelemetry schema URL conflicts prevent real tracer creation.
+// Version information (set at build time).
+var (
+	operatorVersion   = "dev"
+	operatorBuildTime = "unknown"
+	operatorGitCommit = "unknown"
+)
+
 var setupTracingFunc = defaultSetupTracing
 
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+)
+
+var operatorBuildInfo = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "avapigw_operator",
+		Name:      "build_info",
+		Help: "Build information for " +
+			"the operator",
+	},
+	[]string{"version", "commit", "build_time"},
 )
 
 func init() {
@@ -73,6 +94,11 @@ type Config struct {
 	// WebhookPort is the port that the webhook server serves at.
 	WebhookPort int
 
+	// WebhookCertDir is the directory containing TLS certificates for the webhook server.
+	// When set, the webhook server uses tls.crt and tls.key from this directory.
+	// If empty, the controller-runtime default cert directory is used.
+	WebhookCertDir string
+
 	// GRPCPort is the port that the gRPC server serves at.
 	GRPCPort int
 
@@ -88,6 +114,13 @@ type Config struct {
 	// VaultPKIRole is the Vault PKI role name.
 	VaultPKIRole string
 
+	// VaultK8sRole is the Vault role for Kubernetes authentication.
+	VaultK8sRole string
+
+	// VaultK8sMountPath is the mount path for the Kubernetes auth method.
+	// Defaults to "kubernetes".
+	VaultK8sMountPath string
+
 	// LogLevel is the log level (debug, info, warn, error).
 	LogLevel string
 
@@ -99,6 +132,10 @@ type Config struct {
 
 	// EnableGRPCServer enables the gRPC configuration server.
 	EnableGRPCServer bool
+
+	// GRPCRequireClientCert requires client certificates for gRPC connections (mTLS).
+	// When false, the gRPC server uses server-side TLS only.
+	GRPCRequireClientCert bool
 
 	// EnableTracing enables OpenTelemetry tracing.
 	EnableTracing bool
@@ -161,6 +198,12 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	logger := setupLogger(cfg.LogLevel, cfg.LogFormat)
 	ctrl.SetLogger(logger)
 
+	// Set build info metric
+	operatorBuildInfo.WithLabelValues(
+		operatorVersion, operatorGitCommit,
+		operatorBuildTime,
+	).Set(1)
+
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -177,46 +220,20 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 		defer tracerShutdown()
 	}
 
-	// Create manager
-	var mgr ctrl.Manager
-	if restConfig != nil {
-		mgr, err = createManagerWithConfig(restConfig, cfg)
-	} else {
-		mgr, err = createManager(cfg)
-	}
+	// Setup certificate manager and create controller manager
+	certManager, mgr, err := setupCertManagerAndControllerManager(ctx, cfg, restConfig)
 	if err != nil {
 		return err
 	}
 
-	// Setup certificate manager
-	certManager, err := setupCertManager(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("unable to setup certificate manager: %w", err)
-	}
-
-	// Setup gRPC server
-	grpcServer, err := setupGRPCServerIfEnabled(ctx, cfg, certManager)
+	// Setup all operator components (gRPC, controllers, webhooks, health checks)
+	caInjector, err := setupOperatorComponents(ctx, cfg, mgr, certManager)
 	if err != nil {
 		return err
 	}
-
-	// Setup controllers
-	if err := setupControllers(mgr, grpcServer, cfg); err != nil {
-		return fmt.Errorf("unable to setup controllers: %w", err)
+	if caInjector != nil {
+		defer caInjector.Stop()
 	}
-
-	// Setup webhooks if enabled
-	if err := setupWebhooksIfEnabled(mgr, cfg); err != nil {
-		return err
-	}
-
-	// Add health checks
-	if err := setupHealthChecks(mgr); err != nil {
-		return err
-	}
-
-	// Start gRPC server in background
-	startGRPCServerBackground(ctx, grpcServer)
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
@@ -224,6 +241,79 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	}
 
 	return nil
+}
+
+// setupCertManagerAndControllerManager initializes the certificate manager,
+// writes webhook TLS certificates if needed, and creates the controller-runtime manager.
+func setupCertManagerAndControllerManager(
+	ctx context.Context,
+	cfg *Config,
+	restConfig *rest.Config,
+) (cert.Manager, ctrl.Manager, error) {
+	certManager, err := setupCertManager(ctx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to setup certificate manager: %w", err)
+	}
+
+	// Write webhook TLS certificates from the cert manager when webhooks are enabled.
+	// This wires the cert manager's certificates to the webhook server's TLS configuration.
+	if cfg.EnableWebhooks {
+		certDir, certErr := writeWebhookCertificates(ctx, cfg, certManager)
+		if certErr != nil {
+			return nil, nil, fmt.Errorf("unable to write webhook certificates: %w", certErr)
+		}
+		if certDir != "" {
+			cfg.WebhookCertDir = certDir
+		}
+	}
+
+	var mgr ctrl.Manager
+	if restConfig != nil {
+		mgr, err = createManagerWithConfig(restConfig, cfg)
+	} else {
+		mgr, err = createManager(cfg)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return certManager, mgr, nil
+}
+
+// setupOperatorComponents sets up gRPC server, controllers, webhooks, CA injector,
+// health checks, and starts the gRPC server in the background.
+func setupOperatorComponents(
+	ctx context.Context,
+	cfg *Config,
+	mgr ctrl.Manager,
+	certManager cert.Manager,
+) (*cert.WebhookCAInjector, error) {
+	grpcServer, err := setupGRPCServerIfEnabled(ctx, cfg, certManager)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := setupControllers(mgr, grpcServer, cfg); err != nil {
+		return nil, fmt.Errorf("unable to setup controllers: %w", err)
+	}
+
+	// Setup webhooks if enabled (pass ctx for DuplicateChecker lifecycle management)
+	if err := setupWebhooksIfEnabled(ctx, mgr, cfg); err != nil {
+		return nil, err
+	}
+
+	caInjector, err := setupWebhookCAInjectorIfEnabled(ctx, mgr, cfg, certManager)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := setupHealthChecks(mgr); err != nil {
+		return nil, err
+	}
+
+	startGRPCServerBackground(ctx, grpcServer)
+
+	return caInjector, nil
 }
 
 // setupTracingIfEnabled sets up tracing if enabled and returns a shutdown function.
@@ -256,6 +346,19 @@ func createManager(cfg *Config) (ctrl.Manager, error) {
 // createManagerWithConfig creates the controller-runtime manager using the provided REST config.
 // This is separated from createManager to enable unit testing with a fake API server.
 func createManagerWithConfig(restConfig *rest.Config, cfg *Config) (ctrl.Manager, error) {
+	webhookOpts := webhook.Options{
+		Port: cfg.WebhookPort,
+	}
+
+	// Configure TLS certificate paths for the webhook server if cert directory is set.
+	// The cert manager writes certificates to this directory, and the webhook server
+	// reads them for TLS termination.
+	if cfg.WebhookCertDir != "" {
+		webhookOpts.CertDir = cfg.WebhookCertDir
+		webhookOpts.CertName = "tls.crt"
+		webhookOpts.KeyName = "tls.key"
+	}
+
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
@@ -264,9 +367,7 @@ func createManagerWithConfig(restConfig *rest.Config, cfg *Config) (ctrl.Manager
 		HealthProbeBindAddress: cfg.ProbeAddr,
 		LeaderElection:         cfg.EnableLeaderElection,
 		LeaderElectionID:       cfg.LeaderElectionID,
-		WebhookServer: webhook.NewServer(webhook.Options{
-			Port: cfg.WebhookPort,
-		}),
+		WebhookServer:          webhook.NewServer(webhookOpts),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create manager: %w", err)
@@ -291,12 +392,51 @@ func setupGRPCServerIfEnabled(
 	return grpcServer, nil
 }
 
+// setupWebhookCAInjectorIfEnabled creates and starts the WebhookCAInjector when webhooks are enabled.
+// It injects the CA bundle from the cert manager into ValidatingWebhookConfiguration resources
+// so that the API server can verify the webhook server's TLS certificate.
+func setupWebhookCAInjectorIfEnabled(
+	ctx context.Context,
+	mgr ctrl.Manager,
+	cfg *Config,
+	certManager cert.Manager,
+) (*cert.WebhookCAInjector, error) {
+	if !cfg.EnableWebhooks {
+		return nil, nil
+	}
+
+	webhookConfigName := "avapigw-operator-validating-webhook-configuration"
+
+	injector, err := cert.NewWebhookCAInjector(&cert.WebhookInjectorConfig{
+		WebhookConfigName: webhookConfigName,
+		CertManager:       certManager,
+		Client:            mgr.GetClient(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unable to create webhook CA injector: %w", err)
+	}
+
+	// Start the injector in a background goroutine; it will stop when ctx is canceled
+	go func() {
+		if startErr := injector.Start(ctx); startErr != nil {
+			setupLog.Error(startErr, "webhook CA injector error")
+		}
+	}()
+
+	setupLog.Info("webhook CA injector started",
+		"webhook_config", webhookConfigName,
+	)
+
+	return injector, nil
+}
+
 // setupWebhooksIfEnabled sets up webhooks if enabled.
-func setupWebhooksIfEnabled(mgr ctrl.Manager, cfg *Config) error {
+// The context is used for DuplicateChecker lifecycle management to prevent goroutine leaks.
+func setupWebhooksIfEnabled(ctx context.Context, mgr ctrl.Manager, cfg *Config) error {
 	if !cfg.EnableWebhooks {
 		return nil
 	}
-	if err := setupWebhooks(mgr, cfg); err != nil {
+	if err := setupWebhooks(ctx, mgr, cfg); err != nil {
 		return fmt.Errorf("unable to setup webhooks: %w", err)
 	}
 	return nil
@@ -354,6 +494,9 @@ func defineFlags(cfg *Config) {
 		"The name of the resource that leader election will use for holding the leader lock.")
 	flag.IntVar(&cfg.WebhookPort, "webhook-port", 9443,
 		"The port that the webhook server serves at.")
+	flag.StringVar(&cfg.WebhookCertDir, "webhook-cert-dir", "",
+		"The directory containing TLS certificates for the webhook server. "+
+			"If empty, certificates are generated from the cert manager.")
 	flag.IntVar(&cfg.GRPCPort, "grpc-port", 9444,
 		"The port that the gRPC server serves at.")
 	flag.StringVar(&cfg.CertProvider, "cert-provider", "selfsigned",
@@ -364,6 +507,10 @@ func defineFlags(cfg *Config) {
 		"The Vault PKI mount path.")
 	flag.StringVar(&cfg.VaultPKIRole, "vault-pki-role", "operator",
 		"The Vault PKI role name.")
+	flag.StringVar(&cfg.VaultK8sRole, "vault-k8s-role", "",
+		"The Vault role for Kubernetes authentication.")
+	flag.StringVar(&cfg.VaultK8sMountPath, "vault-k8s-mount-path", "kubernetes",
+		"The mount path for the Kubernetes auth method.")
 	flag.StringVar(&cfg.LogLevel, "log-level", "info",
 		"The log level (debug, info, warn, error).")
 	flag.StringVar(&cfg.LogFormat, "log-format", "json",
@@ -372,6 +519,8 @@ func defineFlags(cfg *Config) {
 		"Enable admission webhooks.")
 	flag.BoolVar(&cfg.EnableGRPCServer, "enable-grpc-server", true,
 		"Enable the gRPC configuration server.")
+	flag.BoolVar(&cfg.GRPCRequireClientCert, "grpc-require-client-cert", false,
+		"Require client certificates for gRPC connections (mTLS). When false, uses server-side TLS only.")
 	flag.BoolVar(&cfg.EnableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing.")
 	flag.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "",
@@ -407,12 +556,15 @@ func applyEnvOverrides(cfg *Config) {
 	applyStringEnv(&cfg.VaultAddr, "VAULT_ADDR")
 	applyStringEnv(&cfg.VaultPKIMount, "VAULT_PKI_MOUNT")
 	applyStringEnv(&cfg.VaultPKIRole, "VAULT_PKI_ROLE")
+	applyStringEnv(&cfg.VaultK8sRole, "VAULT_K8S_ROLE")
+	applyStringEnv(&cfg.VaultK8sMountPath, "VAULT_K8S_MOUNT_PATH")
 	applyStringEnv(&cfg.LogLevel, "LOG_LEVEL")
 	applyStringEnv(&cfg.LogFormat, "LOG_FORMAT")
 	applyStringEnv(&cfg.OTLPEndpoint, "OTLP_ENDPOINT")
 
 	// Int overrides
 	applyIntEnv(&cfg.WebhookPort, "WEBHOOK_PORT")
+	applyStringEnv(&cfg.WebhookCertDir, "WEBHOOK_CERT_DIR")
 	applyIntEnv(&cfg.GRPCPort, "GRPC_PORT")
 
 	// Float overrides
@@ -430,6 +582,7 @@ func applyEnvOverrides(cfg *Config) {
 	applyBoolEnv(&cfg.EnableLeaderElection, "LEADER_ELECT")
 	applyBoolEnv(&cfg.EnableWebhooks, "ENABLE_WEBHOOKS")
 	applyBoolEnv(&cfg.EnableGRPCServer, "ENABLE_GRPC_SERVER")
+	applyBoolEnv(&cfg.GRPCRequireClientCert, "GRPC_REQUIRE_CLIENT_CERT")
 	applyBoolEnv(&cfg.EnableTracing, "ENABLE_TRACING")
 	applyBoolEnv(&cfg.EnableIngressController, "ENABLE_INGRESS_CONTROLLER")
 	applyStringEnv(&cfg.IngressClassName, "INGRESS_CLASS_NAME")
@@ -579,6 +732,7 @@ func setupTracing(cfg *Config) (*observability.Tracer, error) {
 		OTLPEndpoint: cfg.OTLPEndpoint,
 		SamplingRate: cfg.TracingSamplingRate,
 		Enabled:      cfg.EnableTracing,
+		OTLPInsecure: true, // Default insecure for backward compatibility
 	})
 }
 
@@ -595,9 +749,11 @@ func setupCertManager(ctx context.Context, cfg *Config) (cert.Manager, error) {
 		)
 
 		manager, err := cert.NewVaultProvider(vaultCtx, &cert.VaultProviderConfig{
-			Address:  cfg.VaultAddr,
-			PKIMount: cfg.VaultPKIMount,
-			Role:     cfg.VaultPKIRole,
+			Address:             cfg.VaultAddr,
+			PKIMount:            cfg.VaultPKIMount,
+			Role:                cfg.VaultPKIRole,
+			KubernetesRole:      cfg.VaultK8sRole,
+			KubernetesMountPath: cfg.VaultK8sMountPath,
 		})
 		if err != nil {
 			// Check if the error is due to context timeout
@@ -622,6 +778,56 @@ func setupCertManager(ctx context.Context, cfg *Config) (cert.Manager, error) {
 			SecretNamespace: cert.DefaultSecretNamespace,
 		})
 	}
+}
+
+// writeWebhookCertificates obtains a TLS certificate from the cert manager and
+// writes it to a temporary directory so the webhook server can load it.
+// Returns the directory path containing the certificate files.
+func writeWebhookCertificates(
+	ctx context.Context,
+	cfg *Config,
+	certManager cert.Manager,
+) (string, error) {
+	dnsNames := getCertDNSNames(cfg)
+
+	setupLog.Info("requesting webhook server certificate",
+		"service_name", cfg.CertServiceName,
+		"namespace", cfg.CertNamespace,
+		"dns_names", dnsNames,
+	)
+
+	serverCert, err := certManager.GetCertificate(ctx, &cert.CertificateRequest{
+		CommonName: cfg.CertServiceName,
+		DNSNames:   dnsNames,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to get webhook certificate: %w", err)
+	}
+
+	// Create a temporary directory for webhook certificates
+	certDir, err := os.MkdirTemp("", "avapigw-webhook-certs-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create webhook cert directory: %w", err)
+	}
+
+	// Write certificate file
+	certPath := filepath.Join(certDir, "tls.crt")
+	if err := os.WriteFile(certPath, serverCert.CertificatePEM, 0o600); err != nil {
+		return "", fmt.Errorf("failed to write webhook certificate: %w", err)
+	}
+
+	// Write private key file
+	keyPath := filepath.Join(certDir, "tls.key")
+	if err := os.WriteFile(keyPath, serverCert.PrivateKeyPEM, 0o600); err != nil {
+		return "", fmt.Errorf("failed to write webhook private key: %w", err)
+	}
+
+	setupLog.Info("webhook TLS certificates written",
+		"cert_dir", certDir,
+		"expiration", serverCert.Expiration,
+	)
+
+	return certDir, nil
 }
 
 // defaultCertDNSNames generates the default DNS names for the server certificate.
@@ -665,11 +871,16 @@ func setupGRPCServer(ctx context.Context, cfg *Config, certManager cert.Manager)
 		return nil, err
 	}
 
-	return operatorgrpc.NewServer(&operatorgrpc.ServerConfig{
-		Port:        cfg.GRPCPort,
-		Certificate: serverCert,
-		CertManager: certManager,
-	})
+	serverConfig := &operatorgrpc.ServerConfig{
+		Port:              cfg.GRPCPort,
+		Certificate:       serverCert,
+		MetricsRegisterer: metrics.Registry,
+	}
+	// Only enable mTLS (client cert verification) when explicitly requested
+	if cfg.GRPCRequireClientCert {
+		serverConfig.CertManager = certManager
+	}
+	return operatorgrpc.NewServer(serverConfig)
 }
 
 // controllerSetup defines a controller setup operation with a name for error reporting.
@@ -770,43 +981,49 @@ func setupIngressController(
 	}).SetupWithManager(mgr)
 }
 
-func setupWebhooks(mgr ctrl.Manager, cfg *Config) error {
-	// Create duplicate checker options based on configuration
-	duplicateCheckerOpts := operatorwebhook.DuplicateCheckerConfig{
+func setupWebhooks(ctx context.Context, mgr ctrl.Manager, cfg *Config) error {
+	// Create a single shared DuplicateChecker for all webhooks.
+	// This avoids creating multiple instances (and cleanup goroutines) per webhook.
+	duplicateCheckerCfg := operatorwebhook.DuplicateCheckerConfig{
 		ClusterWide:  cfg.EnableClusterWideDuplicateCheck,
 		CacheEnabled: cfg.DuplicateCacheEnabled,
 		CacheTTL:     cfg.DuplicateCacheTTL,
 	}
 
+	sharedChecker := operatorwebhook.NewDuplicateCheckerFromConfigWithContext(
+		ctx, mgr.GetClient(), duplicateCheckerCfg,
+	)
+
 	setupLog.Info("configuring webhook duplicate detection",
-		"cluster_wide", duplicateCheckerOpts.ClusterWide,
-		"cache_enabled", duplicateCheckerOpts.CacheEnabled,
-		"cache_ttl", duplicateCheckerOpts.CacheTTL,
+		"cluster_wide", duplicateCheckerCfg.ClusterWide,
+		"cache_enabled", duplicateCheckerCfg.CacheEnabled,
+		"cache_ttl", duplicateCheckerCfg.CacheTTL,
+		"shared_checker", true,
 	)
 
 	webhookSetups := []controllerSetup{
 		{
 			name: "APIRoute",
 			setup: func() error {
-				return operatorwebhook.SetupAPIRouteWebhookWithConfig(mgr, duplicateCheckerOpts)
+				return operatorwebhook.SetupAPIRouteWebhookWithChecker(mgr, sharedChecker)
 			},
 		},
 		{
 			name: "GRPCRoute",
 			setup: func() error {
-				return operatorwebhook.SetupGRPCRouteWebhookWithConfig(mgr, duplicateCheckerOpts)
+				return operatorwebhook.SetupGRPCRouteWebhookWithChecker(mgr, sharedChecker)
 			},
 		},
 		{
 			name: "Backend",
 			setup: func() error {
-				return operatorwebhook.SetupBackendWebhookWithConfig(mgr, duplicateCheckerOpts)
+				return operatorwebhook.SetupBackendWebhookWithChecker(mgr, sharedChecker)
 			},
 		},
 		{
 			name: "GRPCBackend",
 			setup: func() error {
-				return operatorwebhook.SetupGRPCBackendWebhookWithConfig(mgr, duplicateCheckerOpts)
+				return operatorwebhook.SetupGRPCBackendWebhookWithChecker(mgr, sharedChecker)
 			},
 		},
 	}
@@ -817,12 +1034,12 @@ func setupWebhooks(mgr ctrl.Manager, cfg *Config) error {
 		}
 	}
 
-	// Setup Ingress webhook if Ingress controller is enabled
+	// Setup Ingress webhook if Ingress controller is enabled, sharing the same DuplicateChecker
 	if cfg.EnableIngressController {
 		setupLog.Info("setting up Ingress validating webhook",
 			"ingress_class", cfg.IngressClassName,
 		)
-		if err := operatorwebhook.SetupIngressWebhook(mgr, cfg.IngressClassName); err != nil {
+		if err := operatorwebhook.SetupIngressWebhookWithChecker(mgr, sharedChecker, cfg.IngressClassName); err != nil {
 			return fmt.Errorf("unable to setup Ingress webhook: %w", err)
 		}
 	}

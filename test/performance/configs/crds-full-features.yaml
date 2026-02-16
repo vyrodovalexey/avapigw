@@ -1,0 +1,656 @@
+# =============================================================================
+# CRD Resources for Full Feature Testing
+# =============================================================================
+# This configuration covers ALL required test scenarios for performance testing
+# including: caching, rate limiting, authentication (JWT, Basic, API Key, mTLS),
+# transformations, max sessions, and load balancing.
+#
+# Apply with: kubectl apply -f test/performance/configs/crds-full-features.yaml -n avapigw-test
+# =============================================================================
+
+---
+# =============================================================================
+# HTTP BACKENDS
+# =============================================================================
+
+# Backend 1 - REST backend on port 8801
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: rest-backend-1
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8801
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+---
+# Backend 2 - REST backend on port 8802
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: rest-backend-2
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8802
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+---
+# =============================================================================
+# GRPC BACKENDS
+# =============================================================================
+
+# GRPCBackend 1 - gRPC backend on port 8803
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: grpc-backend-1
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8803
+      weight: 1
+  healthCheck:
+    enabled: true
+    service: ""
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  connectionPool:
+    maxConnsPerHost: 100
+    maxIdleConns: 50
+    idleConnTimeout: 90s
+
+---
+# GRPCBackend 2 - gRPC backend on port 8804
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: grpc-backend-2
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8804
+      weight: 1
+  healthCheck:
+    enabled: true
+    service: ""
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  connectionPool:
+    maxConnsPerHost: 100
+    maxIdleConns: 50
+    idleConnTimeout: 90s
+
+---
+# =============================================================================
+# HTTP API ROUTES
+# =============================================================================
+
+# Route 1: Health Check - Direct response 200
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: health-check
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        exact: /health
+      methods:
+        - GET
+  directResponse:
+    status: 200
+    body: '{"status":"healthy","service":"avapigw"}'
+    headers:
+      Content-Type: application/json
+
+---
+# Route 2: Items API with Redis Sentinel Cache and Rate Limiting
+# Features: 50/50 load balancing, Redis Sentinel cache, rate limit (50 RPS, burst 100)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: items-api-cached
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  timeout: 30s
+  cache:
+    enabled: true
+    ttl: 60s
+    keyComponents:
+      - path
+      - method
+      - query
+    staleWhileRevalidate: 30s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 50
+    burst: 100
+    perClient: false
+
+---
+# Route 3: Keycloak JWT Authentication
+# Features: Keycloak JWT auth for secure endpoints, rewrite to backend path
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: auth-keycloak
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/secure/
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://host.docker.internal:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - gateway-client
+      claimMapping:
+        roles: realm_access.roles
+        email: email
+        name: preferred_username
+
+---
+# Route 4: Basic Authentication
+# Features: Basic auth with inline users, rewrite to backend path
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: auth-basic
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/basic/
+      methods:
+        - GET
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  headers:
+    request:
+      set:
+        X-Auth-Type: basic
+
+---
+# Route 5: API Key Authentication with Vault KV
+# Features: API key auth with Vault KV storage, rate limit for specific key (10 RPS)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: auth-apikey
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/apikey/
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      vaultPath: secret/data/apikeys
+      hashAlgorithm: sha256
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 10
+    burst: 20
+    perClient: true
+
+---
+# Route 6: mTLS Authentication
+# Features: mTLS required with Vault PKI (pki mount, test-role)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: mtls-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/mtls/
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  authentication:
+    enabled: true
+    mtls:
+      enabled: true
+      extractIdentity: cn
+  tls:
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: test-role
+      commonName: gateway.avapigw.local
+      ttl: 24h
+
+---
+# Route 7: Request/Response Transformation
+# Features: Add/remove headers on request and response
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: transform-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/transform/
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  headers:
+    request:
+      add:
+        X-Gateway: avapigw
+        X-Request-ID: "{{.RequestID}}"
+      remove:
+        - X-Internal
+    response:
+      add:
+        X-Processed-By: avapigw
+        X-Response-Time: "{{.ResponseTime}}"
+
+---
+# Route 8: WebSocket (no authentication)
+# Features: Plain WebSocket support, timeout 0s for long-lived connections
+# NOTE: WS is NOT tested with authentication per requirements
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: websocket-plain
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        exact: /ws
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  timeout: 0s
+
+---
+# Route 8a: WebSocket with Max Sessions
+# Features: WebSocket with max sessions (50 concurrent, queue 25, timeout 5s)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: websocket-max-sessions
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        exact: /ws-limited
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  timeout: 0s
+  maxSessions:
+    enabled: true
+    maxConcurrent: 50
+    queueSize: 25
+    queueTimeout: 5s
+
+---
+# Route 8b: WebSocket with mTLS
+# Features: WebSocket with mTLS via Vault PKI
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: websocket-mtls
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        exact: /ws-mtls
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  timeout: 0s
+  authentication:
+    enabled: true
+    mtls:
+      enabled: true
+      extractIdentity: cn
+  tls:
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: test-role
+      commonName: ws.avapigw.local
+      ttl: 24h
+
+---
+# Route 8c: WebSocket with API Key Authentication
+# Features: WebSocket with API key auth via Vault KV
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: websocket-apikey
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        exact: /ws-apikey
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  timeout: 0s
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      vaultPath: secret/data/apikeys
+      hashAlgorithm: sha256
+
+---
+# Route 9: Max Sessions with Redis Sentinel Rate Limiting
+# Features: Max sessions (100 concurrent, queue 50, timeout 5s), rate limit (20 RPS)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: max-sessions-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/limited/
+      methods:
+        - GET
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  maxSessions:
+    enabled: true
+    maxConcurrent: 100
+    queueSize: 50
+    queueTimeout: 5s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 20
+    burst: 40
+    perClient: false
+
+---
+# Route 10: Catch-all route
+# Features: Default route to backend-1
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: catch-all
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  timeout: 30s
+
+---
+# =============================================================================
+# GRPC ROUTES
+# =============================================================================
+
+# GRPCRoute 1: Cached gRPC with Rate Limiting and JWT Auth
+# Features: 50/50 load balancing, Redis Sentinel cache, rate limit (50 RPS), Keycloak JWT auth
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: grpc-cached
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8803
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8804
+      weight: 50
+  timeout: 30s
+  cache:
+    enabled: true
+    ttl: 60s
+    keyComponents:
+      - service
+      - method
+    staleWhileRevalidate: 30s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 50
+    burst: 100
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://host.docker.internal:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+
+---
+# GRPCRoute 2: gRPC Transform
+# Features: Metadata manipulation (add x-gateway=avapigw)
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: grpc-transform
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.TransformService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8803
+  timeout: 30s
+  transform:
+    metadata:
+      static:
+        x-gateway: avapigw
+        x-version: v1
+      dynamic:
+        x-request-id: "{{.RequestID}}"
+
+---
+# GRPCRoute 3: gRPC mTLS
+# Features: mTLS required for secure gRPC service
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: grpc-mtls
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.SecureService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8803
+  timeout: 30s
+  authentication:
+    enabled: true
+    mtls:
+      enabled: true
+      extractIdentity: cn
+  tls:
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: test-role
+      commonName: grpc.avapigw.local
+      ttl: 24h
+
+---
+# GRPCRoute 4: gRPC API Key Authentication
+# Features: API key auth with Vault KV storage
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: grpc-apikey
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.ApiKeyService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8803
+  timeout: 30s
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      vaultPath: secret/data/apikeys
+      hashAlgorithm: sha256
+
+---
+# GRPCRoute 5: gRPC Max Sessions with Rate Limiting
+# Features: Max sessions (50 concurrent), rate limit (30 RPS)
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: grpc-max-sessions
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.LimitedService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8803
+  timeout: 30s
+  maxSessions:
+    enabled: true
+    maxConcurrent: 50
+    queueSize: 25
+    queueTimeout: 5s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 30
+    burst: 60
+
+---
+# GRPCRoute 6: Catch-all gRPC
+# Features: Default gRPC route to backend-1
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: catch-all-grpc
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        prefix: /
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8803
+  timeout: 30s

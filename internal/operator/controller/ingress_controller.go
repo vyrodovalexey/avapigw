@@ -4,6 +4,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -90,15 +92,27 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(ingress, IngressFinalizerName) {
+		original := ingress.DeepCopy()
 		controllerutil.AddFinalizer(ingress, IngressFinalizerName)
-		if err := r.Update(ctx, ingress); err != nil {
+		if err := r.Patch(ctx, ingress, client.MergeFrom(original)); err != nil {
 			logger.Error(err, "failed to add finalizer")
 			timer.RecordError()
 			return ctrl.Result{}, err
 		}
 		metrics.RecordFinalizerOperation(ingressControllerName, OperationAdd)
-		timer.RecordRequeue()
-		return ctrl.Result{Requeue: true}, nil
+		// The Patch triggers a watch event automatically; no explicit requeue needed.
+		timer.RecordSuccess()
+		return ctrl.Result{}, nil
+	}
+
+	// Generation-based reconciliation skip: if the Ingress has already been
+	// reconciled for this generation, skip reconciliation.
+	if isIngressReady(ingress) {
+		logger.V(1).Info("skipping "+ingressResourceKind+" reconciliation, already up-to-date",
+			"generation", ingress.Generation,
+		)
+		timer.RecordSuccess()
+		return ctrl.Result{}, nil
 	}
 
 	// Reconcile the Ingress
@@ -106,6 +120,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Error(err, "failed to reconcile "+ingressResourceKind)
 		r.Recorder.Event(ingress, "Warning", EventReasonIngressReconcileFailed, err.Error())
 		metrics.SetResourceCondition(ingressResourceKind, ingress.Name, ingress.Namespace, "Ready", 0)
+		metrics.RecordIngressProcessed(ResultError)
 		timer.RecordError()
 		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, err
 	}
@@ -119,8 +134,15 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	// Update observed generation annotation to enable generation-based skip
+	if err := r.updateObservedGeneration(ctx, ingress); err != nil {
+		logger.Error(err, "failed to update observed generation annotation")
+		// Non-fatal: reconciliation succeeded, annotation tracking is best-effort
+	}
+
 	r.Recorder.Event(ingress, "Normal", EventReasonIngressReconciled, MessageIngressApplied)
 	metrics.SetResourceCondition(ingressResourceKind, ingress.Name, ingress.Namespace, "Ready", 1)
+	metrics.RecordIngressProcessed(ResultSuccess)
 	timer.RecordSuccess()
 
 	return ctrl.Result{}, nil
@@ -168,8 +190,9 @@ func (r *IngressReconciler) handleDeletion(
 		}
 
 		// Remove finalizer
+		original := ingress.DeepCopy()
 		controllerutil.RemoveFinalizer(ingress, IngressFinalizerName)
-		if err := r.Update(ctx, ingress); err != nil {
+		if err := r.Patch(ctx, ingress, client.MergeFrom(original)); err != nil {
 			logger.Error(err, "failed to remove finalizer")
 			return ctrl.Result{}, err
 		}
@@ -192,6 +215,7 @@ func (r *IngressReconciler) reconcileIngress(
 	// Convert Ingress to gateway configuration
 	converted, err := r.Converter.ConvertIngress(ingress)
 	if err != nil {
+		GetControllerMetrics().RecordIngressConversionError(ingress.Namespace, ingress.Name)
 		r.Recorder.Event(ingress, "Warning", EventReasonIngressConversionFailed,
 			fmt.Sprintf("%s: %v", MessageIngressConversionFailed, err))
 		return fmt.Errorf("failed to convert Ingress: %w", err)
@@ -235,6 +259,8 @@ func (r *IngressReconciler) reconcileIngress(
 	// Track applied routes in annotation for cleanup
 	if err := r.updateAppliedRoutesAnnotation(ctx, ingress, converted); err != nil {
 		logger.Error(err, "failed to update applied routes annotation")
+		r.Recorder.Event(ingress, "Warning", "AnnotationUpdateFailed",
+			fmt.Sprintf("failed to update applied routes annotation: %v", err))
 		// Non-fatal: routes are applied, annotation tracking is best-effort
 	}
 
@@ -269,18 +295,10 @@ func (r *IngressReconciler) cleanupIngress(
 		if err != nil {
 			return fmt.Errorf("failed to convert Ingress for cleanup: %w", err)
 		}
-		for key := range converted.Routes {
-			routeKeys = append(routeKeys, key)
-		}
-		for key := range converted.Backends {
-			backendKeys = append(backendKeys, key)
-		}
-		for key := range converted.GRPCRoutes {
-			grpcRouteKeys = append(grpcRouteKeys, key)
-		}
-		for key := range converted.GRPCBackends {
-			grpcBackendKeys = append(grpcBackendKeys, key)
-		}
+		routeKeys = sortedMapKeys(converted.Routes)
+		backendKeys = sortedMapKeys(converted.Backends)
+		grpcRouteKeys = sortedMapKeys(converted.GRPCRoutes)
+		grpcBackendKeys = sortedMapKeys(converted.GRPCBackends)
 	}
 
 	// Delete HTTP routes
@@ -364,12 +382,14 @@ func (r *IngressReconciler) updateAppliedRoutesAnnotation(
 		strings.Join(grpcBackendKeys, ","),
 	)
 
+	original := ingress.DeepCopy()
+
 	if ingress.Annotations == nil {
 		ingress.Annotations = make(map[string]string)
 	}
 	ingress.Annotations[AnnotationAppliedRoutes] = value
 
-	return r.Update(ctx, ingress)
+	return r.Patch(ctx, ingress, client.MergeFrom(original))
 }
 
 // parseKeysPart extracts keys from a part like "prefix:key1,key2".
@@ -451,4 +471,49 @@ func (r *IngressReconciler) ingressClassPredicate() predicate.Predicate {
 		}
 		return r.matchesIngressClass(ingress)
 	})
+}
+
+// isIngressReady checks if an Ingress has already been reconciled for the current generation.
+// Since Ingress is a native K8s resource without CRD conditions, we track the observed
+// generation via an annotation.
+func isIngressReady(ingress *networkingv1.Ingress) bool {
+	if ingress.Annotations == nil {
+		return false
+	}
+	observedStr, ok := ingress.Annotations[AnnotationObservedGeneration]
+	if !ok {
+		return false
+	}
+	observed, err := strconv.ParseInt(observedStr, 10, 64)
+	if err != nil {
+		return false
+	}
+	return observed == ingress.Generation
+}
+
+// updateObservedGeneration updates the observed generation annotation on the Ingress
+// after a successful reconciliation.
+func (r *IngressReconciler) updateObservedGeneration(
+	ctx context.Context,
+	ingress *networkingv1.Ingress,
+) error {
+	original := ingress.DeepCopy()
+
+	if ingress.Annotations == nil {
+		ingress.Annotations = make(map[string]string)
+	}
+	ingress.Annotations[AnnotationObservedGeneration] = strconv.FormatInt(ingress.Generation, 10)
+
+	return r.Patch(ctx, ingress, client.MergeFrom(original))
+}
+
+// sortedMapKeys returns the keys of a map[string][]byte in sorted order
+// for deterministic iteration.
+func sortedMapKeys(m map[string][]byte) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

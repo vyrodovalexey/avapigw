@@ -1190,6 +1190,73 @@ func TestGRPCRouteValidator_ValidateCreate_InvalidRateLimitBurst(t *testing.T) {
 	}
 }
 
+func TestGRPCRouteValidator_ValidateUpdate_Invalid(t *testing.T) {
+	validator := &GRPCRouteValidator{}
+	oldRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			Route: []avapigwv1alpha1.RouteDestination{
+				{
+					Destination: avapigwv1alpha1.Destination{
+						Host: "grpc-backend",
+						Port: 50051,
+					},
+					Weight: 100,
+				},
+			},
+		},
+	}
+	newRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			Route: []avapigwv1alpha1.RouteDestination{
+				{
+					Destination: avapigwv1alpha1.Destination{
+						Host: "", // Missing host - invalid
+						Port: 50051,
+					},
+					Weight: 100,
+				},
+			},
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldRoute, newRoute)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid new route (missing host)")
+	}
+}
+
+func TestGRPCRouteValidator_ValidateUpdate_InvalidTimeout(t *testing.T) {
+	validator := &GRPCRouteValidator{}
+	oldRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-route",
+			Namespace: "default",
+		},
+	}
+	newRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			Timeout: avapigwv1alpha1.Duration("invalid"),
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldRoute, newRoute)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid timeout")
+	}
+}
+
 func TestGRPCRouteValidator_ValidateCreate_NegativeCORSMaxAge(t *testing.T) {
 	validator := &GRPCRouteValidator{}
 	route := &avapigwv1alpha1.GRPCRoute{

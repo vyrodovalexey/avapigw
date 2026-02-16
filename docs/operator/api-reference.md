@@ -40,79 +40,294 @@ syntax = "proto3";
 
 package avapigw.operator.v1alpha1;
 
-option go_package = "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1";
+option go_package = "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1;operatorv1alpha1";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";
-import "google/protobuf/struct.proto";
-import "google/protobuf/empty.proto";
 
-// ConfigurationService manages gateway configuration
+// ConfigurationService provides configuration management for API gateways.
+// The operator pushes configuration updates to connected gateways via streaming.
 service ConfigurationService {
-  // Route operations
-  rpc ApplyAPIRoute(ApplyAPIRouteRequest) returns (ApplyAPIRouteResponse);
-  rpc DeleteAPIRoute(DeleteAPIRouteRequest) returns (DeleteAPIRouteResponse);
-  rpc ApplyGRPCRoute(ApplyGRPCRouteRequest) returns (ApplyGRPCRouteResponse);
-  rpc DeleteGRPCRoute(DeleteGRPCRouteRequest) returns (DeleteGRPCRouteResponse);
-  
-  // Backend operations
-  rpc ApplyBackend(ApplyBackendRequest) returns (ApplyBackendResponse);
-  rpc DeleteBackend(DeleteBackendRequest) returns (DeleteBackendResponse);
-  rpc ApplyGRPCBackend(ApplyGRPCBackendRequest) returns (ApplyGRPCBackendResponse);
-  rpc DeleteGRPCBackend(DeleteGRPCBackendRequest) returns (DeleteGRPCBackendResponse);
-  
-  // Status and health
-  rpc GetGatewayStatus(GetGatewayStatusRequest) returns (GetGatewayStatusResponse);
-  rpc StreamConfigUpdates(StreamConfigUpdatesRequest) returns (stream ConfigUpdate);
-  
-  // Gateway registration
+  // RegisterGateway registers a gateway instance with the operator.
+  // Returns the initial configuration snapshot.
   rpc RegisterGateway(RegisterGatewayRequest) returns (RegisterGatewayResponse);
-  rpc UnregisterGateway(UnregisterGatewayRequest) returns (UnregisterGatewayResponse);
+
+  // StreamConfiguration establishes a server-side streaming connection
+  // for receiving configuration updates from the operator.
+  rpc StreamConfiguration(StreamConfigurationRequest) returns (stream ConfigurationUpdate);
+
+  // GetConfiguration returns the current configuration snapshot.
+  rpc GetConfiguration(GetConfigurationRequest) returns (ConfigurationSnapshot);
+
+  // Heartbeat sends a keep-alive signal to the operator.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // AcknowledgeConfiguration acknowledges receipt and application of a configuration update.
+  rpc AcknowledgeConfiguration(AcknowledgeConfigurationRequest) returns (AcknowledgeConfigurationResponse);
 }
 ```
 
 ## Configuration Service
 
-### Route Operations
+The ConfigurationService uses a snapshot-based approach where the operator maintains the complete configuration state and pushes updates to gateways via streaming or on-demand requests.
 
-#### ApplyAPIRoute
+### Core Operations
 
-Applies an HTTP route configuration to the gateway.
+#### RegisterGateway
+
+Registers a gateway instance with the operator and returns the initial configuration snapshot.
 
 **Request:**
 ```protobuf
-message ApplyAPIRouteRequest {
-  string name = 1;                    // Route name
-  string namespace = 2;               // Kubernetes namespace
-  bytes config = 3;                   // JSON-encoded route configuration
-  int64 generation = 4;               // Resource generation for optimistic concurrency
-  map<string, string> labels = 5;     // Route labels
-  map<string, string> annotations = 6; // Route annotations
+message RegisterGatewayRequest {
+  // Gateway information.
+  GatewayInfo gateway = 1;
+  
+  // Capabilities supported by this gateway.
+  GatewayCapabilities capabilities = 2;
 }
 ```
 
 **Response:**
 ```protobuf
-message ApplyAPIRouteResponse {
-  bool success = 1;                   // Operation success
-  string message = 2;                 // Human-readable message
-  google.protobuf.Timestamp applied_at = 3; // Application timestamp
-  string gateway_id = 4;              // Gateway instance ID
-  repeated string warnings = 5;       // Configuration warnings
+message RegisterGatewayResponse {
+  // Whether registration was successful.
+  bool success = 1;
+  
+  // Error message if registration failed.
+  string error_message = 2;
+  
+  // Session ID for this gateway connection.
+  string session_id = 3;
+  
+  // Initial configuration snapshot.
+  ConfigurationSnapshot initial_config = 4;
+  
+  // Recommended heartbeat interval.
+  google.protobuf.Duration heartbeat_interval = 5;
 }
 ```
 
-**Example:**
-```bash
-# Using grpcurl
-grpcurl -d '{
-  "name": "api-v1",
-  "namespace": "production",
-  "config": "eyJtYXRjaCI6W3sidXJpIjp7InByZWZpeCI6Ii9hcGkvdjEifX1dfQ==",
-  "generation": 1
-}' -insecure localhost:9444 avapigw.operator.v1alpha1.ConfigurationService/ApplyAPIRoute
+**Features:**
+- **Session Management** - Each gateway gets a unique session ID for tracking
+- **Capability Negotiation** - Gateway reports supported features
+- **Initial Configuration** - Complete configuration snapshot provided on registration
+- **Heartbeat Scheduling** - Operator recommends heartbeat interval (default: 30s)
+
+#### GetConfiguration
+
+Returns the current configuration snapshot for immediate consumption.
+
+**Request:**
+```protobuf
+message GetConfigurationRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Namespaces to include (empty = all namespaces).
+  repeated string namespaces = 3;
+  
+  // Resource types to include (empty = all types).
+  repeated ResourceType resource_types = 4;
+}
 ```
+
+**Response:**
+```protobuf
+message ConfigurationSnapshot {
+  // Snapshot version.
+  string version = 1;
+  
+  // Timestamp when the snapshot was created.
+  google.protobuf.Timestamp timestamp = 2;
+  
+  // API routes.
+  repeated ConfigurationResource api_routes = 3;
+  
+  // gRPC routes.
+  repeated ConfigurationResource grpc_routes = 4;
+  
+  // HTTP backends.
+  repeated ConfigurationResource backends = 5;
+  
+  // gRPC backends.
+  repeated ConfigurationResource grpc_backends = 6;
+  
+  // Total number of resources.
+  int32 total_resources = 7;
+  
+  // Checksum of the configuration (for validation).
+  string checksum = 8;
+}
+```
+
+**Features:**
+- **Namespace Filtering** - Request configuration for specific namespaces
+- **Resource Type Filtering** - Request only specific resource types
+- **Version Tracking** - Monotonically increasing version numbers
+- **Integrity Checking** - SHA-256 checksum for validation
+- **Complete State** - Full configuration snapshot in single response
+
+#### StreamConfiguration
+
+Establishes a server-side streaming connection for receiving real-time configuration updates.
+
+**Request:**
+```protobuf
+message StreamConfigurationRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Last known configuration version (for resumption).
+  string last_config_version = 3;
+  
+  // Namespaces to watch (empty = all namespaces).
+  repeated string namespaces = 4;
+  
+  // Resource types to watch (empty = all types).
+  repeated ResourceType resource_types = 5;
+}
+```
+
+**Response Stream:**
+```protobuf
+message ConfigurationUpdate {
+  // Update type.
+  UpdateType type = 1;
+  
+  // Configuration version (monotonically increasing).
+  string version = 2;
+  
+  // Timestamp of the update.
+  google.protobuf.Timestamp timestamp = 3;
+  
+  // Resource that was updated.
+  ConfigurationResource resource = 4;
+  
+  // Full snapshot (for FULL_SYNC type).
+  ConfigurationSnapshot snapshot = 5;
+  
+  // Sequence number for ordering.
+  int64 sequence = 6;
+  
+  // Whether this is the last update in a batch.
+  bool is_last_in_batch = 7;
+}
+```
+
+**Update Types:**
+```protobuf
+enum UpdateType {
+  UPDATE_TYPE_UNSPECIFIED = 0;
+  UPDATE_TYPE_ADDED = 1;        // A resource was added
+  UPDATE_TYPE_MODIFIED = 2;     // A resource was modified
+  UPDATE_TYPE_DELETED = 3;      // A resource was deleted
+  UPDATE_TYPE_FULL_SYNC = 4;    // Full configuration sync
+  UPDATE_TYPE_HEARTBEAT = 5;    // Heartbeat/keep-alive message
+}
+```
+
+**Features:**
+- **Real-time Updates** - Immediate notification of configuration changes
+- **Resumable Streams** - Can resume from last known version
+- **Selective Watching** - Filter by namespace and resource type
+- **Ordered Delivery** - Sequence numbers ensure proper ordering
+- **Batch Support** - Multiple updates can be batched together
+- **Full Sync Support** - Complete configuration refresh when needed
+
+#### Heartbeat
+
+Sends a keep-alive signal to maintain gateway registration and report status.
+
+**Request:**
+```protobuf
+message HeartbeatRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Current gateway status.
+  GatewayStatus status = 3;
+  
+  // Last applied configuration version.
+  string last_applied_version = 4;
+}
+```
+
+**Response:**
+```protobuf
+message HeartbeatResponse {
+  // Whether the heartbeat was acknowledged.
+  bool acknowledged = 1;
+  
+  // Server timestamp.
+  google.protobuf.Timestamp server_time = 2;
+  
+  // Whether the gateway should reconnect (e.g., for config refresh).
+  bool should_reconnect = 3;
+  
+  // Message from the operator.
+  string message = 4;
+}
+```
+
+**Features:**
+- **Session Maintenance** - Keeps gateway registration active
+- **Status Reporting** - Gateway reports current health and metrics
+- **Reconnection Signaling** - Operator can request gateway reconnection
+- **Version Tracking** - Track last applied configuration version
+
+#### AcknowledgeConfiguration
+
+Acknowledges receipt and application of a configuration update.
+
+**Request:**
+```protobuf
+message AcknowledgeConfigurationRequest {
+  // Session ID from registration.
+  string session_id = 1;
+  
+  // Gateway information.
+  GatewayInfo gateway = 2;
+  
+  // Configuration version being acknowledged.
+  string config_version = 3;
+  
+  // Whether the configuration was applied successfully.
+  bool success = 4;
+  
+  // Error message if application failed.
+  string error_message = 5;
+  
+  // Time taken to apply the configuration.
+  google.protobuf.Duration apply_duration = 6;
+}
+```
+
+**Response:**
+```protobuf
+message AcknowledgeConfigurationResponse {
+  // Whether the acknowledgment was received.
+  bool received = 1;
+  
+  // Server timestamp.
+  google.protobuf.Timestamp server_time = 2;
+}
+```
+
+**Features:**
+- **Delivery Confirmation** - Confirms configuration was received and applied
+- **Error Reporting** - Reports configuration application failures
+- **Performance Tracking** - Measures configuration application time
+- **Reliability** - Ensures operator knows configuration state
 
 #### DeleteAPIRoute
 

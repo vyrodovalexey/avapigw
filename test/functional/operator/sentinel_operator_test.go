@@ -4,6 +4,7 @@
 package operator_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,7 +20,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 
 	t.Run("valid backend with sentinel cache", func(t *testing.T) {
 		backend := createBackendWithSentinelCache()
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -37,7 +38,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 			Password:         "master-pass",
 			DB:               2,
 		}
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -53,7 +54,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 				SentinelAddrs: []string{"sentinel-0:26379"},
 			},
 		}
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -66,7 +67,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 			KeyComponents: []string{"path", "query"},
 			Type:          "memory",
 		}
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -78,7 +79,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 			TTL:     "10m",
 			Type:    "redis",
 		}
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -94,7 +95,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 				SentinelAddrs: []string{"sentinel-0:26379"},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "ttl is invalid")
 	})
@@ -108,7 +109,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 				SentinelAddrs: []string{"sentinel-0:26379"},
 			},
 		}
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -116,7 +117,7 @@ func TestFunctional_Operator_CRDWithSentinelCache(t *testing.T) {
 	t.Run("nil cache is valid", func(t *testing.T) {
 		backend := createBasicBackend()
 		backend.Spec.Cache = nil
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -130,7 +131,7 @@ func TestFunctional_Operator_WebhookSentinelValidation(t *testing.T) {
 		oldBackend := createBasicBackend()
 		newBackend := createBackendWithSentinelCache()
 
-		warnings, err := validator.ValidateUpdate(nil, oldBackend, newBackend)
+		warnings, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -147,7 +148,7 @@ func TestFunctional_Operator_WebhookSentinelValidation(t *testing.T) {
 
 		newBackend := createBackendWithSentinelCache()
 
-		warnings, err := validator.ValidateUpdate(nil, oldBackend, newBackend)
+		warnings, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -156,7 +157,7 @@ func TestFunctional_Operator_WebhookSentinelValidation(t *testing.T) {
 		validator := &webhook.BackendValidator{}
 
 		backend := createBackendWithSentinelCache()
-		warnings, err := validator.ValidateDelete(nil, backend)
+		warnings, err := validator.ValidateDelete(context.Background(), backend)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
@@ -194,7 +195,7 @@ func TestFunctional_Operator_WebhookSentinelValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -273,7 +274,7 @@ func TestFunctional_Operator_WebhookSentinelValidation(t *testing.T) {
 			},
 		}
 
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -294,7 +295,7 @@ func TestFunctional_Operator_GRPCBackendSentinelCache(t *testing.T) {
 				Password:      "master-pass",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -309,7 +310,7 @@ func TestFunctional_Operator_GRPCBackendSentinelCache(t *testing.T) {
 				SentinelAddrs: []string{"sentinel-0:26379"},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "ttl is invalid")
 	})

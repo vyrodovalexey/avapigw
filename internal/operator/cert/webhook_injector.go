@@ -153,11 +153,12 @@ func (w *WebhookCAInjector) InjectCABundle(ctx context.Context) error {
 	var caBundlePEM []byte
 	if len(cert.CAChainPEM) > 0 {
 		caBundlePEM = cert.CAChainPEM
-	} else if len(cert.CertificatePEM) > 0 && caPool != nil {
-		// For self-signed, the CA is the issuer of the certificate
-		// We need to extract it from the certificate manager
-		// The CA PEM should be available from the provider
-		caBundlePEM = cert.CertificatePEM
+	} else if caPool != nil {
+		// CAChainPEM is not populated; this should not happen for properly
+		// configured providers (self-signed populates it from the CA cert,
+		// Vault populates it from the CA chain). Log a warning and reject
+		// the leaf certificate to avoid injecting the wrong bundle.
+		w.logger.Warn("certificate has no CA chain PEM; cannot inject leaf certificate as CA bundle")
 	}
 
 	if len(caBundlePEM) == 0 {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/retry"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
@@ -55,7 +57,7 @@ func initVaultClient(logger observability.Logger) vault.Client {
 	caPath := os.Getenv("VAULT_CAPATH")
 	clientCert := os.Getenv("VAULT_CLIENT_CERT")
 	clientKey := os.Getenv("VAULT_CLIENT_KEY")
-	skipVerify := os.Getenv("VAULT_SKIP_VERIFY") == "true"
+	skipVerify, _ := strconv.ParseBool(os.Getenv("VAULT_SKIP_VERIFY"))
 
 	if caCert != "" || caPath != "" || clientCert != "" || clientKey != "" || skipVerify {
 		vaultCfg.TLS = &vault.VaultTLSConfig{
@@ -91,12 +93,32 @@ func initVaultClient(logger observability.Logger) vault.Client {
 		return nil // unreachable in production; allows test to continue
 	}
 
+	// Retry Vault authentication with exponential backoff in case Vault is
+	// temporarily unavailable during startup.
+	authRetryCfg := &retry.Config{
+		MaxRetries:     3,
+		InitialBackoff: 1 * time.Second,
+		MaxBackoff:     10 * time.Second,
+		JitterFactor:   retry.DefaultJitterFactor,
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := client.Authenticate(ctx); err != nil {
+	authErr := retry.Do(ctx, authRetryCfg, func() error {
+		return client.Authenticate(ctx)
+	}, &retry.Options{
+		OnRetry: func(attempt int, retryErr error, backoff time.Duration) {
+			logger.Warn("vault authentication failed, retrying",
+				observability.Int("attempt", attempt),
+				observability.Duration("backoff", backoff),
+				observability.Error(retryErr),
+			)
+		},
+	})
+	if authErr != nil {
 		_ = client.Close()
-		fatalWithSync(logger, "failed to authenticate with vault", observability.Error(err))
+		fatalWithSync(logger, "failed to authenticate with vault after retries", observability.Error(authErr))
 		return nil // unreachable in production; allows test to continue
 	}
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,12 +41,46 @@ func SetupIngressWebhook(mgr ctrl.Manager, ingressClassName string) error {
 		Complete()
 }
 
+// SetupIngressWebhookWithContext sets up the Ingress validating webhook with context-based
+// lifecycle management for the DuplicateChecker cleanup goroutine.
+func SetupIngressWebhookWithContext(ctx context.Context, mgr ctrl.Manager, ingressClassName string) error {
+	if ingressClassName == "" {
+		ingressClassName = controller.DefaultIngressClassName
+	}
+
+	validator := &IngressValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: NewDuplicateCheckerWithContext(ctx, mgr.GetClient()),
+		IngressClassName: ingressClassName,
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &networkingv1.Ingress{}).
+		WithValidator(validator).
+		Complete()
+}
+
+// SetupIngressWebhookWithChecker sets up the Ingress validating webhook with a shared DuplicateChecker.
+// This avoids creating multiple DuplicateChecker instances (and cleanup goroutines) across webhooks.
+func SetupIngressWebhookWithChecker(mgr ctrl.Manager, dc *DuplicateChecker, ingressClassName string) error {
+	if ingressClassName == "" {
+		ingressClassName = controller.DefaultIngressClassName
+	}
+
+	validator := &IngressValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: dc,
+		IngressClassName: ingressClassName,
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &networkingv1.Ingress{}).
+		WithValidator(validator).
+		Complete()
+}
+
 // ValidateCreate implements admission.CustomValidator.
 func (v *IngressValidator) ValidateCreate(
 	ctx context.Context,
 	obj *networkingv1.Ingress,
 ) (admission.Warnings, error) {
-	return v.validateAndCheckConflicts(ctx, obj)
+	return v.validateAndCheckConflicts(ctx, obj, "create")
 }
 
 // ValidateUpdate implements admission.CustomValidator.
@@ -53,7 +88,7 @@ func (v *IngressValidator) ValidateUpdate(
 	ctx context.Context,
 	_, newObj *networkingv1.Ingress,
 ) (admission.Warnings, error) {
-	return v.validateAndCheckConflicts(ctx, newObj)
+	return v.validateAndCheckConflicts(ctx, newObj, "update")
 }
 
 // validateAndCheckConflicts performs validation and conflict checking for an Ingress.
@@ -61,7 +96,10 @@ func (v *IngressValidator) ValidateUpdate(
 func (v *IngressValidator) validateAndCheckConflicts(
 	ctx context.Context,
 	ingress *networkingv1.Ingress,
+	operation string,
 ) (admission.Warnings, error) {
+	start := time.Now()
+
 	if !v.matchesIngressClass(ingress) {
 		// Not our IngressClass, skip validation
 		return nil, nil
@@ -69,6 +107,7 @@ func (v *IngressValidator) validateAndCheckConflicts(
 
 	warnings, err := v.validate(ingress)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation("Ingress", operation, "rejected", time.Since(start), len(warnings))
 		return warnings, err
 	}
 
@@ -77,16 +116,19 @@ func (v *IngressValidator) validateAndCheckConflicts(
 		if v.isGRPCIngress(ingress) {
 			// Check for conflicts with existing GRPCRoute CRDs
 			if conflictErr := v.checkGRPCRouteConflicts(ctx, ingress); conflictErr != nil {
+				GetWebhookMetrics().RecordValidation("Ingress", operation, "rejected", time.Since(start), len(warnings))
 				return warnings, conflictErr
 			}
 		} else {
 			// Check for conflicts with existing APIRoute CRDs
 			if conflictErr := v.checkAPIRouteConflicts(ctx, ingress); conflictErr != nil {
+				GetWebhookMetrics().RecordValidation("Ingress", operation, "rejected", time.Since(start), len(warnings))
 				return warnings, conflictErr
 			}
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation("Ingress", operation, "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
 
@@ -343,6 +385,8 @@ func (v *IngressValidator) checkDuplicateHostPaths(rules []networkingv1.IngressR
 
 // checkAPIRouteConflicts checks if the Ingress paths conflict with existing APIRoute CRDs.
 // This prevents overlapping path configurations between Ingress and APIRoute resources.
+// When the DuplicateChecker is configured for cluster-wide scope, conflicts are checked
+// across all namespaces; otherwise, only the Ingress namespace is checked.
 func (v *IngressValidator) checkAPIRouteConflicts(
 	ctx context.Context,
 	ingress *networkingv1.Ingress,
@@ -351,9 +395,10 @@ func (v *IngressValidator) checkAPIRouteConflicts(
 		return nil
 	}
 
-	// List existing APIRoutes in the same namespace
+	// List existing APIRoutes, respecting the DuplicateChecker's scope setting
 	routes := &avapigwv1alpha1.APIRouteList{}
-	if err := v.Client.List(ctx, routes, client.InNamespace(ingress.Namespace)); err != nil {
+	listOpts := v.buildListOptions(ingress.Namespace)
+	if err := v.Client.List(ctx, routes, listOpts...); err != nil {
 		return fmt.Errorf("failed to list APIRoutes for conflict check: %w", err)
 	}
 
@@ -474,6 +519,16 @@ func pathsOverlap(pathA, pathB string) bool {
 	return strings.HasPrefix(pathA, pathB) || strings.HasPrefix(pathB, pathA)
 }
 
+// buildListOptions returns the list options for conflict checking.
+// When the DuplicateChecker is configured for cluster-wide scope, no namespace filter is applied;
+// otherwise, only the specified namespace is checked.
+func (v *IngressValidator) buildListOptions(namespace string) []client.ListOption {
+	if v.DuplicateChecker != nil && v.DuplicateChecker.GetScope() == ScopeCluster {
+		return []client.ListOption{}
+	}
+	return []client.ListOption{client.InNamespace(namespace)}
+}
+
 // isGRPCIngress checks if the Ingress is configured for gRPC protocol.
 func (v *IngressValidator) isGRPCIngress(ingress *networkingv1.Ingress) bool {
 	if ingress.Annotations == nil {
@@ -488,6 +543,8 @@ func (v *IngressValidator) isGRPCIngress(ingress *networkingv1.Ingress) bool {
 
 // checkGRPCRouteConflicts checks if the gRPC Ingress conflicts with existing GRPCRoute CRDs.
 // This prevents overlapping service/method configurations between Ingress and GRPCRoute resources.
+// When the DuplicateChecker is configured for cluster-wide scope, conflicts are checked
+// across all namespaces; otherwise, only the Ingress namespace is checked.
 func (v *IngressValidator) checkGRPCRouteConflicts(
 	ctx context.Context,
 	ingress *networkingv1.Ingress,
@@ -496,9 +553,10 @@ func (v *IngressValidator) checkGRPCRouteConflicts(
 		return nil
 	}
 
-	// List existing GRPCRoutes in the same namespace
+	// List existing GRPCRoutes, respecting the DuplicateChecker's scope setting
 	routes := &avapigwv1alpha1.GRPCRouteList{}
-	if err := v.Client.List(ctx, routes, client.InNamespace(ingress.Namespace)); err != nil {
+	listOpts := v.buildListOptions(ingress.Namespace)
+	if err := v.Client.List(ctx, routes, listOpts...); err != nil {
 		return fmt.Errorf("failed to list GRPCRoutes for conflict check: %w", err)
 	}
 

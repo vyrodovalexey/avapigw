@@ -5,12 +5,19 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/authz/abac"
 	"github.com/vyrodovalexey/avapigw/internal/authz/external"
 	"github.com/vyrodovalexey/avapigw/internal/authz/rbac"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// authzTracer is the OTEL tracer used for authorization operations.
+var authzTracer = otel.Tracer("avapigw/authz")
 
 // Decision represents an authorization decision.
 type Decision struct {
@@ -224,8 +231,18 @@ func (a *authorizer) initializeCache(config *Config) {
 func (a *authorizer) Authorize(ctx context.Context, req *Request) (*Decision, error) {
 	start := time.Now()
 
+	ctx, span := authzTracer.Start(ctx, "authz.authorize",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("authz.resource", req.Resource),
+			attribute.String("authz.action", req.Action),
+		),
+	)
+	defer span.End()
+
 	// Check if authorization is enabled
 	if !a.config.Enabled {
+		span.SetAttributes(attribute.String("authz.result", "disabled"))
 		return &Decision{
 			Allowed: true,
 			Reason:  "authorization disabled",
@@ -234,6 +251,7 @@ func (a *authorizer) Authorize(ctx context.Context, req *Request) (*Decision, er
 
 	// Check if path should be skipped
 	if a.config.ShouldSkipPath(req.Resource) {
+		span.SetAttributes(attribute.String("authz.result", "skipped"))
 		return &Decision{
 			Allowed: true,
 			Reason:  "path skipped",
@@ -242,12 +260,20 @@ func (a *authorizer) Authorize(ctx context.Context, req *Request) (*Decision, er
 
 	// Check if identity is present
 	if req.Identity == nil {
+		span.SetAttributes(attribute.String("authz.result", "no_identity"))
 		return nil, ErrNoIdentity
 	}
+
+	span.SetAttributes(attribute.String("authz.subject", req.Identity.Subject))
 
 	// Check cache
 	cacheKey := a.buildCacheKey(req)
 	if cached, ok := a.cache.Get(ctx, cacheKey); ok {
+		span.SetAttributes(
+			attribute.Bool("authz.cached", true),
+			attribute.Bool("authz.allowed", cached.Allowed),
+			attribute.String("authz.policy", cached.Policy),
+		)
 		a.logger.Debug("authorization decision from cache",
 			observability.String("subject", req.Identity.Subject),
 			observability.String("resource", req.Resource),
@@ -265,6 +291,10 @@ func (a *authorizer) Authorize(ctx context.Context, req *Request) (*Decision, er
 	// Evaluate authorization
 	decision, err := a.evaluate(ctx, req)
 	if err != nil {
+		span.SetAttributes(
+			attribute.String("authz.result", "error"),
+			attribute.String("authz.error", err.Error()),
+		)
 		a.metrics.RecordEvaluation("combined", "error", time.Since(start))
 		return nil, err
 	}
@@ -283,6 +313,14 @@ func (a *authorizer) Authorize(ctx context.Context, req *Request) (*Decision, er
 	}
 	a.metrics.RecordEvaluation("combined", result, time.Since(start))
 	a.metrics.RecordDecision(result, decision.Policy)
+
+	span.SetAttributes(
+		attribute.Bool("authz.cached", false),
+		attribute.Bool("authz.allowed", decision.Allowed),
+		attribute.String("authz.engine", decision.Engine),
+		attribute.String("authz.policy", decision.Policy),
+		attribute.String("authz.reason", decision.Reason),
+	)
 
 	a.logger.Debug("authorization decision",
 		observability.String("subject", req.Identity.Subject),

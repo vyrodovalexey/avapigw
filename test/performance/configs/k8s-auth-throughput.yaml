@@ -1,0 +1,65 @@
+# Yandex Tank Configuration: K8s Auth Throughput Test
+# Purpose: Measure throughput for authenticated requests using JWT tokens in K8s
+# Duration: 30 seconds total (ramp from 1 to 50 RPS)
+# Target: Conservative load for local K8s (Docker Desktop) with TLS and auth
+#
+# Note: The address port is dynamically replaced by run-k8s-test.sh
+# with the actual K8s NodePort discovered via kubectl.
+# The ammo file is generated with actual JWT token from Keycloak.
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:32300
+  load_profile:
+    load_type: rps
+    # Conservative ramp for local K8s with TLS + auth:
+    # Ramp from 1 to 50 RPS over 30 seconds (auth is heavier)
+    schedule: line(1, 50, 30s)
+
+  # Use phantom-style ammo with Authorization header
+  ammofile: /var/loadtest/ammo/http-auth.txt
+  ammo_type: phantom
+
+  # Connection settings - SSL enabled for K8s with Vault PKI
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 15s  # Higher timeout for TLS handshake + auth validation
+
+  # Instance settings - conservative for local K8s with auth
+  instances: 200
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  # Note: Authorization header is included in the ammo file
+  headers:
+    - "[Host: avapigw.local]"
+    - "[User-Agent: YandexTank/K8sPerftest-Auth]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: k8s-auth-throughput]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 15% for 15 seconds
+    - http(5xx,15%,15s)
+    # Stop if 401/403 errors exceed 10% (auth failures)
+    - http(401,10%,15s)
+    - http(403,10%,15s)
+    # Stop if 50% of requests exceed 5000ms for 15 seconds
+    - time(5000,50%,15s)
+    # Stop if total network errors exceed 10% for 15 seconds
+    - http(net,10%,15s)

@@ -5,6 +5,10 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
@@ -98,6 +102,20 @@ func (rt *responseTransformer) TransformResponse(
 		return nil, nil
 	}
 
+	ctx, span := transformTracer.Start(ctx, "transform.response",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Bool("transform.has_template", cfg.Template != ""),
+			attribute.Int("transform.allow_fields_count", len(cfg.AllowFields)),
+			attribute.Int("transform.deny_fields_count", len(cfg.DenyFields)),
+			attribute.Int("transform.field_mappings_count", len(cfg.FieldMappings)),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
+	metrics := GetTransformMetrics()
+
 	rt.logger.Debug("starting response transformation",
 		observability.Bool("hasAllowFields", len(cfg.AllowFields) > 0),
 		observability.Bool("hasDenyFields", len(cfg.DenyFields) > 0),
@@ -136,6 +154,8 @@ func (rt *responseTransformer) TransformResponse(
 	if len(cfg.FieldMappings) > 0 {
 		data, err = rt.fieldMapper.MapFields(data, cfg.FieldMappings)
 		if err != nil {
+			metrics.RecordOperation("response", "error")
+			metrics.RecordError("response", "field_mapping")
 			return nil, fmt.Errorf("field mapping failed: %w", err)
 		}
 	}
@@ -158,6 +178,8 @@ func (rt *responseTransformer) TransformResponse(
 		}
 	}
 
+	metrics.operationDuration.WithLabelValues("response").Observe(time.Since(start).Seconds())
+	metrics.RecordOperation("response", "success")
 	rt.logger.Debug("response transformation completed")
 
 	return data, nil

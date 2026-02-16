@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	networkingv1 "k8s.io/api/networking/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -33,11 +34,38 @@ type ConvertedConfig struct {
 // IngressConverter translates networking.k8s.io/v1 Ingress resources
 // into internal config.Route and config.Backend types.
 // The converter is stateless and thread-safe.
-type IngressConverter struct{}
+type IngressConverter struct {
+	logger    logr.Logger
+	hasLogger bool
+}
+
+// IngressConverterOption is a functional option for configuring IngressConverter.
+type IngressConverterOption func(*IngressConverter)
+
+// WithLogger sets a custom logger for the IngressConverter.
+// When not set, the converter falls back to the global log.Log logger.
+func WithLogger(logger logr.Logger) IngressConverterOption {
+	return func(c *IngressConverter) {
+		c.logger = logger
+		c.hasLogger = true
+	}
+}
 
 // NewIngressConverter creates a new IngressConverter.
-func NewIngressConverter() *IngressConverter {
-	return &IngressConverter{}
+func NewIngressConverter(opts ...IngressConverterOption) *IngressConverter {
+	c := &IngressConverter{}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+// getLogger returns the configured logger or falls back to the global log.Log.
+func (c *IngressConverter) getLogger() logr.Logger {
+	if c.hasLogger {
+		return c.logger
+	}
+	return log.Log
 }
 
 // ConvertIngress converts a Kubernetes Ingress resource into gateway configuration.
@@ -52,7 +80,7 @@ func (c *IngressConverter) ConvertIngress(
 		return nil, fmt.Errorf("ingress is nil")
 	}
 
-	logger := log.Log.WithValues(
+	logger := c.getLogger().WithValues(
 		"ingress", ingress.Name,
 		"namespace", ingress.Namespace,
 	)

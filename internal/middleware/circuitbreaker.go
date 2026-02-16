@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -8,11 +9,17 @@ import (
 	"time"
 
 	"github.com/sony/gobreaker"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
+
+// cbTracer is the OTEL tracer used for circuit breaker operations.
+var cbTracer = otel.Tracer("avapigw/circuitbreaker")
 
 // CircuitBreakerStateFunc is called when the circuit breaker changes state.
 // Parameters: name (circuit breaker name), state (0=closed, 1=half-open, 2=open).
@@ -74,6 +81,25 @@ func NewCircuitBreaker(
 				observability.String("from", from.String()),
 				observability.String("to", to.String()),
 			)
+
+			mm := GetMiddlewareMetrics()
+			mm.circuitBreakerTransitions.WithLabelValues(
+				name, from.String(), to.String(),
+			).Inc()
+
+			// Record an OTEL span event for the state transition so it
+			// appears in distributed traces that trigger the change.
+			_, span := cbTracer.Start(context.Background(),
+				"circuitbreaker.state_change",
+				trace.WithSpanKind(trace.SpanKindInternal),
+			)
+			span.AddEvent("state_change", trace.WithAttributes(
+				attribute.String("circuitbreaker.name", name),
+				attribute.String("circuitbreaker.from", from.String()),
+				attribute.String("circuitbreaker.to", to.String()),
+			))
+			span.End()
+
 			if cb.stateCallback != nil {
 				cb.stateCallback(name, int(to))
 			}
@@ -118,10 +144,17 @@ func CircuitBreakerMiddleware(cb *CircuitBreaker) func(http.Handler) http.Handle
 				return
 			}
 
+			mm := GetMiddlewareMetrics()
+			cbState := cb.State().String()
+
 			rw := util.NewStatusCapturingResponseWriter(w)
 
 			// Execute the request through the circuit breaker for atomic state check
 			_, err := cb.Execute(func() (interface{}, error) {
+				mm.circuitBreakerRequests.WithLabelValues(
+					"gateway", cbState,
+				).Inc()
+
 				next.ServeHTTP(rw, r)
 
 				// Return error for 5xx responses to trigger circuit breaker
@@ -135,6 +168,10 @@ func CircuitBreakerMiddleware(cb *CircuitBreaker) func(http.Handler) http.Handle
 			if err != nil {
 				// Check if it's a circuit breaker open error
 				if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+					mm.circuitBreakerRequests.WithLabelValues(
+						"gateway", "open",
+					).Inc()
+
 					cb.logger.Warn("circuit breaker rejected request",
 						observability.String("path", r.URL.Path),
 						observability.String("state", cb.State().String()),

@@ -849,6 +849,124 @@ func TestGRPCBackendReconciler_updateStatus_HealthyHostsCalculation(t *testing.T
 }
 
 // ============================================================================
+// RecordIngressProcessed Tests
+// ============================================================================
+
+func TestControllerMetrics_RecordIngressProcessed(t *testing.T) {
+	metrics := GetControllerMetrics()
+
+	tests := []struct {
+		name   string
+		result string
+	}{
+		{name: "success result", result: ResultSuccess},
+		{name: "error result", result: ResultError},
+		{name: "requeue result", result: ResultRequeue},
+		{name: "canceled result", result: ResultCanceled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			metrics.RecordIngressProcessed(tt.result)
+		})
+	}
+}
+
+// ============================================================================
+// RecordIngressConversionError Tests
+// ============================================================================
+
+func TestControllerMetrics_RecordIngressConversionError(t *testing.T) {
+	metrics := GetControllerMetrics()
+
+	tests := []struct {
+		name      string
+		namespace string
+		ingName   string
+	}{
+		{name: "default namespace", namespace: "default", ingName: "my-ingress"},
+		{name: "custom namespace", namespace: "production", ingName: "api-ingress"},
+		{name: "empty namespace", namespace: "", ingName: "test-ingress"},
+		{name: "empty name", namespace: "default", ingName: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			metrics.RecordIngressConversionError(tt.namespace, tt.ingName)
+		})
+	}
+}
+
+// ============================================================================
+// GetStatusUpdateMetrics Singleton Tests
+// ============================================================================
+
+func TestGetStatusUpdateMetrics_Singleton(t *testing.T) {
+	m1 := GetStatusUpdateMetrics()
+	m2 := GetStatusUpdateMetrics()
+
+	if m1 == nil {
+		t.Fatal("GetStatusUpdateMetrics() returned nil")
+	}
+	if m1 != m2 {
+		t.Error("GetStatusUpdateMetrics() should return the same instance")
+	}
+}
+
+func TestGetStatusUpdateMetrics_FieldsInitialized(t *testing.T) {
+	m := GetStatusUpdateMetrics()
+
+	if m.updateDuration == nil {
+		t.Error("updateDuration should be initialized")
+	}
+	if m.updateTotal == nil {
+		t.Error("updateTotal should be initialized")
+	}
+	if m.updateErrors == nil {
+		t.Error("updateErrors should be initialized")
+	}
+}
+
+// ============================================================================
+// RecordStatusUpdate Tests
+// ============================================================================
+
+func TestStatusUpdateMetrics_RecordStatusUpdate(t *testing.T) {
+	m := GetStatusUpdateMetrics()
+
+	tests := []struct {
+		name     string
+		kind     string
+		duration time.Duration
+		success  bool
+	}{
+		{name: "success fast", kind: "APIRoute", duration: 1 * time.Millisecond, success: true},
+		{name: "success slow", kind: "Backend", duration: 500 * time.Millisecond, success: true},
+		{name: "failure fast", kind: "GRPCRoute", duration: 2 * time.Millisecond, success: false},
+		{name: "failure slow", kind: "GRPCBackend", duration: 1 * time.Second, success: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			m.RecordStatusUpdate(tt.kind, tt.duration, tt.success)
+		})
+	}
+}
+
+func TestStatusUpdateMetrics_RecordStatusUpdate_ErrorPath(t *testing.T) {
+	m := GetStatusUpdateMetrics()
+
+	// Record a failure - should increment both updateTotal and updateErrors
+	m.RecordStatusUpdate("TestKind", 10*time.Millisecond, false)
+
+	// Record a success - should only increment updateTotal
+	m.RecordStatusUpdate("TestKind", 5*time.Millisecond, true)
+}
+
+// ============================================================================
 // Metrics Label Constants Tests
 // ============================================================================
 

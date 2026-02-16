@@ -63,40 +63,50 @@ func (m *HeadersMiddleware) addSecurityHeaders(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	metrics := GetSecurityMetrics()
+
 	// Add basic security headers
 	if m.config.IsHeadersEnabled() {
 		m.addBasicSecurityHeaders(w)
+		metrics.RecordHeaderApplied("basic")
 	}
 
 	// Add HSTS header (only for HTTPS)
 	if m.config.IsHSTSEnabled() && isSecureRequest(r) {
 		m.addHSTSHeader(w)
+		metrics.RecordHSTSApplied()
 	}
 
 	// Add CSP header
 	if m.config.IsCSPEnabled() {
 		m.addCSPHeader(w)
+		metrics.RecordCSPApplied()
 	}
 
 	// Add Permissions Policy header
 	if m.config.IsPermissionsPolicyEnabled() {
 		m.addPermissionsPolicyHeader(w)
+		metrics.RecordHeaderApplied("permissions-policy")
 	}
 
 	// Add Referrer-Policy header
 	if m.config.ReferrerPolicy != "" {
 		w.Header().Set("Referrer-Policy", m.config.ReferrerPolicy)
+		metrics.RecordHeaderApplied("referrer-policy")
 	}
 
 	// Add Cross-Origin headers
 	if m.config.CrossOriginOpenerPolicy != "" {
 		w.Header().Set("Cross-Origin-Opener-Policy", m.config.CrossOriginOpenerPolicy)
+		metrics.RecordHeaderApplied("cross-origin-opener-policy")
 	}
 	if m.config.CrossOriginEmbedderPolicy != "" {
 		w.Header().Set("Cross-Origin-Embedder-Policy", m.config.CrossOriginEmbedderPolicy)
+		metrics.RecordHeaderApplied("cross-origin-embedder-policy")
 	}
 	if m.config.CrossOriginResourcePolicy != "" {
 		w.Header().Set("Cross-Origin-Resource-Policy", m.config.CrossOriginResourcePolicy)
+		metrics.RecordHeaderApplied("cross-origin-resource-policy")
 	}
 }
 

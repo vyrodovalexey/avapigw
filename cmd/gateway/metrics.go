@@ -9,6 +9,19 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// securityHeadersMiddleware wraps an http.Handler and adds security
+// headers to every response. This hardens the metrics/health endpoints
+// against content-type sniffing, click-jacking, and caching of
+// sensitive data.
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // createMetricsServer creates the metrics HTTP server.
 func createMetricsServer(
 	port int,
@@ -31,7 +44,7 @@ func createMetricsServer(
 
 	return &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           securityHeadersMiddleware(mux),
 		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
