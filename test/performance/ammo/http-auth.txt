@@ -1,4 +1,4 @@
-GET /api/v1/items HTTP/1.1
+GET /api/v1/secure/items HTTP/1.1
 Host: localhost
 User-Agent: YandexTank/Perftest-Auth
 Accept: application/json
@@ -6,7 +6,7 @@ Connection: keep-alive
 X-Perf-Test: http-auth-throughput
 Authorization: Bearer ${JWT_TOKEN}
 
-GET /api/v1/items HTTP/1.1
+GET /api/v1/secure/items HTTP/1.1
 Host: localhost
 User-Agent: YandexTank/Perftest-Auth
 Accept: application/json
@@ -14,7 +14,7 @@ Connection: keep-alive
 X-Perf-Test: http-auth-throughput
 Authorization: Bearer ${JWT_TOKEN}
 
-GET /api/v1/items HTTP/1.1
+GET /api/v1/secure/items HTTP/1.1
 Host: localhost
 User-Agent: YandexTank/Perftest-Auth
 Accept: application/json
@@ -22,7 +22,7 @@ Connection: keep-alive
 X-Perf-Test: http-auth-throughput
 Authorization: Bearer ${JWT_TOKEN}
 
-GET /health HTTP/1.1
+GET /api/v1/secure/items HTTP/1.1
 Host: localhost
 User-Agent: YandexTank/Perftest-Auth
 Accept: application/json
@@ -30,7 +30,7 @@ Connection: keep-alive
 X-Perf-Test: http-auth-throughput
 Authorization: Bearer ${JWT_TOKEN}
 
-GET /api/v1/items HTTP/1.1
+GET /api/v1/secure/items HTTP/1.1
 Host: localhost
 User-Agent: YandexTank/Perftest-Auth
 Accept: application/json
@@ -38,7 +38,7 @@ Connection: keep-alive
 X-Perf-Test: http-auth-throughput
 Authorization: Bearer ${JWT_TOKEN}
 
-GET /api/v1/items HTTP/1.1
+GET /api/v1/secure/items HTTP/1.1
 Host: localhost
 User-Agent: YandexTank/Perftest-Auth
 Accept: application/json
@@ -46,7 +46,7 @@ Connection: keep-alive
 X-Perf-Test: http-auth-throughput
 Authorization: Bearer ${JWT_TOKEN}
 
-GET /health HTTP/1.1
+GET /api/v1/secure/items HTTP/1.1
 Host: localhost
 User-Agent: YandexTank/Perftest-Auth
 Accept: application/json

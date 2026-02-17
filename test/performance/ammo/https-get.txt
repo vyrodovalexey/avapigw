@@ -8,8 +8,8 @@
 /api/v1/items
 /api/v1/items
 /api/v1/items
-/backend/health
 /health
+/api/v1/items
 /api/v1/items
 /api/v1/items
 /api/v1/items

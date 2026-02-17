@@ -827,8 +827,7 @@ KEYCLOAK_USER="${KEYCLOAK_USER:-perftest-user-1}"
 KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-perftest123}"
 
 get_jwt_token() {
-    log_info "Getting JWT token from Keycloak..."
-    
+    # Note: Do NOT use log_info here as this function's stdout is captured
     local token_url="${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
     
     local response
@@ -842,7 +841,7 @@ get_jwt_token() {
         2>/dev/null)
     
     if [[ -z "$response" ]]; then
-        log_error "Failed to get response from Keycloak at $token_url"
+        echo "ERROR: Failed to get response from Keycloak at $token_url" >&2
         return 1
     fi
     
@@ -855,9 +854,9 @@ get_jwt_token() {
     fi
     
     if [[ -z "$token" ]] || [[ "$token" == "null" ]]; then
-        log_error "Failed to extract JWT token from Keycloak response"
+        echo "ERROR: Failed to extract JWT token from Keycloak response" >&2
         if [[ "$VERBOSE" == "true" ]]; then
-            log_error "Response: $response"
+            echo "Response: $response" >&2
         fi
         return 1
     fi
@@ -941,6 +940,7 @@ run_auth_test() {
     log_info "Target: https://127.0.0.1:${K8S_HTTPS_PORT}"
 
     # Get JWT token from Keycloak
+    log_info "Getting JWT token from Keycloak..."
     local jwt_token
     jwt_token=$(get_jwt_token)
     if [[ $? -ne 0 ]] || [[ -z "$jwt_token" ]]; then

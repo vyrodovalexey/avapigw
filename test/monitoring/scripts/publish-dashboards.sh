@@ -127,21 +127,20 @@ publish_dashboard() {
     return 1
   fi
 
-  # Wrap the dashboard JSON in the import payload
-  local payload
-  payload=$(jq -c '{
+  # POST to Grafana.
+  # Pipe the payload directly from jq into curl via stdin (-d @-) to avoid
+  # "Argument list too long" errors for large dashboard JSON files that
+  # exceed the OS ARG_MAX limit (~128-256 KB on Linux).
+  local response http_code body
+  response=$(jq -c '{
     dashboard: .,
     overwrite: true,
     folderId: 0
-  }' "${file}")
-
-  # POST to Grafana
-  local response http_code body
-  response=$(curl -s -w "\n%{http_code}" \
+  }' "${file}" | curl -s -w "\n%{http_code}" \
     -u "${GRAFANA_AUTH}" \
     -X POST "${GRAFANA_URL}/api/dashboards/db" \
     -H "Content-Type: application/json" \
-    -d "${payload}")
+    -d @-)
 
   http_code=$(echo "${response}" | tail -1)
   body=$(echo "${response}" | sed '$d')
