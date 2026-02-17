@@ -81,6 +81,12 @@ func (r *GRPCRouteReconciler) callbacks() *ReconcileCallbacks {
 		SetFailureMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
 			metrics.SetResourceCondition("GRPCRoute", resource.GetName(), resource.GetNamespace(), "Ready", 0)
 		},
+		IsApplied: func(_ context.Context, resource Reconcilable) bool {
+			if r.GRPCServer == nil {
+				return true
+			}
+			return r.GRPCServer.HasGRPCRoute(resource.GetName(), resource.GetNamespace())
+		},
 	}
 }
 

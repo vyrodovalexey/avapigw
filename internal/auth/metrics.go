@@ -117,6 +117,25 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	return m
 }
 
+// Init pre-initializes common label combinations with zero values so that
+// metrics appear in /metrics output immediately after startup. Prometheus
+// *Vec types only emit metric lines after WithLabelValues() is called at
+// least once. This method is idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	for _, authType := range []string{"jwt", "basic", "apikey", "mtls", "oidc"} {
+		for _, method := range []string{"GET", "POST", "PUT", "DELETE"} {
+			for _, status := range []string{"success", "failure"} {
+				m.requestsTotal.WithLabelValues(method, authType, status)
+			}
+			m.requestDuration.WithLabelValues(method, authType)
+		}
+		m.authSuccessTotal.WithLabelValues(authType)
+		for _, reason := range []string{"invalid_token", "expired", "unauthorized"} {
+			m.authFailureTotal.WithLabelValues(authType, reason)
+		}
+	}
+}
+
 // RecordRequest records an authentication request.
 func (m *Metrics) RecordRequest(method, authType, status string, duration time.Duration) {
 	m.requestsTotal.WithLabelValues(method, authType, status).Inc()

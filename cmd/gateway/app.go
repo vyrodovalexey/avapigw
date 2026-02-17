@@ -7,7 +7,9 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
+	"github.com/vyrodovalexey/avapigw/internal/cache"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	"github.com/vyrodovalexey/avapigw/internal/encoding"
 	"github.com/vyrodovalexey/avapigw/internal/gateway"
 	"github.com/vyrodovalexey/avapigw/internal/health"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
@@ -15,6 +17,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/proxy"
 	"github.com/vyrodovalexey/avapigw/internal/router"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
+	"github.com/vyrodovalexey/avapigw/internal/transform"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
@@ -65,6 +68,15 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	// instance is passed to authenticators via WithAuthenticatorMetrics
 	// to avoid the fallback to prometheus.DefaultRegisterer.
 	authMetrics := auth.NewMetricsWithRegisterer("gateway", metrics.Registry())
+	authMetrics.Init()
+
+	// Initialize subsystem metric singletons and register them with the
+	// gateway's custom Prometheus registry. These singletons use promauto
+	// which auto-registers with the default global registry, but the
+	// gateway serves /metrics from its own custom registry. Without this
+	// explicit registration, cache, encoding, transform, and vault metrics
+	// would be invisible on the /metrics endpoint.
+	registerSubsystemMetrics(metrics, logger)
 
 	// Initialize Vault client if any listener/route needs Vault TLS
 	var vaultClient vault.Client
@@ -118,6 +130,43 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		vaultClient:        vaultClient,
 		authMetrics:        authMetrics,
 	}
+}
+
+// registerSubsystemMetrics initializes and registers cache, encoding,
+// transform, and vault metric singletons with the gateway's custom
+// Prometheus registry. These packages use promauto which registers
+// metrics with the default global registry, but the gateway's /metrics
+// endpoint is served from its own custom registry. Without this
+// explicit registration the subsystem metrics would be invisible on
+// the /metrics endpoint even though they are being recorded at runtime.
+func registerSubsystemMetrics(metrics *observability.Metrics, logger observability.Logger) {
+	registry := metrics.Registry()
+
+	cacheMetrics := cache.GetCacheMetrics()
+	cacheMetrics.MustRegister(registry)
+	cacheMetrics.Init()
+
+	encodingMetrics := encoding.GetEncodingMetrics()
+	encodingMetrics.MustRegister(registry)
+	encodingMetrics.Init()
+
+	transformMetrics := transform.GetTransformMetrics()
+	transformMetrics.MustRegister(registry)
+	transformMetrics.Init()
+
+	// Vault metrics singleton implements prometheus.Collector.
+	// Initialize it (idempotent via sync.Once) and register the
+	// collector with the custom registry so vault metrics appear
+	// on the gateway's /metrics endpoint.
+	vaultMetrics := vault.NewMetrics("gateway")
+	registry.MustRegister(vaultMetrics)
+
+	logger.Info("subsystem metrics registered with gateway registry",
+		observability.Bool("cache", true),
+		observability.Bool("encoding", true),
+		observability.Bool("transform", true),
+		observability.Bool("vault", vaultMetrics != nil),
+	)
 }
 
 // initClientIPExtractor creates and sets the global ClientIPExtractor

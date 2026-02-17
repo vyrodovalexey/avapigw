@@ -71,6 +71,12 @@ type ReconcileCallbacks struct {
 
 	// SetFailureMetrics sets metrics for a failed reconciliation.
 	SetFailureMetrics func(metrics *ControllerMetrics, resource Reconcilable)
+
+	// IsApplied checks whether the resource is present in the gRPC server's in-memory state.
+	// This is optional. When set, it is used to detect cold start conditions: after an operator
+	// restart, resources may appear Ready in Kubernetes but are missing from the gRPC server's
+	// in-memory maps. If IsApplied returns false for a Ready resource, reconciliation is forced.
+	IsApplied func(ctx context.Context, resource Reconcilable) bool
 }
 
 // BaseReconcile performs the common reconciliation flow for all CRD controllers.
@@ -145,12 +151,24 @@ func BaseReconcile(
 
 	// Generation-based reconciliation skip (Task B3): if the resource has already been
 	// reconciled for this generation and is in a Ready state, skip reconciliation.
+	// However, after an operator restart the in-memory route maps are empty. If the
+	// resource is Ready in K8s but not present in the gRPC server's memory, force
+	// reconciliation to restore the in-memory state.
 	if isResourceReady(resource) {
-		logger.V(1).Info("skipping "+cb.ResourceKind+" reconciliation, already up-to-date",
-			"generation", resource.GetGeneration(),
-		)
-		timer.RecordSuccess()
-		return ctrl.Result{}, nil
+		if cb.IsApplied != nil && !cb.IsApplied(ctx, resource) {
+			logger.Info("forcing "+cb.ResourceKind+" reconciliation after restart, "+
+				"resource is Ready but not applied in memory",
+				"name", resource.GetName(),
+				"namespace", resource.GetNamespace(),
+				"generation", resource.GetGeneration(),
+			)
+		} else {
+			logger.V(1).Info("skipping "+cb.ResourceKind+" reconciliation, already up-to-date",
+				"generation", resource.GetGeneration(),
+			)
+			timer.RecordSuccess()
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Reconcile the resource

@@ -787,6 +787,50 @@ func (s *Server) deleteGRPCBackendInternal(ctx context.Context, name, namespace 
 	return nil
 }
 
+// HasAPIRoute checks if an API route exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasAPIRoute(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.apiRoutes[key]
+	return exists
+}
+
+// HasGRPCRoute checks if a gRPC route exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasGRPCRoute(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.grpcRoutes[key]
+	return exists
+}
+
+// HasBackend checks if a backend exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasBackend(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.backends[key]
+	return exists
+}
+
+// HasGRPCBackend checks if a gRPC backend exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasGRPCBackend(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.grpcBackends[key]
+	return exists
+}
+
 // GetAllConfigs returns all configurations as JSON.
 func (s *Server) GetAllConfigs() ([]byte, error) {
 	s.mu.RLock()

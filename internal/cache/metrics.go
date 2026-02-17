@@ -31,6 +31,39 @@ func GetCacheMetrics() *CacheMetrics {
 	return cacheMetricsInstance
 }
 
+// MustRegister registers all cache metric collectors with the given
+// Prometheus registry. This is needed because promauto registers
+// metrics with the default global registry, but the gateway serves
+// /metrics from a custom registry. Calling MustRegister bridges the
+// two so cache metrics appear on the gateway's metrics endpoint.
+func (m *CacheMetrics) MustRegister(registry *prometheus.Registry) {
+	registry.MustRegister(
+		m.hitsTotal,
+		m.missesTotal,
+		m.evictionsTotal,
+		m.sizeGauge,
+		m.operationDuration,
+		m.errorsTotal,
+	)
+}
+
+// Init pre-initializes common label combinations with zero values so that
+// metrics appear in /metrics output immediately after startup. Prometheus
+// *Vec types only emit metric lines after WithLabelValues() is called at
+// least once. This method is idempotent and safe to call multiple times.
+func (m *CacheMetrics) Init() {
+	for _, backend := range []string{"memory", "redis"} {
+		m.hitsTotal.WithLabelValues(backend)
+		m.missesTotal.WithLabelValues(backend)
+		m.evictionsTotal.WithLabelValues(backend)
+		m.sizeGauge.WithLabelValues(backend)
+		for _, op := range []string{"get", "set", "delete", "exists"} {
+			m.operationDuration.WithLabelValues(backend, op)
+			m.errorsTotal.WithLabelValues(backend, op)
+		}
+	}
+}
+
 func newCacheMetrics() *CacheMetrics {
 	return &CacheMetrics{
 		hitsTotal: promauto.NewCounterVec(

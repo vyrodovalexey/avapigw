@@ -89,6 +89,12 @@ func (r *GRPCBackendReconciler) callbacks() *ReconcileCallbacks {
 			metrics.SetResourceCondition("GRPCBackend", resource.GetName(), resource.GetNamespace(), "Ready", 0)
 			metrics.SetResourceCondition("GRPCBackend", resource.GetName(), resource.GetNamespace(), "Healthy", 0)
 		},
+		IsApplied: func(_ context.Context, resource Reconcilable) bool {
+			if r.GRPCServer == nil {
+				return true
+			}
+			return r.GRPCServer.HasGRPCBackend(resource.GetName(), resource.GetNamespace())
+		},
 	}
 }
 
