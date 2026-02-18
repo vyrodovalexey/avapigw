@@ -49,6 +49,7 @@ type HealthChecker struct {
 	unhealthyCounts    map[*Host]int
 	backendName        string
 	onStatusChange     HealthStatusFunc
+	useTLS             bool
 }
 
 // HealthCheckOption is a functional option for configuring the health checker.
@@ -79,6 +80,13 @@ func WithBackendName(name string) HealthCheckOption {
 func WithHealthStatusCallback(fn HealthStatusFunc) HealthCheckOption {
 	return func(hc *HealthChecker) {
 		hc.onStatusChange = fn
+	}
+}
+
+// WithHealthCheckTLS enables HTTPS for health check requests.
+func WithHealthCheckTLS(useTLS bool) HealthCheckOption {
+	return func(hc *HealthChecker) {
+		hc.useTLS = useTLS
 	}
 }
 
@@ -197,7 +205,7 @@ func (hc *HealthChecker) checkHost(ctx context.Context, host *Host) {
 		// Context is still valid, proceed with health check
 	}
 
-	url := host.URL() + hc.config.Path
+	url := host.URLWithScheme(hc.useTLS) + hc.config.Path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {

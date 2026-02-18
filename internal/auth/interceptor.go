@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc"
@@ -12,6 +13,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/apikey"
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // GRPCAuthenticator handles authentication for gRPC requests.
@@ -34,6 +36,7 @@ type grpcAuthenticator struct {
 	apiKeyValidator apikey.Validator
 	logger          observability.Logger
 	metrics         *Metrics
+	vaultClient     vault.Client
 }
 
 // GRPCAuthenticatorOption is a functional option for the gRPC authenticator.
@@ -64,6 +67,13 @@ func WithGRPCJWTValidator(validator jwt.Validator) GRPCAuthenticatorOption {
 func WithGRPCAPIKeyValidator(validator apikey.Validator) GRPCAuthenticatorOption {
 	return func(a *grpcAuthenticator) {
 		a.apiKeyValidator = validator
+	}
+}
+
+// WithGRPCVaultClient sets the vault client for API key vault store.
+func WithGRPCVaultClient(client vault.Client) GRPCAuthenticatorOption {
+	return func(a *grpcAuthenticator) {
+		a.vaultClient = client
 	}
 }
 
@@ -99,7 +109,23 @@ func NewGRPCAuthenticator(config *Config, opts ...GRPCAuthenticatorOption) (GRPC
 
 	// Initialize API key validator if enabled and not provided
 	if config.IsAPIKeyEnabled() && a.apiKeyValidator == nil {
-		validator, err := apikey.NewValidator(config.APIKey, apikey.WithValidatorLogger(a.logger))
+		opts := []apikey.ValidatorOption{apikey.WithValidatorLogger(a.logger)}
+
+		// If vault config is present and vault client is available, create vault store
+		if config.APIKey.Vault != nil && config.APIKey.Vault.Enabled && a.vaultClient != nil {
+			storeCfg := buildVaultStoreConfig(config.APIKey)
+			store, err := apikey.NewVaultStore(a.vaultClient, storeCfg, a.logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create vault API key store: %w", err)
+			}
+			opts = append(opts, apikey.WithStore(store))
+			a.logger.Info("using vault store for gRPC API key authentication",
+				observability.String("kv_mount", storeCfg.Vault.KVMount),
+				observability.String("path", storeCfg.Vault.Path),
+			)
+		}
+
+		validator, err := apikey.NewValidator(config.APIKey, opts...)
 		if err != nil {
 			return nil, err
 		}

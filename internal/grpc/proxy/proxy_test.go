@@ -347,3 +347,88 @@ func (m *proxyTestServerTransportStream) SendHeader(md metadata.MD) error {
 func (m *proxyTestServerTransportStream) SetTrailer(md metadata.MD) error {
 	return nil
 }
+
+// --- ClearAuthCache tests ---
+
+func TestProxy_ClearAuthCache_DelegatesToDirector(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	// Create a RouterDirector (which implements ClearAuthCache)
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	// Pre-populate the director's auth cache
+	authCfg := &config.AuthenticationConfig{
+		Enabled: true,
+		APIKey: &config.APIKeyAuthConfig{
+			Enabled: true,
+			Header:  "x-api-key",
+		},
+	}
+	_, err := director.getOrCreateAuthenticator("test-route", authCfg)
+	require.NoError(t, err)
+
+	// Verify cache has an entry
+	director.authCacheMu.RLock()
+	assert.Len(t, director.authCache, 1)
+	director.authCacheMu.RUnlock()
+
+	// Create proxy with the RouterDirector
+	p := New(r,
+		WithDirector(director),
+		WithConnectionPool(pool),
+		WithProxyLogger(observability.NopLogger()),
+	)
+	defer p.Close()
+
+	// Call ClearAuthCache on the proxy — should delegate to director
+	p.ClearAuthCache()
+
+	// Verify the director's cache was cleared
+	director.authCacheMu.RLock()
+	assert.Len(t, director.authCache, 0, "director auth cache should be empty after proxy.ClearAuthCache()")
+	director.authCacheMu.RUnlock()
+}
+
+func TestProxy_ClearAuthCache_StaticDirector_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	// Create a StaticDirector (doesn't implement ClearAuthCache)
+	staticDirector := NewStaticDirector("localhost:50051", pool, observability.NopLogger())
+
+	// Create proxy with the StaticDirector
+	p := New(r,
+		WithDirector(staticDirector),
+		WithConnectionPool(pool),
+		WithProxyLogger(observability.NopLogger()),
+	)
+	defer p.Close()
+
+	// ClearAuthCache should not panic when director doesn't implement the interface
+	assert.NotPanics(t, func() {
+		p.ClearAuthCache()
+	})
+}
+
+func TestProxy_ClearAuthCache_NilDirector_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	// Create a proxy with a nil director field (edge case)
+	p := &Proxy{
+		logger: observability.NopLogger(),
+	}
+
+	// ClearAuthCache should not panic when director is nil
+	assert.NotPanics(t, func() {
+		p.ClearAuthCache()
+	})
+}

@@ -1,10 +1,26 @@
 package auth
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+var (
+	sharedMetricsInstance *Metrics
+	sharedMetricsOnce     sync.Once
+)
+
+// GetSharedMetrics returns the singleton backend auth metrics instance.
+// This shared instance should be used by all backend auth providers
+// and registered with the gateway's custom Prometheus registry.
+func GetSharedMetrics() *Metrics {
+	sharedMetricsOnce.Do(func() {
+		sharedMetricsInstance = NewMetrics("gateway")
+	})
+	return sharedMetricsInstance
+}
 
 // Metrics holds Prometheus metrics for backend authentication operations.
 type Metrics struct {

@@ -180,11 +180,11 @@ spec:
       route:
         - destination:
             host: 127.0.0.1
-            port: 8803
+            port: 8811
           weight: 50
         - destination:
             host: 127.0.0.1
-            port: 8804
+            port: 8812
           weight: 50
       timeout: 30s
       retries:
@@ -199,13 +199,13 @@ spec:
       route:
         - destination:
             host: 127.0.0.1
-            port: 8803
+            port: 8811
 
   grpcBackends:
     - name: grpc-backend-1
       hosts:
         - address: 127.0.0.1
-          port: 8803
+          port: 8811
           weight: 1
       healthCheck:
         enabled: true
@@ -219,7 +219,7 @@ spec:
     - name: grpc-backend-2
       hosts:
         - address: 127.0.0.1
-          port: 8804
+          port: 8812
           weight: 1
       healthCheck:
         enabled: true

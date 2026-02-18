@@ -2064,3 +2064,362 @@ func TestReverseProxy_WebSocketBypassesCircuitBreaker(t *testing.T) {
 	// In test environment, the actual WebSocket upgrade may not complete
 	// but the code path is exercised
 }
+
+// ============================================================================
+// Backend Host Resolution Tests
+// ============================================================================
+
+func TestReverseProxy_ProxyRequest_WithBackendHostResolution(t *testing.T) {
+	t.Parallel()
+
+	// Create a backend server
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", "resolved")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("resolved backend response"))
+	}))
+	defer backendServer.Close()
+
+	// Parse backend URL
+	backendURL, err := url.Parse(backendServer.URL)
+	require.NoError(t, err)
+
+	port := 80
+	if backendURL.Port() != "" {
+		fmt.Sscanf(backendURL.Port(), "%d", &port)
+	}
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	// Create a backend with the actual server address as a host
+	backendCfg := config.Backend{
+		Name: "my-backend",
+		Hosts: []config.BackendHost{
+			{Address: backendURL.Hostname(), Port: port, Weight: 1},
+		},
+	}
+	b, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+	err = registry.Register(b)
+	require.NoError(t, err)
+	err = b.Start(t.Context())
+	require.NoError(t, err)
+
+	// Add a route that uses the backend name (not the actual host)
+	route := config.Route{
+		Name: "backend-route",
+		Match: []config.RouteMatch{
+			{
+				URI: &config.URIMatch{
+					Prefix: "/backend-test",
+				},
+			},
+		},
+		Route: []config.RouteDestination{
+			{
+				Destination: config.Destination{
+					Host: "my-backend", // Backend CRD name, not actual host
+					Port: 9999,         // This port should be ignored when backend is found
+				},
+			},
+		},
+	}
+	err = r.AddRoute(route)
+	require.NoError(t, err)
+
+	proxy := NewReverseProxy(r, registry, WithProxyLogger(logger))
+
+	req := httptest.NewRequest(http.MethodGet, "/backend-test/path", nil)
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	// The proxy should have resolved the backend name to the actual host
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "resolved", rec.Header().Get("X-Backend"))
+	assert.Contains(t, rec.Body.String(), "resolved backend response")
+}
+
+func TestReverseProxy_ProxyRequest_WithBackendNoAvailableHosts(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	// Create a backend with a host that is marked unhealthy
+	backendCfg := config.Backend{
+		Name: "unhealthy-backend",
+		Hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 8080, Weight: 1},
+		},
+	}
+	b, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+	err = registry.Register(b)
+	require.NoError(t, err)
+
+	// Mark all hosts as unhealthy
+	for _, host := range b.GetHosts() {
+		host.SetStatus(backend.StatusUnhealthy)
+	}
+
+	// Add a route pointing to the unhealthy backend
+	route := config.Route{
+		Name: "unhealthy-route",
+		Match: []config.RouteMatch{
+			{
+				URI: &config.URIMatch{
+					Prefix: "/unhealthy",
+				},
+			},
+		},
+		Route: []config.RouteDestination{
+			{
+				Destination: config.Destination{
+					Host: "unhealthy-backend",
+					Port: 8080,
+				},
+			},
+		},
+	}
+	err = r.AddRoute(route)
+	require.NoError(t, err)
+
+	proxy := NewReverseProxy(r, registry, WithProxyLogger(logger))
+
+	req := httptest.NewRequest(http.MethodGet, "/unhealthy/test", nil)
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	// Should return 503 Service Unavailable
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	assert.Contains(t, rec.Body.String(), "no available backend hosts")
+}
+
+func TestReverseProxy_ProxyRequest_WithoutBackend_UsesDestDirectly(t *testing.T) {
+	t.Parallel()
+
+	// Create a backend server
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", "direct")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("direct response"))
+	}))
+	defer backendServer.Close()
+
+	// Parse backend URL
+	backendURL, err := url.Parse(backendServer.URL)
+	require.NoError(t, err)
+
+	port := 80
+	if backendURL.Port() != "" {
+		fmt.Sscanf(backendURL.Port(), "%d", &port)
+	}
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger) // Empty registry — no backends registered
+
+	// Add a route with direct host (no matching backend in registry)
+	route := config.Route{
+		Name: "direct-route",
+		Match: []config.RouteMatch{
+			{
+				URI: &config.URIMatch{
+					Prefix: "/direct-host",
+				},
+			},
+		},
+		Route: []config.RouteDestination{
+			{
+				Destination: config.Destination{
+					Host: backendURL.Hostname(),
+					Port: port,
+				},
+			},
+		},
+	}
+	err = r.AddRoute(route)
+	require.NoError(t, err)
+
+	proxy := NewReverseProxy(r, registry, WithProxyLogger(logger))
+
+	req := httptest.NewRequest(http.MethodGet, "/direct-host/test", nil)
+	rec := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rec, req)
+
+	// Should work directly without backend resolution
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "direct", rec.Header().Get("X-Backend"))
+	assert.Contains(t, rec.Body.String(), "direct response")
+}
+
+func TestReverseProxy_BuildTargetURL_WithBackendHost(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	proxy := NewReverseProxy(r, registry, WithProxyLogger(logger))
+
+	tests := []struct {
+		name           string
+		dest           *config.RouteDestination
+		serviceBackend *backend.ServiceBackend
+		backendHost    *backend.Host
+		expectedURL    string
+	}{
+		{
+			name: "no backend host - uses destination directly",
+			dest: &config.RouteDestination{
+				Destination: config.Destination{
+					Host: "my-service",
+					Port: 8080,
+				},
+			},
+			serviceBackend: nil,
+			backendHost:    nil,
+			expectedURL:    "http://my-service:8080",
+		},
+		{
+			name: "with backend host - uses host address and port",
+			dest: &config.RouteDestination{
+				Destination: config.Destination{
+					Host: "my-backend-name",
+					Port: 9999, // Should be ignored
+				},
+			},
+			serviceBackend: nil,
+			backendHost:    backend.NewHost("10.0.0.1", 8080, 1),
+			expectedURL:    "http://10.0.0.1:8080",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			target, err := proxy.buildTargetURL(tt.dest, tt.serviceBackend, tt.backendHost)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedURL, target.String())
+		})
+	}
+}
+
+func TestReverseProxy_BuildTargetURL_WithTLSBackendHost(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+	proxy := NewReverseProxy(r, registry, WithProxyLogger(logger))
+
+	// Create a TLS-enabled backend
+	backendCfg := config.Backend{
+		Name: "tls-backend",
+		Hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 443, Weight: 1},
+		},
+		TLS: &config.BackendTLSConfig{
+			Enabled:            true,
+			InsecureSkipVerify: true,
+		},
+	}
+	sb, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+
+	dest := &config.RouteDestination{
+		Destination: config.Destination{
+			Host: "tls-backend",
+			Port: 9999,
+		},
+	}
+	host := backend.NewHost("10.0.0.1", 443, 1)
+
+	target, err := proxy.buildTargetURL(dest, sb, host)
+	require.NoError(t, err)
+	assert.Equal(t, "https://10.0.0.1:443", target.String())
+}
+
+func TestReverseProxy_ProxyRequest_BackendHostConnectionTracking(t *testing.T) {
+	t.Parallel()
+
+	// Create a backend server
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backendServer.Close()
+
+	backendURL, err := url.Parse(backendServer.URL)
+	require.NoError(t, err)
+
+	port := 80
+	if backendURL.Port() != "" {
+		fmt.Sscanf(backendURL.Port(), "%d", &port)
+	}
+
+	r := router.New()
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	// Create a backend
+	backendCfg := config.Backend{
+		Name: "tracked-backend",
+		Hosts: []config.BackendHost{
+			{Address: backendURL.Hostname(), Port: port, Weight: 1},
+		},
+	}
+	b, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+	err = registry.Register(b)
+	require.NoError(t, err)
+	err = b.Start(t.Context())
+	require.NoError(t, err)
+
+	route := config.Route{
+		Name: "tracked-route",
+		Match: []config.RouteMatch{
+			{
+				URI: &config.URIMatch{
+					Prefix: "/tracked",
+				},
+			},
+		},
+		Route: []config.RouteDestination{
+			{
+				Destination: config.Destination{
+					Host: "tracked-backend",
+					Port: 9999,
+				},
+			},
+		},
+	}
+	err = r.AddRoute(route)
+	require.NoError(t, err)
+
+	proxy := NewReverseProxy(r, registry, WithProxyLogger(logger))
+
+	// Get initial connection count
+	hosts := b.GetHosts()
+	require.Len(t, hosts, 1)
+	initialConns := hosts[0].Connections()
+
+	// Make a request
+	req := httptest.NewRequest(http.MethodGet, "/tracked/test", nil)
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// After the request completes, connection count should be back to initial
+	// (ReleaseHost was called via defer)
+	assert.Equal(t, initialConns, hosts[0].Connections(),
+		"connection count should return to initial after request completes")
+}

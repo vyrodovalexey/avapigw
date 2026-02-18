@@ -9,8 +9,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // Proxy is the main gRPC reverse proxy.
@@ -22,6 +24,8 @@ type Proxy struct {
 	logger          observability.Logger
 	defaultTimeout  time.Duration
 	metricsRegistry *prometheus.Registry
+	authMetrics     *auth.Metrics
+	vaultClient     vault.Client
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -65,6 +69,24 @@ func WithMetricsRegistry(registry *prometheus.Registry) ProxyOption {
 	}
 }
 
+// WithAuthMetrics sets the authentication metrics for the proxy.
+// When provided, per-route authentication operations in the director
+// emit Prometheus metrics for observability.
+func WithAuthMetrics(metrics *auth.Metrics) ProxyOption {
+	return func(p *Proxy) {
+		p.authMetrics = metrics
+	}
+}
+
+// WithProxyVaultClient sets the vault client for the proxy.
+// When provided, per-route API key authentication in the director
+// can use Vault as the key store.
+func WithProxyVaultClient(client vault.Client) ProxyOption {
+	return func(p *Proxy) {
+		p.vaultClient = client
+	}
+}
+
 // New creates a new gRPC proxy.
 func New(r *router.Router, opts ...ProxyOption) *Proxy {
 	p := &Proxy{
@@ -90,7 +112,14 @@ func New(r *router.Router, opts ...ProxyOption) *Proxy {
 
 	// Create director if not provided
 	if p.director == nil {
-		p.director = NewRouterDirector(r, p.connPool, WithDirectorLogger(p.logger))
+		directorOpts := []DirectorOption{WithDirectorLogger(p.logger)}
+		if p.authMetrics != nil {
+			directorOpts = append(directorOpts, WithDirectorAuthMetrics(p.authMetrics))
+		}
+		if p.vaultClient != nil {
+			directorOpts = append(directorOpts, WithDirectorVaultClient(p.vaultClient))
+		}
+		p.director = NewRouterDirector(r, p.connPool, directorOpts...)
 	}
 
 	// Create stream handler
@@ -189,6 +218,19 @@ func (p *Proxy) applyTimeout(ctx context.Context, fullMethod string) (context.Co
 
 	newCtx, cancel := context.WithTimeout(ctx, timeout)
 	return newCtx, cancel, true
+}
+
+// ClearAuthCache clears the gRPC director's authenticator cache.
+// This delegates to the RouterDirector's ClearAuthCache method when
+// the director supports it. It is safe to call even when the director
+// does not support cache clearing (e.g., StaticDirector).
+func (p *Proxy) ClearAuthCache() {
+	type authCacheClearer interface {
+		ClearAuthCache()
+	}
+	if clearer, ok := p.director.(authCacheClearer); ok {
+		clearer.ClearAuthCache()
+	}
 }
 
 // Close closes the proxy and releases resources.

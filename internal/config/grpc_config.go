@@ -340,6 +340,12 @@ type GRPCRoute struct {
 	// TLS configures route-level TLS certificate override for this gRPC route.
 	// This allows serving different certificates based on SNI for this route.
 	TLS *RouteTLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+
+	// Authentication configures route-level authentication.
+	Authentication *AuthenticationConfig `yaml:"authentication,omitempty" json:"authentication,omitempty"`
+
+	// Authorization configures route-level authorization.
+	Authorization *AuthorizationConfig `yaml:"authorization,omitempty" json:"authorization,omitempty"`
 }
 
 // HasTLSOverride returns true if the gRPC route has TLS configuration that overrides listener TLS.

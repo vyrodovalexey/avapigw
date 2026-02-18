@@ -31,6 +31,8 @@ The gateway follows a standardized metric naming convention:
 - [gRPC Metrics](#grpc-metrics)
 - [Config Reload Metrics](#config-reload-metrics)
 - [Health Check Metrics](#health-check-metrics)
+- [Transform Metrics](#transform-metrics)
+- [Encoding Metrics](#encoding-metrics)
 - [Gateway Operator Client Metrics](#gateway-operator-client-metrics)
 - [Operator Controller Metrics](#operator-controller-metrics)
 - [Operator Webhook Metrics](#operator-webhook-metrics)
@@ -180,45 +182,69 @@ Metrics for HTTP middleware components including rate limiting, circuit breakers
 - **Description:** Total number of CORS requests by type (preflight, simple, etc.)
 - **Example:** `gateway_middleware_cors_requests_total{type="preflight"} 100`
 
+### gateway_middleware_auth_requests_total
+- **Type:** Counter
+- **Labels:** `provider`, `status`
+- **Description:** Total number of authentication requests processed by global auth middleware
+- **Example:** `gateway_middleware_auth_requests_total{provider="jwt",status="success"} 1200`
+
+### gateway_middleware_auth_duration_seconds
+- **Type:** Histogram
+- **Labels:** `provider`
+- **Description:** Duration of authentication operations in global middleware
+- **Example:** `gateway_middleware_auth_duration_seconds{provider="jwt"} 0.005`
+
 ## Cache Metrics
 
 Metrics for caching operations including hits, misses, evictions, and performance.
 
 ### gateway_cache_hits_total
 - **Type:** Counter
-- **Labels:** `backend`, `cache_type`
-- **Description:** Total number of cache hits
-- **Example:** `gateway_cache_hits_total{backend="api-backend",cache_type="memory"} 850`
+- **Labels:** `route`, `cache_type`
+- **Description:** Total number of cache hits per route
+- **Example:** `gateway_cache_hits_total{route="api-v1",cache_type="memory"} 850`
 
 ### gateway_cache_misses_total
 - **Type:** Counter
-- **Labels:** `backend`, `cache_type`
-- **Description:** Total number of cache misses
-- **Example:** `gateway_cache_misses_total{backend="api-backend",cache_type="memory"} 150`
+- **Labels:** `route`, `cache_type`
+- **Description:** Total number of cache misses per route
+- **Example:** `gateway_cache_misses_total{route="api-v1",cache_type="memory"} 150`
 
 ### gateway_cache_evictions_total
 - **Type:** Counter
-- **Labels:** `backend`, `cache_type`
-- **Description:** Total number of cache evictions
-- **Example:** `gateway_cache_evictions_total{backend="api-backend",cache_type="memory"} 25`
+- **Labels:** `route`, `cache_type`
+- **Description:** Total number of cache evictions per route
+- **Example:** `gateway_cache_evictions_total{route="api-v1",cache_type="memory"} 25`
 
 ### gateway_cache_size_bytes
 - **Type:** Gauge
-- **Labels:** `backend`, `cache_type`
-- **Description:** Current cache size in bytes
-- **Example:** `gateway_cache_size_bytes{backend="api-backend",cache_type="memory"} 1048576`
+- **Labels:** `route`, `cache_type`
+- **Description:** Current cache size in bytes per route
+- **Example:** `gateway_cache_size_bytes{route="api-v1",cache_type="memory"} 1048576`
 
 ### gateway_cache_operation_duration_seconds
 - **Type:** Histogram
-- **Labels:** `backend`, `operation`
-- **Description:** Duration of cache operations (get, set, delete)
-- **Example:** `gateway_cache_operation_duration_seconds{backend="api-backend",operation="get"} 0.001`
+- **Labels:** `route`, `operation`
+- **Description:** Duration of cache operations (get, set, delete) per route
+- **Example:** `gateway_cache_operation_duration_seconds{route="api-v1",operation="get"} 0.001`
 
 ### gateway_cache_errors_total
 - **Type:** Counter
-- **Labels:** `backend`, `error_type`
-- **Description:** Total number of cache errors
-- **Example:** `gateway_cache_errors_total{backend="api-backend",error_type="connection_failed"} 2`
+- **Labels:** `route`, `error_type`
+- **Description:** Total number of cache errors per route
+- **Example:** `gateway_cache_errors_total{route="api-v1",error_type="connection_failed"} 2`
+
+### gateway_cache_body_limit_exceeded_total
+- **Type:** Counter
+- **Labels:** `route`
+- **Description:** Total number of responses exceeding 10MB cache body limit
+- **Example:** `gateway_cache_body_limit_exceeded_total{route="api-v1"} 3`
+
+### gateway_cache_get_requests_total
+- **Type:** Counter
+- **Labels:** `route`
+- **Description:** Total number of GET requests processed by cache middleware (only GET requests are cached)
+- **Example:** `gateway_cache_get_requests_total{route="api-v1"} 1000`
 
 ## Authentication Metrics
 
@@ -573,6 +599,69 @@ Metrics for health check operations and backend monitoring.
 - **Description:** Total number of health check failures
 - **Example:** `gateway_health_check_failures_total{backend="api-backend",failure_type="timeout"} 3`
 
+## Transform Metrics
+
+Metrics for HTTP request/response transformation operations.
+
+### gateway_transform_requests_total
+- **Type:** Counter
+- **Labels:** `route`, `type`, `status`
+- **Description:** Total number of transformation operations (request/response)
+- **Example:** `gateway_transform_requests_total{route="api-v1",type="request",status="success"} 850`
+
+### gateway_transform_duration_seconds
+- **Type:** Histogram
+- **Labels:** `route`, `type`
+- **Description:** Duration of transformation operations
+- **Example:** `gateway_transform_duration_seconds{route="api-v1",type="request"} 0.002`
+
+### gateway_transform_body_size_bytes
+- **Type:** Histogram
+- **Labels:** `route`, `type`, `direction`
+- **Description:** Size of request/response bodies processed by transform middleware
+- **Buckets:** Exponential buckets for body size distribution
+- **Example:** `gateway_transform_body_size_bytes{route="api-v1",type="request",direction="input"} 1024`
+
+### gateway_transform_errors_total
+- **Type:** Counter
+- **Labels:** `route`, `type`, `error_type`
+- **Description:** Total number of transformation errors
+- **Example:** `gateway_transform_errors_total{route="api-v1",type="request",error_type="template_error"} 5`
+
+### gateway_transform_body_limit_exceeded_total
+- **Type:** Counter
+- **Labels:** `route`, `type`
+- **Description:** Total number of requests exceeding 10MB transform body limit
+- **Example:** `gateway_transform_body_limit_exceeded_total{route="api-v1",type="request"} 2`
+
+## Encoding Metrics
+
+Metrics for content negotiation and encoding operations.
+
+### gateway_encoding_negotiations_total
+- **Type:** Counter
+- **Labels:** `route`, `content_type`, `status`
+- **Description:** Total number of content negotiation operations
+- **Example:** `gateway_encoding_negotiations_total{route="api-v1",content_type="application/json",status="success"} 1200`
+
+### gateway_encoding_duration_seconds
+- **Type:** Histogram
+- **Labels:** `route`, `operation`
+- **Description:** Duration of encoding operations
+- **Example:** `gateway_encoding_duration_seconds{route="api-v1",operation="negotiation"} 0.001`
+
+### gateway_encoding_content_types_total
+- **Type:** Counter
+- **Labels:** `route`, `requested`, `negotiated`
+- **Description:** Content type negotiation results
+- **Example:** `gateway_encoding_content_types_total{route="api-v1",requested="*/*",negotiated="application/json"} 800`
+
+### gateway_encoding_errors_total
+- **Type:** Counter
+- **Labels:** `route`, `error_type`
+- **Description:** Total number of encoding errors
+- **Example:** `gateway_encoding_errors_total{route="api-v1",error_type="unsupported_type"} 3`
+
 ## Gateway Operator Client Metrics
 
 Metrics for the gateway's gRPC client communication with the operator.
@@ -902,9 +991,76 @@ groups:
 
 ## Recent Improvements
 
-### DEV-001 to DEV-009 Enhancements
+### Latest Metrics Fixes (Current Release)
 
-The latest refactoring session (DEV-001 through DEV-009) introduced significant improvements to the metrics collection system:
+Four critical metrics issues were resolved to improve gateway observability:
+
+#### Issue 1: Config Reload Timestamp Fix
+- **Problem**: Grafana dashboard query incompatibility - `SetToCurrentTime()` sets seconds but `dateTimeFromNow` expects milliseconds
+- **Solution**: Updated PromQL query to multiply by 1000: `gateway_config_reload_timestamp * 1000`
+- **Impact**: Fixed config reload timestamp visualization in Grafana dashboards
+- **File**: `monitoring/grafana/gateway-operator-dashboard.json`
+
+#### Issue 2: Authentication Metrics Integration
+- **Problem**: Auth middleware not wired into global HTTP middleware chain
+- **Solution**: 
+  - Created `internal/auth/config_converter.go` for `config.AuthenticationConfig` → `auth.Config` conversion
+  - Integrated auth middleware into global chain when `GatewaySpec.Authentication` is enabled
+- **Impact**: Authentication success/failure rates now properly tracked
+- **Files**: `cmd/gateway/middleware.go`, `cmd/gateway/app.go`
+
+#### Issue 3: Cache Metrics Implementation
+- **Problem**: Cache middleware not integrated with per-route middleware chain
+- **Solution**:
+  - Created `internal/middleware/cache.go` - HTTP cache middleware (10MB body limit, GET-only, Cache-Control aware)
+  - Created `internal/gateway/cache_factory.go` - Per-route cache factory with thread-safe lazy creation
+  - Wired into per-route middleware chain via `RouteMiddlewareManager`
+- **Impact**: Per-route cache metrics with hits, misses, evictions, size, and duration tracking
+- **Features**: 10MB body size limit, GET request caching only, Cache-Control header support
+
+#### Issue 4: Transform/Encoding Metrics Implementation
+- **Problem**: Transform and encoding operations not instrumented
+- **Solution**:
+  - Created `internal/middleware/transform.go` - HTTP transform middleware (10MB body limit, JSON transform)
+  - Created `internal/middleware/encoding.go` - HTTP encoding middleware (content negotiation, metrics)
+  - Integrated into per-route middleware chain
+- **Impact**: Transform operations and content negotiation metrics tracking
+- **Features**: 10MB body size limit for transforms, content type negotiation
+
+### Architecture Enhancements
+
+#### Two-Tier Middleware Architecture
+The gateway now implements a sophisticated two-tier middleware system:
+
+**Global Middleware Chain** (applied to all requests):
+```
+Recovery → RequestID → Logging → Tracing → Audit → Metrics → 
+CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
+```
+
+**Per-Route Middleware Chain** (applied per route configuration):
+```
+Security Headers → CORS → Body Limit → Headers → Cache → 
+Transform → Encoding → [proxy to backend]
+```
+
+#### RouteMiddlewareApplier Interface Pattern
+To avoid import cycles between `proxy` and `gateway` packages:
+
+```go
+type RouteMiddlewareApplier interface {
+    GetMiddleware(route *config.Route) []func(http.Handler) http.Handler
+    ApplyMiddleware(handler http.Handler, route *config.Route) http.Handler
+}
+```
+
+**Benefits**:
+- **Decoupled Architecture**: Proxy package independent of gateway package
+- **Per-Route Isolation**: Each route gets its own middleware chain and cache namespace
+- **Thread-Safe Caching**: Middleware chains cached with double-check locking pattern
+- **Lazy Initialization**: Cache instances created on-demand per route
+
+### DEV-001 to DEV-009 Enhancements (Previous Release)
 
 #### DEV-001: Fixed Reload Metrics Registry Mismatch
 - **Issue**: Reload metrics were using different registry than other gateway metrics

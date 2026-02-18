@@ -13,10 +13,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // configField is an atomic pointer for lock-free config access.
@@ -85,6 +87,8 @@ type Gateway struct {
 	metricsRegistry *prometheus.Registry
 	grpcMetrics     *grpcmiddleware.GRPCMetrics
 	grpcMetricsOnce sync.Once
+	authMetrics     *auth.Metrics
+	vaultClient     vault.Client
 }
 
 // Option is a functional option for configuring the gateway.
@@ -144,6 +148,24 @@ func WithMetricsRegistry(registry *prometheus.Registry) Option {
 func WithGatewayTLSMetrics(metrics tlspkg.MetricsRecorder) Option {
 	return func(g *Gateway) {
 		g.tlsMetrics = metrics
+	}
+}
+
+// WithGatewayAuthMetrics sets the authentication metrics for the gateway.
+// The metrics are propagated to gRPC listeners to enable per-route
+// authentication metrics in the gRPC proxy director.
+func WithGatewayAuthMetrics(metrics *auth.Metrics) Option {
+	return func(g *Gateway) {
+		g.authMetrics = metrics
+	}
+}
+
+// WithGatewayVaultClient sets the vault client for the gateway.
+// The vault client is propagated to gRPC listeners to enable per-route
+// API key authentication using Vault as the key store.
+func WithGatewayVaultClient(client vault.Client) Option {
+	return func(g *Gateway) {
+		g.vaultClient = client
 	}
 }
 
@@ -413,6 +435,16 @@ func (g *Gateway) createGRPCListener(
 		grpcOpts = append(grpcOpts, WithGRPCAuditLogger(g.auditLogger))
 	}
 
+	// Pass auth metrics for per-route authentication observability
+	if g.authMetrics != nil {
+		grpcOpts = append(grpcOpts, WithGRPCAuthMetrics(g.authMetrics))
+	}
+
+	// Pass vault client for per-route API key authentication via Vault
+	if g.vaultClient != nil {
+		grpcOpts = append(grpcOpts, WithGRPCVaultClient(g.vaultClient))
+	}
+
 	grpcListener, err := NewGRPCListener(listenerCfg, grpcOpts...)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -526,6 +558,19 @@ func (g *Gateway) stopListeners(ctx context.Context) {
 		// Wait for remaining listeners to stop (they should respect the context)
 		<-done
 	}
+}
+
+// ClearAllAuthCaches clears the authenticator caches on all gRPC listeners.
+// This should be called when gRPC route authentication configuration changes
+// (e.g., CRD updates via the operator) so that the next request rebuilds
+// authenticators from the updated config.
+func (g *Gateway) ClearAllAuthCaches() {
+	for _, listener := range g.grpcListeners {
+		listener.ClearAuthCache()
+	}
+	g.logger.Debug("all gRPC auth caches cleared",
+		observability.Int("listeners", len(g.grpcListeners)),
+	)
 }
 
 // GetListeners returns all HTTP listeners.

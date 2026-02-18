@@ -201,7 +201,7 @@ validate_panels() {
   local ds_uids
   ds_uids=$(jq -r '
     [.. | .datasource? // empty | .uid? // empty]
-    | map(select(. != "" and . != "-- Grafana --" and . != "-- Mixed --"))
+    | map(select(. != "" and . != "-- Grafana --" and . != "-- Mixed --" and . != "grafana"))
     | unique[]
   ' "${file}" 2>/dev/null)
 

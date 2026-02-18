@@ -67,9 +67,22 @@ func runOperatorMode(flags cliFlags, logger observability.Logger) {
 		logger: logger,
 	}
 
-	// Create config handler
+	// Create config handler with cache invalidation callback.
+	// When the operator pushes CRD updates, the invalidator clears
+	// both the HTTP route middleware cache and gRPC auth caches so
+	// the next request rebuilds from the updated configuration.
 	opApp.configHandler = operator.NewConfigHandler(applier,
 		operator.WithHandlerLogger(logger),
+		operator.WithCacheInvalidator(func() {
+			if app.routeMiddlewareMgr != nil {
+				app.routeMiddlewareMgr.ClearCache()
+				logger.Debug("HTTP route middleware cache invalidated by operator update")
+			}
+			if app.gateway != nil {
+				app.gateway.ClearAllAuthCaches()
+				logger.Debug("gRPC auth caches invalidated by operator update")
+			}
+		}),
 	)
 
 	// Use the gateway's existing metrics registry so operator-mode metrics

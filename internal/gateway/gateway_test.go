@@ -526,3 +526,104 @@ func TestGateway_GetListeners_BeforeStart(t *testing.T) {
 	listeners := gw.GetListeners()
 	assert.Nil(t, listeners)
 }
+
+// --- ClearAllAuthCaches tests ---
+
+func TestGateway_ClearAllAuthCaches_NoListeners(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway-no-grpc"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 0, Protocol: "HTTP"},
+			},
+		},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	// Gateway with no gRPC listeners should not panic
+	assert.NotPanics(t, func() {
+		gw.ClearAllAuthCaches()
+	})
+}
+
+func TestGateway_ClearAllAuthCaches_BeforeStart(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway-before-start"},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	// Gateway before start has nil grpcListeners slice — should not panic
+	assert.NotPanics(t, func() {
+		gw.ClearAllAuthCaches()
+	})
+}
+
+func TestGateway_ClearAllAuthCaches_MultipleListeners(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway-multi-grpc"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "grpc-1", Port: 0, Protocol: config.ProtocolGRPC},
+				{Name: "grpc-2", Port: 0, Protocol: config.ProtocolGRPC},
+			},
+		},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = gw.Stop(ctx) }()
+
+	// Verify we have 2 gRPC listeners
+	grpcListeners := gw.GetGRPCListeners()
+	require.Len(t, grpcListeners, 2)
+
+	// ClearAllAuthCaches should clear all listeners without panic
+	assert.NotPanics(t, func() {
+		gw.ClearAllAuthCaches()
+	})
+}
+
+func TestGateway_ClearAllAuthCaches_WithHTTPAndGRPCListeners(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway-mixed"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 0, Protocol: "HTTP"},
+				{Name: "grpc", Port: 0, Protocol: config.ProtocolGRPC},
+			},
+		},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = gw.Stop(ctx) }()
+
+	// Verify we have 1 gRPC listener and 1 HTTP listener
+	assert.Len(t, gw.GetGRPCListeners(), 1)
+	assert.Len(t, gw.GetListeners(), 1)
+
+	// ClearAllAuthCaches should only affect gRPC listeners, not panic
+	assert.NotPanics(t, func() {
+		gw.ClearAllAuthCaches()
+	})
+}

@@ -1760,6 +1760,205 @@ spec:
       otlpTLSCAFile: "/vault/secrets/otlp-ca.crt"
 ```
 
+## Middleware Configuration
+
+The AV API Gateway implements a two-tier middleware architecture with global and per-route middleware chains.
+
+### Global Middleware Configuration
+
+Global middleware is applied to all requests and configured at the gateway level:
+
+```yaml
+spec:
+  # Authentication (global middleware chain)
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: "https://auth.example.com"
+      audience: ["api.example.com"]
+    allowAnonymous: false
+    skipPaths:
+      - "/health"
+      - "/metrics"
+  
+  # Rate limiting (global middleware chain)
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 1000
+    burst: 2000
+    perClient: true
+  
+  # Circuit breaker (global middleware chain)
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+    halfOpenRequests: 3
+  
+  # Max sessions (global middleware chain)
+  maxSessions:
+    enabled: true
+    maxConcurrent: 10000
+    queueSize: 1000
+    queueTimeout: 30s
+  
+  # CORS (global middleware chain)
+  cors:
+    allowOrigins: ["*"]
+    allowMethods: ["GET", "POST", "PUT", "DELETE"]
+    allowHeaders: ["Content-Type", "Authorization"]
+```
+
+### Per-Route Middleware Configuration
+
+Per-route middleware is applied to specific routes and configured at the route level:
+
+```yaml
+spec:
+  routes:
+    - name: api-route
+      match:
+        - uri:
+            prefix: /api/v1
+      route:
+        - destination:
+            host: backend
+            port: 8080
+      
+      # Security headers (per-route middleware)
+      security:
+        enabled: true
+        headers:
+          enabled: true
+          xFrameOptions: "SAMEORIGIN"
+          customHeaders:
+            X-API-Version: "v1"
+      
+      # CORS override (per-route middleware)
+      cors:
+        allowOrigins: ["https://app.example.com"]
+        allowMethods: ["GET", "POST"]
+      
+      # Request limits (per-route middleware)
+      requestLimits:
+        maxBodySize: 10485760  # 10MB
+        maxHeaderSize: 1048576 # 1MB
+      
+      # Headers manipulation (per-route middleware)
+      headers:
+        request:
+          set:
+            X-Route: "api-v1"
+          add:
+            X-Gateway: "avapigw"
+          remove:
+            - "X-Internal-Header"
+        response:
+          set:
+            X-Response-Time: "{{.ResponseTime}}"
+      
+      # Cache (per-route middleware)
+      cache:
+        enabled: true
+        ttl: "10m"
+        type: "memory"
+        keyComponents:
+          - "path"
+          - "query"
+          - "headers.Authorization"
+        staleWhileRevalidate: "2m"
+      
+      # Transform (per-route middleware)
+      transform:
+        request:
+          template: |
+            {
+              "data": {{.Body}},
+              "metadata": {
+                "timestamp": "{{.Timestamp}}",
+                "requestId": "{{.RequestID}}"
+              }
+            }
+        response:
+          allowFields:
+            - "id"
+            - "name"
+            - "email"
+          denyFields:
+            - "password"
+            - "secret"
+          fieldMappings:
+            created_at: "createdAt"
+            updated_at: "updatedAt"
+      
+      # Encoding (per-route middleware)
+      encoding:
+        enableContentNegotiation: true
+        request:
+          contentType: "application/json"
+        response:
+          contentType: "application/json"
+```
+
+### Middleware Execution Order
+
+#### Global Middleware Chain
+```
+Recovery → RequestID → Logging → Tracing → Audit → Metrics → 
+CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
+```
+
+#### Per-Route Middleware Chain
+```
+Security Headers → CORS → Body Limit → Headers → Cache → 
+Transform → Encoding → [proxy to backend]
+```
+
+### Middleware Features and Limits
+
+#### Cache Middleware
+- **Body Size Limit**: 10MB maximum response body size for caching
+- **Method Support**: Only GET requests are cached
+- **Cache-Control**: Respects Cache-Control headers (no-store, no-cache)
+- **Per-Route Isolation**: Each route gets its own cache namespace
+- **Thread Safety**: Thread-safe cache factory with lazy initialization
+
+#### Transform Middleware
+- **Body Size Limit**: 10MB maximum request/response body size for transformation
+- **Template Engine**: Go template engine for request transformation
+- **Field Operations**: Allow/deny lists and field mappings for responses
+- **JSON Support**: Optimized for JSON request/response transformation
+
+#### Encoding Middleware
+- **Content Negotiation**: Automatic content type negotiation based on Accept header
+- **Metrics Recording**: Records negotiation results and content types
+- **Format Support**: JSON, XML, YAML encoding support
+
+### Configuration Precedence
+
+Route-level middleware configuration takes precedence over global configuration:
+
+1. **Route-level configuration** (highest precedence)
+2. **Global configuration** (fallback)
+3. **Default values** (lowest precedence)
+
+Example:
+```yaml
+# Global CORS configuration
+spec:
+  cors:
+    allowOrigins: ["*"]
+    allowMethods: ["GET", "POST"]
+
+  routes:
+    - name: restricted-route
+      # Route-level CORS overrides global
+      cors:
+        allowOrigins: ["https://trusted.example.com"]
+        allowMethods: ["GET"]  # More restrictive than global
+```
+
 ## Enhanced Configuration Reload
 
 The AV API Gateway supports hot configuration reload with enhanced capabilities from the latest refactoring session (TASK-010).
@@ -1771,6 +1970,10 @@ The configuration reload system now supports reloading additional components wit
 **Components Supporting Hot Reload:**
 - **CORS Configuration** - Cross-Origin Resource Sharing settings
 - **Security Headers** - Security header injection policies
+- **Middleware Chains** - Both global and per-route middleware configurations
+- **Cache Configuration** - Per-route cache settings and factory updates
+- **Transform Configuration** - Request/response transformation templates
+- **Encoding Configuration** - Content negotiation settings
 - **Audit Configuration** - Audit logging settings and output destinations
 - **Rate Limiting** - Rate limiting policies and thresholds
 - **Max Sessions** - Concurrent session limits and queue settings

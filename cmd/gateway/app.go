@@ -6,7 +6,9 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/authz"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
+	backendauth "github.com/vyrodovalexey/avapigw/internal/backend/auth"
 	"github.com/vyrodovalexey/avapigw/internal/cache"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/encoding"
@@ -37,6 +39,8 @@ type application struct {
 	auditLogger        audit.Logger
 	vaultClient        vault.Client
 	authMetrics        *auth.Metrics
+	cacheFactory       *gateway.CacheFactory
+	routeMiddlewareMgr *gateway.RouteMiddlewareManager
 }
 
 // initApplication initializes all application components.
@@ -49,9 +53,32 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		audit.WithLoggerRegisterer(metrics.Registry()),
 	)
 
-	backendRegistry := backend.NewRegistry(
-		logger, backend.WithRegistryMetrics(metrics),
-	)
+	// Initialize subsystem metric singletons and register them with the
+	// gateway's custom Prometheus registry. These singletons use promauto
+	// which auto-registers with the default global registry, but the
+	// gateway serves /metrics from its own custom registry. Without this
+	// explicit registration, cache, encoding, transform, and vault metrics
+	// would be invisible on the /metrics endpoint.
+	registerSubsystemMetrics(metrics, logger)
+
+	// Initialize Vault client before the backend registry so that backends
+	// requiring Vault (mTLS certs, KV credentials, OIDC tokens) receive
+	// the client at creation time.
+	var vaultClient vault.Client
+	var vaultFactory tlspkg.VaultProviderFactory
+	if needsVault(cfg) {
+		vaultClient = initVaultClient(logger)
+		if needsVaultTLS(cfg) {
+			vaultFactory = createVaultProviderFactory(vaultClient)
+			logger.Info("vault provider factory created for TLS certificate management")
+		}
+	}
+
+	registryOpts := []backend.RegistryOption{backend.WithRegistryMetrics(metrics)}
+	if vaultClient != nil {
+		registryOpts = append(registryOpts, backend.WithRegistryVaultClient(vaultClient))
+	}
+	backendRegistry := backend.NewRegistry(logger, registryOpts...)
 	if err := backendRegistry.LoadFromConfig(cfg.Spec.Backends); err != nil {
 		fatalWithSync(logger, "failed to load backends", observability.Error(err))
 		return nil // unreachable in production; allows test to continue
@@ -70,28 +97,39 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	authMetrics := auth.NewMetricsWithRegisterer("gateway", metrics.Registry())
 	authMetrics.Init()
 
-	// Initialize subsystem metric singletons and register them with the
-	// gateway's custom Prometheus registry. These singletons use promauto
-	// which auto-registers with the default global registry, but the
-	// gateway serves /metrics from its own custom registry. Without this
-	// explicit registration, cache, encoding, transform, and vault metrics
-	// would be invisible on the /metrics endpoint.
-	registerSubsystemMetrics(metrics, logger)
+	// Create authz metrics registered with the gateway's custom registry
+	// so they appear on the gateway's /metrics endpoint.
+	authzMetrics := authz.NewMetricsWithRegisterer("gateway", metrics.Registry())
+	authzMetrics.Init()
 
-	// Initialize Vault client if any listener/route needs Vault TLS
-	var vaultClient vault.Client
-	var vaultFactory tlspkg.VaultProviderFactory
-	if needsVaultTLS(cfg) {
-		vaultClient = initVaultClient(logger)
-		vaultFactory = createVaultProviderFactory(vaultClient)
-		logger.Info("vault provider factory created for TLS certificate management")
+	// Create per-route middleware manager with cache factory
+	cacheFactory := gateway.NewCacheFactory(logger, vaultClient)
+	routeMiddlewareOpts := []gateway.RouteMiddlewareOption{
+		gateway.WithRouteMiddlewareCacheFactory(cacheFactory),
+		gateway.WithRouteMiddlewareAuthMetrics(authMetrics),
+		gateway.WithRouteMiddlewareAuthzMetrics(authzMetrics),
 	}
+	if vaultClient != nil {
+		routeMiddlewareOpts = append(routeMiddlewareOpts, gateway.WithRouteMiddlewareVaultClient(vaultClient))
+	}
+	routeMiddlewareMgr := gateway.NewRouteMiddlewareManager(
+		&cfg.Spec, logger,
+		routeMiddlewareOpts...,
+	)
 
 	reverseProxy := proxy.NewReverseProxy(r, backendRegistry,
 		proxy.WithProxyLogger(logger),
 		proxy.WithMetricsRegistry(metrics.Registry()),
+		proxy.WithRouteMiddleware(routeMiddlewareMgr),
 	)
-	middlewareResult := buildMiddlewareChain(reverseProxy, cfg, logger, metrics, tracer, auditLogger)
+	middlewareResult, mwErr := buildMiddlewareChain(
+		reverseProxy, cfg, logger, metrics, tracer, auditLogger,
+		cfg.Spec.Authentication, authMetrics,
+	)
+	if mwErr != nil {
+		fatalWithSync(logger, "failed to build middleware chain", observability.Error(mwErr))
+		return nil // unreachable in production; allows test to continue
+	}
 
 	// Create TLS metrics registered with the gateway's custom registry
 	// so they appear on the gateway's /metrics endpoint.
@@ -104,9 +142,13 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		gateway.WithAuditLogger(auditLogger),
 		gateway.WithMetricsRegistry(metrics.Registry()),
 		gateway.WithGatewayTLSMetrics(tlsMetrics),
+		gateway.WithGatewayAuthMetrics(authMetrics),
 	}
 	if vaultFactory != nil {
 		gwOpts = append(gwOpts, gateway.WithGatewayVaultProviderFactory(vaultFactory))
+	}
+	if vaultClient != nil {
+		gwOpts = append(gwOpts, gateway.WithGatewayVaultClient(vaultClient))
 	}
 
 	gw, err := gateway.New(cfg, gwOpts...)
@@ -129,6 +171,8 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		auditLogger:        auditLogger,
 		vaultClient:        vaultClient,
 		authMetrics:        authMetrics,
+		cacheFactory:       cacheFactory,
+		routeMiddlewareMgr: routeMiddlewareMgr,
 	}
 }
 
@@ -161,11 +205,18 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 	vaultMetrics := vault.NewMetrics("gateway")
 	registry.MustRegister(vaultMetrics)
 
+	// Backend auth metrics singleton. Register with the gateway's
+	// custom registry so backend auth metrics (OIDC, mTLS, Basic)
+	// appear on the /metrics endpoint.
+	backendAuthMetrics := backendauth.GetSharedMetrics()
+	backendAuthMetrics.MustRegister(registry)
+
 	logger.Info("subsystem metrics registered with gateway registry",
 		observability.Bool("cache", true),
 		observability.Bool("encoding", true),
 		observability.Bool("transform", true),
 		observability.Bool("vault", vaultMetrics != nil),
+		observability.Bool("backend_auth", true),
 	)
 }
 

@@ -36,6 +36,20 @@ func needsVaultTLS(cfg *config.GatewayConfig) bool {
 	return false
 }
 
+// needsVault returns true when the Vault client should be initialized.
+// This is the case when any listener/route requires Vault TLS, or when
+// the VAULT_ADDR environment variable is set (backends may need Vault
+// for mTLS certificates, basic-auth credentials from KV, or OIDC token
+// acquisition).
+func needsVault(cfg *config.GatewayConfig) bool {
+	if needsVaultTLS(cfg) {
+		return true
+	}
+	// If VAULT_ADDR is configured, backends may depend on Vault for
+	// authentication or TLS even when no listener/route uses Vault TLS.
+	return os.Getenv("VAULT_ADDR") != ""
+}
+
 // initVaultClient creates and authenticates a Vault client using environment variables.
 // It uses the standard Vault environment variables: VAULT_ADDR, VAULT_TOKEN,
 // VAULT_CACERT, VAULT_CAPATH, VAULT_CLIENT_CERT, VAULT_CLIENT_KEY, VAULT_SKIP_VERIFY,

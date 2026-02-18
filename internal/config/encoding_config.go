@@ -1,6 +1,11 @@
 // Package config provides configuration types and loading for the API Gateway.
 package config
 
+import (
+	"encoding/json"
+	"strings"
+)
+
 // EncodingConfig represents encoding/decoding configuration for a route.
 type EncodingConfig struct {
 	// RequestEncoding specifies the encoding for request bodies.
@@ -203,4 +208,129 @@ func (cc *CompressionConfig) IsEmpty() bool {
 		return true
 	}
 	return !cc.Enabled
+}
+
+// contentTypeToEncoding converts a content type string (e.g., "application/json")
+// to the corresponding encoding name (e.g., "json"). Unknown types are returned as-is.
+func contentTypeToEncoding(contentType string) string {
+	// Strip charset and other parameters (e.g., "application/json; charset=utf-8" → "application/json").
+	ct := strings.TrimSpace(contentType)
+	if idx := strings.IndexByte(ct, ';'); idx >= 0 {
+		ct = strings.TrimSpace(ct[:idx])
+	}
+
+	switch ct {
+	case "application/json", "text/json":
+		return EncodingJSON
+	case "application/xml", "text/xml":
+		return EncodingXML
+	case "application/yaml", "application/x-yaml", "text/yaml":
+		return EncodingYAML
+	case "application/protobuf", "application/x-protobuf":
+		return EncodingProtobuf
+	default:
+		return contentType
+	}
+}
+
+// crdEncodingSettings represents a single encoding direction in CRD format.
+type crdEncodingSettings struct {
+	ContentType string `json:"contentType,omitempty"`
+}
+
+// crdEncodingConfig represents the CRD-format encoding configuration
+// sent by the operator (request.contentType / response.contentType).
+type crdEncodingConfig struct {
+	Request  *crdEncodingSettings `json:"request,omitempty"`
+	Response *crdEncodingSettings `json:"response,omitempty"`
+}
+
+// canonicalContentType strips charset and other parameters from a content type string
+// (e.g., "application/json; charset=utf-8" → "application/json").
+func canonicalContentType(ct string) string {
+	canonical := strings.TrimSpace(ct)
+	if idx := strings.IndexByte(canonical, ';'); idx >= 0 {
+		canonical = strings.TrimSpace(canonical[:idx])
+	}
+	return canonical
+}
+
+// applyCRDEncoding converts CRD-format encoding settings into internal EncodingConfig fields.
+// It maps content types to encoding names, enables content negotiation, and populates
+// SupportedContentTypes with the discovered content types.
+func (ec *EncodingConfig) applyCRDEncoding(crd crdEncodingConfig) {
+	// Map CRD content types to internal encoding names.
+	if crd.Request != nil && crd.Request.ContentType != "" {
+		ec.RequestEncoding = contentTypeToEncoding(crd.Request.ContentType)
+	}
+	if crd.Response != nil && crd.Response.ContentType != "" {
+		ec.ResponseEncoding = contentTypeToEncoding(crd.Response.ContentType)
+	}
+
+	// Auto-enable content negotiation when CRD encoding config is present.
+	ec.EnableContentNegotiation = true
+
+	// Auto-populate SupportedContentTypes with the content types found,
+	// preserving any that were already set.
+	existing := make(map[string]struct{}, len(ec.SupportedContentTypes))
+	for _, ct := range ec.SupportedContentTypes {
+		existing[ct] = struct{}{}
+	}
+
+	appendUnique := func(ct string) {
+		if ct == "" {
+			return
+		}
+		canonical := canonicalContentType(ct)
+		if _, ok := existing[canonical]; !ok {
+			ec.SupportedContentTypes = append(ec.SupportedContentTypes, canonical)
+			existing[canonical] = struct{}{}
+		}
+	}
+
+	if crd.Request != nil {
+		appendUnique(crd.Request.ContentType)
+	}
+	if crd.Response != nil {
+		appendUnique(crd.Response.ContentType)
+	}
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for EncodingConfig.
+// It handles both the internal format (requestEncoding/responseEncoding fields)
+// and the CRD format (request.contentType/response.contentType nested objects)
+// for compatibility with the operator's CRD spec JSON.
+func (ec *EncodingConfig) UnmarshalJSON(data []byte) error {
+	// Use a type alias to avoid infinite recursion when calling json.Unmarshal.
+	type Alias EncodingConfig
+
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+
+	*ec = EncodingConfig(alias)
+
+	// If encoding fields are already populated, the internal format was used — nothing more to do.
+	if ec.RequestEncoding != "" || ec.ResponseEncoding != "" {
+		return nil
+	}
+
+	// Both encoding fields are empty after standard unmarshal.
+	// Check whether the CRD format was provided instead.
+	var crd crdEncodingConfig
+	if err := json.Unmarshal(data, &crd); err != nil {
+		// CRD parsing failed on data that already passed standard unmarshal.
+		// This should not happen in practice; return the error for diagnostics.
+		return err
+	}
+
+	// If neither CRD field is present, nothing to convert.
+	if crd.Request == nil && crd.Response == nil {
+		return nil
+	}
+
+	ec.applyCRDEncoding(crd)
+
+	return nil
 }

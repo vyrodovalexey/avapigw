@@ -19,7 +19,7 @@
 #   - Vault running at http://host.docker.internal:8200 with K8s auth configured
 #   - Redis Sentinel running via docker-compose (ports 26379-26381)
 #   - Keycloak running at http://host.docker.internal:8090
-#   - Backend services running via docker-compose (ports 8801-8804)
+#   - Backend services running via docker-compose (REST: 8801-8805, gRPC: 8811-8814)
 #   - OTEL collector deployed in avapigw-test namespace
 
 namespace: avapigw-test
@@ -235,11 +235,11 @@ gateway:
       route:
         - destination:
             host: host.docker.internal
-            port: 8803
+            port: 8811
           weight: 50
         - destination:
             host: host.docker.internal
-            port: 8804
+            port: 8812
           weight: 50
       timeout: 30s
 
@@ -250,14 +250,14 @@ gateway:
       route:
         - destination:
             host: host.docker.internal
-            port: 8803
+            port: 8811
 
   # gRPC Backends
   grpcBackends:
     - name: grpc-backend-1
       hosts:
         - address: host.docker.internal
-          port: 8803
+          port: 8811
           weight: 1
       healthCheck:
         enabled: true
@@ -271,7 +271,7 @@ gateway:
     - name: grpc-backend-2
       hosts:
         - address: host.docker.internal
-          port: 8804
+          port: 8812
           weight: 1
       healthCheck:
         enabled: true

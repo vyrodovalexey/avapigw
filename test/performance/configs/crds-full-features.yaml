@@ -3,7 +3,16 @@
 # =============================================================================
 # This configuration covers ALL required test scenarios for performance testing
 # including: caching, rate limiting, authentication (JWT, Basic, API Key, mTLS),
-# transformations, max sessions, and load balancing.
+# transformations, max sessions, load balancing, and backend auth scenarios
+# (OIDC, mTLS, basic auth for HTTP; OIDC, mTLS for gRPC).
+#
+#   - HTTP backends (5): noauth x2, OIDC (8803), mTLS (8804), basic (8805)
+#   - gRPC backends (4): noauth x2 (8811, 8812), mTLS (8813), OIDC (8814)
+#   - HTTP routes (16): health, cached, JWT, basic, apikey, mTLS, transform,
+#                        backend-oidc, backend-mtls, backend-basic, websocket x4,
+#                        max-sessions, catch-all
+#   - gRPC routes (8): cached+JWT, transform, mTLS, apikey, backend-oidc,
+#                       backend-mtls, max-sessions, catch-all
 #
 # Apply with: kubectl apply -f test/performance/configs/crds-full-features.yaml -n avapigw-test
 # =============================================================================
@@ -56,10 +65,114 @@ spec:
 
 ---
 # =============================================================================
+# HTTP BACKENDS WITH AUTHENTICATION
+# =============================================================================
+
+# Backend 3 - REST backend on port 8803 (backend OIDC auth)
+# The gateway obtains a token via client_credentials grant from Keycloak
+# and passes it as Bearer to the backend. The backend validates the token.
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: perf-http-backend-oidc
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8803
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  authentication:
+    type: jwt
+    jwt:
+      enabled: true
+      tokenSource: oidc
+      headerName: Authorization
+      headerPrefix: Bearer
+      oidc:
+        issuerUrl: http://host.docker.internal:8090/realms/backend-test
+        clientId: gateway-backend
+        clientSecret: gateway-backend-secret
+
+---
+# Backend 4 - REST backend on port 8804 (backend mTLS)
+# The gateway uses a client certificate from Vault PKI to connect to the
+# backend over TLS. The backend requires and verifies the client cert.
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: perf-http-backend-mtls
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8804
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  tls:
+    enabled: true
+    mode: MUTUAL
+    insecureSkipVerify: true
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: client-role
+      commonName: avapigw-client
+      altNames:
+        - localhost
+        - host.docker.internal
+      ttl: "720h"
+
+---
+# Backend 5 - REST backend on port 8805 (backend basic auth)
+# The gateway reads credentials from Vault KV and injects the Basic auth
+# header when connecting to the backend.
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: perf-http-backend-basic
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8805
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  authentication:
+    type: basic
+    basic:
+      enabled: true
+      vaultPath: secret/backend-auth/basic
+      usernameKey: username
+      passwordKey: password
+
+---
+# =============================================================================
 # GRPC BACKENDS
 # =============================================================================
 
-# GRPCBackend 1 - gRPC backend on port 8803
+# GRPCBackend 1 - gRPC backend on port 8811 (no auth)
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCBackend
 metadata:
@@ -68,7 +181,7 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8803
+      port: 8811
       weight: 1
   healthCheck:
     enabled: true
@@ -85,7 +198,7 @@ spec:
     idleConnTimeout: 90s
 
 ---
-# GRPCBackend 2 - gRPC backend on port 8804
+# GRPCBackend 2 - gRPC backend on port 8812 (no auth)
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCBackend
 metadata:
@@ -94,7 +207,7 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8804
+      port: 8812
       weight: 1
   healthCheck:
     enabled: true
@@ -109,6 +222,86 @@ spec:
     maxConnsPerHost: 100
     maxIdleConns: 50
     idleConnTimeout: 90s
+
+---
+# GRPCBackend 3 - gRPC backend on port 8813 (backend mTLS)
+# The gateway uses a client certificate from Vault PKI to connect to the
+# backend over TLS. The backend requires and verifies the client cert.
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: perf-grpc-backend-mtls
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8813
+      weight: 1
+  healthCheck:
+    enabled: true
+    service: ""
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  connectionPool:
+    maxConnsPerHost: 100
+    maxIdleConns: 50
+    idleConnTimeout: 90s
+  tls:
+    enabled: true
+    mode: MUTUAL
+    insecureSkipVerify: true
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: client-role
+      commonName: avapigw-client
+      altNames:
+        - localhost
+        - host.docker.internal
+      ttl: "720h"
+
+---
+# GRPCBackend 4 - gRPC backend on port 8814 (backend OIDC auth)
+# The gateway obtains a token via client_credentials grant from Keycloak
+# and passes it as Bearer to the backend. The backend validates the token.
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: perf-grpc-backend-oidc
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8814
+      weight: 1
+  healthCheck:
+    enabled: true
+    service: ""
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  connectionPool:
+    maxConnsPerHost: 100
+    maxIdleConns: 50
+    idleConnTimeout: 90s
+  authentication:
+    type: jwt
+    jwt:
+      enabled: true
+      tokenSource: oidc
+      headerName: Authorization
+      headerPrefix: Bearer
+      oidc:
+        issuerUrl: http://host.docker.internal:8090/realms/backend-test
+        clientId: gateway-backend
+        clientSecret: gateway-backend-secret
 
 ---
 # =============================================================================
@@ -488,6 +681,91 @@ spec:
 
 ---
 # =============================================================================
+# HTTP API ROUTES - BACKEND AUTH SCENARIOS
+# =============================================================================
+
+# Route: Backend OIDC HTTP
+# Features: Routes to perf-http-backend-oidc which obtains token via client_credentials.
+# destination.host matches the Backend CRD name so the proxy resolves the actual
+# host/port from the backend's host list and applies OIDC auth.
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-backend-oidc-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /perf/backend-oidc
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: perf-http-backend-oidc
+        port: 8803
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+
+---
+# Route: Backend mTLS HTTP
+# Features: Routes to perf-http-backend-mtls which uses Vault PKI client cert.
+# destination.host matches the Backend CRD name so the proxy resolves the actual
+# host/port from the backend's host list and applies mTLS.
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-backend-mtls-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /perf/backend-mtls
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: perf-http-backend-mtls
+        port: 8804
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+
+---
+# Route: Backend Basic Auth HTTP
+# Features: Routes to perf-http-backend-basic which reads creds from Vault KV.
+# destination.host matches the Backend CRD name so the proxy resolves the actual
+# host/port from the backend's host list and applies basic auth.
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-backend-basic-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /perf/backend-basic
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: perf-http-backend-basic
+        port: 8805
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+
+---
+# =============================================================================
 # GRPC ROUTES
 # =============================================================================
 
@@ -505,11 +783,11 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 50
     - destination:
         host: host.docker.internal
-        port: 8804
+        port: 8812
       weight: 50
   timeout: 30s
   cache:
@@ -545,7 +823,7 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
   timeout: 30s
   transform:
     metadata:
@@ -556,7 +834,7 @@ spec:
         x-request-id: "{{.RequestID}}"
 
 ---
-# GRPCRoute 3: gRPC mTLS
+# GRPCRoute 3: gRPC mTLS (client auth on gateway listener)
 # Features: mTLS required for secure gRPC service
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCRoute
@@ -570,7 +848,7 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
   timeout: 30s
   authentication:
     enabled: true
@@ -600,7 +878,7 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
   timeout: 30s
   authentication:
     enabled: true
@@ -611,7 +889,43 @@ spec:
       hashAlgorithm: sha256
 
 ---
-# GRPCRoute 5: gRPC Max Sessions with Rate Limiting
+# GRPCRoute 5: gRPC Backend OIDC
+# Features: Routes to perf-grpc-backend-oidc which obtains token via client_credentials
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-grpc-backend-oidc-route
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.OIDCService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8814
+  timeout: 30s
+
+---
+# GRPCRoute 6: gRPC Backend mTLS
+# Features: Routes to perf-grpc-backend-mtls which uses Vault PKI client cert
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-grpc-backend-mtls-route
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.MTLSService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8813
+  timeout: 30s
+
+---
+# GRPCRoute 7: gRPC Max Sessions with Rate Limiting
 # Features: Max sessions (50 concurrent), rate limit (30 RPS)
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCRoute
@@ -625,7 +939,7 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
   timeout: 30s
   maxSessions:
     enabled: true
@@ -638,7 +952,7 @@ spec:
     burst: 60
 
 ---
-# GRPCRoute 6: Catch-all gRPC
+# GRPCRoute 8: Catch-all gRPC
 # Features: Default gRPC route to backend-1
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCRoute
@@ -652,5 +966,5 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
   timeout: 30s

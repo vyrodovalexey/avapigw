@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
 	"github.com/vyrodovalexey/avapigw/internal/auth/oidc"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // authTracer is the OTEL tracer used for authentication operations.
@@ -40,6 +42,7 @@ type authenticator struct {
 	oidcProviders   map[string]oidc.Provider
 	logger          observability.Logger
 	metrics         *Metrics
+	vaultClient     vault.Client
 }
 
 // AuthenticatorOption is a functional option for the authenticator.
@@ -70,6 +73,13 @@ func WithJWTValidator(validator jwt.Validator) AuthenticatorOption {
 func WithAPIKeyValidator(validator apikey.Validator) AuthenticatorOption {
 	return func(a *authenticator) {
 		a.apiKeyValidator = validator
+	}
+}
+
+// WithVaultClient sets the vault client for API key vault store.
+func WithVaultClient(client vault.Client) AuthenticatorOption {
+	return func(a *authenticator) {
+		a.vaultClient = client
 	}
 }
 
@@ -142,12 +152,60 @@ func (a *authenticator) initAPIKeyValidator(config *Config) error {
 	if !config.IsAPIKeyEnabled() || a.apiKeyValidator != nil {
 		return nil
 	}
-	validator, err := apikey.NewValidator(config.APIKey, apikey.WithValidatorLogger(a.logger))
+
+	opts := []apikey.ValidatorOption{apikey.WithValidatorLogger(a.logger)}
+
+	// If vault config is present and vault client is available, create vault store.
+	// The CRD vaultPath (e.g. "secret/data/apikeys") is stored as-is in
+	// config.APIKey.Vault.Path. For the VaultStore we need the KV-relative
+	// path with the mount prefix and the KV v2 "data/" segment stripped.
+	if config.APIKey.Vault != nil && config.APIKey.Vault.Enabled && a.vaultClient != nil {
+		storeCfg := buildVaultStoreConfig(config.APIKey)
+		store, err := apikey.NewVaultStore(a.vaultClient, storeCfg, a.logger)
+		if err != nil {
+			return fmt.Errorf("failed to create vault API key store: %w", err)
+		}
+		opts = append(opts, apikey.WithStore(store))
+		a.logger.Info("using vault store for API key authentication",
+			observability.String("kv_mount", storeCfg.Vault.KVMount),
+			observability.String("path", storeCfg.Vault.Path),
+		)
+	}
+
+	validator, err := apikey.NewValidator(config.APIKey, opts...)
 	if err != nil {
 		return err
 	}
 	a.apiKeyValidator = validator
 	return nil
+}
+
+// buildVaultStoreConfig creates a shallow copy of the API key config with
+// the Vault path resolved for the KV v2 client. The original CRD path
+// (e.g. "secret/data/apikeys") is split so that KVMount = "secret" and
+// Path = "apikeys" (the "data/" segment is stripped because the KV v2
+// client adds it automatically).
+func buildVaultStoreConfig(src *apikey.Config) *apikey.Config {
+	cfg := *src
+	vc := *src.Vault
+
+	// Strip the mount prefix from the path to get the KV-relative path.
+	// e.g. "secret/data/apikeys" → mount="secret", remainder="data/apikeys"
+	// Then strip the "data/" prefix → "apikeys".
+	raw := vc.Path
+	mount := vc.KVMount
+
+	if mount != "" && len(raw) > len(mount)+1 {
+		remainder := raw[len(mount)+1:] // strip "<mount>/"
+		// Strip the KV v2 "data/" prefix that the client adds automatically.
+		if len(remainder) > 5 && remainder[:5] == "data/" {
+			remainder = remainder[5:]
+		}
+		vc.Path = remainder
+	}
+
+	cfg.Vault = &vc
+	return &cfg
 }
 
 // initMTLSValidator initializes the mTLS validator if enabled.

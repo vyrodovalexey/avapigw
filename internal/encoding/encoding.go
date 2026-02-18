@@ -138,6 +138,33 @@ func normalizeContentType(contentType string) string {
 	return contentType
 }
 
+// NormalizeContentType normalizes a content type by stripping parameters
+// (e.g. ";charset=utf-8"). It is the exported counterpart of the internal
+// normalizeContentType helper so that other packages (middleware, etc.) can
+// reuse the same logic.
+func NormalizeContentType(contentType string) string {
+	return normalizeContentType(contentType)
+}
+
+// supportedEncodings is the set of content types that the gateway can
+// encode/decode. It is used by IsSupportedEncoding to decide whether
+// metrics should be recorded for a given content type.
+var supportedEncodings = map[string]bool{
+	"application/json":   true,
+	"application/xml":    true,
+	"application/yaml":   true,
+	"application/x-yaml": true,
+	"text/json":          true,
+	"text/xml":           true,
+	"text/yaml":          true,
+}
+
+// IsSupportedEncoding reports whether the given (already-normalised)
+// content type is one of the encoding types the gateway understands.
+func IsSupportedEncoding(contentType string) bool {
+	return supportedEncodings[contentType]
+}
+
 // GetEncoder returns an encoder for the given content type.
 func GetEncoder(contentType string, cfg *config.EncodingConfig, logger observability.Logger) (Encoder, error) {
 	factory := NewCodecFactory(logger)

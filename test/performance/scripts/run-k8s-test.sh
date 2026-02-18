@@ -819,12 +819,15 @@ run_websocket_test() {
 # ==============================================================================
 
 # Keycloak configuration
-KEYCLOAK_URL="${KEYCLOAK_URL:-http://127.0.0.1:8090}"
+# IMPORTANT: Use localhost (not 127.0.0.1) so the JWT token's "iss" claim
+# matches the CRD's issuer field (http://localhost:8090/realms/gateway-test).
+# Keycloak sets the "iss" claim based on the URL used to request the token.
+KEYCLOAK_URL="${KEYCLOAK_URL:-http://localhost:8090}"
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-gateway-test}"
 KEYCLOAK_CLIENT="${KEYCLOAK_CLIENT:-gateway}"
 KEYCLOAK_SECRET="${KEYCLOAK_SECRET:-gateway-secret}"
-KEYCLOAK_USER="${KEYCLOAK_USER:-perftest-user-1}"
-KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-perftest123}"
+KEYCLOAK_USER="${KEYCLOAK_USER:-testuser}"
+KEYCLOAK_PASSWORD="${KEYCLOAK_PASSWORD:-testpass}"
 
 get_jwt_token() {
     # Note: Do NOT use log_info here as this function's stdout is captured
@@ -876,54 +879,13 @@ generate_auth_ammo() {
         return 1
     fi
     
-    # For Yandex Tank phantom-style ammo, each request needs a size prefix
-    # Format: <size> <tag>\n<request>\r\n\r\n
-    # We need to process each request block and add the size prefix
-    
-    # Use a temp file to avoid issues with special characters in the token
-    local temp_file
-    temp_file=$(mktemp)
-    
-    # Replace ${JWT_TOKEN} with actual token using perl (handles special chars better)
-    perl -pe "s/\\\$\{JWT_TOKEN\}/$jwt_token/g" "$template_file" > "$temp_file"
-    
-    # Process the content to add size prefixes for phantom-style ammo
-    # Each request block is separated by blank lines
-    local output=""
-    local current_request=""
-    local request_num=1
-    
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if [[ -z "$line" ]] && [[ -n "$current_request" ]]; then
-            # End of a request block - calculate size and output
-            # Add CRLF at the end of request (HTTP spec requires \r\n\r\n at end)
-            current_request="${current_request}"$'\r\n'
-            local size=${#current_request}
-            # Phantom ammo format: <size> <tag>\n<request>
-            output+="${size} auth_req_${request_num}"$'\n'"${current_request}"
-            current_request=""
-            ((request_num++))
-        elif [[ -n "$line" ]]; then
-            # Add line to current request with CRLF
-            if [[ -n "$current_request" ]]; then
-                current_request+=$'\r\n'
-            fi
-            current_request+="$line"
-        fi
-    done < "$temp_file"
-    
-    # Handle last request if file doesn't end with blank line
-    if [[ -n "$current_request" ]]; then
-        current_request="${current_request}"$'\r\n'
-        local size=${#current_request}
-        output+="${size} auth_req_${request_num}"$'\n'"${current_request}"
-    fi
-    
-    # Clean up temp file
-    rm -f "$temp_file"
-    
-    # Write the output file
-    printf '%s' "$output" > "$output_file"
+    # The ammo file uses Yandex Tank "uri" format:
+    #   [Header: value]   — header lines in square brackets
+    #   /path             — URI lines
+    #
+    # We simply replace ${JWT_TOKEN} with the actual token.
+    # Using sed with a delimiter that won't appear in JWT tokens.
+    sed "s|\${JWT_TOKEN}|${jwt_token}|g" "$template_file" > "$output_file"
 }
 
 run_auth_test() {
@@ -1012,6 +974,112 @@ run_auth_test() {
     fi
 }
 
+generate_authz_ammo() {
+    local jwt_token="$1"
+    local output_file="$2"
+    
+    # Read the template ammo file and replace ${JWT_TOKEN}
+    local template_file="$PERF_DIR/ammo/http-authz.txt"
+    
+    if [[ ! -f "$template_file" ]]; then
+        log_error "Authz ammo template not found: $template_file"
+        return 1
+    fi
+    
+    # The ammo file uses Yandex Tank "uri" format:
+    #   [Header: value]   — header lines in square brackets
+    #   /path             — URI lines
+    #
+    # We simply replace ${JWT_TOKEN} with the actual token.
+    sed "s|\${JWT_TOKEN}|${jwt_token}|g" "$template_file" > "$output_file"
+}
+
+run_authz_test() {
+    log_info "=========================================="
+    log_info "Running K8s Authz Throughput Test (JWT + RBAC/ABAC + HTTPS)"
+    log_info "=========================================="
+
+    # Authz test requires HTTPS port (gateway with TLS)
+    if [[ -z "$K8S_HTTPS_PORT" ]]; then
+        log_error "HTTPS NodePort not discovered. Authz test requires TLS."
+        return 1
+    fi
+
+    log_info "Target: https://127.0.0.1:${K8S_HTTPS_PORT}"
+
+    # Get JWT token from Keycloak
+    log_info "Getting JWT token from Keycloak..."
+    local jwt_token
+    jwt_token=$(get_jwt_token)
+    if [[ $? -ne 0 ]] || [[ -z "$jwt_token" ]]; then
+        log_error "Failed to obtain JWT token from Keycloak"
+        log_error "Ensure Keycloak is running at ${KEYCLOAK_URL}"
+        return 1
+    fi
+    log_success "JWT token obtained successfully"
+
+    # Create results directory
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local results_dir="$PERF_DIR/results/k8s/authz_${timestamp}"
+    mkdir -p "$results_dir/ammo"
+
+    # Generate ammo file with actual JWT token
+    local ammo_file="$results_dir/ammo/http-authz.txt"
+    log_info "Generating authz ammo file with JWT token..."
+    if ! generate_authz_ammo "$jwt_token" "$ammo_file"; then
+        log_error "Failed to generate authz ammo file"
+        return 1
+    fi
+    log_success "Authz ammo file generated: $ammo_file"
+
+    # Copy config and update port
+    local config_file="$results_dir/load.yaml"
+    sed "s/host.docker.internal:32300/host.docker.internal:${K8S_HTTPS_PORT}/g" \
+        "$PERF_DIR/configs/k8s-authz-throughput.yaml" > "$config_file"
+
+    log_info "Config: $config_file (ssl: true)"
+    log_info "Results: $results_dir"
+
+    # Build Docker command
+    local docker_cmd="docker run --rm"
+    docker_cmd+=" -v $results_dir:/var/loadtest"
+    docker_cmd+=" -v $results_dir/ammo:/var/loadtest/ammo"
+    docker_cmd+=" --add-host=host.docker.internal:host-gateway"
+    docker_cmd+=" -w /var/loadtest"
+
+    if [[ "$VERBOSE" == "true" ]]; then
+        docker_cmd+=" -e VERBOSE=1"
+    fi
+
+    docker_cmd+=" yandex/yandex-tank:latest"
+    docker_cmd+=" -c /var/loadtest/load.yaml"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "Dry run - would execute:"
+        echo "$docker_cmd"
+        return 0
+    fi
+
+    # Check Yandex Tank image
+    if ! docker image inspect yandex/yandex-tank:latest &> /dev/null; then
+        log_info "Pulling Yandex Tank image..."
+        docker pull yandex/yandex-tank:latest
+    fi
+
+    log_info "Starting Yandex Tank..."
+    eval $docker_cmd
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        log_success "Authz test completed successfully"
+        log_info "Results saved to: $results_dir"
+    else
+        log_error "Authz test failed with exit code: $exit_code"
+        return 1
+    fi
+}
+
 # ==============================================================================
 # Run All Tests
 # ==============================================================================
@@ -1020,7 +1088,7 @@ run_all_tests() {
     local failed_tests=()
 
     log_info "Running all K8s performance tests..."
-    log_info "Test suite: https, grpc-tls, websocket (WSS), auth"
+    log_info "Test suite: https, grpc-tls, websocket (WSS), auth, authz"
 
     # HTTPS test (requires HTTPS port with Vault PKI TLS)
     if [[ -n "$K8S_HTTPS_PORT" ]]; then
@@ -1061,8 +1129,18 @@ run_all_tests() {
         if ! run_auth_test; then
             failed_tests+=("auth")
         fi
+        sleep 3
     else
         log_warn "Skipping Auth test: HTTPS NodePort not discovered"
+    fi
+
+    # Authz test (requires HTTPS port and Keycloak)
+    if [[ -n "$K8S_HTTPS_PORT" ]]; then
+        if ! run_authz_test; then
+            failed_tests+=("authz")
+        fi
+    else
+        log_warn "Skipping Authz test: HTTPS NodePort not discovered"
     fi
 
     echo ""
@@ -1089,7 +1167,7 @@ K8s Performance Test Runner
 Discovers NodePort services from Kubernetes and runs performance tests
 against the gateway deployed in local K8s (Docker Desktop).
 
-Usage: run-k8s-test.sh [http|https|grpc|grpc-tls|websocket|auth|all] [options]
+Usage: run-k8s-test.sh [http|https|grpc|grpc-tls|websocket|auth|authz|all] [options]
 
 Test types:
   http        HTTP throughput test via Yandex Tank (no TLS)
@@ -1098,7 +1176,8 @@ Test types:
   grpc-tls    gRPC TLS unary test via ghz (requires grpcs NodePort)
   websocket   WebSocket message test via k6 (WSS if HTTPS available)
   auth        Authenticated HTTPS test with JWT from Keycloak
-  all         Run: https, grpc-tls, websocket (WSS), auth
+  authz       Authorization (RBAC/ABAC) test with JWT from Keycloak
+  all         Run: https, grpc-tls, websocket (WSS), auth, authz
 
 Options:
   --dry-run         Show commands without running
@@ -1108,12 +1187,14 @@ Options:
   --service=<name>  K8s service name (default: avapigw)
 
 Environment variables for auth test:
-  KEYCLOAK_URL      Keycloak URL (default: http://127.0.0.1:8090)
+  KEYCLOAK_URL      Keycloak URL (default: http://localhost:8090)
+                    IMPORTANT: Use localhost, not 127.0.0.1, so the JWT
+                    token's "iss" claim matches the CRD issuer field.
   KEYCLOAK_REALM    Keycloak realm (default: gateway-test)
   KEYCLOAK_CLIENT   Client ID (default: gateway)
   KEYCLOAK_SECRET   Client secret (default: gateway-secret)
-  KEYCLOAK_USER     Username (default: perftest-user-1)
-  KEYCLOAK_PASSWORD Password (default: perftest123)
+  KEYCLOAK_USER     Username (default: testuser)
+  KEYCLOAK_PASSWORD Password (default: testpass)
 
 Prerequisites:
   - kubectl configured and connected to cluster
@@ -1129,6 +1210,7 @@ Examples:
   ./run-k8s-test.sh https
   ./run-k8s-test.sh grpc-tls --dry-run
   ./run-k8s-test.sh auth --verbose
+  ./run-k8s-test.sh authz --verbose
   ./run-k8s-test.sh all --verbose
   ./run-k8s-test.sh http --namespace=avapigw-test --service=avapigw
 
@@ -1190,12 +1272,19 @@ main() {
             fi
             run_auth_test
             ;;
+        authz)
+            if [[ -z "$K8S_HTTPS_PORT" ]]; then
+                log_error "HTTPS NodePort not discovered. Authz test requires TLS."
+                exit 1
+            fi
+            run_authz_test
+            ;;
         all)
             run_all_tests
             ;;
         *)
             log_error "Unknown test type: $TEST_TYPE"
-            echo "Available types: http, https, grpc, grpc-tls, websocket, auth, all"
+            echo "Available types: http, https, grpc, grpc-tls, websocket, auth, authz, all"
             exit 1
             ;;
     esac

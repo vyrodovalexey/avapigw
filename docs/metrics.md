@@ -16,9 +16,9 @@ The gateway exposes **130+ Prometheus metrics** across all components:
 
 ### Gateway Metrics (70+ metrics)
 - **Core Gateway**: Request processing, build info, uptime
-- **Middleware**: Rate limiting, circuit breaker, timeouts, retries, CORS
-- **Cache**: Memory and Redis cache performance
-- **Authentication**: JWT, API Key, OIDC, mTLS validation
+- **Middleware**: Rate limiting, circuit breaker, timeouts, retries, CORS, authentication, cache, transform, encoding
+- **Cache**: Memory and Redis cache performance with per-route isolation
+- **Authentication**: JWT, API Key, OIDC, mTLS validation (global middleware chain)
 - **Authorization**: RBAC, ABAC, external authorization
 - **TLS**: Handshakes, certificate lifecycle
 - **Vault**: API requests, authentication, secret retrieval
@@ -26,8 +26,10 @@ The gateway exposes **130+ Prometheus metrics** across all components:
 - **Proxy**: Backend communication, errors, duration
 - **WebSocket**: Connections, messages, errors
 - **gRPC**: Requests, streaming, method-level tracking
-- **Config Reload**: Hot reload operations
+- **Config Reload**: Hot reload operations with fixed timestamp metrics
 - **Health Check**: Backend health monitoring
+- **Transform**: Request/response transformation metrics
+- **Encoding**: Content negotiation and encoding metrics
 
 ### Operator Metrics (60+ metrics)
 - **Controller**: Reconciliation performance and errors
@@ -43,7 +45,8 @@ The gateway includes **4 comprehensive Grafana dashboards**:
 ### 1. Gateway Dashboard (`gateway-dashboard.json`)
 - **140+ panels** covering all gateway metrics
 - **Recent Updates**: 47 new panels added in latest refactoring
-- **Coverage**: Authentication, gRPC, config reload, cache, WebSocket, TLS, backend health
+- **Coverage**: Authentication, gRPC, config reload, cache, WebSocket, TLS, backend health, transform, encoding
+- **Fixed Issues**: Config reload timestamp query corrected for Grafana compatibility
 
 ### 2. Gateway Operator Dashboard (`gateway-operator-dashboard.json`)
 - **50+ panels** for operator monitoring
@@ -274,6 +277,74 @@ curl http://prometheus:9090/api/v1/targets
 - **Query Performance**: Optimized queries with appropriate time ranges
 - **Refresh Rates**: 30s for real-time, 5m for historical analysis
 - **Panel Limits**: Reasonable data point limits to prevent browser overload
+
+## Middleware Architecture Updates
+
+### Recent Metrics Fixes (Latest Release)
+
+Four critical metrics issues were resolved to improve observability:
+
+#### 1. Config Reload Timestamp Fix
+- **Issue**: Grafana dashboard query incompatibility with `SetToCurrentTime()` seconds vs milliseconds
+- **Solution**: Updated PromQL query to multiply by 1000 for millisecond conversion
+- **Impact**: Fixed config reload timestamp visualization in Grafana dashboards
+
+#### 2. Authentication Metrics Integration
+- **Issue**: Auth middleware not wired into global HTTP middleware chain
+- **Solution**: Created `internal/auth/config_converter.go` for config type conversion
+- **Impact**: Auth middleware now applied when `GatewaySpec.Authentication` is enabled
+- **Metrics**: Authentication success/failure rates now properly tracked
+
+#### 3. Cache Metrics Implementation
+- **Issue**: Cache middleware not integrated with per-route middleware chain
+- **Solution**: 
+  - Created `internal/middleware/cache.go` for HTTP cache middleware
+  - Created `internal/gateway/cache_factory.go` for per-route cache management
+  - Integrated via `RouteMiddlewareManager` with thread-safe lazy creation
+- **Features**: 10MB body limit, GET-only caching, Cache-Control header support
+- **Metrics**: Cache hits, misses, evictions, size, and duration tracking
+
+#### 4. Transform/Encoding Metrics Implementation
+- **Issue**: Transform and encoding operations not instrumented
+- **Solution**:
+  - Created `internal/middleware/transform.go` for request/response transformation
+  - Created `internal/middleware/encoding.go` for content negotiation
+  - Integrated into per-route middleware chain
+- **Features**: 10MB body limit for transforms, content type negotiation
+- **Metrics**: Transform operations and encoding negotiation tracking
+
+### Middleware Chain Architecture
+
+The gateway now implements a two-tier middleware architecture:
+
+#### Global Middleware Chain (cmd/gateway/middleware.go)
+```
+Recovery → RequestID → Logging → Tracing → Audit → Metrics → 
+CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
+```
+
+#### Per-Route Middleware Chain (internal/gateway/route_middleware.go)
+```
+Security Headers → CORS → Body Limit → Headers → Cache → 
+Transform → Encoding → [proxy to backend]
+```
+
+### RouteMiddlewareApplier Interface
+
+To avoid import cycles, the proxy uses the `RouteMiddlewareApplier` interface:
+
+```go
+type RouteMiddlewareApplier interface {
+    GetMiddleware(route *config.Route) []func(http.Handler) http.Handler
+    ApplyMiddleware(handler http.Handler, route *config.Route) http.Handler
+}
+```
+
+This pattern allows:
+- **Decoupled Architecture**: Proxy package independent of gateway package
+- **Per-Route Middleware**: Cache, transform, encoding applied per route
+- **Thread-Safe Caching**: Middleware chains cached with double-check locking
+- **Lazy Initialization**: Cache instances created on-demand per route
 
 ## Related Documentation
 

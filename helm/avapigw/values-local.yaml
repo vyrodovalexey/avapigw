@@ -8,12 +8,12 @@
 #   - HTTP listener: HTTPS on port 8443 via Vault PKI (TLS enabled)
 #   - gRPC listener: gRPC TLS on port 9443 via Vault PKI (TLS enabled)
 #   - Vault running in Docker Compose at http://host.docker.internal:8200
-#   - Vault Kubernetes auth with role "avapigw" bound to SA "avapigw"
+#   - Vault token auth with K8s secret "vault-token" in namespace avapigw-test
 #   - Vault PKI engine with role "test-role"
 #
 # Vault must be configured with:
 #   - PKI engine enabled with test-role (allows localhost, *.local, *.test, avapigw.local)
-#   - Kubernetes auth method with role avapigw bound to SA avapigw in namespace avapigw-test
+#   - Token stored in K8s secret "vault-token" (key: token) in namespace avapigw-test
 #   - Policy avapigw granting PKI issue, KV read, Transit operations
 #
 # Setup scripts:
@@ -93,6 +93,8 @@ gateway:
     tls: true
     tlsInsecure: true  # Use insecure TLS for local testing (skip CA verification)
 
+  # Listener configuration
+  # HTTP and gRPC listeners with Vault PKI TLS
   listeners:
     http:
       enabled: true
@@ -112,166 +114,47 @@ gateway:
       reflection: true
       healthCheck: true
 
-  routes:
-    - name: health-check
-      match:
-        - uri:
-            exact: /health
-          methods:
-            - GET
-      directResponse:
-        status: 200
-        body: '{"status":"healthy"}'
-        headers:
-          Content-Type: application/json
-
-    - name: items-api
-      match:
-        - uri:
-            prefix: /api/v1/items
-          methods:
-            - GET
-            - POST
-            - PUT
-            - DELETE
-      route:
-        - destination:
-            host: host.docker.internal
-            port: 8801
-          weight: 50
-        - destination:
-            host: host.docker.internal
-            port: 8802
-          weight: 50
-      timeout: 30s
-
-    - name: websocket
-      match:
-        - uri:
-            exact: /ws
-      route:
-        - destination:
-            host: host.docker.internal
-            port: 8801
-      timeout: 0s
-
-    - name: backend-health
-      match:
-        - uri:
-            prefix: /backend/health
-          methods:
-            - GET
-      rewrite:
-        uri: /health
-      route:
-        - destination:
-            host: host.docker.internal
-            port: 8801
-
-    - name: catch-all
-      match:
-        - uri:
-            prefix: /
-      route:
-        - destination:
-            host: host.docker.internal
-            port: 8801
-
-  backends:
-    - name: backend-service-1
-      hosts:
-        - address: host.docker.internal
-          port: 8801
-          weight: 1
-      healthCheck:
-        path: /health
-        interval: 10s
-        timeout: 5s
-        healthyThreshold: 2
-        unhealthyThreshold: 3
-      loadBalancer:
-        algorithm: roundRobin
-
-    - name: backend-service-2
-      hosts:
-        - address: host.docker.internal
-          port: 8802
-          weight: 1
-      healthCheck:
-        path: /health
-        interval: 10s
-        timeout: 5s
-        healthyThreshold: 2
-        unhealthyThreshold: 3
-      loadBalancer:
-        algorithm: roundRobin
-
-  grpcRoutes:
-    - name: test-service-route
-      match:
-        - service:
-            exact: api.v1.TestService
-      route:
-        - destination:
-            host: host.docker.internal
-            port: 8803
-          weight: 50
-        - destination:
-            host: host.docker.internal
-            port: 8804
-          weight: 50
-      timeout: 30s
-
-    - name: catch-all-grpc
-      match:
-        - service:
-            prefix: "/"
-      route:
-        - destination:
-            host: host.docker.internal
-            port: 8803
-
-  grpcBackends:
-    - name: grpc-backend-1
-      hosts:
-        - address: host.docker.internal
-          port: 8803
-          weight: 1
-      healthCheck:
+  # Cache configuration with Redis Sentinel
+  cache:
+    redis:
+      sentinel:
         enabled: true
-        service: ""
-        interval: 10s
-        timeout: 5s
-      connectionPool:
-        maxConnections: 100
-        connectTimeout: 5s
+        masterName: mymaster
+        addrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        password: password
+      poolSize: 20
+      minIdleConns: 5
 
-    - name: grpc-backend-2
-      hosts:
-        - address: host.docker.internal
-          port: 8804
-          weight: 1
-      healthCheck:
-        enabled: true
-        service: ""
-        interval: 10s
-        timeout: 5s
-      connectionPool:
-        maxConnections: 100
-        connectTimeout: 5s
+  # No inline routes - all config comes from CRDs via operator
+  routes: []
 
+  # No inline backends - all config comes from CRDs via operator
+  backends: []
+
+  # No inline gRPC routes - all config comes from CRDs via operator
+  grpcRoutes: []
+
+  # No inline gRPC backends - all config comes from CRDs via operator
+  grpcBackends: []
+
+  # Global rate limit defaults
   rateLimit:
     enabled: true
     requestsPerSecond: 100
     burst: 200
     perClient: true
 
+  # Global circuit breaker defaults
   circuitBreaker:
     enabled: true
     threshold: 5
     timeout: 30s
     halfOpenRequests: 3
 
+  # Security headers
   security:
     enabled: true
     headers:
@@ -282,6 +165,7 @@ gateway:
     hsts:
       enabled: false
 
+  # CORS configuration
   cors:
     allowOrigins:
       - "*"
@@ -296,11 +180,13 @@ gateway:
       - Content-Type
       - Authorization
       - X-Request-ID
+      - X-API-Key
     exposeHeaders:
       - X-Request-ID
     maxAge: 86400
     allowCredentials: false
 
+  # Audit logging
   audit:
     enabled: true
     output: stdout
@@ -325,6 +211,7 @@ gateway:
       - authorization
       - cookie
 
+  # Observability
   observability:
     metrics:
       enabled: true
@@ -339,24 +226,36 @@ gateway:
       level: info
       format: json
 
+# =============================================================================
+# Vault Configuration
+# =============================================================================
+# Vault PKI provides TLS certificates for HTTP and gRPC listeners.
+# Token auth is used for local testing.
+# The deployment template reads the token from K8s secret "<fullname>-vault" (key: token).
+# Ensure the secret "avapigw-vault" exists in namespace avapigw-test with the Vault token.
+# Create it with: kubectl create secret generic avapigw-vault --from-literal=token=myroot -n avapigw-test
 vault:
   enabled: true
   address: "http://host.docker.internal:8200"
-  authMethod: kubernetes
-  role: avapigw
+  authMethod: token
+  token: ""
   pki:
     enabled: true
     pkiMount: "pki"
     role: "test-role"
-    commonName: "avapigw.local"
+    commonName: "gateway.avapigw.local"
     altNames:
       - "localhost"
-      - "avapigw.local"
-      - "*.avapigw.local"
-    ttl: "24h"
+      - "host.docker.internal"
+    ttl: "720h"
     renewBefore: "1h"
     grpc:
       enabled: true
+      commonName: "grpc.avapigw.local"
+      altNames:
+        - "localhost"
+        - "host.docker.internal"
+      ttl: "720h"
 
 # =============================================================================
 # Operator Configuration for Local Testing
@@ -391,27 +290,18 @@ operator:
     retryPeriod: 2s
     resourceName: avapigw-operator-leader.avapigw.io
 
-  # gRPC server configuration - Vault PKI TLS with gateway
+  # gRPC server configuration - Self-signed TLS for local testing
+  # Note: Vault PKI mode requires Kubernetes auth which is not available in local Docker Desktop
   grpc:
     port: 9444
     requireClientCert: false
     tls:
-      mode: vault
-      vault:
-        pkiMount: pki
-        role: test-role
-        commonName: avapigw-operator.local
-        altNames:
-          - localhost
-          - avapigw-operator.local
-          - "*.avapigw-operator.local"
-        ttl: 24h
+      mode: selfsigned
+      selfsigned:
+        validity: 8760h
 
   # Webhook configuration - disabled for local testing.
   # Enable if you want to test webhook validation.
-  # NOTE: Webhook metrics (avapigw_operator_webhook_*) are only emitted
-  # when webhooks are enabled. Set enabled: true and configure cert-manager
-  # or use selfsigned TLS to see webhook validation metrics on /metrics.
   webhook:
     enabled: false
     port: 9443
@@ -420,12 +310,12 @@ operator:
       selfsigned:
         validity: 8760h
 
-  # Vault integration - enabled for Vault PKI certificate management
+  # Vault integration - disabled for local testing (using selfsigned certs)
+  # Note: Vault PKI mode requires Kubernetes auth which is not available in local Docker Desktop
   vault:
-    enabled: true
+    enabled: false
     address: "http://host.docker.internal:8200"
-    authMethod: kubernetes
-    role: avapigw
+    authMethod: token
     kubernetesMountPath: kubernetes
 
   # Metrics configuration
@@ -508,7 +398,6 @@ operator:
   affinity: {}
 
   # Ingress controller - disabled by default for local testing
-  # Enable to test Ingress-based route configuration
   ingressController:
     enabled: false
     className: avapigw

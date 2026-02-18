@@ -126,7 +126,16 @@ func stopCoreServices(ctx context.Context, app *application, logger observabilit
 		logger.Error("failed to stop gateway gracefully", observability.Error(err))
 	}
 
-	// Close Vault client after gateway stops (listeners may need certs during drain)
+	// Close cache factory before Vault client — caches may depend on Vault
+	// for credentials (e.g. Redis auth via Vault KV).
+	if app.cacheFactory != nil {
+		logger.Info("closing cache factory")
+		if err := app.cacheFactory.Close(); err != nil {
+			logger.Error("failed to close cache factory", observability.Error(err))
+		}
+	}
+
+	// Close Vault client after gateway and caches stop (listeners may need certs during drain)
 	if app.vaultClient != nil {
 		logger.Info("closing vault client")
 		if err := app.vaultClient.Close(); err != nil {

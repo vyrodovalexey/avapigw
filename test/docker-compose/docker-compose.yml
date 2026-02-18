@@ -1,6 +1,41 @@
 version: '3.6'
 
+# =============================================================================
+# avapigw Test Environment
+# =============================================================================
+# Port allocation:
+#   8200       - Vault (dev mode, root token: myroot)
+#   8090/8091  - Keycloak (admin/admin)
+#   8801       - REST API 1 (no auth)          - /health, /api/v1/items, /ws
+#   8802       - REST API 2 (no auth)          - /health, /api/v1/items, /ws
+#   8803       - REST API 3 (OIDC auth)        - validates JWT from Keycloak
+#   8804       - REST API 4 (mTLS auth)        - requires client certs from Vault PKI
+#   8805       - REST API 5 (basic auth)       - HTTP Basic authentication
+#   8811/9091  - gRPC 1 (no auth)              - Unary, ServerStream, BidiStream
+#   8812/9092  - gRPC 2 (no auth)              - Unary, ServerStream, BidiStream
+#   8813/9093  - gRPC 3 (mTLS auth)            - requires client certs from Vault PKI
+#   8814/9094  - gRPC 4 (OIDC auth)            - validates JWT from Keycloak
+#   6379       - Redis standalone
+#   6380       - Redis master (sentinel)
+#   26379-26381 - Redis sentinels
+#   3200       - Tempo HTTP API
+#   4317/4318  - OTLP receivers
+#   8428       - VictoriaMetrics
+#   3000       - Grafana
+#
+# Setup order:
+#   1. docker compose up -d
+#   2. Wait for Vault and Keycloak to be ready
+#   3. Run scripts/setup-vault.sh   (configures PKI, issues certs)
+#   4. Run scripts/setup-keycloak.sh (creates realm, clients for service-to-service)
+#   5. Restart mTLS/OIDC backends:
+#      docker compose restart rest_api_3 rest_api_4 grpc_3 grpc_4
+# =============================================================================
+
 services:
+  # ===========================================================================
+  # Vault - PKI for mTLS certificates
+  # ===========================================================================
   vault:
     image: hashicorp/vault:1.17
     container_name: vault
@@ -13,38 +48,184 @@ services:
       - IPC_LOCK
     ports:
       - 8200:8200
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
+  # ===========================================================================
+  # REST API backends (ghcr.io/vyrodovalexey/restapi-example)
+  # Endpoints: /health, /ready, /metrics, /api/v1/items, /ws (WebSocket)
+  # Probe port: 9090 (/health, /ready, /metrics without auth)
+  # ===========================================================================
 
+  # REST backend 1 - no authentication
   rest_api_1:
-    image: ghcr.io/vyrodovalexey/restapi-example:e9416f5
+    image: ghcr.io/vyrodovalexey/restapi-example:41b1a46
     container_name: rest_api_1
+    environment:
+      APP_AUTH_MODE: none
+      APP_LOG_LEVEL: info
     ports:
       - 8801:8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
+  # REST backend 2 - no authentication (for load balancing tests)
   rest_api_2:
-    image: ghcr.io/vyrodovalexey/restapi-example:e9416f5
+    image: ghcr.io/vyrodovalexey/restapi-example:41b1a46
     container_name: rest_api_2
+    environment:
+      APP_AUTH_MODE: none
+      APP_LOG_LEVEL: info
     ports:
       - 8802:8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
-  grpc_1:
-    image: ghcr.io/vyrodovalexey/grpc-example:21f4570
-    container_name: grpc_1
+  # REST backend 3 - OIDC authentication (service-to-service)
+  # Validates JWT tokens issued by Keycloak realm "backend-test"
+  # Gateway must obtain a token via client_credentials grant and pass it as Bearer
+  rest_api_3:
+    image: ghcr.io/vyrodovalexey/restapi-example:41b1a46
+    container_name: rest_api_3
     environment:
-      GRPC_PORT: 8080
-      LOG_LEVEL: debug
+      APP_AUTH_MODE: oidc
+      APP_LOG_LEVEL: debug
+      APP_OIDC_ISSUER_URL: http://host.docker.internal:8090/realms/backend-test
+      APP_OIDC_CLIENT_ID: restapi-server
+    depends_on:
+      keycloak_web:
+        condition: service_healthy
     ports:
       - 8803:8080
 
-  grpc_2:
-    image: ghcr.io/vyrodovalexey/grpc-example:21f4570
-    container_name: grpc_2
+  # REST backend 4 - mTLS authentication
+  # Requires client certificates signed by Vault PKI CA
+  # Certs are provisioned by scripts/setup-vault.sh into shared volume
+  rest_api_4:
+    image: ghcr.io/vyrodovalexey/restapi-example:41b1a46
+    container_name: rest_api_4
     environment:
-      GRPC_PORT: 8080
-      LOG_LEVEL: debug
+      APP_AUTH_MODE: mtls
+      APP_LOG_LEVEL: debug
+      APP_TLS_ENABLED: "true"
+      APP_TLS_CERT_PATH: /certs/rest-server.crt
+      APP_TLS_KEY_PATH: /certs/rest-server.key
+      APP_TLS_CA_PATH: /certs/ca.crt
+      APP_TLS_CLIENT_AUTH: require
+    volumes:
+      - mtls_certs:/certs:ro
     ports:
       - 8804:8080
 
+  # REST backend 5 - basic authentication
+  rest_api_5:
+    image: ghcr.io/vyrodovalexey/restapi-example:41b1a46
+    container_name: rest_api_5
+    environment:
+      APP_AUTH_MODE: basic
+      APP_LOG_LEVEL: info
+      APP_BASIC_AUTH_USERS: "backend-user:$$2y$$05$$7RhNcAD91bWQvRscIZp3E.v9KYFyIT3FV7sBKCVm6Mk3cEQca0AHO"
+    ports:
+      - 8805:8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ===========================================================================
+  # gRPC backends (ghcr.io/vyrodovalexey/grpc-example)
+  # Endpoints: Unary, ServerStream, BidirectionalStream
+  # Metrics/health port: 9090 (/healthz, /metrics)
+  # ===========================================================================
+
+  # gRPC backend 1 - no authentication
+  # NOTE: grpc-example uses a distroless image (no shell/wget/curl),
+  # so in-container healthchecks are not possible. Health is verified
+  # externally via the metrics port 9090 (/healthz).
+  grpc_1:
+    image: ghcr.io/vyrodovalexey/grpc-example:e6f4e61
+    container_name: grpc_1
+    environment:
+      GRPC_PORT: 8080
+      METRICS_PORT: 9090
+      LOG_LEVEL: info
+      AUTH_MODE: none
+    ports:
+      - 8811:8080
+      - 9091:9090
+
+  # gRPC backend 2 - no authentication (for load balancing tests)
+  grpc_2:
+    image: ghcr.io/vyrodovalexey/grpc-example:e6f4e61
+    container_name: grpc_2
+    environment:
+      GRPC_PORT: 8080
+      METRICS_PORT: 9090
+      LOG_LEVEL: info
+      AUTH_MODE: none
+    ports:
+      - 8812:8080
+      - 9092:9090
+
+  # gRPC backend 3 - mTLS authentication
+  # Requires client certificates signed by Vault PKI CA
+  grpc_3:
+    image: ghcr.io/vyrodovalexey/grpc-example:e6f4e61
+    container_name: grpc_3
+    environment:
+      GRPC_PORT: 8080
+      METRICS_PORT: 9090
+      LOG_LEVEL: debug
+      AUTH_MODE: mtls
+      TLS_ENABLED: "true"
+      TLS_MODE: mtls
+      TLS_CERT_PATH: /certs/grpc-server.crt
+      TLS_KEY_PATH: /certs/grpc-server.key
+      TLS_CA_PATH: /certs/ca.crt
+      TLS_CLIENT_AUTH: require
+    volumes:
+      - mtls_certs:/certs:ro
+    ports:
+      - 8813:8080
+      - 9093:9090
+
+  # gRPC backend 4 - OIDC authentication (service-to-service)
+  # Validates JWT tokens issued by Keycloak realm "backend-test"
+  grpc_4:
+    image: ghcr.io/vyrodovalexey/grpc-example:e6f4e61
+    container_name: grpc_4
+    environment:
+      GRPC_PORT: 8080
+      METRICS_PORT: 9090
+      LOG_LEVEL: debug
+      AUTH_MODE: oidc
+      OIDC_ENABLED: "true"
+      OIDC_ISSUER_URL: http://host.docker.internal:8090/realms/backend-test
+      OIDC_CLIENT_ID: grpc-server
+    depends_on:
+      keycloak_web:
+        condition: service_healthy
+    ports:
+      - 8814:8080
+      - 9094:9090
+
+  # ===========================================================================
+  # Redis
+  # ===========================================================================
   redis:
     image: bitnami/redis:latest
     container_name: redis
@@ -139,6 +320,9 @@ services:
     ports:
       - 26381:26379
 
+  # ===========================================================================
+  # Keycloak - OIDC provider for authentication testing
+  # ===========================================================================
   keycloak_web:
     image: quay.io/keycloak/keycloak:26.5
     container_name: keycloak_web
@@ -152,6 +336,7 @@ services:
       KC_HOSTNAME_STRICT: false
       KC_HOSTNAME_STRICT_HTTPS: false
       KC_HTTP_ENABLED: true
+      KC_PROXY_HEADERS: xforwarded
       KC_FEATURES: token-exchange,admin-fine-grained-authz
       KC_SPI_REALM_DEFAULT_SSL_REQUIRED: none
 
@@ -162,20 +347,37 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: admin
     command: start-dev
     depends_on:
-      - keycloakdb
+      keycloakdb:
+        condition: service_healthy
     ports:
       - 8090:8090
       - 8091:9000
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   keycloakdb:
     image: postgres:16
+    container_name: keycloakdb
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
       POSTGRES_PASSWORD: password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
+  # ===========================================================================
+  # Observability stack
+  # ===========================================================================
   tempo:
     image: grafana/tempo:2.7.1
     container_name: tempo
@@ -229,3 +431,4 @@ volumes:
   victoriametrics_data:
   grafana_data:
   tempo_data:
+  mtls_certs:

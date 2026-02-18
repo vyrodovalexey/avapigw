@@ -178,7 +178,7 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8803
+      port: 8811
       weight: 1
   healthCheck:
     enabled: true
@@ -194,7 +194,7 @@ spec:
     idleConnTimeout: 5m
 
 ---
-# perf-grpc-backend-2: Secondary gRPC backend
+# perf-grpc-backend-2: Secondary gRPC backend on port 8812 (no auth)
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCBackend
 metadata:
@@ -206,7 +206,7 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8804
+      port: 8812
       weight: 1
   healthCheck:
     enabled: true
@@ -222,7 +222,7 @@ spec:
     idleConnTimeout: 5m
 
 ---
-# perf-grpc-auth-backend: gRPC backend with Keycloak JWT
+# perf-grpc-auth-backend: gRPC backend with Keycloak JWT (load balanced across noauth gRPC backends)
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCBackend
 metadata:
@@ -234,10 +234,10 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8803
+      port: 8811
       weight: 50
     - address: host.docker.internal
-      port: 8804
+      port: 8812
       weight: 50
   healthCheck:
     enabled: true
@@ -279,10 +279,10 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8803
+      port: 8811
       weight: 50
     - address: host.docker.internal
-      port: 8804
+      port: 8812
       weight: 50
   healthCheck:
     enabled: true
@@ -420,15 +420,17 @@ spec:
         host: host.docker.internal
         port: 8801
       weight: 100
+  rewrite:
+    uri: /api/v1/items
   timeout: 30s
   authentication:
     enabled: true
     jwt:
       enabled: true
-      issuer: http://host.docker.internal:8090/realms/gateway-test
+      issuer: http://localhost:8090/realms/gateway-test
       jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
       audience:
-        - gateway
+        - account
 
 ---
 # perf-basic-auth-route: Basic authentication
@@ -627,6 +629,33 @@ spec:
         - localhost
       ttl: 24h
 
+---
+# perf-encoding-route: Encoding content negotiation performance
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-encoding-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/perf/encoding/
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  encoding:
+    request:
+      contentType: application/json
+    response:
+      contentType: application/json
+
 # =============================================================================
 # gRPC Routes (GRPCRoute CRDs)
 # =============================================================================
@@ -651,11 +680,11 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 50
     - destination:
         host: host.docker.internal
-        port: 8804
+        port: 8812
       weight: 50
   timeout: 30s
   rateLimit:
@@ -681,7 +710,7 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 100
   timeout: 30s
   maxSessions:
@@ -710,18 +739,18 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 50
     - destination:
         host: host.docker.internal
-        port: 8804
+        port: 8812
       weight: 50
   timeout: 30s
   authentication:
     enabled: true
     jwt:
       enabled: true
-      issuer: http://host.docker.internal:8090/realms/gateway-test
+      issuer: http://localhost:8090/realms/gateway-test
       jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
 
 ---
@@ -742,7 +771,7 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 100
   timeout: 30s
   authentication:
@@ -770,11 +799,11 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 50
     - destination:
         host: host.docker.internal
-        port: 8804
+        port: 8812
       weight: 50
   timeout: 30s
   tls:
@@ -786,6 +815,134 @@ spec:
       altNames:
         - localhost
       ttl: 24h
+
+---
+# perf-rbac-authz-route: RBAC authorization with JWT authentication
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-rbac-authz-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: http-route
+    feature: authz-rbac
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/perf/rbac
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+      claimMapping:
+        roles: realm_access.roles
+        email: email
+        name: preferred_username
+  authorization:
+    enabled: true
+    defaultPolicy: deny
+    rbac:
+      enabled: true
+      policies:
+        - name: realm-user-read
+          roles:
+            - offline_access
+          resources:
+            - /api/v1/*
+          actions:
+            - GET
+          effect: allow
+          priority: 10
+        - name: realm-user-write
+          roles:
+            - uma_authorization
+          resources:
+            - /api/v1/*
+          actions:
+            - POST
+            - PUT
+            - DELETE
+          effect: allow
+          priority: 5
+
+---
+# perf-abac-authz-route: ABAC authorization with JWT authentication
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-abac-authz-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: http-route
+    feature: authz-abac
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/perf/abac
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+      claimMapping:
+        roles: realm_access.roles
+        email: email
+        name: preferred_username
+  authorization:
+    enabled: true
+    defaultPolicy: deny
+    abac:
+      enabled: true
+      policies:
+        - name: authenticated-read
+          expression: 'subject.roles.exists(r, r == "offline_access") && action == "GET"'
+          resources:
+            - /api/v1/*
+          actions:
+            - GET
+          effect: allow
+          priority: 10
+        - name: authorized-write
+          expression: 'subject.roles.exists(r, r == "uma_authorization") && action in ["POST", "PUT", "DELETE"]'
+          resources:
+            - /api/v1/*
+          actions:
+            - POST
+            - PUT
+            - DELETE
+          effect: allow
+          priority: 5
 
 ---
 # perf-grpc-transform-route: Data transformation for gRPC
@@ -805,7 +962,7 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 100
   timeout: 30s
   transform:

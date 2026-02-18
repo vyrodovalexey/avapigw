@@ -10,7 +10,7 @@
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations \u0026 Alerts",
+        "name": "Annotations & Alerts",
         "type": "dashboard"
       }
     ]
@@ -1672,7 +1672,7 @@
       },
       "id": 27,
       "panels": [],
-      "title": "HTTP \u0026 WS",
+      "title": "HTTP & WS",
       "type": "row"
     },
     {
@@ -4158,7 +4158,7 @@
           },
           "editorMode": "code",
           "expr": "sum by (name, from, to) (rate(gateway_middleware_circuit_breaker_transitions_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{name}}: {{from}}→{{to}}",
+          "legendFormat": "{{name}}: {{from}}\u2192{{to}}",
           "range": true,
           "refId": "A"
         }
@@ -4364,7 +4364,7 @@
           "refId": "B"
         }
       ],
-      "title": "Retry Attempts \u0026 Success",
+      "title": "Retry Attempts & Success",
       "type": "timeseries"
     },
     {
@@ -4470,7 +4470,7 @@
           "refId": "B"
         }
       ],
-      "title": "Body Limit \u0026 Max Sessions Rejected",
+      "title": "Body Limit & Max Sessions Rejected",
       "type": "timeseries"
     },
     {
@@ -4587,7 +4587,7 @@
           "refId": "C"
         }
       ],
-      "title": "Max Sessions \u0026 Panics \u0026 CORS",
+      "title": "Max Sessions & Panics & CORS",
       "type": "timeseries"
     },
     {
@@ -6380,7 +6380,7 @@
           },
           "editorMode": "code",
           "expr": "sum by (method, backend) (rate(gateway_grpc_proxy_backend_selections_total{instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "{{method}} → {{backend}}",
+          "legendFormat": "{{method}} \u2192 {{backend}}",
           "range": true,
           "refId": "A"
         }
@@ -6484,12 +6484,437 @@
       "type": "timeseries"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 180
+      },
+      "id": 300,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "description": "Rate of authorization evaluations by engine and result",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 181
+          },
+          "id": 301,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "victoriametrics"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(gateway_authz_evaluation_total{instance=~\"$instance\"}[5m])) by (engine, result)",
+              "legendFormat": "{{engine}} - {{result}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Authorization Evaluation Rate",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "description": "Distribution of authorization decisions (allowed vs denied)",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 181
+          },
+          "id": 302,
+          "options": {
+            "displayLabels": [
+              "name",
+              "percent"
+            ],
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "values": [
+                "value",
+                "percent"
+              ]
+            },
+            "pieType": "pie",
+            "reduceOptions": {
+              "calcs": [
+                "sum"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "victoriametrics"
+              },
+              "editorMode": "code",
+              "expr": "sum(increase(gateway_authz_decision_total{instance=~\"$instance\"}[5m])) by (decision)",
+              "legendFormat": "{{decision}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Authorization Decisions",
+          "type": "piechart"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "description": "Authorization evaluation latency percentiles",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 189
+          },
+          "id": 303,
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "victoriametrics"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(gateway_authz_evaluation_duration_seconds_bucket{instance=~\"$instance\"}[5m])) by (le, engine))",
+              "legendFormat": "p99 - {{engine}}",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "victoriametrics"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.50, sum(rate(gateway_authz_evaluation_duration_seconds_bucket{instance=~\"$instance\"}[5m])) by (le, engine))",
+              "legendFormat": "p50 - {{engine}}",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Authorization Evaluation Latency",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "description": "Authorization decision cache hit ratio",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.5
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.8
+                  }
+                ]
+              },
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 12,
+            "y": 189
+          },
+          "id": 304,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "victoriametrics"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(gateway_authz_cache_hits_total{instance=~\"$instance\"}[5m])) / (sum(rate(gateway_authz_cache_hits_total{instance=~\"$instance\"}[5m])) + sum(rate(gateway_authz_cache_misses_total{instance=~\"$instance\"}[5m])))",
+              "legendFormat": "Cache Hit Ratio",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Authz Cache Hit Ratio",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "description": "Number of loaded authorization policies by engine",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 18,
+            "y": 189
+          },
+          "id": 305,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "victoriametrics"
+              },
+              "editorMode": "code",
+              "expr": "sum(gateway_authz_policy_count{instance=~\"$instance\"}) by (engine)",
+              "legendFormat": "{{engine}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Loaded Policies",
+          "type": "stat"
+        }
+      ],
+      "title": "Authorization",
+      "type": "row"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 181
       },
       "id": 79,
       "panels": [],
@@ -6557,7 +6982,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 181
+        "y": 182
       },
       "id": 80,
       "options": {
@@ -6663,7 +7088,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 181
+        "y": 182
       },
       "id": 81,
       "options": {
@@ -6758,7 +7183,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 181
+        "y": 182
       },
       "id": 82,
       "options": {
@@ -6853,7 +7278,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 189
+        "y": 190
       },
       "id": 84,
       "options": {
@@ -6893,11 +7318,11 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 197
+        "y": 198
       },
       "id": 85,
       "panels": [],
-      "title": "Encoding \u0026 Transformation",
+      "title": "Encoding & Transformation",
       "type": "row"
     },
     {
@@ -6961,7 +7386,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 198
+        "y": 199
       },
       "id": 86,
       "options": {
@@ -7056,7 +7481,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 198
+        "y": 199
       },
       "id": 87,
       "options": {
@@ -7151,7 +7576,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 198
+        "y": 199
       },
       "id": 88,
       "options": {
@@ -7246,7 +7671,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 206
+        "y": 207
       },
       "id": 89,
       "options": {
@@ -7341,7 +7766,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 206
+        "y": 207
       },
       "id": 90,
       "options": {
@@ -7436,7 +7861,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 214
+        "y": 215
       },
       "id": 92,
       "options": {
@@ -7476,7 +7901,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 222
+        "y": 223
       },
       "id": 93,
       "panels": [],
@@ -7544,7 +7969,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 223
+        "y": 224
       },
       "id": 94,
       "options": {
@@ -7639,7 +8064,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 223
+        "y": 224
       },
       "id": 95,
       "options": {
@@ -7745,7 +8170,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 231
+        "y": 232
       },
       "id": 97,
       "options": {
@@ -7851,7 +8276,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 231
+        "y": 232
       },
       "id": 98,
       "options": {
@@ -7946,7 +8371,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 239
+        "y": 240
       },
       "id": 100,
       "options": {
@@ -8041,7 +8466,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 239
+        "y": 240
       },
       "id": 102,
       "options": {
@@ -8147,7 +8572,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 247
+        "y": 248
       },
       "id": 103,
       "options": {
@@ -8242,7 +8667,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 247
+        "y": 248
       },
       "id": 104,
       "options": {
@@ -8337,7 +8762,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 255
+        "y": 256
       },
       "id": 106,
       "options": {
@@ -8443,7 +8868,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 255
+        "y": 256
       },
       "id": 107,
       "options": {
@@ -8549,7 +8974,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 263
+        "y": 264
       },
       "id": 109,
       "options": {
@@ -8644,7 +9069,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 263
+        "y": 264
       },
       "id": 110,
       "options": {
@@ -8739,7 +9164,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 263
+        "y": 264
       },
       "id": 111,
       "options": {
@@ -8781,7 +9206,7 @@
           "refId": "B"
         }
       ],
-      "title": "OIDC Introspection \u0026 UserInfo",
+      "title": "OIDC Introspection & UserInfo",
       "type": "timeseries"
     },
     {
@@ -8845,7 +9270,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 271
+        "y": 272
       },
       "id": 112,
       "options": {
@@ -8940,7 +9365,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 271
+        "y": 272
       },
       "id": 113,
       "options": {
@@ -9035,7 +9460,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 271
+        "y": 272
       },
       "id": 114,
       "options": {
@@ -9130,7 +9555,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 279
+        "y": 280
       },
       "id": 115,
       "options": {
@@ -9225,7 +9650,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 279
+        "y": 280
       },
       "id": 116,
       "options": {
@@ -9276,7 +9701,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 287
+        "y": 288
       },
       "id": 118,
       "panels": [],
@@ -9344,7 +9769,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 288
+        "y": 289
       },
       "id": 119,
       "options": {
@@ -9407,7 +9832,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 296
+        "y": 297
       },
       "id": 122,
       "options": {
@@ -9503,7 +9928,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 296
+        "y": 297
       },
       "id": 123,
       "options": {
@@ -9598,7 +10023,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 296
+        "y": 297
       },
       "id": 124,
       "options": {
@@ -9704,7 +10129,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 304
+        "y": 305
       },
       "id": 125,
       "options": {
@@ -9799,7 +10224,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 304
+        "y": 305
       },
       "id": 126,
       "options": {
@@ -9862,7 +10287,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 312
+        "y": 313
       },
       "id": 128,
       "options": {
@@ -9958,7 +10383,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 312
+        "y": 313
       },
       "id": 129,
       "options": {
@@ -10021,7 +10446,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 320
+        "y": 321
       },
       "id": 131,
       "options": {
@@ -10117,7 +10542,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 320
+        "y": 321
       },
       "id": 132,
       "options": {
@@ -10212,7 +10637,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 320
+        "y": 321
       },
       "id": 133,
       "options": {
@@ -10276,7 +10701,7 @@
           "refId": "D"
         }
       ],
-      "title": "External AuthZ Errors \u0026 Cache",
+      "title": "External AuthZ Errors & Cache",
       "type": "timeseries"
     },
     {
@@ -10340,7 +10765,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 328
+        "y": 329
       },
       "id": 134,
       "options": {
@@ -10435,7 +10860,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 328
+        "y": 329
       },
       "id": 135,
       "options": {
@@ -10530,7 +10955,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 328
+        "y": 329
       },
       "id": 136,
       "options": {
@@ -10625,7 +11050,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 336
+        "y": 337
       },
       "id": 137,
       "options": {
@@ -10665,7 +11090,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 344
+        "y": 345
       },
       "id": 138,
       "panels": [],
@@ -10733,7 +11158,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 345
+        "y": 346
       },
       "id": 139,
       "options": {
@@ -10796,7 +11221,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 345
+        "y": 346
       },
       "id": 141,
       "options": {
@@ -10822,7 +11247,7 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "gateway_config_reload_last_success_timestamp{instance=~\"$instance\"}",
+          "expr": "gateway_config_reload_last_success_timestamp{instance=~\"$instance\"} * 1000",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
@@ -10892,7 +11317,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 353
+        "y": 354
       },
       "id": 142,
       "options": {
@@ -10955,7 +11380,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 353
+        "y": 354
       },
       "id": 143,
       "options": {
@@ -10996,7 +11421,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 361
+        "y": 362
       },
       "id": 144,
       "panels": [],
@@ -11064,7 +11489,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 362
+        "y": 363
       },
       "id": 145,
       "options": {
@@ -11104,7 +11529,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 370
+        "y": 371
       },
       "id": 146,
       "panels": [],
@@ -11140,7 +11565,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 371
+        "y": 372
       },
       "id": 147,
       "options": {
@@ -11236,7 +11661,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 371
+        "y": 372
       },
       "id": 148,
       "options": {
@@ -11331,7 +11756,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 379
+        "y": 380
       },
       "id": 150,
       "options": {
@@ -11384,7 +11809,7 @@
           "refId": "C"
         }
       ],
-      "title": "Stream Errors \u0026 Reconnects",
+      "title": "Stream Errors & Reconnects",
       "type": "timeseries"
     },
     {
@@ -11416,7 +11841,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 379
+        "y": 380
       },
       "id": 151,
       "options": {
@@ -11480,7 +11905,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 379
+        "y": 380
       },
       "id": 152,
       "options": {
@@ -11506,7 +11931,7 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "gateway_operator_client_last_config_timestamp_seconds{instance=~\"$instance\"}",
+          "expr": "gateway_operator_client_last_config_timestamp_seconds{instance=~\"$instance\"} * 1000",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
@@ -11521,7 +11946,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 387
+        "y": 388
       },
       "id": 154,
       "panels": [],
@@ -11557,7 +11982,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 388
+        "y": 389
       },
       "id": 155,
       "options": {
@@ -11642,7 +12067,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 388
+        "y": 389
       },
       "id": 156,
       "options": {
@@ -11738,7 +12163,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 392
+        "y": 393
       },
       "id": 157,
       "options": {
@@ -11841,7 +12266,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 392
+        "y": 393
       },
       "id": 158,
       "options": {
@@ -11982,7 +12407,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 392
+        "y": 393
       },
       "id": 159,
       "options": {
@@ -12109,7 +12534,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 400
+        "y": 401
       },
       "id": 160,
       "options": {
@@ -12212,7 +12637,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 400
+        "y": 401
       },
       "id": 161,
       "options": {
@@ -12307,7 +12732,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 400
+        "y": 401
       },
       "id": 162,
       "options": {
@@ -12402,7 +12827,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 408
+        "y": 409
       },
       "id": 163,
       "options": {
@@ -12497,7 +12922,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 408
+        "y": 409
       },
       "id": 164,
       "options": {
@@ -12592,7 +13017,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 408
+        "y": 409
       },
       "id": 165,
       "options": {
@@ -12687,7 +13112,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 416
+        "y": 417
       },
       "id": 166,
       "options": {
@@ -12790,7 +13215,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 416
+        "y": 417
       },
       "id": 167,
       "options": {
@@ -12830,7 +13255,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 424
+        "y": 425
       },
       "id": 168,
       "panels": [],
@@ -12898,7 +13323,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 425
+        "y": 426
       },
       "id": 169,
       "options": {
@@ -12993,7 +13418,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 425
+        "y": 426
       },
       "id": 170,
       "options": {
@@ -13033,7 +13458,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 433
+        "y": 434
       },
       "id": 171,
       "panels": [],
@@ -13101,7 +13526,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 434
+        "y": 435
       },
       "id": 172,
       "options": {
@@ -13164,7 +13589,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 434
+        "y": 435
       },
       "id": 174,
       "options": {
@@ -13260,7 +13685,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 442
+        "y": 443
       },
       "id": 175,
       "options": {
@@ -13355,7 +13780,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 442
+        "y": 443
       },
       "id": 176,
       "options": {
@@ -13450,7 +13875,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 450
+        "y": 451
       },
       "id": 178,
       "options": {
@@ -13490,7 +13915,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 458
+        "y": 459
       },
       "id": 179,
       "panels": [],
@@ -13558,7 +13983,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 459
+        "y": 460
       },
       "id": 180,
       "options": {
@@ -13653,7 +14078,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 459
+        "y": 460
       },
       "id": 182,
       "options": {
@@ -13748,7 +14173,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 467
+        "y": 468
       },
       "id": 183,
       "options": {
@@ -13843,7 +14268,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 467
+        "y": 468
       },
       "id": 185,
       "options": {
@@ -13949,7 +14374,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 475
+        "y": 476
       },
       "id": 186,
       "options": {
@@ -14012,7 +14437,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 475
+        "y": 476
       },
       "id": 188,
       "options": {
@@ -14038,7 +14463,7 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "avapigw_operator_webhook_last_ca_injection_timestamp{instance=~\"$operator_instance\"}",
+          "expr": "avapigw_operator_webhook_last_ca_injection_timestamp{instance=~\"$operator_instance\"} * 1000",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
@@ -14053,7 +14478,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 483
+        "y": 484
       },
       "id": 189,
       "panels": [],
@@ -14121,7 +14546,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 484
+        "y": 485
       },
       "id": 190,
       "options": {
@@ -14238,7 +14663,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 484
+        "y": 485
       },
       "id": 191,
       "options": {
@@ -14333,7 +14758,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 484
+        "y": 485
       },
       "id": 192,
       "options": {
@@ -14428,7 +14853,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 492
+        "y": 493
       },
       "id": 193,
       "options": {
@@ -14523,7 +14948,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 492
+        "y": 493
       },
       "id": 194,
       "options": {
@@ -14618,7 +15043,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 492
+        "y": 493
       },
       "id": 195,
       "options": {
@@ -14713,7 +15138,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 500
+        "y": 501
       },
       "id": 197,
       "options": {
@@ -14808,7 +15233,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 500
+        "y": 501
       },
       "id": 198,
       "options": {
@@ -14848,7 +15273,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 508
+        "y": 509
       },
       "id": 199,
       "panels": [],
@@ -14916,7 +15341,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 509
+        "y": 510
       },
       "id": 200,
       "options": {
@@ -15011,7 +15436,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 509
+        "y": 510
       },
       "id": 202,
       "options": {
@@ -15106,7 +15531,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 517
+        "y": 518
       },
       "id": 203,
       "options": {
@@ -15212,7 +15637,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 517
+        "y": 518
       },
       "id": 204,
       "options": {
@@ -15307,7 +15732,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 517
+        "y": 518
       },
       "id": 205,
       "options": {
@@ -15402,7 +15827,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 525
+        "y": 526
       },
       "id": 206,
       "options": {
@@ -15497,7 +15922,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 525
+        "y": 526
       },
       "id": 207,
       "options": {
@@ -15592,7 +16017,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 525
+        "y": 526
       },
       "id": 208,
       "options": {
@@ -15687,7 +16112,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 533
+        "y": 534
       },
       "id": 209,
       "options": {
@@ -15782,7 +16207,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 533
+        "y": 534
       },
       "id": 210,
       "options": {
@@ -15822,7 +16247,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 541
+        "y": 542
       },
       "id": 211,
       "panels": [],
@@ -15890,7 +16315,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 542
+        "y": 543
       },
       "id": 212,
       "options": {
@@ -16016,7 +16441,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 542
+        "y": 543
       },
       "id": 213,
       "options": {
@@ -16122,7 +16547,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 542
+        "y": 543
       },
       "id": 214,
       "options": {
@@ -16217,7 +16642,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 550
+        "y": 551
       },
       "id": 215,
       "options": {
@@ -16323,7 +16748,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 550
+        "y": 551
       },
       "id": 216,
       "options": {
@@ -16418,7 +16843,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 550
+        "y": 551
       },
       "id": 217,
       "options": {
@@ -16513,7 +16938,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 558
+        "y": 559
       },
       "id": 218,
       "options": {
@@ -16608,7 +17033,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 558
+        "y": 559
       },
       "id": 219,
       "options": {
@@ -16714,7 +17139,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 558
+        "y": 559
       },
       "id": 220,
       "options": {
@@ -16754,7 +17179,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 566
+        "y": 567
       },
       "id": 221,
       "panels": [],
@@ -16822,7 +17247,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 567
+        "y": 568
       },
       "id": 222,
       "options": {
@@ -16917,7 +17342,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 567
+        "y": 568
       },
       "id": 223,
       "options": {
@@ -17012,7 +17437,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 567
+        "y": 568
       },
       "id": 224,
       "options": {
@@ -17107,7 +17532,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 575
+        "y": 576
       },
       "id": 225,
       "options": {
@@ -17202,7 +17627,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 575
+        "y": 576
       },
       "id": 226,
       "options": {
@@ -17297,7 +17722,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 575
+        "y": 576
       },
       "id": 227,
       "options": {
@@ -17392,7 +17817,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 583
+        "y": 584
       },
       "id": 228,
       "options": {
@@ -17487,7 +17912,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 583
+        "y": 584
       },
       "id": 229,
       "options": {
@@ -17582,7 +18007,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 583
+        "y": 584
       },
       "id": 230,
       "options": {
@@ -17707,7 +18132,7 @@
     ]
   },
   "timezone": "browser",
-  "title": "avapigw - Gateway \u0026 Operator (K8s)",
+  "title": "avapigw - Gateway & Operator (K8s)",
   "uid": "avapigw-gateway-operator",
   "version": 1,
   "weekStart": ""

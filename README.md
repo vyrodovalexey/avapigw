@@ -43,6 +43,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Open Redirect Protection** - Automatic validation and blocking of unsafe redirect URLs (javascript:, data:, vbscript: schemes)
 
 ### Authentication & Authorization
+- **Global Authentication Middleware** - Applied to all requests in the global middleware chain
 - **JWT Authentication** - Multiple algorithms (RS256, ES256, HS256, etc.) with JWK URL support
 - **API Key Authentication** - Header/query/metadata extraction with hashing and rate limiting
 - **mTLS Authentication** - Client certificate validation with identity extraction
@@ -51,7 +52,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **ABAC Authorization** - Attribute-based with CEL expressions
 - **External Authorization** - OPA integration for complex policies
 - **Policy Caching** - Configurable TTL for authorization decisions
-- **Security Headers** - HSTS, CSP, X-Frame-Options, and more
+- **Security Headers** - HSTS, CSP, X-Frame-Options, and more (per-route middleware)
 - **Audit Logging** - Comprehensive authentication and authorization logging with stdout as default output
 - **gRPC Audit Support** - Built-in audit interceptor for gRPC requests and responses with trace context integration
 
@@ -76,19 +77,23 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Security Headers** - Automatic security header injection (global and route-level)
 
 ### Data Transformation
+- **Per-Route Transform Middleware** - Request/response transformation applied per route
 - **Field Filtering** - Filter response fields using allow/deny lists
 - **Field Mapping** - Rename and remap response fields
 - **Field Grouping** - Group fields into nested objects
 - **Field Flattening** - Extract and flatten nested objects
 - **Array Operations** - Append, prepend, filter, sort, limit, deduplicate arrays
+- **Request Templating** - Use Go templates for custom request transformation
 - **Response Templating** - Use Go templates for custom response formatting
 - **Response Merging** - Merge responses from multiple backends (deep, shallow, replace strategies)
-- **Request Manipulation** - Transform request body using templates and field operations
+- **Body Size Limits** - 10MB maximum request/response body size for transformation
+- **JSON Optimization** - Optimized JSON request/response transformation
 - **gRPC FieldMask** - Filter gRPC responses using Protocol Buffer FieldMask
 - **Metadata Transformation** - Transform gRPC metadata (static and dynamic)
 - **Streaming Transformation** - Transform streaming messages with rate limiting
 
 ### Caching
+- **Per-Route Caching** - Isolated cache instances per route with dedicated middleware
 - **In-Memory Cache** - Fast local caching with TTL and max entries
 - **Redis Cache** - Distributed caching with Redis standalone or Sentinel
 - **Redis Sentinel Support** - High availability Redis with automatic failover
@@ -96,15 +101,18 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Hash Keys** - SHA256 hashing of cache keys for privacy/length control
 - **Vault Password Integration** - Redis passwords resolved from HashiCorp Vault KV secrets
 - **Cache Key Generation** - Configurable cache key components
-- **Cache Control** - Honor Cache-Control headers
+- **Cache Control** - Honor Cache-Control headers (no-store, no-cache)
 - **Stale-While-Revalidate** - Serve stale data while revalidating
-- **Negative Caching** - Cache error responses
+- **Body Size Limits** - 10MB maximum response body size for caching
+- **GET-Only Caching** - Only GET requests are cached by default
 
 ### Encoding Support
+- **Per-Route Encoding Middleware** - Content negotiation and encoding applied per route
 - **JSON** - Full JSON encoding/decoding with configurable options
 - **XML** - XML encoding/decoding
 - **YAML** - YAML encoding/decoding
 - **Content Negotiation** - Automatic content type negotiation based on Accept header
+- **Encoding Metrics** - Track negotiation results and content type usage
 
 ### Observability
 - **Comprehensive Prometheus Metrics** - 130+ metrics across gateway and operator components with route-based labels for cardinality control
@@ -140,7 +148,19 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Performance Validated** - Comprehensive performance testing across deployment scenarios
 - **Enterprise Monitoring** - 130+ metrics, 4 Grafana dashboards, and OTEL tracing integration
 
-### Recent Improvements (Latest Refactoring Session)
+### Recent Improvements (Latest Release)
+
+#### Metrics Fixes and Middleware Architecture Enhancements
+- **Issue 1**: Fixed config reload timestamp metrics - corrected Grafana dashboard query for millisecond compatibility
+- **Issue 2**: Integrated authentication metrics - wired auth middleware into global HTTP middleware chain with proper config conversion
+- **Issue 3**: Implemented cache metrics - added per-route cache middleware with 10MB body limit, GET-only caching, and Cache-Control support
+- **Issue 4**: Added transform/encoding metrics - implemented request/response transformation and content negotiation middleware
+
+#### Two-Tier Middleware Architecture
+- **Global Middleware Chain**: Recovery → RequestID → Logging → Tracing → Audit → Metrics → CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
+- **Per-Route Middleware Chain**: Security Headers → CORS → Body Limit → Headers → Cache → Transform → Encoding → [proxy to backend]
+- **RouteMiddlewareApplier Interface**: Decoupled proxy from gateway package to avoid import cycles while enabling per-route middleware
+- **Thread-Safe Cache Factory**: Per-route cache instances with lazy initialization and double-check locking
 
 #### Core Reliability and Performance (DEV-001 to DEV-009)
 - **DEV-001**: Fixed reload metrics registry mismatch - reload metrics now use custom registry for consistency
@@ -190,6 +210,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [gRPC Gateway](#-grpc-gateway)
 - [Traffic Management](#-traffic-management)
 - [Observability](#-observability)
+- [Middleware Architecture](#-middleware-architecture)
 - [Performance](#-performance)
 - [Development](#-development)
 - [Kubernetes & Helm](#️-kubernetes--helm)
@@ -804,6 +825,86 @@ curl http://localhost:9090/metrics | grep -E "(gateway_|avapigw_)"
 ```
 
 These metrics provide comprehensive observability across all gateway components, enabling detailed monitoring, alerting, and performance analysis.
+
+## 🔧 Middleware Architecture
+
+The AV API Gateway implements a sophisticated two-tier middleware architecture that provides both global and per-route middleware capabilities.
+
+### Two-Tier Middleware System
+
+#### Global Middleware Chain
+Applied to all requests in the following order:
+```
+Recovery → RequestID → Logging → Tracing → Audit → Metrics → 
+CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
+```
+
+#### Per-Route Middleware Chain
+Applied to specific routes based on configuration:
+```
+Security Headers → CORS → Body Limit → Headers → Cache → 
+Transform → Encoding → [proxy to backend]
+```
+
+### Key Architectural Features
+
+- **Import Cycle Avoidance** - RouteMiddlewareApplier interface pattern decouples proxy from gateway package
+- **Thread-Safe Caching** - Middleware chains cached with double-check locking for performance
+- **Per-Route Isolation** - Each route gets its own cache namespace and middleware configuration
+- **Graceful Degradation** - Middleware failures don't crash requests, they pass through
+- **Comprehensive Metrics** - All middleware operations tracked with Prometheus metrics
+
+### Middleware Components
+
+#### Cache Middleware (`internal/middleware/cache.go`)
+- **10MB Body Limit** - Maximum response body size for caching
+- **GET-Only Caching** - Only GET requests are cached by default
+- **Cache-Control Support** - Respects `no-store` and `no-cache` directives
+- **Per-Route Cache Factory** - Thread-safe lazy cache creation per route
+
+#### Transform Middleware (`internal/middleware/transform.go`)
+- **10MB Body Limit** - Maximum request/response body size for transformation
+- **Go Templates** - Request transformation using Go template engine
+- **Field Operations** - Allow/deny lists and field mappings for responses
+- **JSON Optimization** - Optimized for JSON request/response transformation
+
+#### Encoding Middleware (`internal/middleware/encoding.go`)
+- **Content Negotiation** - Automatic content type negotiation based on Accept header
+- **Format Support** - JSON, XML, YAML encoding support
+- **Metrics Recording** - Tracks negotiation results and content types
+
+### Configuration Example
+
+```yaml
+spec:
+  # Global middleware configuration
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: "https://auth.example.com"
+  
+  routes:
+    - name: api-route
+      # Per-route middleware configuration
+      cache:
+        enabled: true
+        ttl: "10m"
+        type: "memory"
+      transform:
+        request:
+          template: |
+            {
+              "data": {{.Body}},
+              "metadata": {
+                "timestamp": "{{.Timestamp}}"
+              }
+            }
+      encoding:
+        enableContentNegotiation: true
+```
+
+For detailed middleware architecture documentation, see [Middleware Architecture Guide](docs/middleware-architecture.md).
 
 ## 🚀 Performance
 

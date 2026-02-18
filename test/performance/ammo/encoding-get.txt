@@ -1,0 +1,8 @@
+[Host: localhost]
+[User-Agent: YandexTank/Perftest]
+[Accept: application/json]
+[Connection: keep-alive]
+/api/v1/encoding/json/
+/api/v1/encoding/xml/
+/api/v1/encoding/yaml/
+/api/v1/encoding/negotiate/

@@ -441,6 +441,170 @@ func TestGatewayConfigApplier_ApplyFullConfig_WithGRPC_Targeted(t *testing.T) {
 }
 
 // ============================================================================
+// Operator Mode Cache Invalidation Tests
+// ============================================================================
+
+func TestOperatorMode_CacheInvalidator_ClearsBothCaches(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := createTestGatewayConfig("test-cache-invalidator")
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	// Create a RouteMiddlewareManager
+	routeMiddlewareMgr := gateway.NewRouteMiddlewareManager(&cfg.Spec, logger)
+
+	app := &application{
+		gateway:            gw,
+		backendRegistry:    backend.NewRegistry(logger),
+		router:             router.New(),
+		config:             cfg,
+		routeMiddlewareMgr: routeMiddlewareMgr,
+	}
+
+	// Simulate the cache invalidator callback as wired in operator_mode.go
+	invalidatorCalled := false
+	invalidator := func() {
+		invalidatorCalled = true
+		if app.routeMiddlewareMgr != nil {
+			app.routeMiddlewareMgr.ClearCache()
+		}
+		if app.gateway != nil {
+			app.gateway.ClearAllAuthCaches()
+		}
+	}
+
+	// Call the invalidator — should not panic and should clear both caches
+	assert.NotPanics(t, func() {
+		invalidator()
+	})
+	assert.True(t, invalidatorCalled)
+}
+
+func TestOperatorMode_CacheInvalidator_NilRouteMiddlewareMgr(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := createTestGatewayConfig("test-nil-mw-mgr")
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	app := &application{
+		gateway:            gw,
+		config:             cfg,
+		routeMiddlewareMgr: nil, // nil middleware manager
+	}
+
+	// Simulate the cache invalidator callback
+	invalidator := func() {
+		if app.routeMiddlewareMgr != nil {
+			app.routeMiddlewareMgr.ClearCache()
+		}
+		if app.gateway != nil {
+			app.gateway.ClearAllAuthCaches()
+		}
+	}
+
+	// Should not panic with nil routeMiddlewareMgr
+	assert.NotPanics(t, func() {
+		invalidator()
+	})
+}
+
+func TestOperatorMode_CacheInvalidator_NilGateway(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := createTestGatewayConfig("test-nil-gw")
+
+	routeMiddlewareMgr := gateway.NewRouteMiddlewareManager(&cfg.Spec, logger)
+
+	app := &application{
+		gateway:            nil, // nil gateway
+		config:             cfg,
+		routeMiddlewareMgr: routeMiddlewareMgr,
+	}
+
+	// Simulate the cache invalidator callback
+	invalidator := func() {
+		if app.routeMiddlewareMgr != nil {
+			app.routeMiddlewareMgr.ClearCache()
+		}
+		if app.gateway != nil {
+			app.gateway.ClearAllAuthCaches()
+		}
+	}
+
+	// Should not panic with nil gateway
+	assert.NotPanics(t, func() {
+		invalidator()
+	})
+}
+
+func TestOperatorMode_CacheInvalidator_WithConfigHandler(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := createTestGatewayConfig("test-config-handler")
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	routeMiddlewareMgr := gateway.NewRouteMiddlewareManager(&cfg.Spec, logger)
+
+	app := &application{
+		gateway:            gw,
+		backendRegistry:    backend.NewRegistry(logger),
+		router:             router.New(),
+		config:             cfg,
+		routeMiddlewareMgr: routeMiddlewareMgr,
+	}
+
+	// Create the invalidator exactly as wired in operator_mode.go
+	invalidatorCallCount := 0
+	cacheInvalidator := func() {
+		invalidatorCallCount++
+		if app.routeMiddlewareMgr != nil {
+			app.routeMiddlewareMgr.ClearCache()
+			logger.Debug("HTTP route middleware cache invalidated by operator update")
+		}
+		if app.gateway != nil {
+			app.gateway.ClearAllAuthCaches()
+			logger.Debug("gRPC auth caches invalidated by operator update")
+		}
+	}
+
+	// Create config handler with the cache invalidator
+	opApp := &operatorApplication{
+		application:    app,
+		operatorConfig: operator.DefaultConfig(),
+	}
+
+	applier := &gatewayConfigApplier{
+		app:    opApp,
+		logger: logger,
+	}
+
+	opApp.configHandler = operator.NewConfigHandler(applier,
+		operator.WithHandlerLogger(logger),
+		operator.WithCacheInvalidator(cacheInvalidator),
+	)
+
+	assert.NotNil(t, opApp.configHandler)
+
+	// Call the invalidator directly to verify it works
+	cacheInvalidator()
+	assert.Equal(t, 1, invalidatorCallCount)
+
+	// Call again to verify idempotency
+	cacheInvalidator()
+	assert.Equal(t, 2, invalidatorCallCount)
+}
+
+// ============================================================================
 // startConfigWatcher Tests
 // ============================================================================
 

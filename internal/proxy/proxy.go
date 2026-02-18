@@ -44,6 +44,17 @@ var hopHeaders = map[string]struct{}{
 	"Upgrade":             {},
 }
 
+// RouteMiddlewareApplier applies per-route middleware to a handler.
+// This interface decouples the proxy from the gateway package to avoid
+// import cycles.
+type RouteMiddlewareApplier interface {
+	// GetMiddleware returns the middleware chain for a specific route config.
+	GetMiddleware(route *config.Route) []func(http.Handler) http.Handler
+
+	// ApplyMiddleware wraps the handler with per-route middleware.
+	ApplyMiddleware(handler http.Handler, route *config.Route) http.Handler
+}
+
 // ReverseProxy handles proxying requests to backend services.
 type ReverseProxy struct {
 	router                *router.Router
@@ -56,6 +67,7 @@ type ReverseProxy struct {
 	modifyResponse        func(*http.Response) error
 	flushInterval         time.Duration
 	metricsRegistry       *prometheus.Registry
+	routeMiddleware       RouteMiddlewareApplier
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -117,6 +129,15 @@ func WithGlobalCircuitBreaker(manager *backend.CircuitBreakerManager) ProxyOptio
 func WithMetricsRegistry(registry *prometheus.Registry) ProxyOption {
 	return func(p *ReverseProxy) {
 		p.metricsRegistry = registry
+	}
+}
+
+// WithRouteMiddleware sets the per-route middleware applier.
+// When configured, per-route middleware (cache, transform, encoding, headers)
+// is applied around the proxying logic for each matched route.
+func WithRouteMiddleware(rm RouteMiddlewareApplier) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.routeMiddleware = rm
 	}
 }
 
@@ -206,6 +227,32 @@ func (p *ReverseProxy) proxyRequest(
 		return
 	}
 
+	// Apply per-route middleware if configured and the route has any
+	if p.routeMiddleware != nil {
+		middlewares := p.routeMiddleware.GetMiddleware(&route.Config)
+		if len(middlewares) > 0 {
+			// Create a handler that performs the actual proxying
+			proxyHandler := http.HandlerFunc(func(innerW http.ResponseWriter, innerR *http.Request) {
+				p.doProxy(innerW, innerR, route)
+			})
+			// Wrap the proxy handler with per-route middleware
+			handler := p.routeMiddleware.ApplyMiddleware(proxyHandler, &route.Config)
+			handler.ServeHTTP(w, r)
+			return
+		}
+	}
+
+	// No per-route middleware — proxy directly
+	p.doProxy(w, r, route)
+}
+
+// doProxy performs the actual proxying logic: destination selection, backend
+// resolution, target URL building, and reverse proxy execution.
+func (p *ReverseProxy) doProxy(
+	w http.ResponseWriter,
+	r *http.Request,
+	route *router.CompiledRoute,
+) {
 	// Extract incoming trace context and start a proxy span
 	propagator := otel.GetTextMapPropagator()
 	ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
@@ -230,14 +277,44 @@ func (p *ReverseProxy) proxyRequest(
 
 	span.SetAttributes(attribute.String("proxy.backend", dest.Destination.Host))
 
-	// Get backend and target URL
+	// Get backend and resolve target host
 	serviceBackend := p.getServiceBackend(dest.Destination.Host)
-	target, err := p.buildTargetURL(dest, serviceBackend)
+
+	var backendHost *backend.Host
+	if serviceBackend != nil {
+		var hostErr error
+		backendHost, hostErr = serviceBackend.GetAvailableHost()
+		if hostErr != nil {
+			p.logger.Warn("no available hosts for backend",
+				observability.String("backend", dest.Destination.Host),
+				observability.String("route", route.Name),
+				observability.Error(hostErr),
+			)
+			span.SetAttributes(attribute.String("proxy.host_error", hostErr.Error()))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, jsonErrNoAvailableHosts)
+			return
+		}
+		defer serviceBackend.ReleaseHost(backendHost)
+	}
+
+	target, err := p.buildTargetURL(dest, serviceBackend, backendHost)
 	if err != nil {
 		p.errorHandler(w, r, NewInvalidTargetError(
 			route.Name, dest.Destination.Host, err,
 		))
 		return
+	}
+
+	// Record the actual target host for observability
+	targetLabel := dest.Destination.Host
+	if backendHost != nil {
+		actualTarget := net.JoinHostPort(backendHost.Address, strconv.Itoa(backendHost.Port))
+		span.SetAttributes(
+			attribute.String("proxy.target_host", actualTarget),
+		)
+		targetLabel = dest.Destination.Host + "/" + actualTarget
 	}
 
 	// Apply URL rewriting
@@ -256,7 +333,7 @@ func (p *ReverseProxy) proxyRequest(
 	p.executeProxy(w, r, proxy, dest.Destination.Host, target)
 	duration := time.Since(backendStart)
 	getProxyMetrics().backendDuration.WithLabelValues(
-		dest.Destination.Host,
+		targetLabel,
 	).Observe(duration.Seconds())
 
 	// Set span attributes for the response
@@ -277,15 +354,26 @@ func (p *ReverseProxy) getServiceBackend(host string) *backend.ServiceBackend {
 }
 
 // buildTargetURL constructs the target URL for the backend.
+// When a backendHost is provided (from the backend's load balancer), its Address
+// and Port are used instead of the route destination's Host and Port.
 func (p *ReverseProxy) buildTargetURL(
 	dest *config.RouteDestination,
 	serviceBackend *backend.ServiceBackend,
+	backendHost *backend.Host,
 ) (*url.URL, error) {
 	scheme := schemeHTTP
 	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
 		scheme = schemeHTTPS
 	}
-	targetURL := scheme + "://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
+
+	host := dest.Destination.Host
+	port := dest.Destination.Port
+	if backendHost != nil {
+		host = backendHost.Address
+		port = backendHost.Port
+	}
+
+	targetURL := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port))
 	return url.Parse(targetURL)
 }
 
@@ -296,6 +384,14 @@ func (p *ReverseProxy) createReverseProxy(
 	backendHost string,
 	serviceBackend *backend.ServiceBackend,
 ) *httputil.ReverseProxy {
+	// Use the backend's transport when TLS is enabled, so that the
+	// backend's TLS config (including client certs for mTLS and
+	// InsecureSkipVerify) is applied to the connection.
+	transport := p.transport
+	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
+		transport = serviceBackend.HTTPClient().Transport
+	}
+
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			p.director(req, target, originalReq)
@@ -308,7 +404,7 @@ func (p *ReverseProxy) createReverseProxy(
 				}
 			}
 		},
-		Transport:      p.transport,
+		Transport:      transport,
 		FlushInterval:  p.flushInterval,
 		ErrorHandler:   p.errorHandler,
 		ModifyResponse: p.modifyResponse,

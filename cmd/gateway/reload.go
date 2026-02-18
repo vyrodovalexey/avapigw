@@ -207,6 +207,13 @@ func reloadComponents(
 		}
 	}
 
+	// Clear HTTP route middleware cache so the next request rebuilds
+	// middleware chains from the updated route configuration.
+	if app.routeMiddlewareMgr != nil {
+		app.routeMiddlewareMgr.ClearCache()
+		logger.Debug("HTTP route middleware cache cleared after config reload")
+	}
+
 	// Reload HTTP backends (gRPC backends are NOT reloaded — see function comment)
 	if app.backendRegistry != nil {
 		timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
