@@ -1,6 +1,17 @@
 // Package middleware provides HTTP middleware components for the API Gateway.
 package middleware
 
+import (
+	"net/http"
+	"strings"
+)
+
+// isWebSocketUpgrade checks if the request is a WebSocket upgrade request.
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
 // HTTP header constants.
 const (
 	// HeaderContentType is the Content-Type header name.

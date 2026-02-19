@@ -77,13 +77,22 @@ func TestAuthError_Is(t *testing.T) {
 			want:   true,
 		},
 		{
-			name: "matches another AuthError",
+			name: "matches AuthError with same Type",
 			err: &AuthError{
 				Type:    "jwt",
 				Message: "failed",
 			},
-			target: &AuthError{},
+			target: &AuthError{Type: "jwt"},
 			want:   true,
+		},
+		{
+			name: "does not match AuthError with different Type",
+			err: &AuthError{
+				Type:    "jwt",
+				Message: "failed",
+			},
+			target: &AuthError{Type: "apikey"},
+			want:   false,
 		},
 		{
 			name: "matches cause",

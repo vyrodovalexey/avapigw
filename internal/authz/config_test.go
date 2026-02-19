@@ -10,6 +10,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/authz/abac"
 	"github.com/vyrodovalexey/avapigw/internal/authz/external"
 	"github.com/vyrodovalexey/avapigw/internal/authz/rbac"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 func TestConfig_Validate_NilConfig(t *testing.T) {
@@ -547,7 +548,7 @@ func TestMatchPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, matchPath(tt.pattern, tt.path))
+			assert.Equal(t, tt.expected, util.MatchPath(tt.pattern, tt.path))
 		})
 	}
 }

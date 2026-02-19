@@ -230,6 +230,16 @@ func (v *GRPCBackendValidator) validate(grpcBackend *avapigwv1alpha1.GRPCBackend
 		warnings = append(warnings, "tls.mode is INSECURE; this should only be used in development")
 	}
 
+	// Security warnings for plaintext secrets in backend authentication
+	if spec.Authentication != nil {
+		warnings = append(warnings, warnPlaintextBackendAuthSecrets(spec.Authentication)...)
+	}
+
+	// Security warnings for plaintext secrets in cache sentinel config
+	if spec.Cache != nil && spec.Cache.Sentinel != nil {
+		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Cache.Sentinel)...)
+	}
+
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
 	}

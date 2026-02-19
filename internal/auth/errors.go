@@ -111,11 +111,14 @@ func (e *AuthError) Unwrap() error {
 
 // Is checks if the error matches the target.
 func (e *AuthError) Is(target error) bool {
-	if errors.Is(target, ErrAuthenticationFailed) {
+	if target == ErrAuthenticationFailed {
 		return true
 	}
-	_, ok := target.(*AuthError)
-	return ok || errors.Is(e.Cause, target)
+	t, ok := target.(*AuthError)
+	if ok {
+		return e.Type == t.Type
+	}
+	return errors.Is(e.Cause, target)
 }
 
 // NewAuthError creates a new AuthError.

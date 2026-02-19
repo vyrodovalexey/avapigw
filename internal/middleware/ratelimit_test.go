@@ -11,6 +11,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 func TestNewRateLimiter(t *testing.T) {
@@ -777,6 +778,7 @@ func TestWithRateLimitHitCallback(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	req = req.WithContext(util.ContextWithRoute(req.Context(), "/api/test"))
 	req.RemoteAddr = "192.168.1.1:12345"
 	rec := httptest.NewRecorder()
 
@@ -807,6 +809,7 @@ func TestWithRateLimitHitCallback_NilCallback(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	req = req.WithContext(util.ContextWithRoute(req.Context(), "/api/test"))
 	req.RemoteAddr = "192.168.1.1:12345"
 	rec := httptest.NewRecorder()
 

@@ -1491,8 +1491,9 @@ func TestBackendValidator_ValidateCreate_ValidBasicAuthStatic(t *testing.T) {
 	if err != nil {
 		t.Errorf("ValidateCreate() error = %v, want nil", err)
 	}
-	if len(warnings) > 0 {
-		t.Errorf("ValidateCreate() warnings = %v, want empty", warnings)
+	// Plaintext password should produce a security warning recommending Vault usage
+	if len(warnings) != 1 {
+		t.Errorf("ValidateCreate() warnings count = %d, want 1", len(warnings))
 	}
 }
 

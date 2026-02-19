@@ -235,6 +235,16 @@ func (v *BackendValidator) validate(backend *avapigwv1alpha1.Backend) (admission
 				"Consider using Vault or OIDC token sources for production environments.")
 	}
 
+	// Security warnings for plaintext secrets in backend authentication
+	if spec.Authentication != nil {
+		warnings = append(warnings, warnPlaintextBackendAuthSecrets(spec.Authentication)...)
+	}
+
+	// Security warnings for plaintext secrets in cache sentinel config
+	if spec.Cache != nil && spec.Cache.Sentinel != nil {
+		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Cache.Sentinel)...)
+	}
+
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
 	}

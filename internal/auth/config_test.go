@@ -10,6 +10,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
 	"github.com/vyrodovalexey/avapigw/internal/auth/oidc"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 func TestConfig_Validate(t *testing.T) {
@@ -515,7 +516,7 @@ func TestMatchPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := matchPath(tt.pattern, tt.path)
+			got := util.MatchPath(tt.pattern, tt.path)
 			assert.Equal(t, tt.want, got)
 		})
 	}

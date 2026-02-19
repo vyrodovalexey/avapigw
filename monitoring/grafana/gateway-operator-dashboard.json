@@ -13551,8 +13551,8 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "sum by (method, status) (rate(avapigw_operator_grpc_requests_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
-          "legendFormat": "{{method}} ({{status}})",
+          "expr": "sum by (method, code) (rate(avapigw_operator_grpc_server_requests_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
+          "legendFormat": "{{method}} ({{code}})",
           "range": true,
           "refId": "A"
         }
@@ -13565,7 +13565,7 @@
         "type": "prometheus",
         "uid": "victoriametrics"
       },
-      "description": "Number of active gateways connected to operator",
+      "description": "Number of active gRPC server streams (connected gateways)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -13615,13 +13615,13 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "avapigw_operator_grpc_active_gateways{instance=~\"$operator_instance\"}",
+          "expr": "avapigw_operator_grpc_server_active_streams{instance=~\"$operator_instance\"}",
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Active Gateways",
+      "title": "Active Streams (Gateways)",
       "type": "stat"
     },
     {
@@ -13629,7 +13629,7 @@
         "type": "prometheus",
         "uid": "victoriametrics"
       },
-      "description": "Rate of gRPC config applied operations by type and operation",
+      "description": "Rate of reconcile operations by controller and result (tracks config application)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -13710,13 +13710,13 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "sum by (type, operation) (rate(avapigw_operator_grpc_config_applied_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
-          "legendFormat": "{{type}} ({{operation}})",
+          "expr": "sum by (controller, result) (rate(avapigw_operator_reconcile_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
+          "legendFormat": "{{controller}} ({{result}})",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "gRPC Config Applied Rate",
+      "title": "Reconcile Rate (Config Applied)",
       "type": "timeseries"
     },
     {
@@ -13724,7 +13724,7 @@
         "type": "prometheus",
         "uid": "victoriametrics"
       },
-      "description": "Rate of gRPC canceled operations by operation and reason",
+      "description": "Rate of gRPC server error responses (non-OK status codes)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -13805,13 +13805,13 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "sum by (operation, reason) (rate(avapigw_operator_grpc_canceled_operations_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
-          "legendFormat": "{{operation}} ({{reason}})",
+          "expr": "sum by (method, code) (rate(avapigw_operator_grpc_server_requests_total{instance=~\"$operator_instance\", code!=\"OK\"}[$__rate_interval]))",
+          "legendFormat": "{{method}} ({{code}})",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "gRPC Canceled Operations",
+      "title": "gRPC Server Errors (non-OK)",
       "type": "timeseries"
     },
     {
@@ -13819,7 +13819,124 @@
         "type": "prometheus",
         "uid": "victoriametrics"
       },
-      "description": "Rate of gRPC retry attempts by operation, type, and result",
+      "description": "gRPC server request duration percentiles (p50, p90, p99)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 451
+      },
+      "id": 178,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(avapigw_operator_grpc_server_request_duration_seconds_bucket{instance=~\"$operator_instance\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.90, sum by (le) (rate(avapigw_operator_grpc_server_request_duration_seconds_bucket{instance=~\"$operator_instance\"}[$__rate_interval])))",
+          "legendFormat": "p90",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(avapigw_operator_grpc_server_request_duration_seconds_bucket{instance=~\"$operator_instance\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "range": true,
+          "refId": "C"
+        }
+      ],
+      "title": "gRPC Server Request Duration p50/p90/p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "victoriametrics"
+      },
+      "description": "Rate of gRPC server stream messages sent and received",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -13875,9 +13992,9 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 451
+        "y": 459
       },
-      "id": 178,
+      "id": 250,
       "options": {
         "legend": {
           "calcs": [
@@ -13900,13 +14017,24 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "sum by (operation, type, result) (rate(avapigw_operator_grpc_retry_attempts_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
-          "legendFormat": "{{operation}} {{type}} ({{result}})",
+          "expr": "sum by (method) (rate(avapigw_operator_grpc_server_stream_messages_sent_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
+          "legendFormat": "Sent {{method}}",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "victoriametrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (method) (rate(avapigw_operator_grpc_server_stream_messages_received_total{instance=~\"$operator_instance\"}[$__rate_interval]))",
+          "legendFormat": "Received {{method}}",
+          "range": true,
+          "refId": "B"
         }
       ],
-      "title": "gRPC Retry Attempts",
+      "title": "gRPC Server Stream Messages Rate",
       "type": "timeseries"
     },
     {
@@ -13915,7 +14043,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 459
+        "y": 467
       },
       "id": 179,
       "panels": [],

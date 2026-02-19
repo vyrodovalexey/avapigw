@@ -332,6 +332,9 @@ func (p *vaultProvider) Close() error {
 }
 
 // issueCertificate issues a new certificate from Vault PKI.
+// The Vault network call is performed outside the lock to avoid holding the
+// write lock during potentially slow I/O. The lock is only acquired to read
+// config and to update the cached certificate afterwards.
 func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
 	tracer := otel.Tracer(certTracerName)
 	ctx, span := tracer.Start(ctx, "VaultProvider.IssueCertificate",
@@ -343,17 +346,20 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 	)
 	defer span.End()
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+	// Read config under read lock
+	p.mu.RLock()
 	ttl := p.config.TTL
 	if req.TTL > 0 {
 		ttl = req.TTL
 	}
+	pkiMount := p.config.PKIMount
+	role := p.config.Role
+	p.mu.RUnlock()
 
+	// Perform the Vault PKI network call outside the lock
 	vaultCert, err := p.vaultClient.PKI().IssueCertificate(ctx, &vault.PKIIssueOptions{
-		Mount:      p.config.PKIMount,
-		Role:       p.config.Role,
+		Mount:      pkiMount,
+		Role:       role,
 		CommonName: req.CommonName,
 		AltNames:   req.DNSNames,
 		IPSANs:     req.IPAddresses,
@@ -374,8 +380,15 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 		Expiration:     vaultCert.Expiration,
 	}
 
-	// Cache the certificate
+	// Acquire write lock only to update the cache
+	p.mu.Lock()
+	// Check if another goroutine already cached a newer certificate while we were waiting
+	if existing, ok := p.certs[req.CommonName]; ok && existing.Expiration.After(certificate.Expiration) {
+		p.mu.Unlock()
+		return existing, nil
+	}
 	p.certs[req.CommonName] = certificate
+	p.mu.Unlock()
 
 	// Record certificate metrics
 	cm := GetCertMetrics()

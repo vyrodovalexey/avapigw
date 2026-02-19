@@ -69,12 +69,6 @@ func Retry(cfg RetryConfig, logger observability.Logger) func(http.Handler) http
 	}
 }
 
-// isWebSocketUpgrade checks if the request is a WebSocket upgrade request.
-func isWebSocketUpgrade(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
-}
-
 // readRequestBodyWithLimit reads and buffers the request body up to maxSize.
 // Returns the body bytes and a boolean indicating if the request can be retried.
 // If the body exceeds maxSize, returns nil and false, and the original body is preserved.

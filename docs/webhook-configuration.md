@@ -73,6 +73,19 @@ graph TB
 - **Path Type Validation** - Validates supported path types
 - **TLS Configuration Validation** - Validates TLS sections
 
+#### 4. Security Validation Warnings
+The webhooks provide security warnings for potentially unsafe configurations:
+
+- **Plaintext Secrets Warning** - Warns when JWT HMAC secrets or OIDC client secrets are provided as plaintext instead of Vault references
+- **Insecure TLS Warning** - Warns when TLS verification is disabled in production environments
+- **Weak Authentication Warning** - Warns when authentication is disabled on sensitive routes
+
+**Example Warning:**
+```
+SECURITY WARNING: authentication.jwt.secret contains a plaintext HMAC secret. 
+Consider using Vault integration: authentication.jwt.secretVaultPath instead.
+```
+
 ## Certificate Management Modes
 
 The operator supports three certificate management modes for webhook TLS:

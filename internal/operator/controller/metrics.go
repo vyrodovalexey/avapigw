@@ -10,6 +10,8 @@ import (
 )
 
 // ControllerMetrics contains Prometheus metrics for controllers.
+// Prometheus metric types (Counter, Gauge, Histogram) are goroutine-safe,
+// so no additional synchronization is needed for metric operations.
 type ControllerMetrics struct {
 	reconcileDuration         *prometheus.HistogramVec
 	reconcileTotal            *prometheus.CounterVec
@@ -19,8 +21,6 @@ type ControllerMetrics struct {
 	finalizerOperations       *prometheus.CounterVec
 	ingressResourcesProcessed *prometheus.CounterVec
 	ingressConversionErrors   *prometheus.CounterVec
-
-	mu sync.RWMutex
 }
 
 // Metric label constants.
@@ -135,75 +135,48 @@ func newControllerMetrics() *ControllerMetrics {
 
 // RecordReconcileDuration records the duration of a reconciliation operation.
 func (m *ControllerMetrics) RecordReconcileDuration(controller string, duration time.Duration) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.reconcileDuration.WithLabelValues(controller).Observe(duration.Seconds())
 }
 
 // RecordReconcileResult records the result of a reconciliation operation.
 func (m *ControllerMetrics) RecordReconcileResult(controller, result string) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.reconcileTotal.WithLabelValues(controller, result).Inc()
 }
 
 // RecordReconcileError records a reconciliation error.
 func (m *ControllerMetrics) RecordReconcileError(controller string) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.reconcileErrors.WithLabelValues(controller).Inc()
 }
 
 // SetResourceCount sets the total count of resources for a kind in a namespace.
 func (m *ControllerMetrics) SetResourceCount(kind, namespace string, count float64) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.resourcesTotal.WithLabelValues(kind, namespace).Set(count)
 }
 
 // SetResourceCondition sets the condition status for a resource.
 // Status values: 1 = True, 0 = False, -1 = Unknown.
 func (m *ControllerMetrics) SetResourceCondition(kind, name, namespace, condition string, status float64) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.resourceCondition.WithLabelValues(kind, name, namespace, condition).Set(status)
 }
 
 // RecordFinalizerOperation records a finalizer operation.
 func (m *ControllerMetrics) RecordFinalizerOperation(controller, operation string) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.finalizerOperations.WithLabelValues(controller, operation).Inc()
 }
 
 // RecordIngressProcessed records a processed Ingress resource with the given result.
 func (m *ControllerMetrics) RecordIngressProcessed(result string) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.ingressResourcesProcessed.WithLabelValues(result).Inc()
 }
 
 // RecordIngressConversionError records an Ingress conversion error.
 func (m *ControllerMetrics) RecordIngressConversionError(namespace, name string) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.ingressConversionErrors.WithLabelValues(namespace, name).Inc()
 }
 
 // DeleteResourceConditionMetrics deletes all condition metrics for a resource.
 // This should be called when a resource is deleted.
 func (m *ControllerMetrics) DeleteResourceConditionMetrics(kind, name, namespace string) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	// Delete metrics for common conditions
 	conditions := []string{"Ready", "Valid", "Healthy"}
 	for _, condition := range conditions {
@@ -271,11 +244,12 @@ func (t *ReconcileTimer) RecordCanceled() {
 }
 
 // StatusUpdateMetrics tracks status update operations.
+// Prometheus metric types are goroutine-safe, so no additional
+// synchronization is needed for metric operations.
 type StatusUpdateMetrics struct {
 	updateDuration *prometheus.HistogramVec
 	updateTotal    *prometheus.CounterVec
 	updateErrors   *prometheus.CounterVec
-	mu             sync.RWMutex
 }
 
 var (
@@ -319,9 +293,6 @@ func GetStatusUpdateMetrics() *StatusUpdateMetrics {
 
 // RecordStatusUpdate records a status update operation.
 func (m *StatusUpdateMetrics) RecordStatusUpdate(kind string, duration time.Duration, success bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	m.updateDuration.WithLabelValues(kind).Observe(duration.Seconds())
 	result := ResultSuccess
 	if !success {

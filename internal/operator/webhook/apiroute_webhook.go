@@ -265,6 +265,16 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		}
 	}
 
+	// Security warnings for plaintext secrets in authentication config
+	if spec.Authentication != nil {
+		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+	}
+
+	// Security warnings for plaintext secrets in authorization cache sentinel config
+	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
+		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
+	}
+
 	// Check for conflicting configurations
 	if spec.Redirect != nil && len(spec.Route) > 0 {
 		warnings = append(warnings, "redirect and route are both specified; redirect will take precedence")

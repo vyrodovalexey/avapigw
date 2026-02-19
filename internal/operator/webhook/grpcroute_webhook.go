@@ -210,6 +210,16 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 		}
 	}
 
+	// Security warnings for plaintext secrets in authentication config
+	if spec.Authentication != nil {
+		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+	}
+
+	// Security warnings for plaintext secrets in authorization cache sentinel config
+	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
+		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
+	}
+
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
 	}

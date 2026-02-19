@@ -9,6 +9,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
 	"github.com/vyrodovalexey/avapigw/internal/auth/oidc"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // Config represents the main authentication configuration.
@@ -282,23 +283,9 @@ func (c *Config) IsOIDCEnabled() bool {
 // ShouldSkipPath checks if authentication should be skipped for a path.
 func (c *Config) ShouldSkipPath(path string) bool {
 	for _, skipPath := range c.SkipPaths {
-		if matchPath(skipPath, path) {
+		if util.MatchPath(skipPath, path) {
 			return true
 		}
-	}
-	return false
-}
-
-// matchPath checks if a path matches a pattern.
-// Supports exact match and prefix match with trailing *.
-func matchPath(pattern, path string) bool {
-	if pattern == path {
-		return true
-	}
-	// Check for wildcard suffix
-	if pattern != "" && pattern[len(pattern)-1] == '*' {
-		prefix := pattern[:len(pattern)-1]
-		return len(path) >= len(prefix) && path[:len(prefix)] == prefix
 	}
 	return false
 }

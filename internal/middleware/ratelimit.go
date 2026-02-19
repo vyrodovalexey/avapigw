@@ -13,6 +13,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // rlTracer is the OTEL tracer used for rate limiting operations.
@@ -208,6 +209,13 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 			clientIP := getClientIP(r)
 			span.SetAttributes(attribute.String("ratelimit.client_ip", clientIP))
 
+			// Use route name from context for bounded Prometheus label cardinality.
+			// Raw URL paths would create unbounded cardinality (DoS vector).
+			routeName := util.RouteFromContext(ctx)
+			if routeName == "" {
+				routeName = "unknown"
+			}
+
 			if !rl.Allow(clientIP) {
 				span.SetAttributes(
 					attribute.Bool("ratelimit.allowed", false),
@@ -220,12 +228,12 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 				)
 
 				if rl.hitCallback != nil {
-					rl.hitCallback(r.URL.Path)
+					rl.hitCallback(routeName)
 				}
 
 				mm := GetMiddlewareMetrics()
 				mm.rateLimitRejected.WithLabelValues(
-					r.URL.Path,
+					routeName,
 				).Inc()
 
 				w.Header().Set(HeaderContentType, ContentTypeJSON)
@@ -241,7 +249,7 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 			)
 
 			GetMiddlewareMetrics().rateLimitAllowed.WithLabelValues(
-				r.URL.Path,
+				routeName,
 			).Inc()
 
 			next.ServeHTTP(w, r)

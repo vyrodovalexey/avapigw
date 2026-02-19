@@ -382,62 +382,12 @@ func (a *authenticator) authenticateMTLS(ctx context.Context, r *http.Request) (
 
 // claimsToIdentity converts JWT claims to an identity.
 func (a *authenticator) claimsToIdentity(claims *jwt.Claims, authType AuthType) *Identity {
-	identity := &Identity{
-		Subject:  claims.Subject,
-		Issuer:   claims.Issuer,
-		Audience: []string(claims.Audience),
-		AuthType: authType,
-		AuthTime: time.Now(),
-		Claims:   claims.ToMap(),
-	}
-
-	if claims.ExpiresAt != nil {
-		identity.ExpiresAt = claims.ExpiresAt.Time
-	}
-
-	// Extract additional fields from claims
-	if a.config.JWT != nil && a.config.JWT.ClaimMapping != nil {
-		mapping := a.config.JWT.ClaimMapping
-		if mapping.Roles != "" {
-			identity.Roles = claims.GetNestedStringSliceClaim(mapping.Roles)
-		}
-		if mapping.Permissions != "" {
-			identity.Permissions = claims.GetNestedStringSliceClaim(mapping.Permissions)
-		}
-		if mapping.Groups != "" {
-			identity.Groups = claims.GetNestedStringSliceClaim(mapping.Groups)
-		}
-		if mapping.Scopes != "" {
-			identity.Scopes = claims.GetNestedStringSliceClaim(mapping.Scopes)
-		}
-		if mapping.Email != "" {
-			identity.Email = claims.GetStringClaim(mapping.Email)
-		}
-		if mapping.Name != "" {
-			identity.Name = claims.GetStringClaim(mapping.Name)
-		}
-	}
-
-	return identity
+	return claimsToIdentity(claims, authType, a.config)
 }
 
 // keyInfoToIdentity converts API key info to an identity.
 func (a *authenticator) keyInfoToIdentity(keyInfo *apikey.KeyInfo) *Identity {
-	identity := &Identity{
-		Subject:  keyInfo.ID,
-		AuthType: AuthTypeAPIKey,
-		AuthTime: time.Now(),
-		Roles:    keyInfo.Roles,
-		Scopes:   keyInfo.Scopes,
-		Metadata: keyInfo.Metadata,
-		ClientID: keyInfo.ID,
-	}
-
-	if keyInfo.ExpiresAt != nil {
-		identity.ExpiresAt = *keyInfo.ExpiresAt
-	}
-
-	return identity
+	return keyInfoToIdentity(keyInfo)
 }
 
 // certInfoToIdentity converts certificate info to an identity.

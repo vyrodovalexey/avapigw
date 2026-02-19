@@ -210,7 +210,11 @@ func applyPasswordToRedisURL(cfg *config.RedisCacheConfig, password string) erro
 		return fmt.Errorf("failed to parse redis URL: %w", err)
 	}
 
-	parsedURL.User = url.UserPassword(parsedURL.User.Username(), password)
+	var username string
+	if parsedURL.User != nil {
+		username = parsedURL.User.Username()
+	}
+	parsedURL.User = url.UserPassword(username, password)
 	cfg.URL = parsedURL.String()
 
 	return nil

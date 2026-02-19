@@ -150,6 +150,17 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 ### Recent Improvements (Latest Release)
 
+#### Critical Bug Fixes and Performance Improvements
+- **CRITICAL-1**: Fixed nil pointer dereference in Redis cache when URL has no userinfo
+- **CRITICAL-2/3/4**: Fixed broken `errors.Is()` semantics in auth, vault, and authz error types — now compare by Type/Operation/Err fields
+- **CRITICAL-5**: Fixed unbounded Prometheus metric cardinality in rate limiter — now uses route name from context instead of raw URL path
+- **MAJOR-2**: Fixed write lock held during Vault PKI network call in operator cert provider
+- **MAJOR-3**: Extracted duplicate `matchPath` to `internal/util/validation.go` as `util.MatchPath`
+- **MAJOR-4**: Extracted duplicate `claimsToIdentity`/`keyInfoToIdentity` to `internal/auth/identity_helpers.go`
+- **MAJOR-5**: Consolidated duplicate `isWebSocketUpgrade` functions in middleware package
+- **MAJOR-8**: Optimized authz cache eviction from O(n) single-entry to batch eviction (10% of capacity)
+- **MAJOR-10**: Added webhook validation warnings for plaintext secrets in CRD specs
+
 #### Metrics Fixes and Middleware Architecture Enhancements
 - **Issue 1**: Fixed config reload timestamp metrics - corrected Grafana dashboard query for millisecond compatibility
 - **Issue 2**: Integrated authentication metrics - wired auth middleware into global HTTP middleware chain with proper config conversion
@@ -183,14 +194,17 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Lint Clean**: Zero linting issues across the entire codebase
 
 #### Performance Validation
-- **Local Performance**: HTTP 763 RPS, gRPC 12,353 RPS with excellent latency characteristics
-- **Kubernetes Config-based**: HTTP 763 RPS, gRPC 2,594 RPS with CRD management overhead
-- **Kubernetes CRD-based**: HTTP 763 RPS, gRPC 2,816 RPS with operator integration
-- **Kubernetes Ingress**: HTTP 763 RPS, gRPC 3,367 RPS with best P99 latency performance
+- **Local Performance**: HTTP ~2,000 RPS, gRPC ~1,000 RPS with sub-millisecond average latency
+- **HTTP Characteristics**: 0.91ms avg latency, 2.1ms P95, 5.4ms P99 at 2,000 RPS
+- **gRPC Characteristics**: 1.26ms avg latency, 1.35ms P95, 3.31ms P99 at 1,000 RPS
+- **WebSocket Support**: 100% success rate, 5.66ms avg connection time
+- **K8s HTTPS**: ~10ms avg latency with Vault PKI TLS, 100% success rate
 
 #### Enhanced Observability
 - **130+ Prometheus Metrics**: Comprehensive metrics across gateway and operator components
 - **4 Grafana Dashboards**: Complete monitoring coverage with 100% metrics visualization
+- **Dashboard Fixes**: Fixed 5 stale metric references in gateway-operator-dashboard.json
+- **New Dashboard Panels**: Added gRPC Server Stream Messages panel for enhanced gRPC monitoring
 - **OTEL Tracing**: Distributed tracing with spans for proxy, transform, auth, authz, circuit breaker operations
 - **Production Monitoring**: vmagent and otel-collector deployed in Kubernetes for enterprise observability
 

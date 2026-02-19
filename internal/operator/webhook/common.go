@@ -972,3 +972,75 @@ func validateRequestLimits(limits *avapigwv1alpha1.RequestLimitsConfig) error {
 
 	return nil
 }
+
+// warnPlaintextAuthSecrets returns warnings for plaintext secrets found in
+// authentication configuration. These are warnings (not errors) because the
+// configuration is technically valid but insecure for production use.
+func warnPlaintextAuthSecrets(auth *avapigwv1alpha1.AuthenticationConfig) []string {
+	var warnings []string
+
+	// Warn about plaintext HMAC secret in JWT config
+	if auth.JWT != nil && auth.JWT.Enabled && auth.JWT.Secret != "" {
+		warnings = append(warnings,
+			"SECURITY WARNING: authentication.jwt.secret contains a plaintext HMAC secret. "+
+				"Consider using JWKS URL or Vault for secret management in production environments.")
+	}
+
+	// Warn about plaintext client secret in OIDC providers
+	if auth.OIDC != nil && auth.OIDC.Enabled {
+		for i, provider := range auth.OIDC.Providers {
+			if provider.ClientSecret != "" && provider.ClientSecretRef == nil {
+				warnings = append(warnings,
+					fmt.Sprintf("SECURITY WARNING: authentication.oidc.providers[%d].clientSecret "+
+						"contains a plaintext client secret. "+
+						"Consider using clientSecretRef to reference a Kubernetes Secret instead.", i))
+			}
+		}
+	}
+
+	return warnings
+}
+
+// warnPlaintextBackendAuthSecrets returns warnings for plaintext secrets found in
+// backend authentication configuration.
+func warnPlaintextBackendAuthSecrets(auth *avapigwv1alpha1.BackendAuthConfig) []string {
+	var warnings []string
+
+	// Warn about plaintext password in basic auth
+	if auth.Basic != nil && auth.Basic.Enabled && auth.Basic.Password != "" && auth.Basic.VaultPath == "" {
+		warnings = append(warnings,
+			"SECURITY WARNING: authentication.basic.password contains a plaintext password. "+
+				"Consider using Vault (vaultPath) for credential management in production environments.")
+	}
+
+	// Warn about plaintext client secret in backend OIDC config
+	if auth.JWT != nil && auth.JWT.Enabled && auth.JWT.OIDC != nil {
+		if auth.JWT.OIDC.ClientSecret != "" && auth.JWT.OIDC.ClientSecretRef == nil {
+			warnings = append(warnings,
+				"SECURITY WARNING: authentication.jwt.oidc.clientSecret contains a plaintext client secret. "+
+					"Consider using clientSecretRef to reference a Kubernetes Secret instead.")
+		}
+	}
+
+	return warnings
+}
+
+// warnPlaintextSentinelSecrets returns warnings for plaintext secrets found in
+// Redis Sentinel configuration.
+func warnPlaintextSentinelSecrets(sentinel *avapigwv1alpha1.RedisSentinelSpec) []string {
+	var warnings []string
+
+	if sentinel.Password != "" && sentinel.PasswordVaultPath == "" {
+		warnings = append(warnings,
+			"SECURITY WARNING: sentinel.password contains a plaintext Redis password. "+
+				"Consider using passwordVaultPath for secret management in production environments.")
+	}
+
+	if sentinel.SentinelPassword != "" && sentinel.SentinelPasswordVaultPath == "" {
+		warnings = append(warnings,
+			"SECURITY WARNING: sentinel.sentinelPassword contains a plaintext Sentinel password. "+
+				"Consider using sentinelPasswordVaultPath for secret management in production environments.")
+	}
+
+	return warnings
+}
