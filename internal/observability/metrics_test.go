@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
@@ -481,6 +482,27 @@ func TestMetrics_MustRegisterCollector_Panics(t *testing.T) {
 	// Second registration should panic
 	assert.Panics(t, func() {
 		metrics.MustRegisterCollector(counter)
+	})
+}
+
+func TestMetrics_InitVecMetrics(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics("test_init_vec")
+
+	// InitVecMetrics should not panic
+	assert.NotPanics(t, func() {
+		metrics.InitVecMetrics()
+	})
+
+	// Verify metrics are pre-populated by gathering from registry
+	mfs, err := metrics.Registry().Gather()
+	require.NoError(t, err)
+	assert.NotEmpty(t, mfs)
+
+	// InitVecMetrics should be idempotent
+	assert.NotPanics(t, func() {
+		metrics.InitVecMetrics()
 	})
 }
 

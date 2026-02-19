@@ -25,6 +25,9 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
+	"github.com/vyrodovalexey/avapigw/internal/metrics/streaming"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/router"
 	"github.com/vyrodovalexey/avapigw/internal/util"
@@ -159,7 +162,9 @@ func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...Proxy
 	// When metricsRegistry is nil the metrics fall back to the
 	// default global registerer (e.g. in tests).
 	initProxyMetrics(p.metricsRegistry)
+	initProxyVecMetrics()
 	initWebSocketMetrics(p.metricsRegistry)
+	initWebSocketVecMetrics()
 
 	if p.errorHandler == nil {
 		p.errorHandler = p.defaultErrorHandler
@@ -215,6 +220,10 @@ const (
 	schemeHTTP  = "http"
 	schemeHTTPS = "https"
 )
+
+// unknownRoute is the fallback label value used when the route name
+// is not available in the request context.
+const unknownRoute = "unknown"
 
 // proxyRequest proxies the request to a backend.
 func (p *ReverseProxy) proxyRequest(
@@ -274,6 +283,11 @@ func (p *ReverseProxy) doProxy(
 		p.errorHandler(w, r, NewNoDestinationAvailableError(route.Name))
 		return
 	}
+
+	// Record backend-level load balancer selection
+	backendmetrics.GetBackendMetrics().RecordLBSelection(
+		dest.Destination.Host, "weighted",
+	)
 
 	span.SetAttributes(attribute.String("proxy.backend", dest.Destination.Host))
 
@@ -335,6 +349,19 @@ func (p *ReverseProxy) doProxy(
 	getProxyMetrics().backendDuration.WithLabelValues(
 		targetLabel,
 	).Observe(duration.Seconds())
+
+	// Record route-level upstream duration using route.Name
+	// which is already available from the compiled route.
+	routepkg.GetRouteMetrics().RecordUpstreamDuration(
+		route.Name, r.Method, http.StatusOK, duration,
+	)
+
+	// Record backend-level request metrics (new backend metrics package).
+	bm := backendmetrics.GetBackendMetrics()
+	bm.RecordRequest(
+		dest.Destination.Host, r.Method,
+		http.StatusOK, duration,
+	)
 
 	// Set span attributes for the response
 	span.SetAttributes(attribute.Float64("proxy.backend_duration_ms", float64(duration.Milliseconds())))
@@ -401,6 +428,20 @@ func (p *ReverseProxy) createReverseProxy(
 						observability.String("backend", backendHost),
 						observability.Error(err),
 					)
+					// Record backend-level auth failure
+					authType := "unknown"
+					if serviceBackend.AuthProvider() != nil {
+						authType = serviceBackend.AuthProvider().Type()
+					}
+					backendmetrics.GetBackendMetrics().RecordAuthFailure(
+						backendHost, req.Method, authType, "auth_failed",
+					)
+				} else if serviceBackend.AuthProvider() != nil {
+					// Record backend-level auth success
+					backendmetrics.GetBackendMetrics().RecordAuthSuccess(
+						backendHost, req.Method,
+						serviceBackend.AuthProvider().Type(),
+					)
 				}
 			}
 		},
@@ -450,6 +491,8 @@ func (p *ReverseProxy) executeProxy(
 
 // executeWebSocket executes a WebSocket proxy request with message-level metrics and tracing.
 // It uses gorilla/websocket for bidirectional message relay, enabling per-message counting.
+//
+//nolint:funlen // WebSocket setup, metrics, tracing, and teardown require many statements
 func (p *ReverseProxy) executeWebSocket(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -460,10 +503,26 @@ func (p *ReverseProxy) executeWebSocket(
 	wsMetrics.connectionsTotal.WithLabelValues(backendName).Inc()
 	wsMetrics.connectionsActive.WithLabelValues(backendName).Inc()
 	connStart := time.Now()
+
+	// Extract route name for streaming metrics
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+
+	// Record new streaming-level WebSocket connection
+	wsStreamMetrics := streaming.GetWSMetrics()
+	wsStreamMetrics.RecordConnection(routeName, backendName)
+
 	defer func() {
+		connDuration := time.Since(connStart)
 		wsMetrics.connectionsActive.WithLabelValues(backendName).Dec()
 		wsMetrics.connectionDuration.WithLabelValues(backendName).Observe(
-			time.Since(connStart).Seconds(),
+			connDuration.Seconds(),
+		)
+		// Record streaming-level WebSocket disconnection
+		wsStreamMetrics.RecordDisconnection(
+			routeName, backendName, connDuration,
 		)
 	}()
 
@@ -489,12 +548,23 @@ func (p *ReverseProxy) executeWebSocket(
 	wp := &websocketProxy{logger: p.logger}
 	sent, received, wsErr := wp.proxyWebSocket(w, r, target, p.transport)
 
-	// Record message metrics
+	// Record message metrics (old metrics)
 	if sent > 0 {
 		wsMetrics.messagesSentTotal.WithLabelValues(backendName).Add(float64(sent))
 	}
 	if received > 0 {
 		wsMetrics.messagesReceivedTotal.WithLabelValues(backendName).Add(float64(received))
+	}
+
+	// Record streaming-level message metrics (new metrics).
+	// Message sizes are not available from the relay counts, so we
+	// record count-only with zero size. Per-message size tracking
+	// would require changes to the relay loop.
+	for i := int64(0); i < sent; i++ {
+		wsStreamMetrics.RecordMessageSent(routeName, backendName, 0)
+	}
+	for i := int64(0); i < received; i++ {
+		wsStreamMetrics.RecordMessageReceived(routeName, backendName, 0)
 	}
 
 	// Record span attributes for message counts
@@ -505,6 +575,10 @@ func (p *ReverseProxy) executeWebSocket(
 
 	if wsErr != nil {
 		wsMetrics.errorsTotal.WithLabelValues(backendName, "proxy_error").Inc()
+		// Record streaming-level WebSocket error
+		wsStreamMetrics.RecordError(
+			routeName, backendName, "proxy_error",
+		)
 		// Only log at debug level - WebSocket close is normal
 		p.logger.Debug("websocket proxy completed",
 			observability.String("backend", backendName),
@@ -565,6 +639,10 @@ func (p *ReverseProxy) executeWithCircuitBreaker(
 				observability.String("path", r.URL.Path),
 				observability.Error(err),
 			)
+
+			// Record backend-level circuit breaker rejection
+			backendmetrics.GetBackendMetrics().
+				RecordCircuitBreakerRejection(backendName)
 
 			// Only write error response if we haven't written anything yet
 			if !recorder.HeaderWritten {
@@ -828,12 +906,54 @@ func (p *ReverseProxy) defaultErrorHandler(
 	)
 
 	getProxyMetrics().errorsTotal.WithLabelValues(
-		"unknown", "proxy_error",
+		unknownRoute, "proxy_error",
 	).Inc()
+
+	// Record route-level proxy error
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordError(
+		routeName, r.Method, "proxy_error",
+	)
+
+	// Record backend-level connection error (new backend metrics package).
+	errorType := classifyProxyError(err)
+	backendmetrics.GetBackendMetrics().RecordConnectionError(
+		unknownRoute, errorType,
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = io.WriteString(w, jsonErrBadGateway)
+}
+
+// classifyProxyError classifies a proxy error into a backend error type
+// for metrics recording.
+func classifyProxyError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+
+	errStr := err.Error()
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "reset"
+	case strings.Contains(errStr, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(errStr, "tls:") ||
+		strings.Contains(errStr, "certificate"):
+		return "tls_error"
+	case strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "lookup"):
+		return "dns_error"
+	default:
+		return "connection_refused"
+	}
 }
 
 // Handler returns an http.Handler for the proxy.

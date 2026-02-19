@@ -104,6 +104,7 @@ func New(r *router.Router, opts ...ProxyOption) *Proxy {
 	// metricsRegistry is nil the metrics fall back to the default
 	// global registerer (e.g. in tests).
 	InitGRPCProxyMetrics(p.metricsRegistry)
+	InitGRPCProxyVecMetrics()
 
 	// Create connection pool if not provided
 	if p.connPool == nil {

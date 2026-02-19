@@ -90,7 +90,32 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	// registration errors (safe because descriptors are identical).
 	_ = registerer.Register(m.eventsTotal)
 
+	m.Init()
+
 	return m
+}
+
+// Init pre-populates common label combinations with zero values so
+// that audit Vec metrics appear in /metrics output immediately after
+// startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	if m.eventsTotal == nil {
+		return
+	}
+
+	types := []string{"authentication", "authorization", "request"}
+	actions := []string{"access", "modify"}
+	outcomes := []string{"success", "failure"}
+
+	for _, t := range types {
+		for _, a := range actions {
+			for _, o := range outcomes {
+				m.eventsTotal.WithLabelValues(t, a, o)
+			}
+		}
+	}
 }
 
 // RecordEvent records an audit event metric.

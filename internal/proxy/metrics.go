@@ -72,6 +72,25 @@ func initProxyMetrics(registry *prometheus.Registry) {
 	})
 }
 
+// initProxyVecMetrics pre-populates common label combinations with
+// zero values so that proxy Vec metrics appear in /metrics output
+// immediately after startup. Must be called after initProxyMetrics.
+func initProxyVecMetrics() {
+	m := getProxyMetrics()
+
+	errorTypes := []string{
+		"connection_refused",
+		"timeout",
+		"bad_gateway",
+		"service_unavailable",
+	}
+	for _, et := range errorTypes {
+		m.errorsTotal.WithLabelValues("default", et)
+	}
+
+	m.backendDuration.WithLabelValues("default")
+}
+
 // getProxyMetrics returns the singleton proxy metrics instance.
 // If initProxyMetrics has not been called, metrics are lazily
 // initialized with the default registerer.

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/vyrodovalexey/avapigw/internal/metrics/streaming"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -35,6 +37,17 @@ func (h *StreamHandler) HandleStream(srv interface{}, serverStream grpc.ServerSt
 	if !ok {
 		return status.Error(codes.Internal, "failed to get method from context")
 	}
+
+	// Record gRPC stream start (new streaming metrics package).
+	// Route name is derived from the full method for gRPC.
+	grpcStreamMetrics := streaming.GetGRPCStreamMetrics()
+	grpcStreamMetrics.RecordStreamStart(fullMethod, fullMethod)
+	streamStart := time.Now()
+	defer func() {
+		grpcStreamMetrics.RecordStreamEnd(
+			fullMethod, fullMethod, time.Since(streamStart),
+		)
+	}()
 
 	// Get backend connection
 	outCtx, conn, err := h.director.Direct(ctx, fullMethod)
@@ -120,6 +133,7 @@ func (h *StreamHandler) proxyStreams(serverStream grpc.ServerStream, clientStrea
 // forwardServerToClient forwards messages from server stream to client stream.
 func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, clientStream grpc.ClientStream) error {
 	metrics := getGRPCProxyMetrics()
+	grpcStreamMetrics := streaming.GetGRPCStreamMetrics()
 	fullMethod, _ := grpc.Method(serverStream.Context())
 
 	for {
@@ -132,9 +146,14 @@ func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, cl
 			return err
 		}
 
-		// Record request message size and count
+		// Record request message size and count (old metrics)
 		metrics.requestSize.WithLabelValues(fullMethod).Observe(float64(len(frame.payload)))
 		metrics.streamMsgSent.WithLabelValues(fullMethod).Inc()
+
+		// Record streaming-level message sent to backend (new metrics)
+		grpcStreamMetrics.RecordMessageSent(
+			fullMethod, fullMethod, int64(len(frame.payload)),
+		)
 
 		if err := clientStream.SendMsg(frame); err != nil {
 			return err
@@ -145,6 +164,7 @@ func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, cl
 // forwardClientToServer forwards messages from client stream to server stream.
 func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, serverStream grpc.ServerStream) error {
 	metrics := getGRPCProxyMetrics()
+	grpcStreamMetrics := streaming.GetGRPCStreamMetrics()
 	fullMethod, _ := grpc.Method(serverStream.Context())
 
 	headerSent := false
@@ -157,9 +177,14 @@ func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, se
 			return err
 		}
 
-		// Record response message size and count
+		// Record response message size and count (old metrics)
 		metrics.responseSize.WithLabelValues(fullMethod).Observe(float64(len(frame.payload)))
 		metrics.streamMsgReceived.WithLabelValues(fullMethod).Inc()
+
+		// Record streaming-level message received from backend (new metrics)
+		grpcStreamMetrics.RecordMessageReceived(
+			fullMethod, fullMethod, int64(len(frame.payload)),
+		)
 
 		// Forward headers before the first message (non-blocking after first RecvMsg)
 		if !headerSent {

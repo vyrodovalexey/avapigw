@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
@@ -98,6 +99,14 @@ func NewCircuitBreaker(
 				attribute.String("circuitbreaker.to", to.String()),
 			))
 			span.End()
+
+			// Record route-level circuit breaker trip when
+			// transitioning to open state
+			if to == gobreaker.StateOpen {
+				routepkg.GetRouteMetrics().
+					CircuitBreakerTripsTotal.
+					WithLabelValues(name).Inc()
+			}
 
 			if cb.stateCallback != nil {
 				cb.stateCallback(name, int(to))

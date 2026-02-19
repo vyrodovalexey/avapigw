@@ -1104,6 +1104,17 @@ func TestGetVaultAuthMetrics_MetricsInitialized(t *testing.T) {
 	assert.NotNil(t, metrics.authRetriesTotal)
 }
 
+func TestInitVaultAuthMetrics_ExportedWrapper(t *testing.T) {
+	// InitVaultAuthMetrics is the exported wrapper for initVaultAuthMetrics.
+	// Since sync.Once is already initialized, this is a no-op but should not panic.
+	InitVaultAuthMetrics(nil)
+
+	// Verify the singleton is still valid after calling the exported wrapper
+	metrics := getVaultAuthMetrics()
+	assert.NotNil(t, metrics)
+	assert.NotNil(t, metrics.authRetriesTotal)
+}
+
 // ============================================================================
 // VaultProviderConfig Retry Defaults Tests
 // ============================================================================

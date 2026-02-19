@@ -19,6 +19,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/grpc/router"
+	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
@@ -161,6 +162,11 @@ func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context
 		result.Route.Name, target, selectionStrategy,
 	).Inc()
 
+	// Record backend-level LB selection (new backend metrics package)
+	backendmetrics.GetBackendMetrics().RecordLBSelection(
+		dest.Destination.Host, selectionStrategy,
+	)
+
 	// Get connection from pool
 	conn, err := d.connPool.Get(ctx, target)
 	if err != nil {
@@ -170,6 +176,10 @@ func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context
 		)
 		metrics.directRequests.WithLabelValues(fullMethod, "connection_error").Inc()
 		metrics.directDuration.WithLabelValues(fullMethod).Observe(time.Since(start).Seconds())
+		// Record backend-level connection error (new backend metrics package)
+		backendmetrics.GetBackendMetrics().RecordConnectionError(
+			dest.Destination.Host, "connection_refused",
+		)
 		return ctx, nil, fmt.Errorf("failed to connect to %s: %w", target, err)
 	}
 

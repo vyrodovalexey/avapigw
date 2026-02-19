@@ -90,6 +90,26 @@ func initWebSocketMetrics(registry *prometheus.Registry) {
 	})
 }
 
+// initWebSocketVecMetrics pre-populates common label combinations
+// with zero values so that WebSocket Vec metrics appear in /metrics
+// output immediately after startup. Must be called after
+// initWebSocketMetrics.
+func initWebSocketVecMetrics() {
+	m := getWebSocketMetrics()
+
+	errorTypes := []string{
+		"upgrade_failed",
+		"connection_closed",
+		"read_error",
+		"write_error",
+	}
+	for _, et := range errorTypes {
+		m.errorsTotal.WithLabelValues("default", et)
+	}
+
+	m.messagesReceivedTotal.WithLabelValues("default")
+}
+
 // getWebSocketMetrics returns the singleton WebSocket metrics instance.
 // If initWebSocketMetrics has not been called, metrics are lazily
 // initialized with the default registerer.

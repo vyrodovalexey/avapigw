@@ -47,6 +47,56 @@ func GetMiddlewareMetrics() *MiddlewareMetrics {
 	return middlewareMetrics
 }
 
+// MustRegister registers all middleware metric collectors with the
+// given Prometheus registry. This is needed because promauto registers
+// metrics with the default global registry, but the gateway serves
+// /metrics from a custom registry. Calling MustRegister bridges the
+// two so middleware metrics appear on the gateway's metrics endpoint.
+func (m *MiddlewareMetrics) MustRegister(registry *prometheus.Registry) {
+	registry.MustRegister(
+		m.rateLimitAllowed,
+		m.rateLimitRejected,
+		m.circuitBreakerRequests,
+		m.circuitBreakerTransitions,
+		m.timeoutsTotal,
+		m.retryAttemptsTotal,
+		m.retrySuccessTotal,
+		m.bodyLimitRejected,
+		m.maxSessionsRejected,
+		m.maxSessionsCurrent,
+		m.panicsRecovered,
+		m.corsRequestsTotal,
+	)
+}
+
+// Init pre-initializes common label combinations with zero values so
+// that metrics appear in /metrics output immediately after startup.
+// Prometheus *Vec types only emit metric lines after WithLabelValues()
+// is called at least once. This method is idempotent and safe to call
+// multiple times.
+func (m *MiddlewareMetrics) Init() {
+	for _, route := range []string{"default"} {
+		m.rateLimitAllowed.WithLabelValues(route)
+		m.rateLimitRejected.WithLabelValues(route)
+		m.timeoutsTotal.WithLabelValues(route)
+		m.retryAttemptsTotal.WithLabelValues(route)
+		m.retrySuccessTotal.WithLabelValues(route)
+	}
+	for _, state := range []string{"closed", "open", "half-open"} {
+		m.circuitBreakerRequests.WithLabelValues("default", state)
+	}
+	for _, pair := range [][2]string{
+		{"closed", "open"},
+		{"open", "half-open"},
+		{"half-open", "closed"},
+	} {
+		m.circuitBreakerTransitions.WithLabelValues("default", pair[0], pair[1])
+	}
+	for _, corsType := range []string{"preflight", "actual"} {
+		m.corsRequestsTotal.WithLabelValues(corsType)
+	}
+}
+
 //nolint:funlen // metric initialization requires many declarations
 func newMiddlewareMetrics() *MiddlewareMetrics {
 	return &MiddlewareMetrics{

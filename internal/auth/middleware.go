@@ -16,7 +16,9 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
 	"github.com/vyrodovalexey/avapigw/internal/auth/oidc"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
@@ -236,6 +238,38 @@ func (a *authenticator) initOIDCProviders(config *Config) error {
 	return nil
 }
 
+// routeNameFromContext extracts the route name from the request
+// context, returning "unknown" if no route is set.
+func routeNameFromContext(r *http.Request) string {
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		return "unknown"
+	}
+	return routeName
+}
+
+// recordAuthSuccess records authentication success metrics for both
+// the existing auth metrics and the new route-level metrics.
+func (a *authenticator) recordAuthSuccess(
+	r *http.Request,
+	span trace.Span,
+	authType AuthType,
+	identity *Identity,
+	start time.Time,
+) {
+	at := string(authType)
+	span.SetAttributes(
+		attribute.String("auth.type", at),
+		attribute.String("auth.result", "success"),
+		attribute.String("auth.subject", identity.Subject),
+	)
+	a.metrics.RecordRequest("http", at, "success", time.Since(start))
+	a.metrics.RecordSuccess(at)
+	routepkg.GetRouteMetrics().RecordAuthSuccess(
+		routeNameFromContext(r), r.Method, at,
+	)
+}
+
 // Authenticate authenticates an HTTP request.
 func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	start := time.Now()
@@ -263,13 +297,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsMTLSEnabled() && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		identity, authErr = a.authenticateMTLS(ctx, r)
 		if authErr == nil {
-			span.SetAttributes(
-				attribute.String("auth.type", string(AuthTypeMTLS)),
-				attribute.String("auth.result", "success"),
-				attribute.String("auth.subject", identity.Subject),
-			)
-			a.metrics.RecordRequest("http", string(AuthTypeMTLS), "success", time.Since(start))
-			a.metrics.RecordSuccess(string(AuthTypeMTLS))
+			a.recordAuthSuccess(r, span, AuthTypeMTLS, identity, start)
 			return identity, nil
 		}
 		a.logger.Debug("mTLS authentication failed", observability.Error(authErr))
@@ -279,13 +307,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsJWTEnabled() {
 		identity, authErr = a.authenticateJWT(ctx, r)
 		if authErr == nil {
-			span.SetAttributes(
-				attribute.String("auth.type", string(AuthTypeJWT)),
-				attribute.String("auth.result", "success"),
-				attribute.String("auth.subject", identity.Subject),
-			)
-			a.metrics.RecordRequest("http", string(AuthTypeJWT), "success", time.Since(start))
-			a.metrics.RecordSuccess(string(AuthTypeJWT))
+			a.recordAuthSuccess(r, span, AuthTypeJWT, identity, start)
 			return identity, nil
 		}
 		if !errors.Is(authErr, ErrNoCredentials) {
@@ -297,13 +319,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsAPIKeyEnabled() {
 		identity, authErr = a.authenticateAPIKey(ctx, r)
 		if authErr == nil {
-			span.SetAttributes(
-				attribute.String("auth.type", string(AuthTypeAPIKey)),
-				attribute.String("auth.result", "success"),
-				attribute.String("auth.subject", identity.Subject),
-			)
-			a.metrics.RecordRequest("http", string(AuthTypeAPIKey), "success", time.Since(start))
-			a.metrics.RecordSuccess(string(AuthTypeAPIKey))
+			a.recordAuthSuccess(r, span, AuthTypeAPIKey, identity, start)
 			return identity, nil
 		}
 		if !errors.Is(authErr, ErrNoCredentials) {
@@ -329,6 +345,10 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 
 	a.metrics.RecordRequest("http", "unknown", "failure", time.Since(start))
 	a.metrics.RecordFailure("unknown", "no_valid_credentials")
+	routeName := routeNameFromContext(r)
+	routepkg.GetRouteMetrics().RecordAuthFailure(
+		routeName, r.Method, "unknown", "no_valid_credentials",
+	)
 
 	return nil, authErr
 }

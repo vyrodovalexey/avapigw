@@ -53,19 +53,31 @@ var (
 	globalMetricsOnce sync.Once
 )
 
-// GetControllerMetrics returns the global controller metrics instance.
-// It initializes the metrics on first call (singleton pattern).
-func GetControllerMetrics() *ControllerMetrics {
+// InitControllerMetrics initializes the singleton controller metrics instance with
+// the given Prometheus registerer. If registerer is nil, metrics are registered with
+// the default registerer. Must be called before GetControllerMetrics for metrics to
+// appear on the correct registry; subsequent calls are no-ops (sync.Once).
+func InitControllerMetrics(registerer prometheus.Registerer) {
 	globalMetricsOnce.Do(func() {
-		globalMetrics = newControllerMetrics()
+		if registerer == nil {
+			registerer = prometheus.DefaultRegisterer
+		}
+		globalMetrics = newControllerMetricsWithFactory(promauto.With(registerer))
 	})
+}
+
+// GetControllerMetrics returns the global controller metrics instance.
+// If InitControllerMetrics has not been called, metrics are lazily
+// initialized with the default registerer.
+func GetControllerMetrics() *ControllerMetrics {
+	InitControllerMetrics(nil)
 	return globalMetrics
 }
 
-// newControllerMetrics creates a new ControllerMetrics instance.
-func newControllerMetrics() *ControllerMetrics {
+// newControllerMetricsWithFactory creates a new ControllerMetrics instance using the given promauto factory.
+func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetrics {
 	return &ControllerMetrics{
-		reconcileDuration: promauto.NewHistogramVec(
+		reconcileDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Namespace: "avapigw_operator",
 				Name:      "reconcile_duration_seconds",
@@ -74,7 +86,7 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelController},
 		),
-		reconcileTotal: promauto.NewCounterVec(
+		reconcileTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Name:      "reconcile_total",
@@ -82,7 +94,7 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelController, labelResult},
 		),
-		reconcileErrors: promauto.NewCounterVec(
+		reconcileErrors: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Name:      "reconcile_errors_total",
@@ -90,7 +102,7 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelController},
 		),
-		resourcesTotal: promauto.NewGaugeVec(
+		resourcesTotal: factory.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Namespace: "avapigw_operator",
 				Name:      "resources_total",
@@ -98,7 +110,7 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelKind, labelNamespace},
 		),
-		resourceCondition: promauto.NewGaugeVec(
+		resourceCondition: factory.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Namespace: "avapigw_operator",
 				Name:      "resource_condition",
@@ -106,7 +118,7 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelKind, labelName, labelNamespace, labelCondition},
 		),
-		finalizerOperations: promauto.NewCounterVec(
+		finalizerOperations: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Name:      "finalizer_operations_total",
@@ -114,7 +126,7 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelController, labelOperation},
 		),
-		ingressResourcesProcessed: promauto.NewCounterVec(
+		ingressResourcesProcessed: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Name:      "ingress_resources_processed_total",
@@ -122,7 +134,7 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelResult},
 		),
-		ingressConversionErrors: promauto.NewCounterVec(
+		ingressConversionErrors: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: "avapigw_operator",
 				Name:      "ingress_conversion_errors_total",
@@ -130,6 +142,66 @@ func newControllerMetrics() *ControllerMetrics {
 			},
 			[]string{labelNamespace, labelName},
 		),
+	}
+}
+
+// InitControllerVecMetrics pre-populates all ControllerMetrics vector metrics with
+// common label combinations so they appear on /metrics immediately with zero values,
+// rather than only after the first observation.
+func InitControllerVecMetrics() {
+	m := GetControllerMetrics()
+
+	controllers := []string{"apiroute", "grpcroute", "backend", "grpcbackend", "ingress"}
+	results := []string{ResultSuccess, ResultError, ResultRequeue}
+	operations := []string{OperationAdd, OperationRemove}
+	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend"}
+
+	for _, c := range controllers {
+		// reconcileTotal: controller × result
+		for _, r := range results {
+			m.reconcileTotal.WithLabelValues(c, r)
+		}
+		// reconcileErrors: controller
+		m.reconcileErrors.WithLabelValues(c)
+		// reconcileDuration: controller
+		m.reconcileDuration.WithLabelValues(c)
+		// finalizerOperations: controller × operation
+		for _, op := range operations {
+			m.finalizerOperations.WithLabelValues(c, op)
+		}
+	}
+
+	// resourcesTotal: kind × namespace
+	for _, k := range kinds {
+		m.resourcesTotal.WithLabelValues(k, "default")
+	}
+
+	// ingressResourcesProcessed: result
+	for _, r := range []string{ResultSuccess, ResultError} {
+		m.ingressResourcesProcessed.WithLabelValues(r)
+	}
+
+	// ingressConversionErrors: namespace × name
+	m.ingressConversionErrors.WithLabelValues("default", "default")
+}
+
+// InitStatusUpdateVecMetrics pre-populates all StatusUpdateMetrics vector metrics with
+// common label combinations so they appear on /metrics immediately with zero values.
+func InitStatusUpdateVecMetrics() {
+	m := GetStatusUpdateMetrics()
+
+	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend"}
+	results := []string{ResultSuccess, ResultError}
+
+	for _, k := range kinds {
+		// updateTotal: kind × result
+		for _, r := range results {
+			m.updateTotal.WithLabelValues(k, r)
+		}
+		// updateErrors: kind
+		m.updateErrors.WithLabelValues(k)
+		// updateDuration: kind
+		m.updateDuration.WithLabelValues(k)
 	}
 }
 
@@ -257,38 +329,56 @@ var (
 	statusUpdateMetricsOnce sync.Once
 )
 
-// GetStatusUpdateMetrics returns the global status update metrics instance.
-func GetStatusUpdateMetrics() *StatusUpdateMetrics {
+// InitStatusUpdateMetrics initializes the singleton status update metrics instance
+// with the given Prometheus registerer. If registerer is nil, metrics are registered
+// with the default registerer. Must be called before GetStatusUpdateMetrics for
+// metrics to appear on the correct registry; subsequent calls are no-ops (sync.Once).
+func InitStatusUpdateMetrics(registerer prometheus.Registerer) {
 	statusUpdateMetricsOnce.Do(func() {
-		statusUpdateMetrics = &StatusUpdateMetrics{
-			updateDuration: promauto.NewHistogramVec(
-				prometheus.HistogramOpts{
-					Namespace: "avapigw_operator",
-					Name:      "status_update_duration_seconds",
-					Help:      "Duration of status update operations in seconds",
-					Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
-				},
-				[]string{labelKind},
-			),
-			updateTotal: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Namespace: "avapigw_operator",
-					Name:      "status_update_total",
-					Help:      "Total number of status update operations",
-				},
-				[]string{labelKind, labelResult},
-			),
-			updateErrors: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Namespace: "avapigw_operator",
-					Name:      "status_update_errors_total",
-					Help:      "Total number of status update errors",
-				},
-				[]string{labelKind},
-			),
+		if registerer == nil {
+			registerer = prometheus.DefaultRegisterer
 		}
+		statusUpdateMetrics = newStatusUpdateMetricsWithFactory(promauto.With(registerer))
 	})
+}
+
+// GetStatusUpdateMetrics returns the global status update metrics instance.
+// If InitStatusUpdateMetrics has not been called, metrics are lazily
+// initialized with the default registerer.
+func GetStatusUpdateMetrics() *StatusUpdateMetrics {
+	InitStatusUpdateMetrics(nil)
 	return statusUpdateMetrics
+}
+
+// newStatusUpdateMetricsWithFactory creates status update metrics using the given promauto factory.
+func newStatusUpdateMetricsWithFactory(factory promauto.Factory) *StatusUpdateMetrics {
+	return &StatusUpdateMetrics{
+		updateDuration: factory.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: "avapigw_operator",
+				Name:      "status_update_duration_seconds",
+				Help:      "Duration of status update operations in seconds",
+				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
+			},
+			[]string{labelKind},
+		),
+		updateTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "avapigw_operator",
+				Name:      "status_update_total",
+				Help:      "Total number of status update operations",
+			},
+			[]string{labelKind, labelResult},
+		),
+		updateErrors: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "avapigw_operator",
+				Name:      "status_update_errors_total",
+				Help:      "Total number of status update errors",
+			},
+			[]string{labelKind},
+		),
+	}
 }
 
 // RecordStatusUpdate records a status update operation.

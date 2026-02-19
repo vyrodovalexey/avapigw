@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,15 +62,54 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
-var operatorBuildInfo = promauto.NewGaugeVec(
-	prometheus.GaugeOpts{
-		Namespace: "avapigw_operator",
-		Name:      "build_info",
-		Help: "Build information for " +
-			"the operator",
-	},
-	[]string{"version", "commit", "build_time"},
+var (
+	operatorBuildInfo     *prometheus.GaugeVec
+	operatorBuildInfoOnce sync.Once
 )
+
+// initializeMetrics initializes all operator metrics modules with the given
+// Prometheus registerer so they appear on the correct /metrics endpoint.
+// This must be called early in runWithConfig, after the controller manager
+// is created but before any component that records metrics is started.
+func initializeMetrics(registerer prometheus.Registerer) {
+	initOperatorBuildInfo(registerer)
+	controller.InitControllerMetrics(registerer)
+	controller.InitControllerVecMetrics()
+	controller.InitStatusUpdateMetrics(registerer)
+	controller.InitStatusUpdateVecMetrics()
+	operatorwebhook.InitWebhookMetrics(registerer)
+	operatorwebhook.InitWebhookVecMetrics()
+	operatorwebhook.InitDuplicateMetrics(registerer)
+	operatorwebhook.InitDuplicateVecMetrics()
+	cert.InitCertMetrics(registerer)
+	cert.InitCertVecMetrics()
+	cert.InitVaultAuthMetrics(registerer)
+	cert.InitVaultAuthVecMetrics()
+	cert.InitWebhookInjectorMetrics(registerer)
+	cert.InitWebhookInjectorVecMetrics()
+}
+
+// initOperatorBuildInfo initializes the singleton operator build info metric with
+// the given Prometheus registerer. If registerer is nil, metrics are registered with
+// the default registerer. Must be called before using operatorBuildInfo for the metric
+// to appear on the correct registry; subsequent calls are no-ops (sync.Once).
+func initOperatorBuildInfo(registerer prometheus.Registerer) {
+	operatorBuildInfoOnce.Do(func() {
+		if registerer == nil {
+			registerer = prometheus.DefaultRegisterer
+		}
+		factory := promauto.With(registerer)
+		operatorBuildInfo = factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "avapigw_operator",
+				Name:      "build_info",
+				Help: "Build information for " +
+					"the operator",
+			},
+			[]string{"version", "commit", "build_time"},
+		)
+	})
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -198,12 +238,6 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	logger := setupLogger(cfg.LogLevel, cfg.LogFormat)
 	ctrl.SetLogger(logger)
 
-	// Set build info metric
-	operatorBuildInfo.WithLabelValues(
-		operatorVersion, operatorGitCommit,
-		operatorBuildTime,
-	).Set(1)
-
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -225,6 +259,16 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	if err != nil {
 		return err
 	}
+
+	// Initialize all operator metrics with controller-runtime's registry
+	// so they appear on the /metrics endpoint served by the manager.
+	initializeMetrics(metrics.Registry)
+
+	// Set build info metric
+	operatorBuildInfo.WithLabelValues(
+		operatorVersion, operatorGitCommit,
+		operatorBuildTime,
+	).Set(1)
 
 	// Setup all operator components (gRPC, controllers, webhooks, health checks)
 	caInjector, err := setupOperatorComponents(ctx, cfg, mgr, certManager)
@@ -880,7 +924,12 @@ func setupGRPCServer(ctx context.Context, cfg *Config, certManager cert.Manager)
 	if cfg.GRPCRequireClientCert {
 		serverConfig.CertManager = certManager
 	}
-	return operatorgrpc.NewServer(serverConfig)
+	server, err := operatorgrpc.NewServer(serverConfig)
+	if err != nil {
+		return nil, err
+	}
+	operatorgrpc.InitServerVecMetrics()
+	return server, nil
 }
 
 // controllerSetup defines a controller setup operation with a name for error reporting.

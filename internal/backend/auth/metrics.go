@@ -127,6 +127,30 @@ func NewMetrics(namespace string) *Metrics {
 	return m
 }
 
+// Init pre-populates common label combinations with zero values so
+// that backend auth Vec metrics appear in /metrics output immediately
+// after startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	authTypes := []string{"oidc", "basic", "mtls"}
+	errorTypes := []string{
+		"token_error",
+		"connection_error",
+		"auth_failed",
+	}
+	statuses := []string{"success", "error"}
+
+	for _, at := range authTypes {
+		for _, et := range errorTypes {
+			m.errorsTotal.WithLabelValues("default", at, et)
+		}
+		for _, s := range statuses {
+			m.tokenRefreshTotal.WithLabelValues("default", at, s)
+		}
+	}
+}
+
 // RecordRequest records a backend authentication request.
 func (m *Metrics) RecordRequest(provider, authType, status string, duration time.Duration) {
 	m.requestsTotal.WithLabelValues(provider, authType, status).Inc()

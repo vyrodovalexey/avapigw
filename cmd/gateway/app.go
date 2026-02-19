@@ -6,7 +6,14 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/auth/apikey"
+	authjwt "github.com/vyrodovalexey/avapigw/internal/auth/jwt"
+	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
+	"github.com/vyrodovalexey/avapigw/internal/auth/oidc"
 	"github.com/vyrodovalexey/avapigw/internal/authz"
+	"github.com/vyrodovalexey/avapigw/internal/authz/abac"
+	"github.com/vyrodovalexey/avapigw/internal/authz/external"
+	"github.com/vyrodovalexey/avapigw/internal/authz/rbac"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	backendauth "github.com/vyrodovalexey/avapigw/internal/backend/auth"
 	"github.com/vyrodovalexey/avapigw/internal/cache"
@@ -14,10 +21,14 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/encoding"
 	"github.com/vyrodovalexey/avapigw/internal/gateway"
 	"github.com/vyrodovalexey/avapigw/internal/health"
+	backendmetricspkg "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
+	"github.com/vyrodovalexey/avapigw/internal/metrics/streaming"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/proxy"
 	"github.com/vyrodovalexey/avapigw/internal/router"
+	"github.com/vyrodovalexey/avapigw/internal/security"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 	"github.com/vyrodovalexey/avapigw/internal/transform"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
@@ -46,6 +57,7 @@ type application struct {
 // initApplication initializes all application components.
 func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *application {
 	metrics := observability.NewMetrics("gateway")
+	metrics.InitVecMetrics()
 	metrics.SetBuildInfo(version, gitCommit, buildTime)
 	tracer := initTracer(cfg, logger)
 	healthChecker := health.NewChecker(version, logger)
@@ -134,6 +146,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	// Create TLS metrics registered with the gateway's custom registry
 	// so they appear on the gateway's /metrics endpoint.
 	tlsMetrics := tlspkg.NewMetrics("gateway", tlspkg.WithRegistry(metrics.Registry()))
+	tlsMetrics.Init()
 
 	gwOpts := []gateway.Option{
 		gateway.WithLogger(logger),
@@ -176,13 +189,15 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	}
 }
 
-// registerSubsystemMetrics initializes and registers cache, encoding,
-// transform, and vault metric singletons with the gateway's custom
-// Prometheus registry. These packages use promauto which registers
-// metrics with the default global registry, but the gateway's /metrics
-// endpoint is served from its own custom registry. Without this
-// explicit registration the subsystem metrics would be invisible on
-// the /metrics endpoint even though they are being recorded at runtime.
+// registerSubsystemMetrics initializes and registers all subsystem
+// metric singletons with the gateway's custom Prometheus registry.
+// Many packages use promauto which registers metrics with the default
+// global registry, but the gateway's /metrics endpoint is served from
+// its own custom registry. Without this explicit registration the
+// subsystem metrics would be invisible on the /metrics endpoint even
+// though they are being recorded at runtime.
+//
+//nolint:funlen // registering many subsystems requires many statements
 func registerSubsystemMetrics(metrics *observability.Metrics, logger observability.Logger) {
 	registry := metrics.Registry()
 
@@ -204,12 +219,99 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 	// on the gateway's /metrics endpoint.
 	vaultMetrics := vault.NewMetrics("gateway")
 	registry.MustRegister(vaultMetrics)
+	vaultMetrics.Init()
 
 	// Backend auth metrics singleton. Register with the gateway's
 	// custom registry so backend auth metrics (OIDC, mTLS, Basic)
 	// appear on the /metrics endpoint.
 	backendAuthMetrics := backendauth.GetSharedMetrics()
 	backendAuthMetrics.MustRegister(registry)
+	backendAuthMetrics.Init()
+
+	// Middleware metrics singleton (rate limiter, circuit breaker,
+	// timeouts, retries, body limit, max sessions, panics, CORS).
+	mwMetrics := middleware.GetMiddlewareMetrics()
+	mwMetrics.MustRegister(registry)
+	mwMetrics.Init()
+
+	// Security headers metrics singleton (security headers, HSTS,
+	// CSP applied/violations).
+	secMetrics := security.GetSecurityMetrics()
+	secMetrics.MustRegister(registry)
+	secMetrics.Init()
+
+	// Health check metrics singleton (checks total, check status).
+	hlMetrics := health.GetHealthMetrics()
+	hlMetrics.MustRegister(registry)
+	hlMetrics.Init()
+
+	// Router regex cache metrics singleton (cache hits, misses,
+	// evictions, size).
+	routerMetrics := router.GetRouterMetrics()
+	routerMetrics.MustRegister(registry)
+	routerMetrics.Init()
+
+	// Auth provider metrics singletons. Each provider creates its own
+	// private prometheus.Registry internally; registering the shared
+	// singleton with the gateway's custom registry makes these metrics
+	// visible on the /metrics endpoint.
+	apikeyMetrics := apikey.GetSharedMetrics()
+	apikeyMetrics.MustRegister(registry)
+	apikeyMetrics.Init()
+
+	jwtMetrics := authjwt.GetSharedMetrics()
+	jwtMetrics.MustRegister(registry)
+	jwtMetrics.Init()
+
+	oidcMetrics := oidc.GetSharedMetrics()
+	oidcMetrics.MustRegister(registry)
+	oidcMetrics.Init()
+
+	mtlsMetrics := mtls.GetSharedMetrics()
+	mtlsMetrics.MustRegister(registry)
+	mtlsMetrics.Init()
+
+	// Authz provider metrics singletons. Same pattern as auth providers.
+	rbacMetrics := rbac.GetSharedMetrics()
+	rbacMetrics.MustRegister(registry)
+	rbacMetrics.Init()
+
+	abacMetrics := abac.GetSharedMetrics()
+	abacMetrics.MustRegister(registry)
+	abacMetrics.Init()
+
+	externalMetrics := external.GetSharedMetrics()
+	externalMetrics.MustRegister(registry)
+	externalMetrics.Init()
+
+	// Route-level metrics singleton. Register with the gateway's
+	// custom registry so route metrics appear on the /metrics endpoint.
+	rm := routepkg.GetRouteMetrics()
+	rm.MustRegister(registry)
+	rm.Init()
+
+	// Backend-level metrics singleton. Register with the gateway's
+	// custom registry so backend metrics (requests, connections,
+	// health checks, LB, circuit breaker, auth, TLS, pool) appear
+	// on the /metrics endpoint.
+	bm := backendmetricspkg.GetBackendMetrics()
+	bm.MustRegister(registry)
+	bm.Init()
+
+	// WebSocket streaming metrics singleton. Register with the
+	// gateway's custom registry so WebSocket streaming metrics
+	// (connections, messages, errors, duration) appear on the
+	// /metrics endpoint.
+	wsm := streaming.GetWSMetrics()
+	wsm.MustRegister(registry)
+	wsm.Init()
+
+	// gRPC streaming metrics singleton. Register with the gateway's
+	// custom registry so gRPC streaming metrics (messages, active
+	// streams, duration) appear on the /metrics endpoint.
+	gsm := streaming.GetGRPCStreamMetrics()
+	gsm.MustRegister(registry)
+	gsm.Init()
 
 	logger.Info("subsystem metrics registered with gateway registry",
 		observability.Bool("cache", true),
@@ -217,6 +319,21 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 		observability.Bool("transform", true),
 		observability.Bool("vault", vaultMetrics != nil),
 		observability.Bool("backend_auth", true),
+		observability.Bool("middleware", true),
+		observability.Bool("security", true),
+		observability.Bool("health", true),
+		observability.Bool("router", true),
+		observability.Bool("apikey", true),
+		observability.Bool("jwt", true),
+		observability.Bool("oidc", true),
+		observability.Bool("mtls", true),
+		observability.Bool("rbac", true),
+		observability.Bool("abac", true),
+		observability.Bool("external_authz", true),
+		observability.Bool("route", true),
+		observability.Bool("backend", true),
+		observability.Bool("ws_streaming", true),
+		observability.Bool("grpc_streaming", true),
 	)
 }
 

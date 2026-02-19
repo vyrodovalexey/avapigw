@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // timeoutGracePeriod is the grace period to wait for goroutine completion after timeout.
@@ -132,6 +134,15 @@ func writeTimeoutResponse(
 	GetMiddlewareMetrics().timeoutsTotal.WithLabelValues(
 		r.URL.Path,
 	).Inc()
+
+	// Record route-level timeout
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordTimeout(
+		routeName, r.Method, "upstream",
+	)
 
 	w.Header().Set(HeaderContentType, ContentTypeJSON)
 	w.WriteHeader(http.StatusGatewayTimeout)

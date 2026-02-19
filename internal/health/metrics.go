@@ -47,3 +47,29 @@ func GetHealthMetrics() *HealthMetrics {
 	})
 	return healthMetricsInstance
 }
+
+// MustRegister registers all health metric collectors with the given
+// Prometheus registry. This is needed because promauto registers
+// metrics with the default global registry, but the gateway serves
+// /metrics from a custom registry. Calling MustRegister bridges the
+// two so health metrics appear on the gateway's metrics endpoint.
+func (m *HealthMetrics) MustRegister(registry *prometheus.Registry) {
+	registry.MustRegister(
+		m.checksTotal,
+		m.checkStatus,
+	)
+}
+
+// Init pre-initializes common label combinations with zero values so
+// that metrics appear in /metrics output immediately after startup.
+// Prometheus *Vec types only emit metric lines after WithLabelValues()
+// is called at least once. This method is idempotent and safe to call
+// multiple times.
+func (m *HealthMetrics) Init() {
+	for _, checkType := range []string{"liveness", "readiness"} {
+		m.checksTotal.WithLabelValues(checkType)
+	}
+	for _, check := range []string{"overall", "backend"} {
+		m.checkStatus.WithLabelValues(check)
+	}
+}

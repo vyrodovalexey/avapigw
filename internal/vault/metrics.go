@@ -145,6 +145,34 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	)
 }
 
+// Init pre-populates common label combinations with zero values so
+// that Vault Vec metrics appear in /metrics output immediately after
+// startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	methods := []string{"token", "kubernetes", "approle"}
+	statuses := []string{"success", "error"}
+	for _, method := range methods {
+		for _, status := range statuses {
+			m.authAttempts.WithLabelValues(method, status)
+		}
+	}
+
+	errorTypes := []string{
+		"auth_error",
+		"read_error",
+		"write_error",
+		"connection_error",
+	}
+	for _, et := range errorTypes {
+		m.errors.WithLabelValues(et)
+	}
+}
+
 // RecordRequest records a Vault request.
 func (m *Metrics) RecordRequest(operation, status string, duration time.Duration) {
 	m.mu.RLock()

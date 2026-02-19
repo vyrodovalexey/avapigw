@@ -233,6 +233,21 @@ func newServerMetricsWithFactory(factory promauto.Factory) *serverMetrics {
 	}
 }
 
+// InitServerVecMetrics pre-populates the cancelledOps vector metric with common label
+// combinations so it appears on /metrics immediately with zero values.
+func InitServerVecMetrics() {
+	m := getServerMetrics()
+
+	operations := []string{"watch", "heartbeat", "apply"}
+	reasons := []string{"context_canceled", "deadline_exceeded", "client_disconnect"}
+
+	for _, op := range operations {
+		for _, r := range reasons {
+			m.cancelledOps.WithLabelValues(op, r)
+		}
+	}
+}
+
 // NewServer creates a new gRPC server.
 func NewServer(config *ServerConfig) (*Server, error) {
 	var registerer prometheus.Registerer

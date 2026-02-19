@@ -46,22 +46,56 @@ var (
 	vaultAuthMetricsOnce     sync.Once
 )
 
-// getVaultAuthMetrics returns the singleton instance of Vault authentication metrics.
-func getVaultAuthMetrics() *vaultAuthMetrics {
+// initVaultAuthMetrics initializes the singleton Vault authentication metrics instance
+// with the given Prometheus registerer. If registerer is nil, metrics are registered
+// with the default registerer. Must be called before getVaultAuthMetrics for metrics
+// to appear on the correct registry; subsequent calls are no-ops (sync.Once).
+func initVaultAuthMetrics(registerer prometheus.Registerer) {
 	vaultAuthMetricsOnce.Do(func() {
-		vaultAuthMetricsInstance = &vaultAuthMetrics{
-			authRetriesTotal: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Namespace: "avapigw_operator",
-					Subsystem: "vault",
-					Name:      "auth_retries_total",
-					Help:      "Total number of Vault authentication retry attempts",
-				},
-				[]string{"result"},
-			),
+		if registerer == nil {
+			registerer = prometheus.DefaultRegisterer
 		}
+		vaultAuthMetricsInstance = newVaultAuthMetricsWithFactory(promauto.With(registerer))
 	})
+}
+
+// InitVaultAuthMetrics initializes the singleton Vault authentication metrics instance
+// with the given Prometheus registerer. This is the exported wrapper for initVaultAuthMetrics.
+func InitVaultAuthMetrics(registerer prometheus.Registerer) {
+	initVaultAuthMetrics(registerer)
+}
+
+// getVaultAuthMetrics returns the singleton instance of Vault authentication metrics.
+// If initVaultAuthMetrics has not been called, metrics are lazily
+// initialized with the default registerer.
+func getVaultAuthMetrics() *vaultAuthMetrics {
+	initVaultAuthMetrics(nil)
 	return vaultAuthMetricsInstance
+}
+
+// newVaultAuthMetricsWithFactory creates Vault authentication metrics using the given promauto factory.
+func newVaultAuthMetricsWithFactory(factory promauto.Factory) *vaultAuthMetrics {
+	return &vaultAuthMetrics{
+		authRetriesTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "avapigw_operator",
+				Subsystem: "vault",
+				Name:      "auth_retries_total",
+				Help:      "Total number of Vault authentication retry attempts",
+			},
+			[]string{"result"},
+		),
+	}
+}
+
+// InitVaultAuthVecMetrics pre-populates all vaultAuthMetrics vector metrics with
+// common label combinations so they appear on /metrics immediately with zero values.
+func InitVaultAuthVecMetrics() {
+	m := getVaultAuthMetrics()
+
+	for _, r := range []string{"success", "retry", "exhausted"} {
+		m.authRetriesTotal.WithLabelValues(r)
+	}
 }
 
 // VaultProviderConfig contains configuration for the Vault certificate provider.
@@ -99,6 +133,10 @@ type VaultProviderConfig struct {
 	// KubernetesMountPath is the mount path for the Kubernetes auth method.
 	// Defaults to "kubernetes".
 	KubernetesMountPath string
+
+	// MetricsRegisterer is the Prometheus registerer for Vault authentication metrics.
+	// If nil, metrics are registered with the default registerer.
+	MetricsRegisterer prometheus.Registerer
 }
 
 // vaultProvider implements Manager using Vault PKI.
@@ -153,6 +191,7 @@ func NewVaultProvider(ctx context.Context, config *VaultProviderConfig) (Manager
 	}
 
 	logger := observability.GetGlobalLogger().With(observability.String("component", "vault-cert-manager"))
+	initVaultAuthMetrics(config.MetricsRegisterer)
 	metrics := getVaultAuthMetrics()
 
 	// Create Vault client with Kubernetes authentication configuration

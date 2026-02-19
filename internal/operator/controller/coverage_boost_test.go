@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -1718,6 +1720,313 @@ func TestIsResourceReady(t *testing.T) {
 				t.Errorf("isResourceReady() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// ============================================================================
+// deletionMessage Tests
+// ============================================================================
+
+// ============================================================================
+// newControllerMetricsWithFactory Tests
+// ============================================================================
+
+// newTestControllerMetrics creates a ControllerMetrics instance with a fresh registry
+// to avoid duplicate registration panics across tests.
+func newTestControllerMetrics(t *testing.T) (*ControllerMetrics, *prometheus.Registry) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	m := newControllerMetricsWithFactory(promauto.With(reg))
+	return m, reg
+}
+
+func TestNewControllerMetricsWithFactory_AllFieldsInitialized(t *testing.T) {
+	m, _ := newTestControllerMetrics(t)
+
+	if m == nil {
+		t.Fatal("newControllerMetricsWithFactory() returned nil")
+	}
+	if m.reconcileDuration == nil {
+		t.Error("reconcileDuration should be initialized")
+	}
+	if m.reconcileTotal == nil {
+		t.Error("reconcileTotal should be initialized")
+	}
+	if m.reconcileErrors == nil {
+		t.Error("reconcileErrors should be initialized")
+	}
+	if m.resourcesTotal == nil {
+		t.Error("resourcesTotal should be initialized")
+	}
+	if m.resourceCondition == nil {
+		t.Error("resourceCondition should be initialized")
+	}
+	if m.finalizerOperations == nil {
+		t.Error("finalizerOperations should be initialized")
+	}
+	if m.ingressResourcesProcessed == nil {
+		t.Error("ingressResourcesProcessed should be initialized")
+	}
+	if m.ingressConversionErrors == nil {
+		t.Error("ingressConversionErrors should be initialized")
+	}
+}
+
+func TestNewControllerMetricsWithFactory_MetricNames(t *testing.T) {
+	m, reg := newTestControllerMetrics(t)
+
+	// Initialize metrics with label values so they appear in Gather()
+	m.reconcileDuration.WithLabelValues("test-controller").Observe(0.01)
+	m.reconcileTotal.WithLabelValues("test-controller", ResultSuccess).Inc()
+	m.reconcileErrors.WithLabelValues("test-controller").Inc()
+	m.resourcesTotal.WithLabelValues("APIRoute", "default").Set(1)
+	m.resourceCondition.WithLabelValues("APIRoute", "test", "default", "Ready").Set(1)
+	m.finalizerOperations.WithLabelValues("test-controller", OperationAdd).Inc()
+	m.ingressResourcesProcessed.WithLabelValues(ResultSuccess).Inc()
+	m.ingressConversionErrors.WithLabelValues("default", "test-ingress").Inc()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Failed to gather metrics: %v", err)
+	}
+
+	expectedNames := map[string]bool{
+		"avapigw_operator_reconcile_duration_seconds":        false,
+		"avapigw_operator_reconcile_total":                   false,
+		"avapigw_operator_reconcile_errors_total":            false,
+		"avapigw_operator_resources_total":                   false,
+		"avapigw_operator_resource_condition":                false,
+		"avapigw_operator_finalizer_operations_total":        false,
+		"avapigw_operator_ingress_resources_processed_total": false,
+		"avapigw_operator_ingress_conversion_errors_total":   false,
+	}
+
+	for _, family := range families {
+		if _, ok := expectedNames[family.GetName()]; ok {
+			expectedNames[family.GetName()] = true
+		}
+	}
+
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("metric %s should be registered", name)
+		}
+	}
+}
+
+func TestNewControllerMetricsWithFactory_RecordOperations(t *testing.T) {
+	m, _ := newTestControllerMetrics(t)
+
+	tests := []struct {
+		name string
+		fn   func()
+	}{
+		{"RecordReconcileDuration", func() { m.RecordReconcileDuration("test", 100*time.Millisecond) }},
+		{"RecordReconcileResult success", func() { m.RecordReconcileResult("test", ResultSuccess) }},
+		{"RecordReconcileResult error", func() { m.RecordReconcileResult("test", ResultError) }},
+		{"RecordReconcileResult requeue", func() { m.RecordReconcileResult("test", ResultRequeue) }},
+		{"RecordReconcileResult canceled", func() { m.RecordReconcileResult("test", ResultCanceled) }},
+		{"RecordReconcileError", func() { m.RecordReconcileError("test") }},
+		{"SetResourceCount", func() { m.SetResourceCount("APIRoute", "default", 5) }},
+		{"SetResourceCondition", func() { m.SetResourceCondition("APIRoute", "test", "default", "Ready", 1) }},
+		{"RecordFinalizerOperation add", func() { m.RecordFinalizerOperation("test", OperationAdd) }},
+		{"RecordFinalizerOperation remove", func() { m.RecordFinalizerOperation("test", OperationRemove) }},
+		{"RecordIngressProcessed", func() { m.RecordIngressProcessed(ResultSuccess) }},
+		{"RecordIngressConversionError", func() { m.RecordIngressConversionError("default", "test") }},
+		{"DeleteResourceConditionMetrics", func() { m.DeleteResourceConditionMetrics("APIRoute", "test", "default") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			tt.fn()
+		})
+	}
+}
+
+// ============================================================================
+// newStatusUpdateMetricsWithFactory Tests
+// ============================================================================
+
+func newTestStatusUpdateMetrics(t *testing.T) (*StatusUpdateMetrics, *prometheus.Registry) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	m := newStatusUpdateMetricsWithFactory(promauto.With(reg))
+	return m, reg
+}
+
+func TestNewStatusUpdateMetricsWithFactory_AllFieldsInitialized(t *testing.T) {
+	m, _ := newTestStatusUpdateMetrics(t)
+
+	if m == nil {
+		t.Fatal("newStatusUpdateMetricsWithFactory() returned nil")
+	}
+	if m.updateDuration == nil {
+		t.Error("updateDuration should be initialized")
+	}
+	if m.updateTotal == nil {
+		t.Error("updateTotal should be initialized")
+	}
+	if m.updateErrors == nil {
+		t.Error("updateErrors should be initialized")
+	}
+}
+
+func TestNewStatusUpdateMetricsWithFactory_MetricNames(t *testing.T) {
+	m, reg := newTestStatusUpdateMetrics(t)
+
+	// Initialize metrics with label values so they appear in Gather()
+	m.updateDuration.WithLabelValues("APIRoute").Observe(0.01)
+	m.updateTotal.WithLabelValues("APIRoute", ResultSuccess).Inc()
+	m.updateErrors.WithLabelValues("APIRoute").Inc()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Failed to gather metrics: %v", err)
+	}
+
+	expectedNames := map[string]bool{
+		"avapigw_operator_status_update_duration_seconds": false,
+		"avapigw_operator_status_update_total":            false,
+		"avapigw_operator_status_update_errors_total":     false,
+	}
+
+	for _, family := range families {
+		if _, ok := expectedNames[family.GetName()]; ok {
+			expectedNames[family.GetName()] = true
+		}
+	}
+
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("metric %s should be registered", name)
+		}
+	}
+}
+
+func TestNewStatusUpdateMetricsWithFactory_RecordStatusUpdate(t *testing.T) {
+	m, _ := newTestStatusUpdateMetrics(t)
+
+	tests := []struct {
+		name     string
+		kind     string
+		duration time.Duration
+		success  bool
+	}{
+		{"success fast", "APIRoute", 1 * time.Millisecond, true},
+		{"success slow", "Backend", 500 * time.Millisecond, true},
+		{"failure fast", "GRPCRoute", 2 * time.Millisecond, false},
+		{"failure slow", "GRPCBackend", 1 * time.Second, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should not panic
+			m.RecordStatusUpdate(tt.kind, tt.duration, tt.success)
+		})
+	}
+}
+
+// ============================================================================
+// ConditionStatusToFloat Tests
+// ============================================================================
+
+func TestConditionStatusToFloat_TableDriven(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   float64
+	}{
+		{"True", "True", 1},
+		{"False", "False", 0},
+		{"Unknown", "Unknown", -1},
+		{"empty", "", -1},
+		{"arbitrary", "SomethingElse", -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ConditionStatusToFloat(tt.status)
+			if got != tt.want {
+				t.Errorf("ConditionStatusToFloat(%q) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// ReconcileTimer Tests with Factory
+// ============================================================================
+
+func TestReconcileTimer_WithFactoryMetrics(t *testing.T) {
+	// ReconcileTimer uses GetControllerMetrics() internally, so we test
+	// that it works correctly with the singleton.
+	timer := NewReconcileTimer("test-controller")
+	if timer == nil {
+		t.Fatal("NewReconcileTimer() returned nil")
+	}
+	if timer.controller != "test-controller" {
+		t.Errorf("controller = %q, want %q", timer.controller, "test-controller")
+	}
+	if timer.metrics == nil {
+		t.Error("metrics should not be nil")
+	}
+
+	// Test all record methods - should not panic
+	timer.RecordSuccess()
+
+	timer2 := NewReconcileTimer("test-controller-2")
+	timer2.RecordError()
+
+	timer3 := NewReconcileTimer("test-controller-3")
+	timer3.RecordRequeue()
+
+	timer4 := NewReconcileTimer("test-controller-4")
+	timer4.RecordCanceled()
+}
+
+// ============================================================================
+// GetControllerMetrics Singleton Tests
+// ============================================================================
+
+func TestGetControllerMetrics_Singleton(t *testing.T) {
+	m1 := GetControllerMetrics()
+	m2 := GetControllerMetrics()
+
+	if m1 == nil {
+		t.Fatal("GetControllerMetrics() returned nil")
+	}
+	if m1 != m2 {
+		t.Error("GetControllerMetrics() should return the same instance")
+	}
+}
+
+func TestGetControllerMetrics_FieldsInitialized(t *testing.T) {
+	m := GetControllerMetrics()
+
+	if m.reconcileDuration == nil {
+		t.Error("reconcileDuration should be initialized")
+	}
+	if m.reconcileTotal == nil {
+		t.Error("reconcileTotal should be initialized")
+	}
+	if m.reconcileErrors == nil {
+		t.Error("reconcileErrors should be initialized")
+	}
+	if m.resourcesTotal == nil {
+		t.Error("resourcesTotal should be initialized")
+	}
+	if m.resourceCondition == nil {
+		t.Error("resourceCondition should be initialized")
+	}
+	if m.finalizerOperations == nil {
+		t.Error("finalizerOperations should be initialized")
+	}
+	if m.ingressResourcesProcessed == nil {
+		t.Error("ingressResourcesProcessed should be initialized")
+	}
+	if m.ingressConversionErrors == nil {
+		t.Error("ingressConversionErrors should be initialized")
 	}
 }
 

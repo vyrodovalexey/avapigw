@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
@@ -181,6 +182,15 @@ func (m *Metrics) registerCollectors() {
 	)
 }
 
+// InitVecMetrics pre-populates common label combinations with zero
+// values so that Vec metrics appear in /metrics output immediately
+// after startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is idempotent.
+func (m *Metrics) InitVecMetrics() {
+	m.circuitBreaker.WithLabelValues("default")
+	m.rateLimitHits.WithLabelValues("default")
+}
+
 // RecordRequest records a completed HTTP request.
 // The route parameter should be the matched route name/pattern,
 // not the raw request path, to prevent cardinality explosion.
@@ -316,6 +326,14 @@ func MetricsMiddleware(
 
 				metrics.RecordRequest(
 					method, route, rw.status,
+					duration,
+					r.ContentLength, int64(rw.size),
+				)
+
+				// Record route-level metrics in parallel
+				routeMetrics := routepkg.GetRouteMetrics()
+				routeMetrics.RecordRequest(
+					route, method, rw.status,
 					duration,
 					r.ContentLength, int64(rw.size),
 				)

@@ -12,6 +12,10 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
+// unknownRoute is the fallback label value used when the route name
+// is not available in the request context.
+const unknownRoute = "unknown"
+
 // HTTP header constants.
 const (
 	// HeaderContentType is the Content-Type header name.

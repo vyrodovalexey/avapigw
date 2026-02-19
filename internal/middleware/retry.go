@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/retry"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // DefaultMaxBodySize is the default maximum body size for retry buffering (1MB).
@@ -217,6 +219,13 @@ func logRetryAttempt(
 	GetMiddlewareMetrics().retryAttemptsTotal.WithLabelValues(
 		r.URL.Path,
 	).Inc()
+
+	// Record route-level retry attempt
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordRetry(routeName, r.Method)
 }
 
 // writeRetryExhaustedResponse writes the response when all retries are exhausted.
@@ -230,6 +239,15 @@ func writeRetryExhaustedResponse(
 		observability.String("path", r.URL.Path),
 		observability.Int("attempts", attempts),
 		observability.Int("last_status", lastStatus),
+	)
+
+	// Record route-level retry exhaustion
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordRetryExhausted(
+		routeName, r.Method,
 	)
 
 	w.Header().Set(HeaderContentType, ContentTypeJSON)

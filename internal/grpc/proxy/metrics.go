@@ -164,6 +164,26 @@ func InitGRPCProxyMetrics(registry *prometheus.Registry) {
 	})
 }
 
+// InitGRPCProxyVecMetrics pre-populates common label combinations
+// with zero values so that gRPC proxy Vec metrics appear in /metrics
+// output immediately after startup. Must be called after
+// InitGRPCProxyMetrics.
+func InitGRPCProxyVecMetrics() {
+	m := getGRPCProxyMetrics()
+
+	errorTypes := []string{
+		"dial_error",
+		"tls_error",
+		"auth_error",
+	}
+	for _, et := range errorTypes {
+		m.connectionErrors.WithLabelValues("default", et)
+	}
+
+	m.connectionClosed.WithLabelValues("default")
+	m.timeoutOccurrences.WithLabelValues("default")
+}
+
 // getGRPCProxyMetrics returns the singleton gRPC proxy metrics instance.
 // If InitGRPCProxyMetrics has not been called, metrics are lazily
 // initialized with the default registerer.

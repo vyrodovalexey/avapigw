@@ -259,3 +259,24 @@ func TestMetrics_ConcurrentAccess(t *testing.T) {
 		}
 	})
 }
+
+func TestMetrics_Init(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics("test_init")
+
+	// Init should not panic
+	assert.NotPanics(t, func() {
+		metrics.Init()
+	})
+
+	// Verify metrics are pre-populated by gathering from registry
+	mfs, err := metrics.Registry().Gather()
+	require.NoError(t, err)
+	assert.NotEmpty(t, mfs)
+
+	// Init should be idempotent
+	assert.NotPanics(t, func() {
+		metrics.Init()
+	})
+}

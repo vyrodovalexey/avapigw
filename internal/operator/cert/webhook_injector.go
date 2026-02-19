@@ -32,6 +32,10 @@ type WebhookInjectorConfig struct {
 	// RefreshInterval is the interval at which to check and refresh the CA bundle.
 	// Default is 1 hour.
 	RefreshInterval time.Duration
+
+	// MetricsRegisterer is the Prometheus registerer for webhook injector metrics.
+	// If nil, metrics are registered with the default registerer.
+	MetricsRegisterer prometheus.Registerer
 }
 
 // webhookInjectorMetrics contains Prometheus metrics for webhook CA injection.
@@ -46,39 +50,73 @@ var (
 	webhookInjectorMetricsOnce     sync.Once
 )
 
-// getWebhookInjectorMetrics returns the singleton instance of webhook injector metrics.
-func getWebhookInjectorMetrics() *webhookInjectorMetrics {
+// initWebhookInjectorMetrics initializes the singleton webhook injector metrics instance
+// with the given Prometheus registerer. If registerer is nil, metrics are registered
+// with the default registerer. Must be called before getWebhookInjectorMetrics for
+// metrics to appear on the correct registry; subsequent calls are no-ops (sync.Once).
+func initWebhookInjectorMetrics(registerer prometheus.Registerer) {
 	webhookInjectorMetricsOnce.Do(func() {
-		webhookInjectorMetricsInstance = &webhookInjectorMetrics{
-			injectionsTotal: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Namespace: "avapigw_operator",
-					Subsystem: "webhook",
-					Name:      "ca_injections_total",
-					Help:      "Total number of webhook CA bundle injection attempts",
-				},
-				[]string{"result"},
-			),
-			injectionDuration: promauto.NewHistogram(
-				prometheus.HistogramOpts{
-					Namespace: "avapigw_operator",
-					Subsystem: "webhook",
-					Name:      "ca_injection_duration_seconds",
-					Help:      "Duration of webhook CA bundle injection operations",
-					Buckets:   prometheus.DefBuckets,
-				},
-			),
-			lastInjectionTime: promauto.NewGauge(
-				prometheus.GaugeOpts{
-					Namespace: "avapigw_operator",
-					Subsystem: "webhook",
-					Name:      "last_ca_injection_timestamp",
-					Help:      "Timestamp of the last successful CA bundle injection",
-				},
-			),
+		if registerer == nil {
+			registerer = prometheus.DefaultRegisterer
 		}
+		webhookInjectorMetricsInstance = newWebhookInjectorMetricsWithFactory(promauto.With(registerer))
 	})
+}
+
+// InitWebhookInjectorMetrics initializes the singleton webhook injector metrics instance
+// with the given Prometheus registerer. This is the exported wrapper for initWebhookInjectorMetrics.
+func InitWebhookInjectorMetrics(registerer prometheus.Registerer) {
+	initWebhookInjectorMetrics(registerer)
+}
+
+// getWebhookInjectorMetrics returns the singleton instance of webhook injector metrics.
+// If initWebhookInjectorMetrics has not been called, metrics are lazily
+// initialized with the default registerer.
+func getWebhookInjectorMetrics() *webhookInjectorMetrics {
+	initWebhookInjectorMetrics(nil)
 	return webhookInjectorMetricsInstance
+}
+
+// newWebhookInjectorMetricsWithFactory creates webhook injector metrics using the given promauto factory.
+func newWebhookInjectorMetricsWithFactory(factory promauto.Factory) *webhookInjectorMetrics {
+	return &webhookInjectorMetrics{
+		injectionsTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "avapigw_operator",
+				Subsystem: "webhook",
+				Name:      "ca_injections_total",
+				Help:      "Total number of webhook CA bundle injection attempts",
+			},
+			[]string{"result"},
+		),
+		injectionDuration: factory.NewHistogram(
+			prometheus.HistogramOpts{
+				Namespace: "avapigw_operator",
+				Subsystem: "webhook",
+				Name:      "ca_injection_duration_seconds",
+				Help:      "Duration of webhook CA bundle injection operations",
+				Buckets:   prometheus.DefBuckets,
+			},
+		),
+		lastInjectionTime: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: "avapigw_operator",
+				Subsystem: "webhook",
+				Name:      "last_ca_injection_timestamp",
+				Help:      "Timestamp of the last successful CA bundle injection",
+			},
+		),
+	}
+}
+
+// InitWebhookInjectorVecMetrics pre-populates all webhookInjectorMetrics vector metrics
+// with common label combinations so they appear on /metrics immediately with zero values.
+func InitWebhookInjectorVecMetrics() {
+	m := getWebhookInjectorMetrics()
+
+	for _, r := range []string{"success", "error"} {
+		m.injectionsTotal.WithLabelValues(r)
+	}
 }
 
 // WebhookCAInjector injects CA bundles into ValidatingWebhookConfiguration resources.
@@ -115,6 +153,8 @@ func NewWebhookCAInjector(config *WebhookInjectorConfig) (*WebhookCAInjector, er
 	if config.RefreshInterval == 0 {
 		config.RefreshInterval = 1 * time.Hour
 	}
+
+	initWebhookInjectorMetrics(config.MetricsRegisterer)
 
 	return &WebhookCAInjector{
 		config:  config,

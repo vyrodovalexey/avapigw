@@ -12,7 +12,9 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/cache"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // maxCacheBodySize is the maximum response body size that will be buffered
@@ -71,6 +73,15 @@ func CacheFromConfig(
 				return
 			}
 
+			// Record route-level cache miss
+			routeName := util.RouteFromContext(r.Context())
+			if routeName == "" {
+				routeName = unknownRoute
+			}
+			routepkg.GetRouteMetrics().RecordCacheMiss(
+				routeName, r.Method,
+			)
+
 			cm.captureAndCache(w, r, next, key)
 		})
 	}
@@ -106,6 +117,14 @@ func (cm *cacheMiddleware) serveCachedResponse(w http.ResponseWriter, r *http.Re
 		observability.String("key", key),
 		observability.String("path", r.URL.Path),
 	)
+
+	// Record route-level cache hit
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordCacheHit(routeName, r.Method)
+
 	return true
 }
 

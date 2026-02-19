@@ -78,6 +78,8 @@ func newReloadMetrics(m *observability.Metrics) *reloadMetrics {
 		),
 	}
 
+	rm.Init()
+
 	// Register all reload metrics with the custom registry so they
 	// appear on the gateway's /metrics endpoint.
 	collectors := []prometheus.Collector{
@@ -94,6 +96,31 @@ func newReloadMetrics(m *observability.Metrics) *reloadMetrics {
 	}
 
 	return rm
+}
+
+// Init pre-populates common label combinations with zero values so
+// that reload Vec metrics appear in /metrics output immediately after
+// startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (rm *reloadMetrics) Init() {
+	results := []string{"success", "error"}
+	for _, r := range results {
+		rm.configReloadTotal.WithLabelValues(r)
+	}
+
+	components := []string{
+		"rate_limiter",
+		"max_sessions",
+		"routes",
+		"backends",
+		"audit",
+	}
+	for _, c := range components {
+		for _, r := range results {
+			rm.configReloadComponentTotal.WithLabelValues(c, r)
+		}
+	}
 }
 
 // ensureReloadMetrics returns the application's reload metrics,

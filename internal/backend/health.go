@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -213,17 +214,28 @@ func (hc *HealthChecker) checkHost(ctx context.Context, host *Host) {
 		return
 	}
 
+	checkStart := time.Now()
 	resp, err := hc.client.Do(req)
+	checkDuration := time.Since(checkStart)
+
+	bm := backendmetrics.GetBackendMetrics()
+
 	if err != nil {
 		hc.recordFailure(host, err)
+		// Record backend-level health check failure
+		bm.RecordHealthCheck(hc.backendName, "failure", checkDuration)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		hc.recordSuccess(host)
+		// Record backend-level health check success
+		bm.RecordHealthCheck(hc.backendName, "success", checkDuration)
 	} else {
 		hc.recordFailure(host, nil)
+		// Record backend-level health check failure
+		bm.RecordHealthCheck(hc.backendName, "failure", checkDuration)
 	}
 }
 
@@ -242,6 +254,13 @@ func (hc *HealthChecker) recordSuccess(host *Host) {
 				observability.Int("port", host.Port),
 			)
 			host.SetStatus(StatusHealthy)
+			// Record backend-level health status (1=healthy)
+			backendmetrics.GetBackendMetrics().
+				HealthCheckStatus.
+				WithLabelValues(hc.backendName).Set(1)
+			backendmetrics.GetBackendMetrics().
+				ConsecutiveFailures.
+				WithLabelValues(hc.backendName).Set(0)
 			if hc.onStatusChange != nil {
 				hostAddr := net.JoinHostPort(
 					host.Address, strconv.Itoa(host.Port),
@@ -262,6 +281,12 @@ func (hc *HealthChecker) recordFailure(host *Host, err error) {
 	hc.unhealthyCounts[host]++
 	hc.healthyCounts[host] = 0
 
+	// Record backend-level consecutive failures gauge
+	backendmetrics.GetBackendMetrics().
+		ConsecutiveFailures.
+		WithLabelValues(hc.backendName).
+		Set(float64(hc.unhealthyCounts[host]))
+
 	if hc.unhealthyCounts[host] >= hc.unhealthyThreshold {
 		if host.Status() != StatusUnhealthy {
 			hc.logger.Warn("host became unhealthy",
@@ -270,6 +295,10 @@ func (hc *HealthChecker) recordFailure(host *Host, err error) {
 				observability.Error(err),
 			)
 			host.SetStatus(StatusUnhealthy)
+			// Record backend-level health status (0=unhealthy)
+			backendmetrics.GetBackendMetrics().
+				HealthCheckStatus.
+				WithLabelValues(hc.backendName).Set(0)
 			if hc.onStatusChange != nil {
 				hostAddr := net.JoinHostPort(
 					host.Address, strconv.Itoa(host.Port),

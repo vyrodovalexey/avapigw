@@ -241,3 +241,23 @@ func TestNopMetrics_ImplementsInterface(t *testing.T) {
 func TestMetrics_ImplementsInterface(t *testing.T) {
 	var _ MetricsRecorder = (*Metrics)(nil)
 }
+
+func TestMetrics_Init(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	m := NewMetrics("test_init", WithRegistry(registry))
+
+	// Init should not panic
+	assert.NotPanics(t, func() {
+		m.Init()
+	})
+
+	// Verify metrics are pre-populated by gathering from registry
+	mfs, err := registry.Gather()
+	require.NoError(t, err)
+	assert.NotEmpty(t, mfs)
+
+	// Init should be idempotent
+	assert.NotPanics(t, func() {
+		m.Init()
+	})
+}

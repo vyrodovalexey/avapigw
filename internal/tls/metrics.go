@@ -139,6 +139,43 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	)
 }
 
+// Init pre-populates common label combinations with zero values so
+// that TLS Vec metrics appear in /metrics output immediately after
+// startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	versions := []string{"1.2", "1.3"}
+	modes := []string{"server", "client", "mtls"}
+	for _, v := range versions {
+		for _, mode := range modes {
+			m.handshakeDuration.WithLabelValues(v, mode)
+		}
+	}
+
+	handshakeErrorReasons := []string{
+		"timeout",
+		"protocol_error",
+		"certificate_error",
+	}
+	for _, reason := range handshakeErrorReasons {
+		m.handshakeErrors.WithLabelValues(reason)
+	}
+
+	certValidationResults := []string{
+		"success",
+		"failure",
+		"expired",
+		"revoked",
+	}
+	for _, result := range certValidationResults {
+		m.clientCertValidation.WithLabelValues(result)
+	}
+}
+
 // RecordConnection records a successful TLS connection.
 func (m *Metrics) RecordConnection(version uint16, cipherSuite uint16, mode TLSMode) {
 	m.mu.RLock()

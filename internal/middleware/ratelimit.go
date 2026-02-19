@@ -12,6 +12,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
@@ -213,7 +214,7 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 			// Raw URL paths would create unbounded cardinality (DoS vector).
 			routeName := util.RouteFromContext(ctx)
 			if routeName == "" {
-				routeName = "unknown"
+				routeName = unknownRoute
 			}
 
 			if !rl.Allow(clientIP) {
@@ -235,6 +236,11 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 				mm.rateLimitRejected.WithLabelValues(
 					routeName,
 				).Inc()
+
+				// Record route-level rate limit hit
+				routepkg.GetRouteMetrics().RecordRateLimitHit(
+					routeName, r.Method, "default",
+				)
 
 				w.Header().Set(HeaderContentType, ContentTypeJSON)
 				w.Header().Set(HeaderRetryAfter, "1")
