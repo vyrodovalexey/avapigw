@@ -1,10 +1,26 @@
 package auth
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+var (
+	sharedMetricsInstance *Metrics
+	sharedMetricsOnce     sync.Once
+)
+
+// GetSharedMetrics returns the singleton backend auth metrics instance.
+// This shared instance should be used by all backend auth providers
+// and registered with the gateway's custom Prometheus registry.
+func GetSharedMetrics() *Metrics {
+	sharedMetricsOnce.Do(func() {
+		sharedMetricsInstance = NewMetrics("gateway")
+	})
+	return sharedMetricsInstance
+}
 
 // Metrics holds Prometheus metrics for backend authentication operations.
 type Metrics struct {
@@ -91,7 +107,7 @@ func NewMetrics(namespace string) *Metrics {
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "backend_auth",
-			Name:      "token_expiry_timestamp_seconds",
+			Name:      "token_expiry_seconds",
 			Help:      "Token expiry timestamp in seconds since epoch",
 		},
 		[]string{"provider", "auth_type"},
@@ -109,6 +125,30 @@ func NewMetrics(namespace string) *Metrics {
 	)
 
 	return m
+}
+
+// Init pre-populates common label combinations with zero values so
+// that backend auth Vec metrics appear in /metrics output immediately
+// after startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	authTypes := []string{"oidc", "basic", "mtls"}
+	errorTypes := []string{
+		"token_error",
+		"connection_error",
+		"auth_failed",
+	}
+	statuses := []string{"success", "error"}
+
+	for _, at := range authTypes {
+		for _, et := range errorTypes {
+			m.errorsTotal.WithLabelValues("default", at, et)
+		}
+		for _, s := range statuses {
+			m.tokenRefreshTotal.WithLabelValues("default", at, s)
+		}
+	}
 }
 
 // RecordRequest records a backend authentication request.

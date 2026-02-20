@@ -4,6 +4,7 @@
 package operator_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,7 +30,7 @@ func TestFunctional_Webhook_DurationValidation(t *testing.T) {
 		t.Run("valid duration: "+d, func(t *testing.T) {
 			route := createBasicAPIRoute()
 			route.Spec.Timeout = avapigwv1alpha1.Duration(d)
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			assert.NoError(t, err)
 		})
 	}
@@ -49,7 +50,7 @@ func TestFunctional_Webhook_DurationValidation(t *testing.T) {
 		t.Run("invalid duration: "+d, func(t *testing.T) {
 			route := createBasicAPIRoute()
 			route.Spec.Timeout = avapigwv1alpha1.Duration(d)
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			assert.Error(t, err)
 		})
 	}
@@ -67,12 +68,12 @@ func TestFunctional_Webhook_CommonValidation(t *testing.T) {
 			RequestsPerSecond: 100,
 			Burst:             200,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 
 		// Invalid - zero requests per second when enabled
 		route.Spec.RateLimit.RequestsPerSecond = 0
-		_, err = validator.ValidateCreate(nil, route)
+		_, err = validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 	})
 
@@ -89,7 +90,7 @@ func TestFunctional_Webhook_CommonValidation(t *testing.T) {
 			MaxAge:           86400,
 			AllowCredentials: true,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -104,12 +105,12 @@ func TestFunctional_Webhook_CommonValidation(t *testing.T) {
 			QueueSize:     100,
 			QueueTimeout:  "10s",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 
 		// Invalid - zero max concurrent when enabled
 		route.Spec.MaxSessions.MaxConcurrent = 0
-		_, err = validator.ValidateCreate(nil, route)
+		_, err = validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 	})
 
@@ -123,7 +124,7 @@ func TestFunctional_Webhook_CommonValidation(t *testing.T) {
 			KeyFile:    "/certs/tls.key",
 			MinVersion: "TLS12",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 
 		// Valid TLS with Vault
@@ -135,7 +136,7 @@ func TestFunctional_Webhook_CommonValidation(t *testing.T) {
 				CommonName: "test.example.com",
 			},
 		}
-		_, err = validator.ValidateCreate(nil, route)
+		_, err = validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -178,7 +179,7 @@ func TestFunctional_Webhook_DefaultValues(t *testing.T) {
 		}
 
 		validator := &webhook.APIRouteValidator{}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -200,7 +201,7 @@ func TestFunctional_Webhook_DefaultValues(t *testing.T) {
 		}
 
 		validator := &webhook.BackendValidator{}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -216,7 +217,7 @@ func TestFunctional_Webhook_CrossFieldValidation(t *testing.T) {
 			Code: 301,
 		}
 
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		assert.NotEmpty(t, warnings)
 	})
@@ -230,7 +231,7 @@ func TestFunctional_Webhook_CrossFieldValidation(t *testing.T) {
 			Body:   `{"status":"ok"}`,
 		}
 
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		assert.NotEmpty(t, warnings)
 	})
@@ -246,7 +247,7 @@ func TestFunctional_Webhook_CrossFieldValidation(t *testing.T) {
 			// Missing CertFile and KeyFile
 		}
 
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "tls.certFile or tls.vault is required for MUTUAL TLS mode")
 	})
@@ -266,7 +267,7 @@ func TestFunctional_Webhook_CrossFieldValidation(t *testing.T) {
 			},
 		}
 
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 	})
 }
@@ -279,7 +280,7 @@ func TestFunctional_Webhook_EdgeCases(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Match = nil
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		// Empty match is valid - matches all requests
 		assert.NoError(t, err)
 	})
@@ -290,7 +291,7 @@ func TestFunctional_Webhook_EdgeCases(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Route = nil
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		// Empty route is valid if redirect or directResponse is set
 		assert.NoError(t, err)
 	})
@@ -301,7 +302,7 @@ func TestFunctional_Webhook_EdgeCases(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Route[0].Weight = 0
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		// Single destination with weight 0 is valid
 		assert.NoError(t, err)
 	})
@@ -321,7 +322,7 @@ func TestFunctional_Webhook_EdgeCases(t *testing.T) {
 			},
 		}
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		// Multiple destinations with all weights 0 is valid (equal distribution)
 		assert.NoError(t, err)
 	})
@@ -332,7 +333,7 @@ func TestFunctional_Webhook_EdgeCases(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Timeout = "24h"
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -342,7 +343,7 @@ func TestFunctional_Webhook_EdgeCases(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Timeout = "1ms"
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -357,7 +358,7 @@ func TestFunctional_Webhook_SpecialCharacters(t *testing.T) {
 			Prefix: "/api/v1/users/{id}",
 		}
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -369,7 +370,7 @@ func TestFunctional_Webhook_SpecialCharacters(t *testing.T) {
 			{Name: "X-Custom-Header", Exact: "value"},
 		}
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -381,7 +382,7 @@ func TestFunctional_Webhook_SpecialCharacters(t *testing.T) {
 			Regex: `^/api/v[0-9]+/users/[a-zA-Z0-9\-]+$`,
 		}
 
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -404,7 +405,7 @@ func TestFunctional_Webhook_LoadBalancerAlgorithms(t *testing.T) {
 				Algorithm: algo,
 			}
 
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			assert.NoError(t, err)
 		})
 	}
@@ -425,7 +426,7 @@ func TestFunctional_Webhook_TLSVersions(t *testing.T) {
 				MinVersion: version,
 			}
 
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			assert.NoError(t, err)
 		})
 	}
@@ -455,7 +456,7 @@ func TestFunctional_Webhook_AuthenticationValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -470,7 +471,7 @@ func TestFunctional_Webhook_AuthenticationValidation(t *testing.T) {
 				Algorithm: "HS256",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -485,7 +486,7 @@ func TestFunctional_Webhook_AuthenticationValidation(t *testing.T) {
 				VaultPath:     "secret/api-keys",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -499,7 +500,7 @@ func TestFunctional_Webhook_AuthenticationValidation(t *testing.T) {
 				HashAlgorithm: "sha512",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -515,7 +516,7 @@ func TestFunctional_Webhook_AuthenticationValidation(t *testing.T) {
 				AllowedOUs:      []string{"Engineering", "Operations"},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -529,7 +530,7 @@ func TestFunctional_Webhook_AuthenticationValidation(t *testing.T) {
 				ExtractIdentity: "san",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -560,7 +561,7 @@ func TestFunctional_Webhook_AuthenticationValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -609,7 +610,7 @@ func TestFunctional_Webhook_AuthorizationValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -648,7 +649,7 @@ func TestFunctional_Webhook_AuthorizationValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -670,7 +671,7 @@ func TestFunctional_Webhook_AuthorizationValidation(t *testing.T) {
 				FailOpen: false,
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -688,7 +689,7 @@ func TestFunctional_Webhook_AuthorizationValidation(t *testing.T) {
 				FailOpen: true,
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -714,7 +715,7 @@ func TestFunctional_Webhook_AuthorizationValidation(t *testing.T) {
 				Type:    "redis",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -747,7 +748,7 @@ func TestFunctional_Webhook_BackendTransformValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -769,7 +770,7 @@ func TestFunctional_Webhook_BackendTransformValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -784,7 +785,7 @@ func TestFunctional_Webhook_BackendTransformValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -802,7 +803,7 @@ func TestFunctional_Webhook_BackendCacheValidation(t *testing.T) {
 			StaleWhileRevalidate: "5m",
 			Type:                 "redis",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -814,7 +815,7 @@ func TestFunctional_Webhook_BackendCacheValidation(t *testing.T) {
 			KeyComponents: []string{"path"},
 			Type:          "memory",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -824,7 +825,7 @@ func TestFunctional_Webhook_BackendCacheValidation(t *testing.T) {
 			Enabled: true,
 			TTL:     "invalid-duration",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "ttl is invalid")
 	})
@@ -836,7 +837,7 @@ func TestFunctional_Webhook_BackendCacheValidation(t *testing.T) {
 			TTL:                  "5m",
 			StaleWhileRevalidate: "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "staleWhileRevalidate is invalid")
 	})
@@ -857,7 +858,7 @@ func TestFunctional_Webhook_BackendEncodingValidation(t *testing.T) {
 				Compression: "gzip",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -869,7 +870,7 @@ func TestFunctional_Webhook_BackendEncodingValidation(t *testing.T) {
 				Compression: "deflate",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -881,7 +882,7 @@ func TestFunctional_Webhook_BackendEncodingValidation(t *testing.T) {
 				Compression: "br",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -893,7 +894,7 @@ func TestFunctional_Webhook_BackendEncodingValidation(t *testing.T) {
 				Compression: "none",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -909,7 +910,7 @@ func TestFunctional_Webhook_GRPCBackendTransformValidation(t *testing.T) {
 				Paths: []string{"user.id", "user.name", "user.email", "user.profile.avatar"},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -930,7 +931,7 @@ func TestFunctional_Webhook_GRPCBackendTransformValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -949,7 +950,7 @@ func TestFunctional_Webhook_GRPCBackendTransformValidation(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -963,7 +964,7 @@ func TestFunctional_Webhook_RequestLimitsValidation(t *testing.T) {
 			MaxBodySize:   10485760,
 			MaxHeaderSize: 1048576,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -974,7 +975,7 @@ func TestFunctional_Webhook_RequestLimitsValidation(t *testing.T) {
 			MaxBodySize:   4194304,
 			MaxHeaderSize: 65536,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -985,7 +986,7 @@ func TestFunctional_Webhook_RequestLimitsValidation(t *testing.T) {
 			MaxBodySize:   52428800,
 			MaxHeaderSize: 2097152,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -996,7 +997,7 @@ func TestFunctional_Webhook_RequestLimitsValidation(t *testing.T) {
 			MaxBodySize:   1073741824,
 			MaxHeaderSize: 104857600,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -1041,7 +1042,7 @@ func TestFunctional_Webhook_CombinedValidation(t *testing.T) {
 			},
 			SkipPaths: []string{"/health", "/metrics"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -1070,7 +1071,7 @@ func TestFunctional_Webhook_CombinedValidation(t *testing.T) {
 				Compression: "gzip",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -1103,7 +1104,7 @@ func TestFunctional_Webhook_CombinedValidation(t *testing.T) {
 				ContentType: "application/grpc",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }

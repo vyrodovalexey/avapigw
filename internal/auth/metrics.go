@@ -14,17 +14,29 @@ type Metrics struct {
 	authFailureTotal *prometheus.CounterVec
 	cacheHits        prometheus.Counter
 	cacheMisses      prometheus.Counter
-	registry         *prometheus.Registry
+	registerer       prometheus.Registerer
 }
 
 // NewMetrics creates a new Metrics instance.
+// Metrics are registered with prometheus.DefaultRegisterer so they are
+// automatically exposed on the default /metrics endpoint.
 func NewMetrics(namespace string) *Metrics {
+	return NewMetricsWithRegisterer(namespace, prometheus.DefaultRegisterer)
+}
+
+// NewMetricsWithRegisterer creates a new Metrics instance with a custom registerer.
+// This is useful for testing where a private registry is preferred.
+func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer) *Metrics {
 	if namespace == "" {
 		namespace = "gateway"
 	}
 
+	if registerer == nil {
+		registerer = prometheus.DefaultRegisterer
+	}
+
 	m := &Metrics{
-		registry: prometheus.NewRegistry(),
+		registerer: registerer,
 	}
 
 	m.requestsTotal = prometheus.NewCounterVec(
@@ -86,17 +98,42 @@ func NewMetrics(namespace string) *Metrics {
 		},
 	)
 
-	// Register all metrics
-	m.registry.MustRegister(
+	// Register all metrics with the provided registerer, ignoring duplicates.
+	// This is safe because the metric descriptors are identical when re-registered.
+	collectors := []prometheus.Collector{
 		m.requestsTotal,
 		m.requestDuration,
 		m.authSuccessTotal,
 		m.authFailureTotal,
 		m.cacheHits,
 		m.cacheMisses,
-	)
+	}
+	for _, c := range collectors {
+		// Use Register instead of MustRegister to handle duplicate registration gracefully.
+		// If the metric is already registered (e.g., in tests), we ignore the error.
+		_ = m.registerer.Register(c)
+	}
 
 	return m
+}
+
+// Init pre-initializes common label combinations with zero values so that
+// metrics appear in /metrics output immediately after startup. Prometheus
+// *Vec types only emit metric lines after WithLabelValues() is called at
+// least once. This method is idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	for _, authType := range []string{"jwt", "basic", "apikey", "mtls", "oidc"} {
+		for _, method := range []string{"GET", "POST", "PUT", "DELETE"} {
+			for _, status := range []string{"success", "failure"} {
+				m.requestsTotal.WithLabelValues(method, authType, status)
+			}
+			m.requestDuration.WithLabelValues(method, authType)
+		}
+		m.authSuccessTotal.WithLabelValues(authType)
+		for _, reason := range []string{"invalid_token", "expired", "unauthorized"} {
+			m.authFailureTotal.WithLabelValues(authType, reason)
+		}
+	}
 }
 
 // RecordRequest records an authentication request.
@@ -125,9 +162,20 @@ func (m *Metrics) RecordCacheMiss() {
 	m.cacheMisses.Inc()
 }
 
-// Registry returns the Prometheus registry.
+// Registry returns a Prometheus registry containing these metrics.
+// This creates a new registry and re-registers the collectors for
+// backward compatibility with code that calls Gather() on the returned registry.
 func (m *Metrics) Registry() *prometheus.Registry {
-	return m.registry
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(
+		m.requestsTotal,
+		m.requestDuration,
+		m.authSuccessTotal,
+		m.authFailureTotal,
+		m.cacheHits,
+		m.cacheMisses,
+	)
+	return reg
 }
 
 // MustRegister registers the metrics with the given registry.

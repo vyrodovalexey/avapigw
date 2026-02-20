@@ -5,14 +5,17 @@ metadata:
   namespace: avapigw-test
 spec:
   hosts:
-    - address: 10.0.1.10
-      port: 8080
+    # For local K8s testing, use host.docker.internal to reach
+    # REST backends running in docker-compose.
+    # In production, use the actual K8s service FQDN or IP.
+    - address: host.docker.internal
+      port: 8801
       weight: 50
-    - address: 10.0.1.11
-      port: 8080
+    - address: host.docker.internal
+      port: 8802
       weight: 30
-    - address: 10.0.1.12
-      port: 8080
+    - address: host.docker.internal
+      port: 8805
       weight: 20
   healthCheck:
     path: /health
@@ -25,9 +28,11 @@ spec:
   tls:
     enabled: true
     mode: MUTUAL
-    caFile: /certs/backend/ca.crt
-    certFile: /certs/backend/client.crt
-    keyFile: /certs/backend/client.key
+    # When using Vault PKI, file-based cert paths are not needed.
+    # The gateway will obtain certificates from Vault automatically.
+    # caFile: /certs/backend/ca.crt
+    # certFile: /certs/backend/client.crt
+    # keyFile: /certs/backend/client.key
     serverName: backend.internal
     minVersion: TLS12
     vault:

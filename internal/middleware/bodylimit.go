@@ -20,6 +20,9 @@ func BodyLimit(maxSize int64, logger observability.Logger) func(http.Handler) ht
 					observability.Int64("max_size", maxSize),
 					observability.String("path", r.URL.Path),
 				)
+
+				GetMiddlewareMetrics().bodyLimitRejected.Inc()
+
 				w.Header().Set(HeaderContentType, ContentTypeJSON)
 				w.WriteHeader(http.StatusRequestEntityTooLarge)
 				_, _ = io.WriteString(w, ErrRequestEntityTooLarge)

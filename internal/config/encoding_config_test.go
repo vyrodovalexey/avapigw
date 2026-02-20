@@ -474,3 +474,640 @@ func TestEncodingConfig_FullConfiguration(t *testing.T) {
 	assert.False(t, config.Protobuf.IsEmpty())
 	assert.False(t, config.Compression.IsEmpty())
 }
+
+// ---------------------------------------------------------------------------
+// Tests for contentTypeToEncoding helper
+// ---------------------------------------------------------------------------
+
+func TestContentTypeToEncoding(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		expected    string
+	}{
+		{
+			name:        "application/json",
+			contentType: "application/json",
+			expected:    "json",
+		},
+		{
+			name:        "text/json",
+			contentType: "text/json",
+			expected:    "json",
+		},
+		{
+			name:        "application/json with charset",
+			contentType: "application/json; charset=utf-8",
+			expected:    "json",
+		},
+		{
+			name:        "application/xml",
+			contentType: "application/xml",
+			expected:    "xml",
+		},
+		{
+			name:        "text/xml",
+			contentType: "text/xml",
+			expected:    "xml",
+		},
+		{
+			name:        "application/yaml",
+			contentType: "application/yaml",
+			expected:    "yaml",
+		},
+		{
+			name:        "application/x-yaml",
+			contentType: "application/x-yaml",
+			expected:    "yaml",
+		},
+		{
+			name:        "text/yaml",
+			contentType: "text/yaml",
+			expected:    "yaml",
+		},
+		{
+			name:        "application/protobuf",
+			contentType: "application/protobuf",
+			expected:    "protobuf",
+		},
+		{
+			name:        "application/x-protobuf",
+			contentType: "application/x-protobuf",
+			expected:    "protobuf",
+		},
+		{
+			name:        "unknown type returned as-is",
+			contentType: "unknown/type",
+			expected:    "unknown/type",
+		},
+		{
+			name:        "empty string",
+			contentType: "",
+			expected:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := contentTypeToEncoding(tt.contentType)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for canonicalContentType helper
+// ---------------------------------------------------------------------------
+
+func TestCanonicalContentType(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "strips charset parameter",
+			input:    "application/json; charset=utf-8",
+			expected: "application/json",
+		},
+		{
+			name:     "no parameters unchanged",
+			input:    "application/json",
+			expected: "application/json",
+		},
+		{
+			name:     "strips charset with extra spaces",
+			input:    "text/xml ; charset=iso-8859-1",
+			expected: "text/xml",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := canonicalContentType(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for UnmarshalJSON — CRD format
+// ---------------------------------------------------------------------------
+
+func TestEncodingConfig_UnmarshalJSON_CRDFormat(t *testing.T) {
+	tests := []struct {
+		name                        string
+		jsonInput                   string
+		expectedRequestEncoding     string
+		expectedResponseEncoding    string
+		expectedContentNegotiation  bool
+		expectedSupportedCTContains []string
+		expectedIsEmpty             bool
+	}{
+		{
+			name:                        "CRD with both request and response content types",
+			jsonInput:                   `{"request":{"contentType":"application/json"},"response":{"contentType":"application/xml"}}`,
+			expectedRequestEncoding:     "json",
+			expectedResponseEncoding:    "xml",
+			expectedContentNegotiation:  true,
+			expectedSupportedCTContains: []string{"application/json", "application/xml"},
+			expectedIsEmpty:             false,
+		},
+		{
+			name:                        "CRD with only request content type",
+			jsonInput:                   `{"request":{"contentType":"application/json"}}`,
+			expectedRequestEncoding:     "json",
+			expectedResponseEncoding:    "",
+			expectedContentNegotiation:  true,
+			expectedSupportedCTContains: []string{"application/json"},
+			expectedIsEmpty:             false,
+		},
+		{
+			name:                        "CRD with only response content type",
+			jsonInput:                   `{"response":{"contentType":"application/xml"}}`,
+			expectedRequestEncoding:     "",
+			expectedResponseEncoding:    "xml",
+			expectedContentNegotiation:  true,
+			expectedSupportedCTContains: []string{"application/xml"},
+			expectedIsEmpty:             false,
+		},
+		{
+			name:                        "CRD with different content types request=json response=xml",
+			jsonInput:                   `{"request":{"contentType":"application/json"},"response":{"contentType":"application/xml"}}`,
+			expectedRequestEncoding:     "json",
+			expectedResponseEncoding:    "xml",
+			expectedContentNegotiation:  true,
+			expectedSupportedCTContains: []string{"application/json", "application/xml"},
+			expectedIsEmpty:             false,
+		},
+		{
+			name:                        "CRD with yaml content types",
+			jsonInput:                   `{"request":{"contentType":"application/yaml"},"response":{"contentType":"text/yaml"}}`,
+			expectedRequestEncoding:     "yaml",
+			expectedResponseEncoding:    "yaml",
+			expectedContentNegotiation:  true,
+			expectedSupportedCTContains: []string{"application/yaml", "text/yaml"},
+			expectedIsEmpty:             false,
+		},
+		{
+			name:                        "CRD with protobuf content types",
+			jsonInput:                   `{"request":{"contentType":"application/protobuf"},"response":{"contentType":"application/x-protobuf"}}`,
+			expectedRequestEncoding:     "protobuf",
+			expectedResponseEncoding:    "protobuf",
+			expectedContentNegotiation:  true,
+			expectedSupportedCTContains: []string{"application/protobuf", "application/x-protobuf"},
+			expectedIsEmpty:             false,
+		},
+		{
+			name:                        "CRD with charset in content type",
+			jsonInput:                   `{"request":{"contentType":"application/json; charset=utf-8"},"response":{"contentType":"application/json"}}`,
+			expectedRequestEncoding:     "json",
+			expectedResponseEncoding:    "json",
+			expectedContentNegotiation:  true,
+			expectedSupportedCTContains: []string{"application/json"},
+			expectedIsEmpty:             false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			var ec EncodingConfig
+
+			// Act
+			err := json.Unmarshal([]byte(tt.jsonInput), &ec)
+
+			// Assert
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedRequestEncoding, ec.RequestEncoding)
+			assert.Equal(t, tt.expectedResponseEncoding, ec.ResponseEncoding)
+			assert.Equal(t, tt.expectedContentNegotiation, ec.EnableContentNegotiation)
+			for _, ct := range tt.expectedSupportedCTContains {
+				assert.Contains(t, ec.SupportedContentTypes, ct)
+			}
+			assert.Equal(t, tt.expectedIsEmpty, ec.IsEmpty())
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for UnmarshalJSON — internal (backward-compatible) format
+// ---------------------------------------------------------------------------
+
+func TestEncodingConfig_UnmarshalJSON_InternalFormat(t *testing.T) {
+	tests := []struct {
+		name                       string
+		jsonInput                  string
+		expectedRequestEncoding    string
+		expectedResponseEncoding   string
+		expectedContentNegotiation bool
+	}{
+		{
+			name:                       "internal format with requestEncoding and responseEncoding",
+			jsonInput:                  `{"requestEncoding":"json","responseEncoding":"xml"}`,
+			expectedRequestEncoding:    "json",
+			expectedResponseEncoding:   "xml",
+			expectedContentNegotiation: false,
+		},
+		{
+			name:                       "internal format with all fields populated",
+			jsonInput:                  `{"requestEncoding":"yaml","responseEncoding":"protobuf","enableContentNegotiation":true,"supportedContentTypes":["application/yaml","application/protobuf"]}`,
+			expectedRequestEncoding:    "yaml",
+			expectedResponseEncoding:   "protobuf",
+			expectedContentNegotiation: true,
+		},
+		{
+			name:                       "internal format takes precedence over CRD fields",
+			jsonInput:                  `{"requestEncoding":"xml","responseEncoding":"yaml","request":{"contentType":"application/json"},"response":{"contentType":"application/json"}}`,
+			expectedRequestEncoding:    "xml",
+			expectedResponseEncoding:   "yaml",
+			expectedContentNegotiation: false,
+		},
+		{
+			name:                       "internal format with only requestEncoding",
+			jsonInput:                  `{"requestEncoding":"json"}`,
+			expectedRequestEncoding:    "json",
+			expectedResponseEncoding:   "",
+			expectedContentNegotiation: false,
+		},
+		{
+			name:                       "internal format with only responseEncoding",
+			jsonInput:                  `{"responseEncoding":"xml"}`,
+			expectedRequestEncoding:    "",
+			expectedResponseEncoding:   "xml",
+			expectedContentNegotiation: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			var ec EncodingConfig
+
+			// Act
+			err := json.Unmarshal([]byte(tt.jsonInput), &ec)
+
+			// Assert
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedRequestEncoding, ec.RequestEncoding)
+			assert.Equal(t, tt.expectedResponseEncoding, ec.ResponseEncoding)
+			assert.Equal(t, tt.expectedContentNegotiation, ec.EnableContentNegotiation)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for UnmarshalJSON — empty and nil edge cases
+// ---------------------------------------------------------------------------
+
+func TestEncodingConfig_UnmarshalJSON_EmptyAndNil(t *testing.T) {
+	tests := []struct {
+		name            string
+		jsonInput       string
+		expectedIsEmpty bool
+		expectedReqEnc  string
+		expectedRespEnc string
+	}{
+		{
+			name:            "empty JSON object",
+			jsonInput:       `{}`,
+			expectedIsEmpty: true,
+			expectedReqEnc:  "",
+			expectedRespEnc: "",
+		},
+		{
+			name:            "request with empty contentType enables negotiation but no encoding",
+			jsonInput:       `{"request":{}}`,
+			expectedIsEmpty: false, // EnableContentNegotiation is set to true by applyCRDEncoding
+			expectedReqEnc:  "",
+			expectedRespEnc: "",
+		},
+		{
+			name:            "request with empty string contentType enables negotiation but no encoding",
+			jsonInput:       `{"request":{"contentType":""}}`,
+			expectedIsEmpty: false, // EnableContentNegotiation is set to true by applyCRDEncoding
+			expectedReqEnc:  "",
+			expectedRespEnc: "",
+		},
+		{
+			name:            "request null",
+			jsonInput:       `{"request":null}`,
+			expectedIsEmpty: true,
+			expectedReqEnc:  "",
+			expectedRespEnc: "",
+		},
+		{
+			name:            "response null",
+			jsonInput:       `{"response":null}`,
+			expectedIsEmpty: true,
+			expectedReqEnc:  "",
+			expectedRespEnc: "",
+		},
+		{
+			name:            "both request and response null",
+			jsonInput:       `{"request":null,"response":null}`,
+			expectedIsEmpty: true,
+			expectedReqEnc:  "",
+			expectedRespEnc: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			var ec EncodingConfig
+
+			// Act
+			err := json.Unmarshal([]byte(tt.jsonInput), &ec)
+
+			// Assert
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedIsEmpty, ec.IsEmpty())
+			assert.Equal(t, tt.expectedReqEnc, ec.RequestEncoding)
+			assert.Equal(t, tt.expectedRespEnc, ec.ResponseEncoding)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for UnmarshalJSON — mixed CRD + internal fields
+// ---------------------------------------------------------------------------
+
+func TestEncodingConfig_UnmarshalJSON_MixedFormat(t *testing.T) {
+	t.Run("CRD format with additional json config", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/json"},"json":{"prettyPrint":true}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "json", ec.RequestEncoding)
+		assert.True(t, ec.EnableContentNegotiation)
+		assert.NotNil(t, ec.JSON)
+		assert.True(t, ec.JSON.PrettyPrint)
+	})
+
+	t.Run("CRD format with compression config", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/json"},"response":{"contentType":"application/json"},"compression":{"enabled":true,"algorithms":["gzip"],"minSize":2048}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "json", ec.RequestEncoding)
+		assert.Equal(t, "json", ec.ResponseEncoding)
+		assert.True(t, ec.EnableContentNegotiation)
+		require.NotNil(t, ec.Compression)
+		assert.True(t, ec.Compression.Enabled)
+		assert.Contains(t, ec.Compression.Algorithms, "gzip")
+		assert.Equal(t, 2048, ec.Compression.MinSize)
+	})
+
+	t.Run("CRD format with passthrough true", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/json"},"passthrough":true}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "json", ec.RequestEncoding)
+		assert.True(t, ec.Passthrough)
+		assert.True(t, ec.EnableContentNegotiation)
+	})
+
+	t.Run("CRD format with protobuf config", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/protobuf"},"protobuf":{"useJSONEncoding":true,"descriptorSource":"reflection"}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "protobuf", ec.RequestEncoding)
+		assert.True(t, ec.EnableContentNegotiation)
+		require.NotNil(t, ec.Protobuf)
+		assert.True(t, ec.Protobuf.UseJSONEncoding)
+		assert.Equal(t, "reflection", ec.Protobuf.DescriptorSource)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for UnmarshalJSON — SupportedContentTypes deduplication
+// ---------------------------------------------------------------------------
+
+func TestEncodingConfig_UnmarshalJSON_SupportedContentTypes_Dedup(t *testing.T) {
+	t.Run("same content type for request and response does not duplicate", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/json"},"response":{"contentType":"application/json"}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "json", ec.RequestEncoding)
+		assert.Equal(t, "json", ec.ResponseEncoding)
+		// SupportedContentTypes should contain "application/json" exactly once
+		count := 0
+		for _, ct := range ec.SupportedContentTypes {
+			if ct == "application/json" {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "application/json should appear exactly once in SupportedContentTypes")
+	})
+
+	t.Run("existing supportedContentTypes are preserved and not duplicated", func(t *testing.T) {
+		// Arrange — use internal format with pre-existing SupportedContentTypes,
+		// then verify CRD path doesn't run (since requestEncoding is set).
+		input := `{"requestEncoding":"json","supportedContentTypes":["application/json","application/xml"]}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, []string{"application/json", "application/xml"}, ec.SupportedContentTypes)
+	})
+
+	t.Run("different content types for request and response both appear", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/json"},"response":{"contentType":"application/xml"}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Len(t, ec.SupportedContentTypes, 2)
+		assert.Contains(t, ec.SupportedContentTypes, "application/json")
+		assert.Contains(t, ec.SupportedContentTypes, "application/xml")
+	})
+
+	t.Run("charset variants are deduplicated to canonical form", func(t *testing.T) {
+		// Arrange — both request and response use application/json but one has charset
+		input := `{"request":{"contentType":"application/json; charset=utf-8"},"response":{"contentType":"application/json"}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		count := 0
+		for _, ct := range ec.SupportedContentTypes {
+			if ct == "application/json" {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "application/json should appear exactly once after charset dedup")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for UnmarshalJSON — real CRD payload (integration-style)
+// ---------------------------------------------------------------------------
+
+func TestEncodingConfig_UnmarshalJSON_RealCRDPayload(t *testing.T) {
+	t.Run("exact operator CRD JSON payload", func(t *testing.T) {
+		// Arrange — this is the exact JSON the operator sends
+		input := `{"request":{"contentType":"application/json"},"response":{"contentType":"application/json"}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "json", ec.RequestEncoding)
+		assert.Equal(t, "json", ec.ResponseEncoding)
+		assert.True(t, ec.EnableContentNegotiation)
+		assert.Contains(t, ec.SupportedContentTypes, "application/json")
+		assert.False(t, ec.IsEmpty())
+	})
+
+	t.Run("operator CRD with XML", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/xml"},"response":{"contentType":"application/xml"}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "xml", ec.RequestEncoding)
+		assert.Equal(t, "xml", ec.ResponseEncoding)
+		assert.True(t, ec.EnableContentNegotiation)
+		assert.Contains(t, ec.SupportedContentTypes, "application/xml")
+		assert.False(t, ec.IsEmpty())
+	})
+
+	t.Run("operator CRD with mixed request/response types", func(t *testing.T) {
+		// Arrange
+		input := `{"request":{"contentType":"application/json"},"response":{"contentType":"application/xml"}}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "json", ec.RequestEncoding)
+		assert.Equal(t, "xml", ec.ResponseEncoding)
+		assert.True(t, ec.EnableContentNegotiation)
+		assert.Contains(t, ec.SupportedContentTypes, "application/json")
+		assert.Contains(t, ec.SupportedContentTypes, "application/xml")
+		assert.Len(t, ec.SupportedContentTypes, 2)
+		assert.False(t, ec.IsEmpty())
+	})
+
+	t.Run("operator CRD full route spec encoding section", func(t *testing.T) {
+		// Arrange — simulating a more complete CRD payload with additional fields
+		input := `{
+			"request": {"contentType": "application/json"},
+			"response": {"contentType": "application/json"},
+			"json": {"prettyPrint": true, "emitDefaults": true},
+			"compression": {"enabled": true, "algorithms": ["gzip"], "minSize": 1024, "level": 6}
+		}`
+
+		// Act
+		var ec EncodingConfig
+		err := json.Unmarshal([]byte(input), &ec)
+
+		// Assert
+		require.NoError(t, err)
+		assert.Equal(t, "json", ec.RequestEncoding)
+		assert.Equal(t, "json", ec.ResponseEncoding)
+		assert.True(t, ec.EnableContentNegotiation)
+		assert.Contains(t, ec.SupportedContentTypes, "application/json")
+
+		require.NotNil(t, ec.JSON)
+		assert.True(t, ec.JSON.PrettyPrint)
+		assert.True(t, ec.JSON.EmitDefaults)
+
+		require.NotNil(t, ec.Compression)
+		assert.True(t, ec.Compression.Enabled)
+		assert.Contains(t, ec.Compression.Algorithms, "gzip")
+		assert.Equal(t, 1024, ec.Compression.MinSize)
+		assert.Equal(t, 6, ec.Compression.Level)
+
+		assert.False(t, ec.IsEmpty())
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tests for UnmarshalJSON — error cases
+// ---------------------------------------------------------------------------
+
+func TestEncodingConfig_UnmarshalJSON_InvalidJSON(t *testing.T) {
+	tests := []struct {
+		name      string
+		jsonInput string
+	}{
+		{
+			name:      "completely invalid JSON",
+			jsonInput: `{invalid`,
+		},
+		{
+			name:      "wrong type for requestEncoding",
+			jsonInput: `{"requestEncoding":123}`,
+		},
+		{
+			name:      "wrong type for enableContentNegotiation",
+			jsonInput: `{"enableContentNegotiation":"yes"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			var ec EncodingConfig
+
+			// Act
+			err := json.Unmarshal([]byte(tt.jsonInput), &ec)
+
+			// Assert
+			assert.Error(t, err)
+		})
+	}
+}

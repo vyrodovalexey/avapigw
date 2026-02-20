@@ -245,7 +245,7 @@ func TestSetupWebhooks_WithoutIngress(t *testing.T) {
 		DuplicateCacheTTL:               30 * time.Second,
 	}
 
-	err := setupWebhooks(mgr, cfg)
+	err := setupWebhooks(context.Background(), mgr, cfg)
 	assert.NoError(t, err)
 }
 
@@ -260,7 +260,7 @@ func TestSetupWebhooks_WithIngress(t *testing.T) {
 		DuplicateCacheTTL:               1 * time.Minute,
 	}
 
-	err := setupWebhooks(mgr, cfg)
+	err := setupWebhooks(context.Background(), mgr, cfg)
 	assert.NoError(t, err)
 }
 
@@ -274,7 +274,7 @@ func TestSetupWebhooks_CacheDisabled(t *testing.T) {
 		DuplicateCacheTTL:               0,
 	}
 
-	err := setupWebhooks(mgr, cfg)
+	err := setupWebhooks(context.Background(), mgr, cfg)
 	assert.NoError(t, err)
 }
 
@@ -293,7 +293,7 @@ func TestSetupWebhooksIfEnabled_Enabled(t *testing.T) {
 		DuplicateCacheTTL:               30 * time.Second,
 	}
 
-	err := setupWebhooksIfEnabled(mgr, cfg)
+	err := setupWebhooksIfEnabled(context.Background(), mgr, cfg)
 	assert.NoError(t, err)
 }
 
@@ -309,7 +309,7 @@ func TestSetupWebhooksIfEnabled_EnabledWithIngress(t *testing.T) {
 		DuplicateCacheTTL:               1 * time.Minute,
 	}
 
-	err := setupWebhooksIfEnabled(mgr, cfg)
+	err := setupWebhooksIfEnabled(context.Background(), mgr, cfg)
 	assert.NoError(t, err)
 }
 

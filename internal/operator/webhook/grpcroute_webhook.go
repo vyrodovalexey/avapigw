@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -13,6 +14,10 @@ import (
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
+
+// Compile-time assertion: GRPCRouteValidator must implement admission.Validator
+// for the typed *avapigwv1alpha1.GRPCRoute parameter.
+var _ admission.Validator[*avapigwv1alpha1.GRPCRoute] = (*GRPCRouteValidator)(nil)
 
 // GRPCRouteValidator validates GRPCRoute resources.
 type GRPCRouteValidator struct {
@@ -36,23 +41,53 @@ func SetupGRPCRouteWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerConfi
 		Complete()
 }
 
+// SetupGRPCRouteWebhookWithConfigAndContext sets up the GRPCRoute webhook with context-based
+// lifecycle management for the DuplicateChecker cleanup goroutine.
+func SetupGRPCRouteWebhookWithConfigAndContext(
+	ctx context.Context, mgr ctrl.Manager, cfg DuplicateCheckerConfig,
+) error {
+	validator := &GRPCRouteValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: NewDuplicateCheckerFromConfigWithContext(ctx, mgr.GetClient(), cfg),
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.GRPCRoute{}).
+		WithValidator(validator).
+		Complete()
+}
+
+// SetupGRPCRouteWebhookWithChecker sets up the GRPCRoute webhook with a shared DuplicateChecker.
+// This avoids creating multiple DuplicateChecker instances (and cleanup goroutines) across webhooks.
+func SetupGRPCRouteWebhookWithChecker(mgr ctrl.Manager, dc *DuplicateChecker) error {
+	validator := &GRPCRouteValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: dc,
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.GRPCRoute{}).
+		WithValidator(validator).
+		Complete()
+}
+
 // ValidateCreate implements admission.CustomValidator.
 func (v *GRPCRouteValidator) ValidateCreate(
 	ctx context.Context,
 	obj *avapigwv1alpha1.GRPCRoute,
 ) (admission.Warnings, error) {
+	start := time.Now()
 	warnings, err := v.validate(obj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation("GRPCRoute", "create", "rejected", time.Since(start), len(warnings))
 		return warnings, err
 	}
 
 	// Check for duplicates
 	if v.DuplicateChecker != nil {
 		if dupErr := v.DuplicateChecker.CheckGRPCRouteDuplicate(ctx, obj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation("GRPCRoute", "create", "rejected", time.Since(start), len(warnings))
 			return warnings, dupErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation("GRPCRoute", "create", "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
 
@@ -61,27 +96,32 @@ func (v *GRPCRouteValidator) ValidateUpdate(
 	ctx context.Context,
 	_, newObj *avapigwv1alpha1.GRPCRoute,
 ) (admission.Warnings, error) {
+	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation("GRPCRoute", "update", "rejected", time.Since(start), len(warnings))
 		return warnings, err
 	}
 
 	// Check for duplicates (excluding self)
 	if v.DuplicateChecker != nil {
 		if dupErr := v.DuplicateChecker.CheckGRPCRouteDuplicate(ctx, newObj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation("GRPCRoute", "update", "rejected", time.Since(start), len(warnings))
 			return warnings, dupErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation("GRPCRoute", "update", "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
 
 // ValidateDelete implements admission.CustomValidator.
+// No-op: GRPCRoute deletion does not require validation because the gateway
+// controller handles cleanup of derived configuration via finalizers.
 func (v *GRPCRouteValidator) ValidateDelete(
 	_ context.Context,
 	_ *avapigwv1alpha1.GRPCRoute,
 ) (admission.Warnings, error) {
-	// No validation needed for delete
 	return nil, nil
 }
 
@@ -172,6 +212,16 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 		if err := validateRequestLimits(spec.RequestLimits); err != nil {
 			errs = append(errs, err.Error())
 		}
+	}
+
+	// Security warnings for plaintext secrets in authentication config
+	if spec.Authentication != nil {
+		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+	}
+
+	// Security warnings for plaintext secrets in authorization cache sentinel config
+	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
+		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
 	}
 
 	if len(errs) > 0 {

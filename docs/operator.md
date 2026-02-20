@@ -77,11 +77,28 @@ graph TB
 - **GRPCBackend Controller** - Manages gRPC backend configuration with base reconciler pattern
 - **Ingress Controller** - Converts standard Kubernetes Ingress resources to gateway routes
 
+**Generation-Based Reconciliation (TASK-009):**
+- **Skip Optimization** - Ingress controller skips reconciliation when resource generation hasn't changed
+- **Performance Improvement** - Reduces unnecessary processing for unchanged resources
+- **Resource Efficiency** - Minimizes CPU usage and API server load
+
+**Enhanced Finalizer Management (DEV-008 to DEV-011):**
+- **No Redundant Requeue** - Finalizer addition no longer triggers unnecessary reconciliation loops
+- **Patch-Based Updates** - Finalizer operations use Patch instead of Update to reduce API conflicts
+- **Event Recording** - Annotation update failures now record Warning events for better observability
+- **Deterministic Cleanup** - Cleanup operations iterate through resources in sorted order for consistency
+
 #### 2. Enhanced Admission Webhooks
 - **Validating Webhooks** - Validate CRD specifications before creation/update
 - **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations
 - **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
 - **Cross-Reference Validation** - Ensure referenced backends exist
+
+**Shared DuplicateChecker Pattern (TASK-007):**
+- **Single Instance** - One shared DuplicateChecker across all webhooks for consistency
+- **Cluster-Wide Checking** - Ingress webhook respects cluster-wide duplicate check flag (TASK-008)
+- **Resource Efficiency** - Reduces memory usage and improves performance
+- **Lifecycle Management** - Proper context-based lifecycle to prevent goroutine leaks
 
 #### 3. Certificate Management System
 - **Webhook Injector** - Automated CA injection into ValidatingWebhookConfigurations
@@ -344,7 +361,7 @@ The webhook injector automatically manages CA certificates:
 
 ### gRPC mTLS Communication
 
-The operator communicates with gateway instances using secure gRPC with mutual TLS:
+The operator communicates with gateway instances using secure gRPC with mutual TLS via Vault PKI:
 
 **Configuration:**
 ```yaml
@@ -352,39 +369,96 @@ operator:
   grpc:
     port: 9444
     tls:
-      mode: selfsigned  # or vault, cert-manager
+      mode: vault  # Vault PKI for production mTLS
     keepalive:
       time: 30s
       timeout: 10s
+
+vault:
+  enabled: true
+  address: "https://vault.example.com:8200"
+  authMethod: kubernetes
+  role: avapigw-operator
+  pki:
+    enabled: true
+    pkiMount: "pki"
+    role: "operator-certs"
+    commonName: "avapigw-operator.avapigw-system.svc"
+    ttl: "24h"
 ```
 
 **Security Features:**
-- **Mutual Authentication** - Both operator and gateway verify each other's identity
-- **Encryption** - All communication is encrypted in transit
-- **Certificate Rotation** - Automatic certificate renewal without service interruption
+- **Mutual Authentication** - Both operator and gateway verify each other's identity using Vault PKI certificates
+- **Encryption** - All communication is encrypted in transit with TLS 1.3
+- **Certificate Rotation** - Automatic certificate renewal via Vault PKI without service interruption
 - **Connection Pooling** - Efficient connection management with keepalive
+- **Vault Integration** - Centralized certificate management and rotation
 
 ### Protocol Definition
 
+The ConfigurationService uses a modern streaming-based approach for efficient configuration management:
+
 ```protobuf
 service ConfigurationService {
-  // Apply route configuration
-  rpc ApplyAPIRoute(ApplyAPIRouteRequest) returns (ApplyAPIRouteResponse);
-  rpc ApplyGRPCRoute(ApplyGRPCRouteRequest) returns (ApplyGRPCRouteResponse);
-  
-  // Apply backend configuration  
-  rpc ApplyBackend(ApplyBackendRequest) returns (ApplyBackendResponse);
-  rpc ApplyGRPCBackend(ApplyGRPCBackendRequest) returns (ApplyGRPCBackendResponse);
-  
-  // Delete configuration
-  rpc DeleteAPIRoute(DeleteAPIRouteRequest) returns (DeleteAPIRouteResponse);
-  rpc DeleteGRPCRoute(DeleteGRPCRouteRequest) returns (DeleteGRPCRouteResponse);
-  rpc DeleteBackend(DeleteBackendRequest) returns (DeleteBackendResponse);
-  rpc DeleteGRPCBackend(DeleteGRPCBackendRequest) returns (DeleteGRPCBackendResponse);
-  
-  // Status and health
-  rpc GetGatewayStatus(GetGatewayStatusRequest) returns (GetGatewayStatusResponse);
+  // RegisterGateway registers a gateway instance with the operator.
+  // Returns the initial configuration snapshot.
+  rpc RegisterGateway(RegisterGatewayRequest) returns (RegisterGatewayResponse);
+
+  // StreamConfiguration establishes a server-side streaming connection
+  // for receiving configuration updates from the operator.
+  rpc StreamConfiguration(StreamConfigurationRequest) returns (stream ConfigurationUpdate);
+
+  // GetConfiguration returns the current configuration snapshot.
+  rpc GetConfiguration(GetConfigurationRequest) returns (ConfigurationSnapshot);
+
+  // Heartbeat sends a keep-alive signal to the operator.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // AcknowledgeConfiguration acknowledges receipt and application of a configuration update.
+  rpc AcknowledgeConfiguration(AcknowledgeConfigurationRequest) returns (AcknowledgeConfigurationResponse);
 }
+```
+
+### Configuration Management Flow
+
+1. **Gateway Registration**
+   - Gateway connects to operator gRPC service
+   - Registers with capabilities and metadata
+   - Receives initial configuration snapshot
+   - Gets assigned session ID and heartbeat interval
+
+2. **Configuration Streaming**
+   - Gateway establishes streaming connection
+   - Operator pushes configuration updates in real-time
+   - Updates include resource additions, modifications, deletions
+   - Full sync capability for recovery scenarios
+
+3. **Heartbeat Maintenance**
+   - Gateway sends periodic heartbeats (default: 30s)
+   - Reports current status and last applied configuration
+   - Operator can signal reconnection if needed
+
+4. **Configuration Acknowledgment**
+   - Gateway acknowledges successful configuration application
+   - Reports any errors or application duration
+   - Enables operator to track configuration state
+
+### OpenTelemetry Tracing
+
+All gRPC operations include comprehensive OpenTelemetry tracing:
+
+- **Span Creation** - Each RPC call creates a server span
+- **Attribute Enrichment** - Gateway name, namespace, and operation details
+- **Performance Tracking** - Request duration and success metrics
+- **Distributed Tracing** - Trace context propagation for end-to-end visibility
+- **Error Tracking** - Failed operations captured with error details
+
+Example trace attributes:
+```
+gateway.name: "gateway-1"
+gateway.namespace: "avapigw-system"
+config_version: "123"
+total_resources: 42
 ```
 
 ## Installation
@@ -426,7 +500,7 @@ helm install avapigw ./helm/avapigw \
 ### Installation with Vault PKI
 
 ```bash
-# Install with Vault PKI certificate management
+# Install with Vault PKI certificate management for operator gRPC TLS
 helm install avapigw ./helm/avapigw \
   --set operator.enabled=true \
   --set operator.webhook.tls.mode=vault \
@@ -435,11 +509,135 @@ helm install avapigw ./helm/avapigw \
   --set vault.address="https://vault.example.com:8200" \
   --set vault.authMethod=kubernetes \
   --set vault.role=avapigw-operator \
+  --set vault.pki.enabled=true \
+  --set vault.pki.pkiMount=pki \
+  --set vault.pki.role=operator-certs \
   -n avapigw \
   --create-namespace
+
+# Verify mTLS communication between operator and gateway
+kubectl logs -n avapigw -l app.kubernetes.io/name=avapigw-operator | grep "gRPC connection established"
+kubectl logs -n avapigw -l app.kubernetes.io/name=avapigw-gateway | grep "operator connection"
 ```
 
 ## Configuration
+
+### CRD Examples for All Supported Features
+
+The operator supports comprehensive CRD-based configuration covering all gateway features. A complete example configuration is available at:
+
+**File**: `test/performance/configs/crds-full-features.yaml`
+
+**Key CRD Resources:**
+
+#### APIRoute Examples
+```yaml
+# HTTP route with Redis Sentinel cache and rate limiting
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: items-api-cached
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/items
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  cache:
+    enabled: true
+    ttl: 60s
+    staleWhileRevalidate: 30s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 50
+    burst: 100
+
+# JWT Authentication with Keycloak
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: auth-keycloak
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/secure/
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://host.docker.internal:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+```
+
+#### GRPCRoute Examples
+```yaml
+# gRPC route with cache and JWT authentication
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: grpc-cached
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8803
+  cache:
+    enabled: true
+    ttl: 60s
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://host.docker.internal:8090/realms/gateway-test
+```
+
+#### Backend and GRPCBackend Examples
+```yaml
+# HTTP Backend with health checks
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: rest-backend-1
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8801
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+  loadBalancer:
+    algorithm: roundRobin
+
+# gRPC Backend with connection pooling
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: grpc-backend-1
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8803
+  connectionPool:
+    maxConnsPerHost: 100
+    maxIdleConns: 50
+    idleConnTimeout: 90s
+```
 
 ### Operator Configuration
 
@@ -526,7 +724,7 @@ vault:
 
 ### Prometheus Metrics
 
-The operator exposes comprehensive metrics for monitoring:
+The operator exposes comprehensive metrics for monitoring across all components:
 
 #### Controller Metrics
 ```prometheus
@@ -539,22 +737,36 @@ controller_runtime_reconcile_time_seconds{controller="apiroute"} 0.123
 workqueue_adds_total{name="apiroute"} 42
 workqueue_depth{name="apiroute"} 0
 workqueue_queue_duration_seconds{name="apiroute"} 0.001
+
+# Controller-specific metrics
+avapigw_operator_reconcile_total{controller="apiroute",result="success"} 38
+avapigw_operator_reconcile_total{controller="apiroute",result="error"} 4
+avapigw_operator_reconcile_duration_seconds{controller="apiroute"} 0.125
+avapigw_operator_reconcile_errors_total{controller="apiroute",error_type="validation"} 2
 ```
 
 #### Custom Operator Metrics
 ```prometheus
 # CRD management
 avapigw_operator_crds_total{type="apiroute"} 10
-avapigw_operator_crds_total{type="backend"} 5
+avapigw_operator_crds_total{type="grpcroute"} 5
+avapigw_operator_crds_total{type="backend"} 8
+avapigw_operator_crds_total{type="grpcbackend"} 3
 
 # Gateway communication
 avapigw_operator_gateways_connected 2
 avapigw_operator_config_push_total{status="success"} 156
-avapigw_operator_config_push_errors_total 0
+avapigw_operator_config_push_total{status="error"} 3
+avapigw_operator_config_push_errors_total{error_type="connection_failed"} 2
+avapigw_operator_config_push_errors_total{error_type="validation_failed"} 1
+avapigw_operator_config_push_duration_seconds 0.025
 
-# Certificate management
-avapigw_operator_cert_renewals_total{mode="selfsigned",status="success"} 5
-avapigw_operator_webhook_ca_injections_total{status="success"} 10
+# gRPC client metrics
+avapigw_operator_grpc_requests_total{method="ApplyAPIRoute",status="success"} 45
+avapigw_operator_grpc_requests_total{method="ApplyBackend",status="success"} 20
+avapigw_operator_grpc_request_duration_seconds{method="ApplyAPIRoute"} 0.015
+avapigw_operator_grpc_connections_active 2
+avapigw_operator_grpc_connection_errors_total{error_type="tls_handshake_failed"} 1
 ```
 
 #### Webhook Metrics
@@ -562,7 +774,117 @@ avapigw_operator_webhook_ca_injections_total{status="success"} 10
 # Webhook validation
 avapigw_operator_webhook_requests_total{webhook="apiroute",status="allowed"} 100
 avapigw_operator_webhook_requests_total{webhook="apiroute",status="denied"} 2
+avapigw_operator_webhook_requests_total{webhook="grpcroute",status="allowed"} 25
+avapigw_operator_webhook_requests_total{webhook="backend",status="allowed"} 40
 avapigw_operator_webhook_duration_seconds{webhook="apiroute"} 0.005
+avapigw_operator_webhook_validation_errors_total{webhook="apiroute",error_type="invalid_spec"} 2
+avapigw_operator_webhook_validation_errors_total{webhook="backend",error_type="missing_reference"} 1
+
+# Cross-CRD validation metrics
+avapigw_operator_webhook_cross_validation_total{type="duplicate_route"} 1
+avapigw_operator_webhook_cross_validation_total{type="missing_backend"} 2
+avapigw_operator_webhook_cross_validation_duration_seconds 0.003
+```
+
+#### Certificate Management Metrics
+```prometheus
+# Certificate lifecycle
+avapigw_operator_cert_renewals_total{mode="selfsigned",status="success"} 5
+avapigw_operator_cert_renewals_total{mode="vault",status="success"} 8
+avapigw_operator_cert_renewals_total{mode="cert-manager",status="success"} 3
+avapigw_operator_cert_renewal_errors_total{mode="vault",error_type="auth_failed"} 1
+avapigw_operator_cert_renewal_duration_seconds{mode="selfsigned"} 0.150
+avapigw_operator_cert_expiry_seconds{cert_type="webhook"} 2073600
+avapigw_operator_cert_expiry_seconds{cert_type="grpc"} 2073600
+
+# CA injection metrics
+avapigw_operator_webhook_ca_injections_total{status="success"} 10
+avapigw_operator_webhook_ca_injections_total{status="error"} 1
+avapigw_operator_webhook_ca_injection_duration_seconds 0.050
+avapigw_operator_webhook_ca_injection_errors_total{error_type="api_server_error"} 1
+
+# Certificate provider metrics
+avapigw_operator_cert_provider_requests_total{provider="vault",operation="issue"} 15
+avapigw_operator_cert_provider_requests_total{provider="selfsigned",operation="generate"} 8
+avapigw_operator_cert_provider_errors_total{provider="vault",error_type="pki_unavailable"} 1
+```
+
+#### Ingress Controller Metrics (when enabled)
+```prometheus
+# Ingress processing
+avapigw_operator_ingress_processed_total{status="success"} 25
+avapigw_operator_ingress_processed_total{status="error"} 2
+avapigw_operator_ingress_processing_duration_seconds 0.045
+avapigw_operator_ingress_conversion_errors_total{error_type="unsupported_annotation"} 1
+avapigw_operator_ingress_conversion_errors_total{error_type="invalid_path_type"} 1
+
+# Annotation processing
+avapigw_operator_ingress_annotations_processed_total{annotation_group="auth"} 15
+avapigw_operator_ingress_annotations_processed_total{annotation_group="tls"} 10
+avapigw_operator_ingress_annotation_errors_total{annotation="avapigw.io/rate-limit",error_type="invalid_value"} 1
+```
+
+#### Build Information and Uptime
+```prometheus
+# Operator build info
+avapigw_operator_build_info{version="v1.0.0",commit="abc123",build_time="2026-02-14"} 1
+avapigw_operator_start_time_seconds 1708000000
+avapigw_operator_uptime_seconds 86400
+```
+
+### Enhanced Grafana Dashboards
+
+The operator includes comprehensive Grafana dashboards with significant enhancements from the latest refactoring session:
+
+#### Dashboard Updates (Latest Refactoring Session)
+- **Gateway Dashboard**: 47 new panels added for comprehensive gateway metrics coverage
+- **Operator Dashboard**: 7 new panels added for enhanced operator monitoring
+- **Metric Name Fixes**: 9 metric name mismatches corrected (avapigw_ → gateway_)
+
+#### Gateway Operator Dashboard (`monitoring/grafana/gateway-operator-dashboard.json`)
+
+**New Panels Added:**
+1. **gRPC ConfigurationService Metrics** - Request rates, latency, and connection tracking
+2. **Certificate Management** - Certificate expiry, renewals, and provider metrics  
+3. **Webhook Validation** - Admission webhook performance and error rates
+4. **CA Injection Status** - ValidatingWebhookConfiguration CA bundle injection metrics
+5. **Controller Reconciliation** - Per-controller reconciliation rates and errors
+6. **Session Management** - Gateway registration and session tracking
+7. **Configuration Streaming** - Real-time configuration update metrics
+8. **Heartbeat Monitoring** - Gateway heartbeat success rates and intervals
+9. **Resource Tracking** - CRD counts and resource management metrics
+10. **Error Analysis** - Detailed error breakdown by component and type
+
+#### Gateway Dashboard (`monitoring/grafana/gateway-dashboard.json`)
+
+**47 New Panels Added:**
+- **Authentication & Authorization** - JWT, API Key, OIDC, mTLS, RBAC, ABAC metrics
+- **gRPC Operations** - Comprehensive gRPC request tracking and streaming metrics
+- **Config Reload** - Hot configuration reload success/failure tracking
+- **Enhanced Cache Metrics** - Memory and Redis cache performance
+- **WebSocket Monitoring** - Connection and message throughput metrics
+- **TLS & Security** - Certificate lifecycle and security event tracking
+- **Backend Health** - Enhanced backend monitoring and health checks
+
+**Dashboard Features:**
+- **Multi-Instance Support** - Metrics aggregated across operator replicas
+- **Time Range Filtering** - Configurable time ranges for analysis
+- **Alert Integration** - Visual indicators for alert conditions
+- **Drill-Down Capability** - Links to detailed views and logs
+- **Performance Baselines** - Historical performance comparison
+
+#### Usage Examples
+
+```bash
+# Import dashboards to Grafana
+kubectl apply -f monitoring/grafana/
+
+# Access via port-forward
+kubectl port-forward -n monitoring svc/grafana 3000:3000
+
+# Direct dashboard URLs
+http://localhost:3000/d/avapigw-operator/avapigw-operator-dashboard
+http://localhost:3000/d/avapigw-gateway/avapigw-gateway-dashboard
 ```
 
 ### ServiceMonitor Configuration
@@ -621,18 +943,22 @@ Error: admission webhook denied the request: validation failed
 - Review webhook logs for detailed error messages
 - Test webhook connectivity manually
 
-#### 3. gRPC Communication Errors
+#### 3. gRPC ConfigurationService Errors
 
 **Symptoms:**
 ```
 Error: failed to connect to gateway: connection refused
+Error: gateway registration failed
+Error: configuration stream interrupted
 ```
 
 **Solutions:**
-- Verify gateway gRPC server is running
-- Check mTLS certificate configuration
+- Verify operator gRPC ConfigurationService is running on port 9444
+- Check mTLS certificate configuration for both operator and gateway
 - Validate network connectivity between operator and gateway
 - Review firewall and network policies
+- Check gateway session management and heartbeat intervals
+- Verify configuration snapshot building and streaming logic
 
 #### 4. RBAC Permission Denied
 

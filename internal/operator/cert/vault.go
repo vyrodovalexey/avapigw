@@ -12,11 +12,17 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/retry"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
+
+// certTracerName is the OpenTelemetry tracer name for certificate operations.
+const certTracerName = "avapigw-operator/cert"
 
 // Default retry configuration constants for Vault authentication.
 const (
@@ -40,22 +46,56 @@ var (
 	vaultAuthMetricsOnce     sync.Once
 )
 
-// getVaultAuthMetrics returns the singleton instance of Vault authentication metrics.
-func getVaultAuthMetrics() *vaultAuthMetrics {
+// initVaultAuthMetrics initializes the singleton Vault authentication metrics instance
+// with the given Prometheus registerer. If registerer is nil, metrics are registered
+// with the default registerer. Must be called before getVaultAuthMetrics for metrics
+// to appear on the correct registry; subsequent calls are no-ops (sync.Once).
+func initVaultAuthMetrics(registerer prometheus.Registerer) {
 	vaultAuthMetricsOnce.Do(func() {
-		vaultAuthMetricsInstance = &vaultAuthMetrics{
-			authRetriesTotal: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Namespace: "avapigw_operator",
-					Subsystem: "vault",
-					Name:      "auth_retries_total",
-					Help:      "Total number of Vault authentication retry attempts",
-				},
-				[]string{"result"},
-			),
+		if registerer == nil {
+			registerer = prometheus.DefaultRegisterer
 		}
+		vaultAuthMetricsInstance = newVaultAuthMetricsWithFactory(promauto.With(registerer))
 	})
+}
+
+// InitVaultAuthMetrics initializes the singleton Vault authentication metrics instance
+// with the given Prometheus registerer. This is the exported wrapper for initVaultAuthMetrics.
+func InitVaultAuthMetrics(registerer prometheus.Registerer) {
+	initVaultAuthMetrics(registerer)
+}
+
+// getVaultAuthMetrics returns the singleton instance of Vault authentication metrics.
+// If initVaultAuthMetrics has not been called, metrics are lazily
+// initialized with the default registerer.
+func getVaultAuthMetrics() *vaultAuthMetrics {
+	initVaultAuthMetrics(nil)
 	return vaultAuthMetricsInstance
+}
+
+// newVaultAuthMetricsWithFactory creates Vault authentication metrics using the given promauto factory.
+func newVaultAuthMetricsWithFactory(factory promauto.Factory) *vaultAuthMetrics {
+	return &vaultAuthMetrics{
+		authRetriesTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: "avapigw_operator",
+				Subsystem: "vault",
+				Name:      "auth_retries_total",
+				Help:      "Total number of Vault authentication retry attempts",
+			},
+			[]string{"result"},
+		),
+	}
+}
+
+// InitVaultAuthVecMetrics pre-populates all vaultAuthMetrics vector metrics with
+// common label combinations so they appear on /metrics immediately with zero values.
+func InitVaultAuthVecMetrics() {
+	m := getVaultAuthMetrics()
+
+	for _, r := range []string{"success", "retry", "exhausted"} {
+		m.authRetriesTotal.WithLabelValues(r)
+	}
 }
 
 // VaultProviderConfig contains configuration for the Vault certificate provider.
@@ -86,6 +126,17 @@ type VaultProviderConfig struct {
 	// RetryMaxDelay is the maximum delay for exponential backoff.
 	// Default is 30 seconds.
 	RetryMaxDelay time.Duration
+
+	// KubernetesRole is the Vault role for Kubernetes authentication.
+	KubernetesRole string
+
+	// KubernetesMountPath is the mount path for the Kubernetes auth method.
+	// Defaults to "kubernetes".
+	KubernetesMountPath string
+
+	// MetricsRegisterer is the Prometheus registerer for Vault authentication metrics.
+	// If nil, metrics are registered with the default registerer.
+	MetricsRegisterer prometheus.Registerer
 }
 
 // vaultProvider implements Manager using Vault PKI.
@@ -140,14 +191,18 @@ func NewVaultProvider(ctx context.Context, config *VaultProviderConfig) (Manager
 	}
 
 	logger := observability.GetGlobalLogger().With(observability.String("component", "vault-cert-manager"))
+	initVaultAuthMetrics(config.MetricsRegisterer)
 	metrics := getVaultAuthMetrics()
 
-	// Create Vault client
+	// Create Vault client with Kubernetes authentication configuration
 	vaultClient, err := vault.New(&vault.Config{
-		Enabled: true,
-		Address: config.Address,
-		// Auth will be configured via environment or Kubernetes service account
+		Enabled:    true,
+		Address:    config.Address,
 		AuthMethod: vault.AuthMethodKubernetes,
+		Kubernetes: &vault.KubernetesAuthConfig{
+			Role:      config.KubernetesRole,
+			MountPath: config.KubernetesMountPath,
+		},
 	}, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create vault client: %w", err)
@@ -214,20 +269,15 @@ func authenticateWithRetry(
 	if err != nil {
 		metrics.authRetriesTotal.WithLabelValues("exhausted").Inc()
 
-		// Build aggregated error message
-		errMsg := fmt.Sprintf("failed to authenticate with vault after %d attempts", attemptCount+1)
-		if len(authErrors) > 0 {
-			errMsg += ": "
-			for i, e := range authErrors {
-				if i > 0 {
-					errMsg += "; "
-				}
-				errMsg += fmt.Sprintf("attempt %d: %v", i+1, e)
-			}
+		// Build aggregated error using errors.Join for structured error composition
+		allErrors := make([]error, 0, len(authErrors)+2)
+		allErrors = append(allErrors, fmt.Errorf("failed to authenticate with vault after %d attempts", attemptCount+1))
+		for i, e := range authErrors {
+			allErrors = append(allErrors, fmt.Errorf("attempt %d: %w", i+1, e))
 		}
-		errMsg += fmt.Sprintf("; final error: %v", err)
+		allErrors = append(allErrors, fmt.Errorf("final error: %w", err))
 
-		return errors.New(errMsg)
+		return errors.Join(allErrors...)
 	}
 
 	metrics.authRetriesTotal.WithLabelValues("success").Inc()
@@ -300,6 +350,8 @@ func (p *vaultProvider) RotateCertificate(ctx context.Context, req *CertificateR
 		return nil, fmt.Errorf("common name is required")
 	}
 
+	GetCertMetrics().rotationsTotal.WithLabelValues("vault").Inc()
+
 	return p.issueCertificate(ctx, req)
 }
 
@@ -319,24 +371,41 @@ func (p *vaultProvider) Close() error {
 }
 
 // issueCertificate issues a new certificate from Vault PKI.
+// The Vault network call is performed outside the lock to avoid holding the
+// write lock during potentially slow I/O. The lock is only acquired to read
+// config and to update the cached certificate afterwards.
 func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	tracer := otel.Tracer(certTracerName)
+	ctx, span := tracer.Start(ctx, "VaultProvider.IssueCertificate",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("cert.common_name", req.CommonName),
+			attribute.String("cert.provider", "vault"),
+		),
+	)
+	defer span.End()
 
+	// Read config under read lock
+	p.mu.RLock()
 	ttl := p.config.TTL
 	if req.TTL > 0 {
 		ttl = req.TTL
 	}
+	pkiMount := p.config.PKIMount
+	role := p.config.Role
+	p.mu.RUnlock()
 
+	// Perform the Vault PKI network call outside the lock
 	vaultCert, err := p.vaultClient.PKI().IssueCertificate(ctx, &vault.PKIIssueOptions{
-		Mount:      p.config.PKIMount,
-		Role:       p.config.Role,
+		Mount:      pkiMount,
+		Role:       role,
 		CommonName: req.CommonName,
 		AltNames:   req.DNSNames,
 		IPSANs:     req.IPAddresses,
 		TTL:        ttl,
 	})
 	if err != nil {
+		GetCertMetrics().errorsTotal.WithLabelValues("vault", "issue").Inc()
 		return nil, fmt.Errorf("failed to issue certificate from vault: %w", err)
 	}
 
@@ -350,8 +419,22 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 		Expiration:     vaultCert.Expiration,
 	}
 
-	// Cache the certificate
+	// Acquire write lock only to update the cache
+	p.mu.Lock()
+	// Check if another goroutine already cached a newer certificate while we were waiting
+	if existing, ok := p.certs[req.CommonName]; ok && existing.Expiration.After(certificate.Expiration) {
+		p.mu.Unlock()
+		return existing, nil
+	}
 	p.certs[req.CommonName] = certificate
+	p.mu.Unlock()
+
+	// Record certificate metrics
+	cm := GetCertMetrics()
+	cm.issuedTotal.WithLabelValues("vault").Inc()
+	cm.expirySeconds.WithLabelValues(
+		req.CommonName,
+	).Set(time.Until(certificate.Expiration).Seconds())
 
 	p.logger.Info("certificate issued from vault",
 		observability.String("common_name", req.CommonName),

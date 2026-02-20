@@ -476,7 +476,7 @@ func TestRedisCache_Exists_RetryOnError(t *testing.T) {
 // ============================================================
 // redis.go: Non-retryable error break path in retry loops
 // Use a context that gets canceled during the Redis operation
-// (not during backoff) to trigger the !isRetryableError break.
+// (not during backoff) to trigger the !isRetryableRedisError break.
 // ============================================================
 
 func TestRedisCache_Get_NonRetryableErrorBreak(t *testing.T) {

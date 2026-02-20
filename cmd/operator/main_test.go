@@ -6,9 +6,20 @@ import (
 	"flag"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// resetOperatorBuildInfoForTesting resets the operator build info metrics
+// singleton so tests can re-initialize with a fresh Prometheus registry.
+// This prevents "duplicate metrics collector registration" panics when
+// multiple tests need isolated metrics instances. Must only be called
+// from tests.
+func resetOperatorBuildInfoForTesting() {
+	operatorBuildInfo = nil
+	operatorBuildInfoOnce = sync.Once{}
+}
 
 // ============================================================================
 // parseIntEnv Tests
@@ -791,7 +802,7 @@ func TestSetupWebhooksIfEnabled_Disabled(t *testing.T) {
 		EnableWebhooks: false,
 	}
 
-	err := setupWebhooksIfEnabled(nil, cfg)
+	err := setupWebhooksIfEnabled(context.Background(), nil, cfg)
 	if err != nil {
 		t.Errorf("setupWebhooksIfEnabled() error = %v, want nil", err)
 	}
@@ -1516,7 +1527,7 @@ func TestSetupWebhooksIfEnabled_DisabledWithNilManager(t *testing.T) {
 	}
 
 	// Should not panic with nil manager when disabled
-	err := setupWebhooksIfEnabled(nil, cfg)
+	err := setupWebhooksIfEnabled(context.Background(), nil, cfg)
 	if err != nil {
 		t.Errorf("setupWebhooksIfEnabled() error = %v, want nil", err)
 	}
@@ -1960,7 +1971,7 @@ func TestSetupWebhooksIfEnabled_EnabledWithNilManager(t *testing.T) {
 	// This should panic or return error with nil manager
 	// We test that it doesn't panic when disabled
 	cfg.EnableWebhooks = false
-	err := setupWebhooksIfEnabled(nil, cfg)
+	err := setupWebhooksIfEnabled(context.Background(), nil, cfg)
 	if err != nil {
 		t.Errorf("setupWebhooksIfEnabled() error = %v, want nil when disabled", err)
 	}

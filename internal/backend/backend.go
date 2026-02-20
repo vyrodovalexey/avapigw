@@ -42,20 +42,19 @@ const (
 type HostRateLimiter struct {
 	rps       int
 	burst     int
-	tokens    atomic.Int64
-	lastCheck atomic.Int64
+	tokens    int64
+	lastCheck int64
 	mu        sync.Mutex
 }
 
 // NewHostRateLimiter creates a new host rate limiter.
 func NewHostRateLimiter(rps, burst int) *HostRateLimiter {
-	rl := &HostRateLimiter{
-		rps:   rps,
-		burst: burst,
+	return &HostRateLimiter{
+		rps:       rps,
+		burst:     burst,
+		tokens:    int64(burst),
+		lastCheck: time.Now().UnixNano(),
 	}
-	rl.tokens.Store(int64(burst))
-	rl.lastCheck.Store(time.Now().UnixNano())
-	return rl
 }
 
 // Allow checks if a request is allowed based on rate limiting.
@@ -64,12 +63,11 @@ func (rl *HostRateLimiter) Allow() bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now().UnixNano()
-	last := rl.lastCheck.Load()
-	elapsed := time.Duration(now - last)
+	elapsed := time.Duration(now - rl.lastCheck)
 
 	// Calculate tokens to add based on elapsed time
 	tokensToAdd := int64(float64(rl.rps) * elapsed.Seconds())
-	currentTokens := rl.tokens.Load() + tokensToAdd
+	currentTokens := rl.tokens + tokensToAdd
 
 	// Cap at burst limit
 	if currentTokens > int64(rl.burst) {
@@ -80,8 +78,8 @@ func (rl *HostRateLimiter) Allow() bool {
 		return false
 	}
 
-	rl.tokens.Store(currentTokens - 1)
-	rl.lastCheck.Store(now)
+	rl.tokens = currentTokens - 1
+	rl.lastCheck = now
 	return true
 }
 
@@ -467,6 +465,7 @@ func (b *ServiceBackend) initAuthProvider(cfg config.Backend) error {
 
 	authOpts := []auth.ProviderOption{
 		auth.WithLogger(b.logger),
+		auth.WithMetrics(auth.GetSharedMetrics()),
 	}
 	if b.vaultClient != nil {
 		authOpts = append(authOpts, auth.WithVaultClient(b.vaultClient))
@@ -576,6 +575,18 @@ func (b *ServiceBackend) Start(ctx context.Context) error {
 					)
 				},
 			))
+		}
+		// Use TLS for health checks if backend has TLS enabled
+		if b.tlsConfig != nil {
+			opts = append(opts,
+				WithHealthCheckClient(&http.Client{
+					Timeout: b.config.HealthCheck.Timeout.Duration(),
+					Transport: &http.Transport{
+						TLSClientConfig: b.tlsConfig,
+					},
+				}),
+				WithHealthCheckTLS(true),
+			)
 		}
 		b.healthCheck = NewHealthChecker(
 			b.hosts, *b.config.HealthCheck, opts...,
@@ -746,10 +757,11 @@ func (b *ServiceBackend) RefreshAuth(ctx context.Context) error {
 
 // Registry manages multiple backends.
 type Registry struct {
-	backends map[string]Backend
-	mu       sync.RWMutex
-	logger   observability.Logger
-	metrics  *observability.Metrics
+	backends    map[string]Backend
+	mu          sync.RWMutex
+	logger      observability.Logger
+	metrics     *observability.Metrics
+	vaultClient vault.Client
 }
 
 // RegistryOption is a functional option for configuring a Registry.
@@ -759,6 +771,16 @@ type RegistryOption func(*Registry)
 func WithRegistryMetrics(m *observability.Metrics) RegistryOption {
 	return func(r *Registry) {
 		r.metrics = m
+	}
+}
+
+// WithRegistryVaultClient sets the Vault client for the registry.
+// When set, the client is passed to each backend created by
+// LoadFromConfig and ReloadFromConfig so that backends requiring
+// Vault (mTLS certs, KV credentials, OIDC tokens) can function.
+func WithRegistryVaultClient(client vault.Client) RegistryOption {
+	return func(r *Registry) {
+		r.vaultClient = client
 	}
 }
 
@@ -894,6 +916,9 @@ func (r *Registry) LoadFromConfig(backends []config.Backend) error {
 		if r.metrics != nil {
 			opts = append(opts, WithMetrics(r.metrics))
 		}
+		if r.vaultClient != nil {
+			opts = append(opts, WithVaultClient(r.vaultClient))
+		}
 		b, err := NewBackend(cfg, opts...)
 		if err != nil {
 			return fmt.Errorf(
@@ -941,6 +966,9 @@ func (r *Registry) ReloadFromConfig(
 		opts := []BackendOption{WithBackendLogger(r.logger)}
 		if r.metrics != nil {
 			opts = append(opts, WithMetrics(r.metrics))
+		}
+		if r.vaultClient != nil {
+			opts = append(opts, WithVaultClient(r.vaultClient))
 		}
 		b, err := NewBackend(cfg, opts...)
 		if err != nil {

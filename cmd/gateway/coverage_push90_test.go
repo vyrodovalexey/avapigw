@@ -31,7 +31,7 @@ func TestWaitForOperatorShutdown_WithOperatorClientP90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19520,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -98,7 +98,7 @@ func TestWaitForOperatorShutdown_WithOperatorClientStopErrorP90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19521,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -167,7 +167,7 @@ func TestRunOperatorGateway_SuccessfulStartThenShutdownP90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19522,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -240,7 +240,7 @@ func TestRunOperatorGateway_OperatorClientStartErrorP90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19523,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -333,7 +333,7 @@ func TestRunGateway_WithShutdownP90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19524,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -379,7 +379,7 @@ spec:
   listeners:
     - name: http
       bind: "127.0.0.1"
-      port: 19524
+      port: 8080
       protocol: HTTP
 `)
 	require.NoError(t, err)
@@ -462,7 +462,7 @@ func TestWaitForOperatorShutdown_WithVaultClientP90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19525,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

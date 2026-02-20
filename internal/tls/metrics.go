@@ -7,6 +7,15 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+// defaultTLSMetrics holds the singleton Metrics instance registered with the default global registry.
+// This ensures metrics are only registered once with the default Prometheus registry,
+// avoiding duplicate registration panics.
+var (
+	defaultTLSMetrics     *Metrics
+	defaultTLSMetricsOnce sync.Once
 )
 
 // Metrics holds Prometheus metrics for TLS operations.
@@ -26,6 +35,7 @@ type Metrics struct {
 type MetricsOption func(*Metrics)
 
 // WithRegistry sets a custom Prometheus registry.
+// When not set, metrics are automatically registered with the default global registry via promauto.
 func WithRegistry(registry *prometheus.Registry) MetricsOption {
 	return func(m *Metrics) {
 		m.registry = registry
@@ -33,6 +43,9 @@ func WithRegistry(registry *prometheus.Registry) MetricsOption {
 }
 
 // NewMetrics creates a new Metrics instance with the given namespace.
+// By default, metrics are registered with the default global Prometheus registry via promauto
+// using a singleton pattern to avoid duplicate registration panics.
+// Use WithRegistry to register with a custom registry instead.
 func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 	if namespace == "" {
 		namespace = "gateway"
@@ -44,11 +57,27 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		opt(m)
 	}
 
-	if m.registry == nil {
-		m.registry = prometheus.NewRegistry()
+	// When a custom registry is provided, create a new Metrics instance with that registry.
+	// Otherwise, return the singleton instance registered with the default global registry.
+	if m.registry != nil {
+		factory := promauto.With(m.registry)
+		m.initWithFactory(namespace, factory)
+		return m
 	}
 
-	m.connectionsTotal = prometheus.NewCounterVec(
+	// Use singleton pattern for the default global registry to prevent duplicate registration.
+	defaultTLSMetricsOnce.Do(func() {
+		defaultTLSMetrics = &Metrics{}
+		factory := promauto.With(prometheus.DefaultRegisterer)
+		defaultTLSMetrics.initWithFactory(namespace, factory)
+	})
+
+	return defaultTLSMetrics
+}
+
+// initWithFactory initializes all metrics using the given promauto factory.
+func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
+	m.connectionsTotal = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "tls",
@@ -58,7 +87,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"version", "cipher", "mode"},
 	)
 
-	m.handshakeDuration = prometheus.NewHistogramVec(
+	m.handshakeDuration = factory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: "tls",
@@ -69,7 +98,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"version", "mode"},
 	)
 
-	m.certificateExpiry = prometheus.NewGaugeVec(
+	m.certificateExpiry = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: "tls",
@@ -79,7 +108,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"subject", "type"},
 	)
 
-	m.certificateReload = prometheus.NewCounterVec(
+	m.certificateReload = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "tls",
@@ -89,7 +118,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"status"},
 	)
 
-	m.handshakeErrors = prometheus.NewCounterVec(
+	m.handshakeErrors = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "tls",
@@ -99,7 +128,7 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		[]string{"reason"},
 	)
 
-	m.clientCertValidation = prometheus.NewCounterVec(
+	m.clientCertValidation = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: "tls",
@@ -108,18 +137,43 @@ func NewMetrics(namespace string, opts ...MetricsOption) *Metrics {
 		},
 		[]string{"result"},
 	)
+}
 
-	// Register all metrics
-	m.registry.MustRegister(
-		m.connectionsTotal,
-		m.handshakeDuration,
-		m.certificateExpiry,
-		m.certificateReload,
-		m.handshakeErrors,
-		m.clientCertValidation,
-	)
+// Init pre-populates common label combinations with zero values so
+// that TLS Vec metrics appear in /metrics output immediately after
+// startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	return m
+	versions := []string{"1.2", "1.3"}
+	modes := []string{"server", "client", "mtls"}
+	for _, v := range versions {
+		for _, mode := range modes {
+			m.handshakeDuration.WithLabelValues(v, mode)
+		}
+	}
+
+	handshakeErrorReasons := []string{
+		"timeout",
+		"protocol_error",
+		"certificate_error",
+	}
+	for _, reason := range handshakeErrorReasons {
+		m.handshakeErrors.WithLabelValues(reason)
+	}
+
+	certValidationResults := []string{
+		"success",
+		"failure",
+		"expired",
+		"revoked",
+	}
+	for _, result := range certValidationResults {
+		m.clientCertValidation.WithLabelValues(result)
+	}
 }
 
 // RecordConnection records a successful TLS connection.

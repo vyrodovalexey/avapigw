@@ -180,12 +180,13 @@ func TestProxy_ApplyTimeout_NoDeadline(t *testing.T) {
 	defer p.Close()
 
 	ctx := context.Background()
-	newCtx, cancel := p.applyTimeout(ctx, "/test.Service/Method")
-	defer cancel()
-
-	deadline, ok := newCtx.Deadline()
-	assert.True(t, ok)
-	assert.True(t, deadline.After(time.Now()))
+	newCtx, cancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
+	// No route configured, so matched should be false
+	assert.False(t, matched)
+	assert.Nil(t, cancel)
+	// Context should be unchanged when route is not matched
+	_, hasDeadline := newCtx.Deadline()
+	assert.False(t, hasDeadline)
 }
 
 func TestProxy_ApplyTimeout_ExistingDeadline(t *testing.T) {
@@ -198,7 +199,8 @@ func TestProxy_ApplyTimeout_ExistingDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	newCtx, newCancel := p.applyTimeout(ctx, "/test.Service/Method")
+	newCtx, newCancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
+	assert.True(t, matched)
 	assert.Nil(t, newCancel)
 	assert.Equal(t, ctx, newCtx)
 }
@@ -223,7 +225,9 @@ func TestProxy_ApplyTimeout_RouteTimeout(t *testing.T) {
 	defer p.Close()
 
 	ctx := context.Background()
-	newCtx, cancel := p.applyTimeout(ctx, "/test.Service/Method")
+	newCtx, cancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
+	assert.True(t, matched)
+	require.NotNil(t, cancel)
 	defer cancel()
 
 	deadline, ok := newCtx.Deadline()
@@ -342,4 +346,89 @@ func (m *proxyTestServerTransportStream) SendHeader(md metadata.MD) error {
 
 func (m *proxyTestServerTransportStream) SetTrailer(md metadata.MD) error {
 	return nil
+}
+
+// --- ClearAuthCache tests ---
+
+func TestProxy_ClearAuthCache_DelegatesToDirector(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	// Create a RouterDirector (which implements ClearAuthCache)
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	// Pre-populate the director's auth cache
+	authCfg := &config.AuthenticationConfig{
+		Enabled: true,
+		APIKey: &config.APIKeyAuthConfig{
+			Enabled: true,
+			Header:  "x-api-key",
+		},
+	}
+	_, err := director.getOrCreateAuthenticator("test-route", authCfg)
+	require.NoError(t, err)
+
+	// Verify cache has an entry
+	director.authCacheMu.RLock()
+	assert.Len(t, director.authCache, 1)
+	director.authCacheMu.RUnlock()
+
+	// Create proxy with the RouterDirector
+	p := New(r,
+		WithDirector(director),
+		WithConnectionPool(pool),
+		WithProxyLogger(observability.NopLogger()),
+	)
+	defer p.Close()
+
+	// Call ClearAuthCache on the proxy — should delegate to director
+	p.ClearAuthCache()
+
+	// Verify the director's cache was cleared
+	director.authCacheMu.RLock()
+	assert.Len(t, director.authCache, 0, "director auth cache should be empty after proxy.ClearAuthCache()")
+	director.authCacheMu.RUnlock()
+}
+
+func TestProxy_ClearAuthCache_StaticDirector_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	// Create a StaticDirector (doesn't implement ClearAuthCache)
+	staticDirector := NewStaticDirector("localhost:50051", pool, observability.NopLogger())
+
+	// Create proxy with the StaticDirector
+	p := New(r,
+		WithDirector(staticDirector),
+		WithConnectionPool(pool),
+		WithProxyLogger(observability.NopLogger()),
+	)
+	defer p.Close()
+
+	// ClearAuthCache should not panic when director doesn't implement the interface
+	assert.NotPanics(t, func() {
+		p.ClearAuthCache()
+	})
+}
+
+func TestProxy_ClearAuthCache_NilDirector_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	// Create a proxy with a nil director field (edge case)
+	p := &Proxy{
+		logger: observability.NopLogger(),
+	}
+
+	// ClearAuthCache should not panic when director is nil
+	assert.NotPanics(t, func() {
+		p.ClearAuthCache()
+	})
 }

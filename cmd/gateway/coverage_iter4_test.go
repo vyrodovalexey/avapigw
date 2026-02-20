@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -276,7 +277,7 @@ func TestInitApplication_WithVaultTLS(t *testing.T) {
 				{
 					Name:     "https",
 					Bind:     "127.0.0.1",
-					Port:     19300,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 					TLS: &config.ListenerTLSConfig{
 						Vault: &config.VaultTLSConfig{
@@ -362,7 +363,7 @@ spec:
   listeners:
     - name: http
       bind: 127.0.0.1
-      port: 19350
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -470,21 +471,8 @@ func TestInitAuditLogger_NilEvents(t *testing.T) {
 		},
 	}
 
-	var auditLogger audit.Logger
-	panicked := false
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -513,7 +501,7 @@ spec:
   listeners:
     - name: http
       bind: 127.0.0.1
-      port: 19301
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -528,7 +516,7 @@ spec:
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19301,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -626,8 +614,10 @@ func TestReloadComponents_BackendReloadErrorAfterGatewaySuccess(t *testing.T) {
 		},
 	}
 
-	// Should not panic
-	reloadComponents(context.Background(), app, newCfg, logger)
+	// Should not panic even with duplicate backend names
+	assert.NotPanics(t, func() {
+		reloadComponents(context.Background(), app, newCfg, logger)
+	}, "reloadComponents should not panic with duplicate backend names")
 }
 
 // ============================================================
@@ -675,7 +665,9 @@ func TestReloadComponents_RouteReloadErrorAfterGatewaySuccess(t *testing.T) {
 	}
 
 	// Should not panic - gateway.Reload may reject this config
-	reloadComponents(context.Background(), app, newCfg, logger)
+	assert.NotPanics(t, func() {
+		reloadComponents(context.Background(), app, newCfg, logger)
+	}, "reloadComponents should not panic with duplicate route names")
 }
 
 // ============================================================
@@ -696,7 +688,7 @@ func TestWaitForShutdown_TracerShutdownError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19302,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -773,7 +765,7 @@ func TestWaitForShutdown_BackendStopError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19303,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -851,21 +843,8 @@ func TestInitAuditLogger_EmptyOutput(t *testing.T) {
 		},
 	}
 
-	var auditLogger audit.Logger
-	panicked := false
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()

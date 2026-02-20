@@ -260,6 +260,20 @@ func ValidateIPAddress(ip string) error {
 	return nil
 }
 
+// MatchPath checks if a path matches a pattern.
+// Supports exact match and prefix match with trailing *.
+func MatchPath(pattern, path string) bool {
+	if pattern == path {
+		return true
+	}
+	// Check for wildcard suffix
+	if pattern != "" && pattern[len(pattern)-1] == '*' {
+		prefix := pattern[:len(pattern)-1]
+		return len(path) >= len(prefix) && path[:len(prefix)] == prefix
+	}
+	return false
+}
+
 // isValidIPChar checks if a character is valid in an IP address.
 func isValidIPChar(c rune) bool {
 	if c >= '0' && c <= '9' {

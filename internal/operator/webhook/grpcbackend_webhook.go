@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -12,6 +13,10 @@ import (
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
+
+// Compile-time assertion: GRPCBackendValidator must implement admission.Validator
+// for the typed *avapigwv1alpha1.GRPCBackend parameter.
+var _ admission.Validator[*avapigwv1alpha1.GRPCBackend] = (*GRPCBackendValidator)(nil)
 
 // GRPCBackendValidator validates GRPCBackend resources.
 type GRPCBackendValidator struct {
@@ -35,27 +40,58 @@ func SetupGRPCBackendWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerCon
 		Complete()
 }
 
+// SetupGRPCBackendWebhookWithConfigAndContext sets up the GRPCBackend webhook with context-based
+// lifecycle management for the DuplicateChecker cleanup goroutine.
+func SetupGRPCBackendWebhookWithConfigAndContext(
+	ctx context.Context, mgr ctrl.Manager, cfg DuplicateCheckerConfig,
+) error {
+	validator := &GRPCBackendValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: NewDuplicateCheckerFromConfigWithContext(ctx, mgr.GetClient(), cfg),
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.GRPCBackend{}).
+		WithValidator(validator).
+		Complete()
+}
+
+// SetupGRPCBackendWebhookWithChecker sets up the GRPCBackend webhook with a shared DuplicateChecker.
+// This avoids creating multiple DuplicateChecker instances (and cleanup goroutines) across webhooks.
+func SetupGRPCBackendWebhookWithChecker(mgr ctrl.Manager, dc *DuplicateChecker) error {
+	validator := &GRPCBackendValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: dc,
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.GRPCBackend{}).
+		WithValidator(validator).
+		Complete()
+}
+
 // ValidateCreate implements admission.CustomValidator.
 func (v *GRPCBackendValidator) ValidateCreate(
 	ctx context.Context,
 	obj *avapigwv1alpha1.GRPCBackend,
 ) (admission.Warnings, error) {
+	start := time.Now()
 	warnings, err := v.validate(obj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation("GRPCBackend", "create", "rejected", time.Since(start), len(warnings))
 		return warnings, err
 	}
 
 	if v.DuplicateChecker != nil {
 		// Check for duplicates within the same CRD type
 		if dupErr := v.DuplicateChecker.CheckGRPCBackendDuplicate(ctx, obj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation("GRPCBackend", "create", "rejected", time.Since(start), len(warnings))
 			return warnings, dupErr
 		}
 		// Check for cross-CRD host:port conflicts with Backends
 		if crossErr := v.DuplicateChecker.CheckGRPCBackendCrossConflicts(ctx, obj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation("GRPCBackend", "create", "rejected", time.Since(start), len(warnings))
 			return warnings, crossErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation("GRPCBackend", "create", "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
 
@@ -64,31 +100,37 @@ func (v *GRPCBackendValidator) ValidateUpdate(
 	ctx context.Context,
 	_, newObj *avapigwv1alpha1.GRPCBackend,
 ) (admission.Warnings, error) {
+	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation("GRPCBackend", "update", "rejected", time.Since(start), len(warnings))
 		return warnings, err
 	}
 
 	if v.DuplicateChecker != nil {
 		// Check for duplicates within the same CRD type (excluding self)
 		if dupErr := v.DuplicateChecker.CheckGRPCBackendDuplicate(ctx, newObj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation("GRPCBackend", "update", "rejected", time.Since(start), len(warnings))
 			return warnings, dupErr
 		}
 		// Check for cross-CRD host:port conflicts with Backends
 		if crossErr := v.DuplicateChecker.CheckGRPCBackendCrossConflicts(ctx, newObj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation("GRPCBackend", "update", "rejected", time.Since(start), len(warnings))
 			return warnings, crossErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation("GRPCBackend", "update", "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
 
 // ValidateDelete implements admission.CustomValidator.
+// No-op: GRPCBackend deletion does not require validation because the gateway
+// controller handles cleanup of derived configuration via finalizers.
 func (v *GRPCBackendValidator) ValidateDelete(
 	_ context.Context,
 	_ *avapigwv1alpha1.GRPCBackend,
 ) (admission.Warnings, error) {
-	// No validation needed for delete
 	return nil, nil
 }
 
@@ -190,6 +232,16 @@ func (v *GRPCBackendValidator) validate(grpcBackend *avapigwv1alpha1.GRPCBackend
 
 	if spec.TLS != nil && spec.TLS.Mode == "INSECURE" {
 		warnings = append(warnings, "tls.mode is INSECURE; this should only be used in development")
+	}
+
+	// Security warnings for plaintext secrets in backend authentication
+	if spec.Authentication != nil {
+		warnings = append(warnings, warnPlaintextBackendAuthSecrets(spec.Authentication)...)
+	}
+
+	// Security warnings for plaintext secrets in cache sentinel config
+	if spec.Cache != nil && spec.Cache.Sentinel != nil {
+		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Cache.Sentinel)...)
 	}
 
 	if len(errs) > 0 {

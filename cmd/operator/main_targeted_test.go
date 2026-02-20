@@ -36,8 +36,11 @@ func TestSetupTracingIfEnabled_EnabledWithEndpoint_Targeted(t *testing.T) {
 
 	shutdown, err := setupTracingIfEnabled(cfg)
 	// May succeed or fail depending on OTLP availability
-	if err == nil && shutdown != nil {
-		// Call shutdown to test the shutdown function path
+	if err != nil {
+		// Error is acceptable when OTLP endpoint is not available
+		assert.Nil(t, shutdown, "shutdown should be nil when setup fails")
+	} else {
+		assert.NotNil(t, shutdown, "shutdown should not be nil when setup succeeds")
 		shutdown()
 	}
 }
@@ -51,7 +54,10 @@ func TestSetupTracingIfEnabled_EnabledEmptyEndpoint_Targeted(t *testing.T) {
 
 	shutdown, err := setupTracingIfEnabled(cfg)
 	// May succeed or fail depending on OTLP availability
-	if err == nil && shutdown != nil {
+	if err != nil {
+		assert.Nil(t, shutdown, "shutdown should be nil when setup fails")
+	} else {
+		assert.NotNil(t, shutdown, "shutdown should not be nil when setup succeeds")
 		shutdown()
 	}
 }
@@ -65,7 +71,7 @@ func TestSetupWebhooksIfEnabled_Disabled_Targeted(t *testing.T) {
 		EnableWebhooks: false,
 	}
 
-	err := setupWebhooksIfEnabled(nil, cfg)
+	err := setupWebhooksIfEnabled(context.Background(), nil, cfg)
 	assert.NoError(t, err)
 }
 
@@ -92,19 +98,10 @@ func (m *mockManager) AddReadyzCheck(name string, check interface{}) error {
 // integration tests. Here we test the error paths conceptually.
 
 func TestSetupHealthChecks_Concept(t *testing.T) {
-	// This test documents the expected behavior of setupHealthChecks
-	// The actual function requires a real ctrl.Manager
-
-	// Test case 1: Both checks succeed
-	// Expected: nil error
-
-	// Test case 2: Healthz check fails
-	// Expected: error containing "unable to set up health check"
-
-	// Test case 3: Readyz check fails
-	// Expected: error containing "unable to set up ready check"
-
-	t.Log("setupHealthChecks requires a real ctrl.Manager - tested via integration tests")
+	// setupHealthChecks requires a real ctrl.Manager which is tested via
+	// integration tests (main_healthcheck_test.go). This test verifies
+	// the function signature exists and documents expected behavior.
+	assert.NotNil(t, setupHealthChecks, "setupHealthChecks function should exist")
 }
 
 // ============================================================================
@@ -114,11 +111,12 @@ func TestSetupHealthChecks_Concept(t *testing.T) {
 func TestStartGRPCServerBackground_NilServer_Targeted(t *testing.T) {
 	ctx := context.Background()
 
-	// Should not panic with nil server
-	startGRPCServerBackground(ctx, nil)
-
-	// Give it a moment to ensure no panic
-	time.Sleep(10 * time.Millisecond)
+	// Should not panic with nil server - verify it completes without panic
+	assert.NotPanics(t, func() {
+		startGRPCServerBackground(ctx, nil)
+		// Give it a moment to ensure no panic in the goroutine
+		time.Sleep(10 * time.Millisecond)
+	}, "startGRPCServerBackground should not panic with nil server")
 }
 
 func TestStartGRPCServerBackground_WithServer_Targeted(t *testing.T) {
@@ -207,7 +205,10 @@ func TestSetupTracingIfEnabled_ErrorPath(t *testing.T) {
 
 	shutdown, err := setupTracingIfEnabled(cfg)
 	// The tracer may or may not fail depending on implementation
-	if err == nil && shutdown != nil {
+	if err != nil {
+		assert.Nil(t, shutdown, "shutdown should be nil when setup fails")
+	} else {
+		assert.NotNil(t, shutdown, "shutdown should not be nil when setup succeeds")
 		shutdown()
 	}
 }
@@ -258,23 +259,23 @@ func (m *mockCertManager) Close() error {
 }
 
 func TestSetupGRPCServer_CertManagerError_Targeted(t *testing.T) {
-	ctx := context.Background()
-
+	// Verify mock cert manager returns expected error
 	mockMgr := &mockCertManager{
 		getCertErr: errors.New("mock cert error"),
 	}
 
+	_, err := mockMgr.GetCertificate(context.Background(), &cert.CertificateRequest{})
+	assert.Error(t, err, "mock cert manager should return error")
+	assert.Contains(t, err.Error(), "mock cert error")
+
+	// Verify config is properly constructed
 	cfg := &Config{
 		GRPCPort:        19605,
 		CertServiceName: "test-service",
 		CertNamespace:   "test-namespace",
 	}
-
-	// This will fail because mockCertManager doesn't implement the full interface
-	// but it tests the error path conceptually
-	_ = cfg
-	_ = mockMgr
-	_ = ctx
+	assert.Equal(t, 19605, cfg.GRPCPort)
+	assert.Equal(t, "test-service", cfg.CertServiceName)
 }
 
 // ============================================================================
@@ -289,7 +290,10 @@ func TestSetupTracingIfEnabled_ZeroSamplingRate(t *testing.T) {
 	}
 
 	shutdown, err := setupTracingIfEnabled(cfg)
-	if err == nil && shutdown != nil {
+	if err != nil {
+		assert.Nil(t, shutdown, "shutdown should be nil when setup fails")
+	} else {
+		assert.NotNil(t, shutdown, "shutdown should not be nil when setup succeeds")
 		shutdown()
 	}
 }
@@ -302,7 +306,10 @@ func TestSetupTracingIfEnabled_FullSamplingRate(t *testing.T) {
 	}
 
 	shutdown, err := setupTracingIfEnabled(cfg)
-	if err == nil && shutdown != nil {
+	if err != nil {
+		assert.Nil(t, shutdown, "shutdown should be nil when setup fails")
+	} else {
+		assert.NotNil(t, shutdown, "shutdown should not be nil when setup succeeds")
 		shutdown()
 	}
 }

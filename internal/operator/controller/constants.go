@@ -64,4 +64,7 @@ const (
 
 	// EventReasonCleanupFailed is the event reason when cleanup fails.
 	EventReasonCleanupFailed = "CleanupFailed"
+
+	// EventReasonConfigApplied is the event reason when configuration is applied to the gateway.
+	EventReasonConfigApplied = "ConfigApplied"
 )

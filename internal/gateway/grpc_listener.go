@@ -6,9 +6,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
@@ -16,7 +18,11 @@ import (
 	grpcserver "github.com/vyrodovalexey/avapigw/internal/grpc/server"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
+
+// defaultGracefulStopTimeout is the default timeout for gracefully stopping the gRPC server.
+const defaultGracefulStopTimeout = 30 * time.Second
 
 // GRPCListener represents a gRPC listener.
 type GRPCListener struct {
@@ -34,6 +40,9 @@ type GRPCListener struct {
 	auditLogger          audit.Logger
 	rateLimiter          *grpcmiddleware.GRPCRateLimiter
 	circuitBreaker       *grpcmiddleware.GRPCCircuitBreaker
+	metricsRegistry      *prometheus.Registry
+	authMetrics          *auth.Metrics
+	vaultClient          vault.Client
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -111,6 +120,35 @@ func WithGRPCCircuitBreaker(cb *grpcmiddleware.GRPCCircuitBreaker) GRPCListenerO
 	}
 }
 
+// WithGRPCMetricsRegistry sets the Prometheus registry for gRPC proxy
+// metrics. When provided, gRPC proxy metrics (connection pool, direct
+// requests, streaming, etc.) are registered with this registry instead
+// of the default global registerer, ensuring they appear on the
+// gateway's /metrics endpoint.
+func WithGRPCMetricsRegistry(registry *prometheus.Registry) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.metricsRegistry = registry
+	}
+}
+
+// WithGRPCAuthMetrics sets the authentication metrics for the gRPC listener.
+// When provided, per-route authentication operations in the gRPC proxy
+// director emit Prometheus metrics for observability.
+func WithGRPCAuthMetrics(metrics *auth.Metrics) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.authMetrics = metrics
+	}
+}
+
+// WithGRPCVaultClient sets the vault client for the gRPC listener.
+// When provided, per-route API key authentication in the gRPC proxy
+// can use Vault as the key store.
+func WithGRPCVaultClient(client vault.Client) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.vaultClient = client
+	}
+}
+
 // NewGRPCListener creates a new gRPC listener.
 func NewGRPCListener(
 	cfg config.Listener,
@@ -130,10 +168,21 @@ func NewGRPCListener(
 		l.router = grpcrouter.New()
 	}
 
-	// Create proxy
-	l.proxy = grpcproxy.New(l.router,
+	// Create proxy with metrics registry so gRPC proxy metrics
+	// appear on the gateway's /metrics endpoint.
+	proxyOpts := []grpcproxy.ProxyOption{
 		grpcproxy.WithProxyLogger(l.logger),
-	)
+	}
+	if l.metricsRegistry != nil {
+		proxyOpts = append(proxyOpts, grpcproxy.WithMetricsRegistry(l.metricsRegistry))
+	}
+	if l.authMetrics != nil {
+		proxyOpts = append(proxyOpts, grpcproxy.WithAuthMetrics(l.authMetrics))
+	}
+	if l.vaultClient != nil {
+		proxyOpts = append(proxyOpts, grpcproxy.WithProxyVaultClient(l.vaultClient))
+	}
+	l.proxy = grpcproxy.New(l.router, proxyOpts...)
 
 	// Build interceptors
 	unaryInterceptors, streamInterceptors := l.buildInterceptors()
@@ -503,7 +552,7 @@ func (l *GRPCListener) Stop(ctx context.Context) error {
 	// Create timeout context if not already set
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, defaultGracefulStopTimeout)
 		defer cancel()
 	}
 
@@ -570,6 +619,19 @@ func (l *GRPCListener) Server() *grpcserver.Server {
 // Proxy returns the gRPC proxy.
 func (l *GRPCListener) Proxy() *grpcproxy.Proxy {
 	return l.proxy
+}
+
+// ClearAuthCache clears the gRPC proxy director's authenticator cache.
+// This should be called when gRPC route authentication configuration
+// changes so that the next request rebuilds authenticators from the
+// updated config.
+func (l *GRPCListener) ClearAuthCache() {
+	if l.proxy != nil {
+		l.proxy.ClearAuthCache()
+		l.logger.Debug("gRPC listener auth cache cleared",
+			observability.String("name", l.config.Name),
+		)
+	}
 }
 
 // LoadRoutes loads gRPC routes from configuration.

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
@@ -19,10 +21,11 @@ type middlewareChainResult struct {
 // buildMiddlewareChain builds the middleware chain.
 // The execution order (outermost executes first):
 // Recovery -> RequestID -> Logging -> Tracing -> Audit -> Metrics ->
-// CORS -> MaxSessions -> CircuitBreaker -> RateLimit -> [proxy]
+// CORS -> MaxSessions -> CircuitBreaker -> RateLimit -> Auth -> [proxy]
 //
 // Tracing runs before Audit so that trace context (TraceID/SpanID)
 // is available in the request context when audit events are created.
+// Returns an error if auth is explicitly enabled but fails to initialize.
 func buildMiddlewareChain(
 	handler http.Handler,
 	cfg *config.GatewayConfig,
@@ -30,10 +33,32 @@ func buildMiddlewareChain(
 	metrics *observability.Metrics,
 	tracer *observability.Tracer,
 	auditLogger audit.Logger,
-) middlewareChainResult {
+	authCfg *config.AuthenticationConfig,
+	authMetrics *auth.Metrics,
+) (middlewareChainResult, error) {
 	h := handler
 	var rateLimiter *middleware.RateLimiter
 	var maxSessionsLimiter *middleware.MaxSessionsLimiter
+
+	// Body limit middleware wraps the handler closest to the proxy (innermost,
+	// before auth) so oversized requests are rejected before authentication
+	// processing. This prevents resource exhaustion from large payloads.
+	if cfg.Spec.RequestLimits != nil && cfg.Spec.RequestLimits.MaxBodySize > 0 {
+		h = middleware.BodyLimitFromRequestLimits(cfg.Spec.RequestLimits, logger)(h)
+	}
+
+	// Auth middleware wraps the handler closest to the proxy (innermost).
+	// If auth is explicitly enabled but fails to initialize, return an error
+	// so the gateway does not start without required authentication.
+	if authCfg != nil && authCfg.Enabled {
+		authMiddleware, err := buildAuthMiddleware(authCfg, authMetrics, logger)
+		if err != nil {
+			return middlewareChainResult{}, fmt.Errorf("auth middleware initialization failed: %w", err)
+		}
+		if authMiddleware != nil {
+			h = authMiddleware(h)
+		}
+	}
 
 	if cfg.Spec.RateLimit != nil && cfg.Spec.RateLimit.Enabled {
 		var rateLimitMiddleware func(http.Handler) http.Handler
@@ -79,5 +104,37 @@ func buildMiddlewareChain(
 		handler:            h,
 		rateLimiter:        rateLimiter,
 		maxSessionsLimiter: maxSessionsLimiter,
+	}, nil
+}
+
+// buildAuthMiddleware creates the authentication middleware from gateway config.
+// Returns an error if auth is explicitly enabled but fails to initialize,
+// preventing the gateway from starting without required authentication.
+func buildAuthMiddleware(
+	authCfg *config.AuthenticationConfig,
+	authMetrics *auth.Metrics,
+	logger observability.Logger,
+) (func(http.Handler) http.Handler, error) {
+	authConfig, err := auth.ConvertFromGatewayConfig(authCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert auth config: %w", err)
 	}
+
+	if authConfig == nil {
+		return nil, nil
+	}
+
+	var opts []auth.AuthenticatorOption
+	opts = append(opts, auth.WithAuthenticatorLogger(logger))
+	if authMetrics != nil {
+		opts = append(opts, auth.WithAuthenticatorMetrics(authMetrics))
+	}
+
+	authenticator, err := auth.NewAuthenticator(authConfig, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create authenticator: %w", err)
+	}
+
+	logger.Info("authentication middleware enabled")
+	return authenticator.HTTPMiddleware(), nil
 }

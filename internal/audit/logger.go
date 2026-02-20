@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
@@ -57,10 +56,26 @@ type Metrics struct {
 	eventsTotal *prometheus.CounterVec
 }
 
-// NewMetrics creates new audit metrics.
+// NewMetrics creates new audit metrics registered with the default
+// registerer.
 func NewMetrics(namespace string) *Metrics {
-	return &Metrics{
-		eventsTotal: promauto.NewCounterVec(
+	return NewMetricsWithRegisterer(namespace, prometheus.DefaultRegisterer)
+}
+
+// NewMetricsWithRegisterer creates new audit metrics registered with
+// the provided registerer. This allows the metrics to be registered
+// with the gateway's custom registry so they appear on the /metrics
+// endpoint.
+func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer) *Metrics {
+	if namespace == "" {
+		namespace = "gateway"
+	}
+	if registerer == nil {
+		registerer = prometheus.DefaultRegisterer
+	}
+
+	m := &Metrics{
+		eventsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
 				Subsystem: "audit",
@@ -69,6 +84,37 @@ func NewMetrics(namespace string) *Metrics {
 			},
 			[]string{"type", "action", "outcome"},
 		),
+	}
+
+	// Register with the provided registerer, ignoring duplicate
+	// registration errors (safe because descriptors are identical).
+	_ = registerer.Register(m.eventsTotal)
+
+	m.Init()
+
+	return m
+}
+
+// Init pre-populates common label combinations with zero values so
+// that audit Vec metrics appear in /metrics output immediately after
+// startup. Prometheus *Vec types only emit metric lines after
+// WithLabelValues() is called at least once. This method is
+// idempotent and safe to call multiple times.
+func (m *Metrics) Init() {
+	if m.eventsTotal == nil {
+		return
+	}
+
+	types := []string{"authentication", "authorization", "request"}
+	actions := []string{"access", "modify"}
+	outcomes := []string{"success", "failure"}
+
+	for _, t := range types {
+		for _, a := range actions {
+			for _, o := range outcomes {
+				m.eventsTotal.WithLabelValues(t, a, o)
+			}
+		}
 	}
 }
 
@@ -101,6 +147,16 @@ func WithLoggerMetrics(metrics *Metrics) LoggerOption {
 func WithLoggerWriter(writer io.Writer) LoggerOption {
 	return func(lg *logger) {
 		lg.writer = writer
+	}
+}
+
+// WithLoggerRegisterer sets the Prometheus registerer for audit
+// metrics. When provided, audit metrics are registered with this
+// registerer instead of the global default, ensuring they appear on
+// the gateway's custom /metrics endpoint.
+func WithLoggerRegisterer(registerer prometheus.Registerer) LoggerOption {
+	return func(lg *logger) {
+		lg.metrics = NewMetricsWithRegisterer("gateway", registerer)
 	}
 }
 

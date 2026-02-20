@@ -91,10 +91,11 @@ type vaultClient struct {
 	tokenExpiry atomic.Int64
 
 	// Lifecycle
-	mu        sync.RWMutex
-	closed    bool
-	stopCh    chan struct{}
-	stoppedCh chan struct{}
+	mu             sync.RWMutex
+	closed         bool
+	stopCh         chan struct{}
+	stoppedCh      chan struct{}
+	renewalStarted bool // guards against multiple renewal goroutines
 }
 
 // ClientOption is a functional option for configuring the client.
@@ -233,7 +234,29 @@ func (c *vaultClient) Authenticate(ctx context.Context) error {
 		observability.Duration("duration", duration),
 	)
 
-	// Start token renewal goroutine (uses internal stop channel, not passed context)
+	// Start token renewal goroutine, stopping any previous one first
+	c.mu.Lock()
+	if c.renewalStarted {
+		// Stop the previous renewal goroutine by closing its stop channel
+		// and waiting for it to finish, then create fresh channels.
+		close(c.stopCh)
+		c.mu.Unlock()
+
+		// Wait for the previous goroutine to finish
+		select {
+		case <-c.stoppedCh:
+			// Previous goroutine stopped successfully
+		case <-time.After(DefaultCloseTimeout):
+			c.logger.Warn("timeout waiting for previous token renewal goroutine to stop")
+		}
+
+		c.mu.Lock()
+		c.stopCh = make(chan struct{})
+		c.stoppedCh = make(chan struct{})
+	}
+	c.renewalStarted = true
+	c.mu.Unlock()
+
 	go c.tokenRenewalLoop() //nolint:contextcheck // Background goroutine manages its own context lifecycle
 
 	return nil

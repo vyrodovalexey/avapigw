@@ -38,6 +38,21 @@ const (
 	StateStopping
 )
 
+// Default server configuration constants.
+const (
+	// DefaultMaxConcurrentStreams is the default maximum number of concurrent streams per connection.
+	DefaultMaxConcurrentStreams = 100
+
+	// DefaultMaxMsgSize is the default maximum message size in bytes (4MB).
+	DefaultMaxMsgSize = 4 * 1024 * 1024
+
+	// DefaultConnectionTimeout is the default connection timeout.
+	DefaultConnectionTimeout = 120 * time.Second
+
+	// DefaultGracefulStopTimeout is the default timeout for graceful server shutdown.
+	DefaultGracefulStopTimeout = 30 * time.Second
+)
+
 // String returns the string representation of the state.
 func (s State) String() string {
 	switch s {
@@ -102,11 +117,11 @@ func New(cfg *config.GRPCListenerConfig, opts ...Option) (*Server, error) {
 	s := &Server{
 		config:               cfg,
 		logger:               observability.NopLogger(),
-		maxConcurrentStreams: 100,
-		maxRecvMsgSize:       4 * 1024 * 1024, // 4MB
-		maxSendMsgSize:       4 * 1024 * 1024, // 4MB
-		connectionTimeout:    120 * time.Second,
-		gracefulStopTimeout:  30 * time.Second,
+		maxConcurrentStreams: DefaultMaxConcurrentStreams,
+		maxRecvMsgSize:       DefaultMaxMsgSize,
+		maxSendMsgSize:       DefaultMaxMsgSize,
+		connectionTimeout:    DefaultConnectionTimeout,
+		gracefulStopTimeout:  DefaultGracefulStopTimeout,
 		healthServiceEnabled: true,
 	}
 

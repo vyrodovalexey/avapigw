@@ -27,9 +27,9 @@ func TestGetCertificateFingerprint(t *testing.T) {
 	// Test with valid certificate
 	cert := generateTestCertificate(t)
 	fingerprint = GetCertificateFingerprint(cert)
-	// The current implementation returns empty due to placeholder sha256Sum
-	// This test documents the current behavior
-	assert.Empty(t, fingerprint)
+	// SHA-256 fingerprint should be a colon-separated hex string
+	assert.NotEmpty(t, fingerprint)
+	assert.Contains(t, fingerprint, ":")
 }
 
 // TestSha256Sum tests sha256Sum function.
@@ -40,8 +40,9 @@ func TestSha256Sum(t *testing.T) {
 	data := []byte("test data")
 	result := sha256Sum(data)
 
-	// Current implementation returns nil (placeholder)
-	assert.Nil(t, result)
+	// SHA-256 hash should be 32 bytes
+	assert.NotNil(t, result)
+	assert.Len(t, result, 32)
 }
 
 // TestFormatFingerprint tests formatFingerprint function.

@@ -38,9 +38,10 @@ type ConfigApplier interface {
 
 // ConfigHandler handles configuration updates from the operator.
 type ConfigHandler struct {
-	applier ConfigApplier
-	logger  observability.Logger
-	tracer  trace.Tracer
+	applier          ConfigApplier
+	logger           observability.Logger
+	tracer           trace.Tracer
+	cacheInvalidator CacheInvalidator
 
 	// Current state tracking
 	mu           sync.RWMutex
@@ -49,6 +50,9 @@ type ConfigHandler struct {
 	grpcRoutes   map[string]*config.GRPCRoute   // key: namespace/name
 	grpcBackends map[string]*config.GRPCBackend // key: namespace/name
 }
+
+// CacheInvalidator is called when configuration changes require cache invalidation.
+type CacheInvalidator func()
 
 // ConfigHandlerOption is a functional option for ConfigHandler.
 type ConfigHandlerOption func(*ConfigHandler)
@@ -64,6 +68,15 @@ func WithHandlerLogger(logger observability.Logger) ConfigHandlerOption {
 func WithHandlerTracer(tracer trace.Tracer) ConfigHandlerOption {
 	return func(h *ConfigHandler) {
 		h.tracer = tracer
+	}
+}
+
+// WithCacheInvalidator sets the cache invalidation callback.
+// This is called whenever configuration changes are applied, allowing
+// the route middleware cache to be cleared.
+func WithCacheInvalidator(invalidator CacheInvalidator) ConfigHandlerOption {
+	return func(h *ConfigHandler) {
+		h.cacheInvalidator = invalidator
 	}
 }
 
@@ -191,6 +204,8 @@ func (h *ConfigHandler) handleRouteUpdate(
 		}
 	}
 
+	h.invalidateCache()
+
 	h.logger.Info("route updated",
 		observability.String("name", route.Name),
 		observability.String("key", key),
@@ -211,6 +226,8 @@ func (h *ConfigHandler) handleRouteDelete(ctx context.Context, key string) error
 			return fmt.Errorf("failed to apply routes after deletion: %w", err)
 		}
 	}
+
+	h.invalidateCache()
 
 	h.logger.Info("route deleted",
 		observability.String("key", key),
@@ -239,6 +256,8 @@ func (h *ConfigHandler) handleBackendUpdate(
 		}
 	}
 
+	h.invalidateCache()
+
 	h.logger.Info("backend updated",
 		observability.String("name", backend.Name),
 		observability.String("key", key),
@@ -259,6 +278,8 @@ func (h *ConfigHandler) handleBackendDelete(ctx context.Context, key string) err
 			return fmt.Errorf("failed to apply backends after deletion: %w", err)
 		}
 	}
+
+	h.invalidateCache()
 
 	h.logger.Info("backend deleted",
 		observability.String("key", key),
@@ -287,6 +308,8 @@ func (h *ConfigHandler) handleGRPCRouteUpdate(
 		}
 	}
 
+	h.invalidateCache()
+
 	h.logger.Info("gRPC route updated",
 		observability.String("name", route.Name),
 		observability.String("key", key),
@@ -307,6 +330,8 @@ func (h *ConfigHandler) handleGRPCRouteDelete(ctx context.Context, key string) e
 			return fmt.Errorf("failed to apply gRPC routes after deletion: %w", err)
 		}
 	}
+
+	h.invalidateCache()
 
 	h.logger.Info("gRPC route deleted",
 		observability.String("key", key),
@@ -335,6 +360,8 @@ func (h *ConfigHandler) handleGRPCBackendUpdate(
 		}
 	}
 
+	h.invalidateCache()
+
 	h.logger.Info("gRPC backend updated",
 		observability.String("name", backend.Name),
 		observability.String("key", key),
@@ -355,6 +382,8 @@ func (h *ConfigHandler) handleGRPCBackendDelete(ctx context.Context, key string)
 			return fmt.Errorf("failed to apply gRPC backends after deletion: %w", err)
 		}
 	}
+
+	h.invalidateCache()
 
 	h.logger.Info("gRPC backend deleted",
 		observability.String("key", key),
@@ -437,6 +466,8 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 			return fmt.Errorf("failed to apply full configuration: %w", err)
 		}
 	}
+
+	h.invalidateCache()
 
 	h.logger.Info("configuration snapshot applied",
 		observability.String("version", snapshot.Version),
@@ -559,6 +590,15 @@ func (h *ConfigHandler) collectGRPCBackends() []config.GRPCBackend {
 		backends = append(backends, *b)
 	}
 	return backends
+}
+
+// invalidateCache calls the cache invalidation callback if configured.
+// This should be called after any configuration change is applied.
+func (h *ConfigHandler) invalidateCache() {
+	if h.cacheInvalidator != nil {
+		h.cacheInvalidator()
+		h.logger.Debug("route middleware cache invalidated after config change")
+	}
 }
 
 // resourceKey creates a unique key for a resource.

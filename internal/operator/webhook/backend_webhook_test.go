@@ -1491,8 +1491,9 @@ func TestBackendValidator_ValidateCreate_ValidBasicAuthStatic(t *testing.T) {
 	if err != nil {
 		t.Errorf("ValidateCreate() error = %v, want nil", err)
 	}
-	if len(warnings) > 0 {
-		t.Errorf("ValidateCreate() warnings = %v, want empty", warnings)
+	// Plaintext password should produce a security warning recommending Vault usage
+	if len(warnings) != 1 {
+		t.Errorf("ValidateCreate() warnings count = %d, want 1", len(warnings))
 	}
 }
 
@@ -2178,6 +2179,69 @@ func TestBackendValidator_ValidateCreate_BasicAuthDisabled(t *testing.T) {
 	}
 	if len(warnings) > 0 {
 		t.Errorf("ValidateCreate() warnings = %v, want empty", warnings)
+	}
+}
+
+func TestBackendValidator_ValidateUpdate_Invalid(t *testing.T) {
+	validator := &BackendValidator{}
+	oldBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{
+					Address: "backend-service",
+					Port:    8080,
+					Weight:  100,
+				},
+			},
+		},
+	}
+	newBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{}, // No hosts - invalid
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid new backend (no hosts)")
+	}
+}
+
+func TestBackendValidator_ValidateUpdate_InvalidPort(t *testing.T) {
+	validator := &BackendValidator{}
+	oldBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+	}
+	newBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{
+					Address: "backend-service",
+					Port:    0, // Invalid port
+					Weight:  100,
+				},
+			},
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid port")
 	}
 }
 

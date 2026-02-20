@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package api.v1;
+
+option go_package = "api/v1;apiv1";
+
+// ApiKeyService is used for testing API key authentication on gRPC routes.
+service ApiKeyService {
+  rpc Unary(ApiKeyRequest) returns (ApiKeyResponse);
+}
+
+message ApiKeyRequest {
+  string message = 1;
+}
+
+message ApiKeyResponse {
+  string message = 1;
+  int64 timestamp = 2;
+}

@@ -1,0 +1,14 @@
+[Host: api.example.com]
+[User-Agent: YandexTank/IngressPerftest]
+[Accept: application/json]
+[Connection: keep-alive]
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items
+/api/v1/items

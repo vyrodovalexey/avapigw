@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -443,4 +445,117 @@ func TestTracingConstants(t *testing.T) {
 	assert.NotZero(t, DefaultOTLPRetryMaxElapsedTime)
 	assert.NotZero(t, DefaultOTLPTimeout)
 	assert.NotZero(t, DefaultOTLPReconnectionPeriod)
+}
+
+// ============================================================================
+// tracingResponseWriter.Hijack Tests
+// ============================================================================
+
+// mockHijackerResponseWriter implements both http.ResponseWriter and http.Hijacker.
+type mockHijackerResponseWriter struct {
+	http.ResponseWriter
+	hijackCalled bool
+}
+
+func (m *mockHijackerResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	m.hijackCalled = true
+	// Return a pipe-based connection for testing
+	server, client := net.Pipe()
+	// Close server side immediately since we just need to verify delegation
+	_ = server.Close()
+	rw := bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client))
+	return client, rw, nil
+}
+
+func TestTracingResponseWriter_Hijack_WithHijacker(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: underlying writer implements http.Hijacker
+	rec := httptest.NewRecorder()
+	hijacker := &mockHijackerResponseWriter{ResponseWriter: rec}
+	trw := &tracingResponseWriter{
+		ResponseWriter: hijacker,
+		status:         http.StatusOK,
+	}
+
+	// Act
+	conn, rw, err := trw.Hijack()
+
+	// Assert
+	require.NoError(t, err)
+	assert.NotNil(t, conn)
+	assert.NotNil(t, rw)
+	assert.True(t, hijacker.hijackCalled, "Hijack should delegate to underlying writer")
+
+	// Cleanup
+	_ = conn.Close()
+}
+
+func TestTracingResponseWriter_Hijack_WithoutHijacker(t *testing.T) {
+	t.Parallel()
+
+	// Arrange: underlying writer does NOT implement http.Hijacker
+	rec := httptest.NewRecorder()
+	trw := &tracingResponseWriter{
+		ResponseWriter: rec,
+		status:         http.StatusOK,
+	}
+
+	// Act
+	conn, rw, err := trw.Hijack()
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, conn)
+	assert.Nil(t, rw)
+	assert.Contains(t, err.Error(), "does not implement http.Hijacker")
+}
+
+// TestTracingResponseWriter_Hijack_TableDriven tests Hijack with various underlying writers.
+func TestTracingResponseWriter_Hijack_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		writer      http.ResponseWriter
+		expectError bool
+		expectConn  bool
+	}{
+		{
+			name:        "with hijacker support",
+			writer:      &mockHijackerResponseWriter{ResponseWriter: httptest.NewRecorder()},
+			expectError: false,
+			expectConn:  true,
+		},
+		{
+			name:        "without hijacker support (httptest.ResponseRecorder)",
+			writer:      httptest.NewRecorder(),
+			expectError: true,
+			expectConn:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			trw := &tracingResponseWriter{
+				ResponseWriter: tt.writer,
+				status:         http.StatusOK,
+			}
+
+			conn, rw, err := trw.Hijack()
+
+			if tt.expectError {
+				assert.Error(t, err)
+				assert.Nil(t, conn)
+				assert.Nil(t, rw)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, conn)
+				assert.NotNil(t, rw)
+				_ = conn.Close()
+			}
+		})
+	}
 }

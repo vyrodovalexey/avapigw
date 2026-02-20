@@ -4,15 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/auth/apikey"
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/auth/mtls"
 	"github.com/vyrodovalexey/avapigw/internal/auth/oidc"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
+
+// authTracer is the OTEL tracer used for authentication operations.
+var authTracer = otel.Tracer("avapigw/auth")
 
 // Authenticator handles authentication for HTTP requests.
 type Authenticator interface {
@@ -33,6 +44,7 @@ type authenticator struct {
 	oidcProviders   map[string]oidc.Provider
 	logger          observability.Logger
 	metrics         *Metrics
+	vaultClient     vault.Client
 }
 
 // AuthenticatorOption is a functional option for the authenticator.
@@ -63,6 +75,13 @@ func WithJWTValidator(validator jwt.Validator) AuthenticatorOption {
 func WithAPIKeyValidator(validator apikey.Validator) AuthenticatorOption {
 	return func(a *authenticator) {
 		a.apiKeyValidator = validator
+	}
+}
+
+// WithVaultClient sets the vault client for API key vault store.
+func WithVaultClient(client vault.Client) AuthenticatorOption {
+	return func(a *authenticator) {
+		a.vaultClient = client
 	}
 }
 
@@ -135,12 +154,60 @@ func (a *authenticator) initAPIKeyValidator(config *Config) error {
 	if !config.IsAPIKeyEnabled() || a.apiKeyValidator != nil {
 		return nil
 	}
-	validator, err := apikey.NewValidator(config.APIKey, apikey.WithValidatorLogger(a.logger))
+
+	opts := []apikey.ValidatorOption{apikey.WithValidatorLogger(a.logger)}
+
+	// If vault config is present and vault client is available, create vault store.
+	// The CRD vaultPath (e.g. "secret/data/apikeys") is stored as-is in
+	// config.APIKey.Vault.Path. For the VaultStore we need the KV-relative
+	// path with the mount prefix and the KV v2 "data/" segment stripped.
+	if config.APIKey.Vault != nil && config.APIKey.Vault.Enabled && a.vaultClient != nil {
+		storeCfg := buildVaultStoreConfig(config.APIKey)
+		store, err := apikey.NewVaultStore(a.vaultClient, storeCfg, a.logger)
+		if err != nil {
+			return fmt.Errorf("failed to create vault API key store: %w", err)
+		}
+		opts = append(opts, apikey.WithStore(store))
+		a.logger.Info("using vault store for API key authentication",
+			observability.String("kv_mount", storeCfg.Vault.KVMount),
+			observability.String("path", storeCfg.Vault.Path),
+		)
+	}
+
+	validator, err := apikey.NewValidator(config.APIKey, opts...)
 	if err != nil {
 		return err
 	}
 	a.apiKeyValidator = validator
 	return nil
+}
+
+// buildVaultStoreConfig creates a shallow copy of the API key config with
+// the Vault path resolved for the KV v2 client. The original CRD path
+// (e.g. "secret/data/apikeys") is split so that KVMount = "secret" and
+// Path = "apikeys" (the "data/" segment is stripped because the KV v2
+// client adds it automatically).
+func buildVaultStoreConfig(src *apikey.Config) *apikey.Config {
+	cfg := *src
+	vc := *src.Vault
+
+	// Strip the mount prefix from the path to get the KV-relative path.
+	// e.g. "secret/data/apikeys" → mount="secret", remainder="data/apikeys"
+	// Then strip the "data/" prefix → "apikeys".
+	raw := vc.Path
+	mount := vc.KVMount
+
+	if mount != "" && len(raw) > len(mount)+1 {
+		remainder := raw[len(mount)+1:] // strip "<mount>/"
+		// Strip the KV v2 "data/" prefix that the client adds automatically.
+		if len(remainder) > 5 && remainder[:5] == "data/" {
+			remainder = remainder[5:]
+		}
+		vc.Path = remainder
+	}
+
+	cfg.Vault = &vc
+	return &cfg
 }
 
 // initMTLSValidator initializes the mTLS validator if enabled.
@@ -171,13 +238,55 @@ func (a *authenticator) initOIDCProviders(config *Config) error {
 	return nil
 }
 
+// routeNameFromContext extracts the route name from the request
+// context, returning "unknown" if no route is set.
+func routeNameFromContext(r *http.Request) string {
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		return "unknown"
+	}
+	return routeName
+}
+
+// recordAuthSuccess records authentication success metrics for both
+// the existing auth metrics and the new route-level metrics.
+func (a *authenticator) recordAuthSuccess(
+	r *http.Request,
+	span trace.Span,
+	authType AuthType,
+	identity *Identity,
+	start time.Time,
+) {
+	at := string(authType)
+	span.SetAttributes(
+		attribute.String("auth.type", at),
+		attribute.String("auth.result", "success"),
+		attribute.String("auth.subject", identity.Subject),
+	)
+	a.metrics.RecordRequest("http", at, "success", time.Since(start))
+	a.metrics.RecordSuccess(at)
+	routepkg.GetRouteMetrics().RecordAuthSuccess(
+		routeNameFromContext(r), r.Method, at,
+	)
+}
+
 // Authenticate authenticates an HTTP request.
 func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	start := time.Now()
 	ctx := r.Context()
 
+	ctx, span := authTracer.Start(ctx, "auth.authenticate",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("auth.path", r.URL.Path),
+			attribute.String("auth.method", r.Method),
+		),
+	)
+	defer span.End()
+
 	// Check if path should be skipped
 	if a.config.ShouldSkipPath(r.URL.Path) {
+		span.SetAttributes(attribute.String("auth.result", "skipped"))
 		return AnonymousIdentity(), nil
 	}
 
@@ -188,8 +297,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsMTLSEnabled() && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		identity, authErr = a.authenticateMTLS(ctx, r)
 		if authErr == nil {
-			a.metrics.RecordRequest("http", string(AuthTypeMTLS), "success", time.Since(start))
-			a.metrics.RecordSuccess(string(AuthTypeMTLS))
+			a.recordAuthSuccess(r, span, AuthTypeMTLS, identity, start)
 			return identity, nil
 		}
 		a.logger.Debug("mTLS authentication failed", observability.Error(authErr))
@@ -199,8 +307,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsJWTEnabled() {
 		identity, authErr = a.authenticateJWT(ctx, r)
 		if authErr == nil {
-			a.metrics.RecordRequest("http", string(AuthTypeJWT), "success", time.Since(start))
-			a.metrics.RecordSuccess(string(AuthTypeJWT))
+			a.recordAuthSuccess(r, span, AuthTypeJWT, identity, start)
 			return identity, nil
 		}
 		if !errors.Is(authErr, ErrNoCredentials) {
@@ -212,8 +319,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 	if a.config.IsAPIKeyEnabled() {
 		identity, authErr = a.authenticateAPIKey(ctx, r)
 		if authErr == nil {
-			a.metrics.RecordRequest("http", string(AuthTypeAPIKey), "success", time.Since(start))
-			a.metrics.RecordSuccess(string(AuthTypeAPIKey))
+			a.recordAuthSuccess(r, span, AuthTypeAPIKey, identity, start)
 			return identity, nil
 		}
 		if !errors.Is(authErr, ErrNoCredentials) {
@@ -223,6 +329,7 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 
 	// If no credentials were provided and anonymous access is allowed
 	if a.config.AllowAnonymous && errors.Is(authErr, ErrNoCredentials) {
+		span.SetAttributes(attribute.String("auth.result", "anonymous"))
 		return AnonymousIdentity(), nil
 	}
 
@@ -231,8 +338,17 @@ func (a *authenticator) Authenticate(r *http.Request) (*Identity, error) {
 		authErr = ErrNoCredentials
 	}
 
+	span.SetAttributes(
+		attribute.String("auth.result", "failure"),
+		attribute.String("auth.error", authErr.Error()),
+	)
+
 	a.metrics.RecordRequest("http", "unknown", "failure", time.Since(start))
 	a.metrics.RecordFailure("unknown", "no_valid_credentials")
+	routeName := routeNameFromContext(r)
+	routepkg.GetRouteMetrics().RecordAuthFailure(
+		routeName, r.Method, "unknown", "no_valid_credentials",
+	)
 
 	return nil, authErr
 }
@@ -286,62 +402,12 @@ func (a *authenticator) authenticateMTLS(ctx context.Context, r *http.Request) (
 
 // claimsToIdentity converts JWT claims to an identity.
 func (a *authenticator) claimsToIdentity(claims *jwt.Claims, authType AuthType) *Identity {
-	identity := &Identity{
-		Subject:  claims.Subject,
-		Issuer:   claims.Issuer,
-		Audience: []string(claims.Audience),
-		AuthType: authType,
-		AuthTime: time.Now(),
-		Claims:   claims.ToMap(),
-	}
-
-	if claims.ExpiresAt != nil {
-		identity.ExpiresAt = claims.ExpiresAt.Time
-	}
-
-	// Extract additional fields from claims
-	if a.config.JWT != nil && a.config.JWT.ClaimMapping != nil {
-		mapping := a.config.JWT.ClaimMapping
-		if mapping.Roles != "" {
-			identity.Roles = claims.GetNestedStringSliceClaim(mapping.Roles)
-		}
-		if mapping.Permissions != "" {
-			identity.Permissions = claims.GetNestedStringSliceClaim(mapping.Permissions)
-		}
-		if mapping.Groups != "" {
-			identity.Groups = claims.GetNestedStringSliceClaim(mapping.Groups)
-		}
-		if mapping.Scopes != "" {
-			identity.Scopes = claims.GetNestedStringSliceClaim(mapping.Scopes)
-		}
-		if mapping.Email != "" {
-			identity.Email = claims.GetStringClaim(mapping.Email)
-		}
-		if mapping.Name != "" {
-			identity.Name = claims.GetStringClaim(mapping.Name)
-		}
-	}
-
-	return identity
+	return claimsToIdentity(claims, authType, a.config)
 }
 
 // keyInfoToIdentity converts API key info to an identity.
 func (a *authenticator) keyInfoToIdentity(keyInfo *apikey.KeyInfo) *Identity {
-	identity := &Identity{
-		Subject:  keyInfo.ID,
-		AuthType: AuthTypeAPIKey,
-		AuthTime: time.Now(),
-		Roles:    keyInfo.Roles,
-		Scopes:   keyInfo.Scopes,
-		Metadata: keyInfo.Metadata,
-		ClientID: keyInfo.ID,
-	}
-
-	if keyInfo.ExpiresAt != nil {
-		identity.ExpiresAt = *keyInfo.ExpiresAt
-	}
-
-	return identity
+	return keyInfoToIdentity(keyInfo)
 }
 
 // certInfoToIdentity converts certificate info to an identity.

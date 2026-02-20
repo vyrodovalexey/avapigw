@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -97,15 +98,29 @@ func (m *CircuitBreakerManager) createCircuitBreaker(
 	backend *config.Backend,
 ) *middleware.CircuitBreaker {
 	cfg := backend.CircuitBreaker
+	backendName := backend.Name
 
-	opts := []middleware.CircuitBreakerOption{
+	// Wrap the user-provided state callback to also record
+	// backend-level circuit breaker metrics.
+	wrappedCallback := func(name string, state int) {
+		bm := backendmetrics.GetBackendMetrics()
+		bm.CircuitBreakerState.
+			WithLabelValues(backendName).Set(float64(state))
+		// state 2 = open, meaning the circuit breaker tripped
+		const cbStateOpen = 2
+		if state == cbStateOpen {
+			bm.RecordCircuitBreakerTrip(backendName)
+		}
+		if m.stateCallback != nil {
+			m.stateCallback(name, state)
+		}
+	}
+
+	opts := make([]middleware.CircuitBreakerOption, 0, 2)
+	opts = append(opts,
 		middleware.WithCircuitBreakerLogger(m.logger),
-	}
-	if m.stateCallback != nil {
-		opts = append(opts,
-			middleware.WithCircuitBreakerStateCallback(m.stateCallback),
-		)
-	}
+		middleware.WithCircuitBreakerStateCallback(wrappedCallback),
+	)
 
 	return middleware.NewCircuitBreaker(
 		"backend-"+backend.Name,

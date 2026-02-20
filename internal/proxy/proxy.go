@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -16,24 +17,45 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
+	"github.com/vyrodovalexey/avapigw/internal/metrics/streaming"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/router"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // hopHeaders are headers that should not be forwarded.
-var hopHeaders = []string{
-	"Connection",
-	"Proxy-Connection",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Authorization",
-	"Te",
-	"Trailer",
-	"Transfer-Encoding",
-	"Upgrade",
+// Using a map for O(1) lookup instead of iterating a slice.
+var hopHeaders = map[string]struct{}{
+	"Connection":          {},
+	"Proxy-Connection":    {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Authorization": {},
+	"Te":                  {},
+	"Trailer":             {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+}
+
+// RouteMiddlewareApplier applies per-route middleware to a handler.
+// This interface decouples the proxy from the gateway package to avoid
+// import cycles.
+type RouteMiddlewareApplier interface {
+	// GetMiddleware returns the middleware chain for a specific route config.
+	GetMiddleware(route *config.Route) []func(http.Handler) http.Handler
+
+	// ApplyMiddleware wraps the handler with per-route middleware.
+	ApplyMiddleware(handler http.Handler, route *config.Route) http.Handler
 }
 
 // ReverseProxy handles proxying requests to backend services.
@@ -47,6 +69,8 @@ type ReverseProxy struct {
 	errorHandler          func(http.ResponseWriter, *http.Request, error)
 	modifyResponse        func(*http.Response) error
 	flushInterval         time.Duration
+	metricsRegistry       *prometheus.Registry
+	routeMiddleware       RouteMiddlewareApplier
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -101,6 +125,25 @@ func WithGlobalCircuitBreaker(manager *backend.CircuitBreakerManager) ProxyOptio
 	}
 }
 
+// WithMetricsRegistry sets the Prometheus registry for proxy metrics.
+// When provided, proxy and WebSocket metrics are registered with this
+// registry instead of the default global registerer, ensuring they
+// appear on the gateway's /metrics endpoint.
+func WithMetricsRegistry(registry *prometheus.Registry) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.metricsRegistry = registry
+	}
+}
+
+// WithRouteMiddleware sets the per-route middleware applier.
+// When configured, per-route middleware (cache, transform, encoding, headers)
+// is applied around the proxying logic for each matched route.
+func WithRouteMiddleware(rm RouteMiddlewareApplier) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.routeMiddleware = rm
+	}
+}
+
 // NewReverseProxy creates a new reverse proxy.
 func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...ProxyOption) *ReverseProxy {
 	p := &ReverseProxy{
@@ -113,6 +156,15 @@ func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...Proxy
 	for _, opt := range opts {
 		opt(p)
 	}
+
+	// Initialize proxy and WebSocket metrics with the configured
+	// registry so they appear on the gateway's /metrics endpoint.
+	// When metricsRegistry is nil the metrics fall back to the
+	// default global registerer (e.g. in tests).
+	initProxyMetrics(p.metricsRegistry)
+	initProxyVecMetrics()
+	initWebSocketMetrics(p.metricsRegistry)
+	initWebSocketVecMetrics()
 
 	if p.errorHandler == nil {
 		p.errorHandler = p.defaultErrorHandler
@@ -160,12 +212,70 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.proxyRequest(w, r, route)
 }
 
+// proxyTracerName is the OpenTelemetry tracer name for proxy operations.
+const proxyTracerName = "avapigw/proxy"
+
+// URL scheme constants to avoid duplicated string literals.
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
+
+// unknownRoute is the fallback label value used when the route name
+// is not available in the request context.
+const unknownRoute = "unknown"
+
 // proxyRequest proxies the request to a backend.
-func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, route *router.CompiledRoute) {
+func (p *ReverseProxy) proxyRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	route *router.CompiledRoute,
+) {
 	if len(route.Config.Route) == 0 {
 		p.errorHandler(w, r, NewNoDestinationError(route.Name))
 		return
 	}
+
+	// Apply per-route middleware if configured and the route has any
+	if p.routeMiddleware != nil {
+		middlewares := p.routeMiddleware.GetMiddleware(&route.Config)
+		if len(middlewares) > 0 {
+			// Create a handler that performs the actual proxying
+			proxyHandler := http.HandlerFunc(func(innerW http.ResponseWriter, innerR *http.Request) {
+				p.doProxy(innerW, innerR, route)
+			})
+			// Wrap the proxy handler with per-route middleware
+			handler := p.routeMiddleware.ApplyMiddleware(proxyHandler, &route.Config)
+			handler.ServeHTTP(w, r)
+			return
+		}
+	}
+
+	// No per-route middleware — proxy directly
+	p.doProxy(w, r, route)
+}
+
+// doProxy performs the actual proxying logic: destination selection, backend
+// resolution, target URL building, and reverse proxy execution.
+func (p *ReverseProxy) doProxy(
+	w http.ResponseWriter,
+	r *http.Request,
+	route *router.CompiledRoute,
+) {
+	// Extract incoming trace context and start a proxy span
+	propagator := otel.GetTextMapPropagator()
+	ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	tracer := otel.Tracer(proxyTracerName)
+	ctx, span := tracer.Start(ctx, "proxy "+r.Method+" "+route.Name,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("http.request.method", r.Method),
+			attribute.String("url.path", r.URL.Path),
+			attribute.String("proxy.route", route.Name),
+		),
+	)
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	// Select destination using weighted random selection
 	dest := p.selectDestination(route.Config.Route)
@@ -174,12 +284,51 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		return
 	}
 
-	// Get backend and target URL
+	// Record backend-level load balancer selection
+	backendmetrics.GetBackendMetrics().RecordLBSelection(
+		dest.Destination.Host, "weighted",
+	)
+
+	span.SetAttributes(attribute.String("proxy.backend", dest.Destination.Host))
+
+	// Get backend and resolve target host
 	serviceBackend := p.getServiceBackend(dest.Destination.Host)
-	target, err := p.buildTargetURL(dest, serviceBackend)
+
+	var backendHost *backend.Host
+	if serviceBackend != nil {
+		var hostErr error
+		backendHost, hostErr = serviceBackend.GetAvailableHost()
+		if hostErr != nil {
+			p.logger.Warn("no available hosts for backend",
+				observability.String("backend", dest.Destination.Host),
+				observability.String("route", route.Name),
+				observability.Error(hostErr),
+			)
+			span.SetAttributes(attribute.String("proxy.host_error", hostErr.Error()))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, jsonErrNoAvailableHosts)
+			return
+		}
+		defer serviceBackend.ReleaseHost(backendHost)
+	}
+
+	target, err := p.buildTargetURL(dest, serviceBackend, backendHost)
 	if err != nil {
-		p.errorHandler(w, r, NewInvalidTargetError(route.Name, dest.Destination.Host, err))
+		p.errorHandler(w, r, NewInvalidTargetError(
+			route.Name, dest.Destination.Host, err,
+		))
 		return
+	}
+
+	// Record the actual target host for observability
+	targetLabel := dest.Destination.Host
+	if backendHost != nil {
+		actualTarget := net.JoinHostPort(backendHost.Address, strconv.Itoa(backendHost.Port))
+		span.SetAttributes(
+			attribute.String("proxy.target_host", actualTarget),
+		)
+		targetLabel = dest.Destination.Host + "/" + actualTarget
 	}
 
 	// Apply URL rewriting
@@ -187,11 +336,35 @@ func (p *ReverseProxy) proxyRequest(w http.ResponseWriter, r *http.Request, rout
 		r = p.applyRewrite(r, route.Config.Rewrite)
 	}
 
-	// Create and execute reverse proxy
-	proxy := p.createReverseProxy(target, r, dest.Destination.Host, serviceBackend)
+	// Create and execute reverse proxy with duration tracking
+	proxy := p.createReverseProxy(
+		target, r, dest.Destination.Host, serviceBackend,
+	)
 	r, cancel := p.applyTimeout(r, route.Config.Timeout.Duration())
 	defer cancel()
-	p.executeProxy(w, r, proxy, dest.Destination.Host)
+
+	backendStart := time.Now()
+	p.executeProxy(w, r, proxy, dest.Destination.Host, target)
+	duration := time.Since(backendStart)
+	getProxyMetrics().backendDuration.WithLabelValues(
+		targetLabel,
+	).Observe(duration.Seconds())
+
+	// Record route-level upstream duration using route.Name
+	// which is already available from the compiled route.
+	routepkg.GetRouteMetrics().RecordUpstreamDuration(
+		route.Name, r.Method, http.StatusOK, duration,
+	)
+
+	// Record backend-level request metrics (new backend metrics package).
+	bm := backendmetrics.GetBackendMetrics()
+	bm.RecordRequest(
+		dest.Destination.Host, r.Method,
+		http.StatusOK, duration,
+	)
+
+	// Set span attributes for the response
+	span.SetAttributes(attribute.Float64("proxy.backend_duration_ms", float64(duration.Milliseconds())))
 }
 
 // getServiceBackend retrieves the service backend from the registry.
@@ -208,15 +381,26 @@ func (p *ReverseProxy) getServiceBackend(host string) *backend.ServiceBackend {
 }
 
 // buildTargetURL constructs the target URL for the backend.
+// When a backendHost is provided (from the backend's load balancer), its Address
+// and Port are used instead of the route destination's Host and Port.
 func (p *ReverseProxy) buildTargetURL(
 	dest *config.RouteDestination,
 	serviceBackend *backend.ServiceBackend,
+	backendHost *backend.Host,
 ) (*url.URL, error) {
-	scheme := "http"
+	scheme := schemeHTTP
 	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
-		scheme = "https"
+		scheme = schemeHTTPS
 	}
-	targetURL := scheme + "://" + net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
+
+	host := dest.Destination.Host
+	port := dest.Destination.Port
+	if backendHost != nil {
+		host = backendHost.Address
+		port = backendHost.Port
+	}
+
+	targetURL := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port))
 	return url.Parse(targetURL)
 }
 
@@ -227,6 +411,14 @@ func (p *ReverseProxy) createReverseProxy(
 	backendHost string,
 	serviceBackend *backend.ServiceBackend,
 ) *httputil.ReverseProxy {
+	// Use the backend's transport when TLS is enabled, so that the
+	// backend's TLS config (including client certs for mTLS and
+	// InsecureSkipVerify) is applied to the connection.
+	transport := p.transport
+	if serviceBackend != nil && serviceBackend.IsTLSEnabled() {
+		transport = serviceBackend.HTTPClient().Transport
+	}
+
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			p.director(req, target, originalReq)
@@ -236,10 +428,24 @@ func (p *ReverseProxy) createReverseProxy(
 						observability.String("backend", backendHost),
 						observability.Error(err),
 					)
+					// Record backend-level auth failure
+					authType := "unknown"
+					if serviceBackend.AuthProvider() != nil {
+						authType = serviceBackend.AuthProvider().Type()
+					}
+					backendmetrics.GetBackendMetrics().RecordAuthFailure(
+						backendHost, req.Method, authType, "auth_failed",
+					)
+				} else if serviceBackend.AuthProvider() != nil {
+					// Record backend-level auth success
+					backendmetrics.GetBackendMetrics().RecordAuthSuccess(
+						backendHost, req.Method,
+						serviceBackend.AuthProvider().Type(),
+					)
 				}
 			}
 		},
-		Transport:      p.transport,
+		Transport:      transport,
 		FlushInterval:  p.flushInterval,
 		ErrorHandler:   p.errorHandler,
 		ModifyResponse: p.modifyResponse,
@@ -258,18 +464,21 @@ func (p *ReverseProxy) applyTimeout(r *http.Request, timeout time.Duration) (*ht
 }
 
 // executeProxy executes the proxy request with optional circuit breaker protection.
+// The target URL is passed through for WebSocket message-level proxying.
 func (p *ReverseProxy) executeProxy(
 	w http.ResponseWriter,
 	r *http.Request,
 	proxy *httputil.ReverseProxy,
 	backendName string,
+	target *url.URL,
 ) {
 	cb := p.getCircuitBreaker(backendName)
 
 	// WebSocket upgrades require direct access to the underlying connection (Hijacker)
-	// and cannot be wrapped by the circuit breaker's response recorder
+	// and cannot be wrapped by the circuit breaker's response recorder.
+	// The gorilla/websocket message-level proxy is used for per-message metrics.
 	if isWebSocketRequest(r) {
-		p.executeWebSocket(w, r, proxy, backendName)
+		p.executeWebSocket(w, r, backendName, target)
 		return
 	}
 
@@ -280,24 +489,104 @@ func (p *ReverseProxy) executeProxy(
 	}
 }
 
-// executeWebSocket executes a WebSocket proxy request with metrics tracking.
+// executeWebSocket executes a WebSocket proxy request with message-level metrics and tracing.
+// It uses gorilla/websocket for bidirectional message relay, enabling per-message counting.
+//
+//nolint:funlen // WebSocket setup, metrics, tracing, and teardown require many statements
 func (p *ReverseProxy) executeWebSocket(
 	w http.ResponseWriter,
 	r *http.Request,
-	proxy *httputil.ReverseProxy,
 	backendName string,
+	target *url.URL,
 ) {
 	wsMetrics := getWebSocketMetrics()
 	wsMetrics.connectionsTotal.WithLabelValues(backendName).Inc()
 	wsMetrics.connectionsActive.WithLabelValues(backendName).Inc()
-	defer wsMetrics.connectionsActive.WithLabelValues(backendName).Dec()
+	connStart := time.Now()
+
+	// Extract route name for streaming metrics
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+
+	// Record new streaming-level WebSocket connection
+	wsStreamMetrics := streaming.GetWSMetrics()
+	wsStreamMetrics.RecordConnection(routeName, backendName)
+
+	defer func() {
+		connDuration := time.Since(connStart)
+		wsMetrics.connectionsActive.WithLabelValues(backendName).Dec()
+		wsMetrics.connectionDuration.WithLabelValues(backendName).Observe(
+			connDuration.Seconds(),
+		)
+		// Record streaming-level WebSocket disconnection
+		wsStreamMetrics.RecordDisconnection(
+			routeName, backendName, connDuration,
+		)
+	}()
+
+	// Start a tracing span for the WebSocket connection
+	tracer := otel.Tracer(proxyTracerName)
+	ctx, span := tracer.Start(r.Context(), "websocket "+r.URL.Path,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String("websocket.backend", backendName),
+			attribute.String("url.path", r.URL.Path),
+			attribute.String("network.protocol.name", "websocket"),
+		),
+	)
+	defer span.End()
+	r = r.WithContext(ctx)
 
 	p.logger.Debug("websocket connection established",
 		observability.String("backend", backendName),
 		observability.String("path", r.URL.Path),
 	)
 
-	proxy.ServeHTTP(w, r)
+	// Use message-level WebSocket proxy for metrics tracking
+	wp := &websocketProxy{logger: p.logger}
+	sent, received, wsErr := wp.proxyWebSocket(w, r, target, p.transport)
+
+	// Record message metrics (old metrics)
+	if sent > 0 {
+		wsMetrics.messagesSentTotal.WithLabelValues(backendName).Add(float64(sent))
+	}
+	if received > 0 {
+		wsMetrics.messagesReceivedTotal.WithLabelValues(backendName).Add(float64(received))
+	}
+
+	// Record streaming-level message metrics (new metrics).
+	// Message sizes are not available from the relay counts, so we
+	// record count-only with zero size. Per-message size tracking
+	// would require changes to the relay loop.
+	for i := int64(0); i < sent; i++ {
+		wsStreamMetrics.RecordMessageSent(routeName, backendName, 0)
+	}
+	for i := int64(0); i < received; i++ {
+		wsStreamMetrics.RecordMessageReceived(routeName, backendName, 0)
+	}
+
+	// Record span attributes for message counts
+	span.SetAttributes(
+		attribute.Int64("websocket.messages_sent", sent),
+		attribute.Int64("websocket.messages_received", received),
+	)
+
+	if wsErr != nil {
+		wsMetrics.errorsTotal.WithLabelValues(backendName, "proxy_error").Inc()
+		// Record streaming-level WebSocket error
+		wsStreamMetrics.RecordError(
+			routeName, backendName, "proxy_error",
+		)
+		// Only log at debug level - WebSocket close is normal
+		p.logger.Debug("websocket proxy completed",
+			observability.String("backend", backendName),
+			observability.Error(wsErr),
+			observability.Int64("messages_sent", sent),
+			observability.Int64("messages_received", received),
+		)
+	}
 }
 
 // isWebSocketRequest checks if the request is a WebSocket upgrade request.
@@ -351,6 +640,10 @@ func (p *ReverseProxy) executeWithCircuitBreaker(
 				observability.Error(err),
 			)
 
+			// Record backend-level circuit breaker rejection
+			backendmetrics.GetBackendMetrics().
+				RecordCircuitBreakerRejection(backendName)
+
 			// Only write error response if we haven't written anything yet
 			if !recorder.HeaderWritten {
 				w.Header().Set("Content-Type", "application/json")
@@ -367,7 +660,13 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	req.URL.Scheme = target.Scheme
 	req.URL.Host = target.Host
 
-	// Preserve the original path if not rewritten
+	// Inject trace context into outgoing request headers for distributed tracing
+	otel.GetTextMapPropagator().Inject(originalReq.Context(), propagation.HeaderCarrier(req.Header))
+
+	// Set the path from the original request only when the outgoing request
+	// has no path (e.g., the request was constructed without one). When a
+	// rewrite has been applied, req.URL.Path is already set to the rewritten
+	// value and should not be overridden.
 	if req.URL.Path == "" {
 		req.URL.Path = originalReq.URL.Path
 	}
@@ -383,7 +682,7 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	// ReverseProxy.ServeHTTP checks upgradeType(outreq.Header) AFTER Director
 	// returns, then strips hop-by-hop headers itself and re-adds Upgrade/Connection
 	// if an upgrade was detected.
-	for _, h := range hopHeaders {
+	for h := range hopHeaders {
 		if h == "Upgrade" || h == "Connection" {
 			continue
 		}
@@ -399,9 +698,9 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	}
 
 	if originalReq.TLS != nil {
-		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-Proto", schemeHTTPS)
 	} else {
-		req.Header.Set("X-Forwarded-Proto", "http")
+		req.Header.Set("X-Forwarded-Proto", schemeHTTP)
 	}
 
 	req.Header.Set("X-Forwarded-Host", originalReq.Host)
@@ -458,8 +757,12 @@ func secureRandomInt(maxVal int) int {
 
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// Fallback to 0 on error (will select first destination)
-		return 0
+		// Fallback to math/rand/v2 on crypto/rand failure
+		observability.GetGlobalLogger().Warn("crypto/rand failure, falling back to math/rand",
+			observability.Error(err),
+		)
+		getProxyMetrics().cryptoRandFailures.Inc()
+		return mathrand.IntN(maxVal) //nolint:gosec // fallback when crypto/rand is unavailable
 	}
 
 	// Convert to uint64 and take modulo
@@ -468,7 +771,13 @@ func secureRandomInt(maxVal int) int {
 }
 
 // applyRewrite applies URL rewriting to the request.
+// It clones the URL before modifying to avoid mutating shared state.
 func (p *ReverseProxy) applyRewrite(r *http.Request, rewrite *config.RewriteConfig) *http.Request {
+	// Clone the URL to avoid mutating the original request's URL,
+	// which could be shared with other middleware or logging.
+	clonedURL := *r.URL
+	r.URL = &clonedURL
+
 	if rewrite.URI != "" {
 		// Get path params from context
 		params := util.PathParamsFromContext(r.Context())
@@ -568,7 +877,7 @@ func isRedirectSafe(u *url.URL) bool {
 	}
 
 	scheme := strings.ToLower(u.Scheme)
-	return scheme == "http" || scheme == "https"
+	return scheme == schemeHTTP || scheme == schemeHTTPS
 }
 
 // handleRouteNotFound handles route not found errors.
@@ -585,16 +894,66 @@ func (p *ReverseProxy) handleRouteNotFound(w http.ResponseWriter, r *http.Reques
 }
 
 // defaultErrorHandler is the default error handler.
-func (p *ReverseProxy) defaultErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
+func (p *ReverseProxy) defaultErrorHandler(
+	w http.ResponseWriter,
+	r *http.Request,
+	err error,
+) {
 	p.logger.Error("proxy error",
 		observability.String("path", r.URL.Path),
 		observability.String("method", r.Method),
 		observability.Error(err),
 	)
 
+	getProxyMetrics().errorsTotal.WithLabelValues(
+		unknownRoute, "proxy_error",
+	).Inc()
+
+	// Record route-level proxy error
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordError(
+		routeName, r.Method, "proxy_error",
+	)
+
+	// Record backend-level connection error (new backend metrics package).
+	errorType := classifyProxyError(err)
+	backendmetrics.GetBackendMetrics().RecordConnectionError(
+		unknownRoute, errorType,
+	)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = io.WriteString(w, jsonErrBadGateway)
+}
+
+// classifyProxyError classifies a proxy error into a backend error type
+// for metrics recording.
+func classifyProxyError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+
+	errStr := err.Error()
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "reset"
+	case strings.Contains(errStr, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(errStr, "tls:") ||
+		strings.Contains(errStr, "certificate"):
+		return "tls_error"
+	case strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "lookup"):
+		return "dns_error"
+	default:
+		return "connection_refused"
+	}
 }
 
 // Handler returns an http.Handler for the proxy.

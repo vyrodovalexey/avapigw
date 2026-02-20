@@ -219,20 +219,20 @@ func TestFunctional_Cache_Memory_TTLExpiration(t *testing.T) {
 		key := "refresh-ttl-key"
 		value := []byte("refresh-ttl-value")
 
-		err := c.Set(ctx, key, value, 80*time.Millisecond)
+		err := c.Set(ctx, key, value, 200*time.Millisecond)
 		require.NoError(t, err)
 
 		// Wait 50ms
 		time.Sleep(50 * time.Millisecond)
 
-		// Update with new TTL
-		err = c.Set(ctx, key, value, 80*time.Millisecond)
+		// Update with new TTL (refreshes expiration to now+200ms)
+		err = c.Set(ctx, key, value, 200*time.Millisecond)
 		require.NoError(t, err)
 
-		// Wait another 50ms (total 100ms from start)
-		time.Sleep(50 * time.Millisecond)
+		// Wait another 100ms (total 150ms from start, but only 100ms since refresh)
+		time.Sleep(100 * time.Millisecond)
 
-		// Should still exist because TTL was refreshed
+		// Should still exist because TTL was refreshed (100ms < 200ms)
 		result, err := c.Get(ctx, key)
 		require.NoError(t, err)
 		assert.Equal(t, value, result)

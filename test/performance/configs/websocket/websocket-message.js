@@ -75,13 +75,13 @@ export default function () {
                     socket.send(message);
                     messagesSent.add(1);
                     bytesTransferred.add(message.length);
-                }, i * MESSAGE_INTERVAL_MS);
+                }, (i + 1) * MESSAGE_INTERVAL_MS);
             }
             
             // Close connection after all messages sent + buffer time
             socket.setTimeout(function () {
                 socket.close();
-            }, MESSAGES_PER_CONNECTION * MESSAGE_INTERVAL_MS + 2000);
+            }, (MESSAGES_PER_CONNECTION + 1) * MESSAGE_INTERVAL_MS + 2000);
         });
         
         socket.on('message', function (message) {

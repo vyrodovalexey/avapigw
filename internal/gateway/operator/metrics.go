@@ -9,9 +9,11 @@ import (
 
 const (
 	// metricsNamespace is the namespace for operator client metrics.
-	metricsNamespace = "avapigw"
+	// Uses "gateway" to be consistent with all other gateway-side metrics
+	// (see internal/observability/metrics.go and cmd/gateway/reload.go).
+	metricsNamespace = "gateway"
 	// metricsSubsystem is the subsystem for operator client metrics.
-	metricsSubsystem = "gateway_operator"
+	metricsSubsystem = "operator_client"
 )
 
 // clientMetrics holds Prometheus metrics for the operator client.

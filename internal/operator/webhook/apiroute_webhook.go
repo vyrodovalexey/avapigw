@@ -7,13 +7,26 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
+
+// webhookTracerName is the OpenTelemetry tracer name for webhook operations.
+const webhookTracerName = "avapigw-operator/webhook"
+
+// Compile-time assertion: APIRouteValidator must implement admission.Validator
+// for the typed *avapigwv1alpha1.APIRoute parameter. This ensures that if
+// controller-runtime changes the Validator interface, the build will fail
+// rather than silently breaking webhook registration at runtime.
+var _ admission.Validator[*avapigwv1alpha1.APIRoute] = (*APIRouteValidator)(nil)
 
 // APIRouteValidator validates APIRoute resources.
 type APIRouteValidator struct {
@@ -37,23 +50,71 @@ func SetupAPIRouteWebhookWithConfig(mgr ctrl.Manager, cfg DuplicateCheckerConfig
 		Complete()
 }
 
+// SetupAPIRouteWebhookWithConfigAndContext sets up the APIRoute webhook with context-based
+// lifecycle management for the DuplicateChecker cleanup goroutine.
+func SetupAPIRouteWebhookWithConfigAndContext(ctx context.Context, mgr ctrl.Manager, cfg DuplicateCheckerConfig) error {
+	validator := &APIRouteValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: NewDuplicateCheckerFromConfigWithContext(ctx, mgr.GetClient(), cfg),
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.APIRoute{}).
+		WithValidator(validator).
+		Complete()
+}
+
+// SetupAPIRouteWebhookWithChecker sets up the APIRoute webhook with a shared DuplicateChecker.
+// This avoids creating multiple DuplicateChecker instances (and cleanup goroutines) across webhooks.
+func SetupAPIRouteWebhookWithChecker(mgr ctrl.Manager, dc *DuplicateChecker) error {
+	validator := &APIRouteValidator{
+		Client:           mgr.GetClient(),
+		DuplicateChecker: dc,
+	}
+	return ctrl.NewWebhookManagedBy(mgr, &avapigwv1alpha1.APIRoute{}).
+		WithValidator(validator).
+		Complete()
+}
+
 // ValidateCreate implements admission.CustomValidator.
 func (v *APIRouteValidator) ValidateCreate(
 	ctx context.Context,
 	obj *avapigwv1alpha1.APIRoute,
 ) (admission.Warnings, error) {
+	tracer := otel.Tracer(webhookTracerName)
+	ctx, span := tracer.Start(ctx, "Webhook.APIRoute.ValidateCreate",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("k8s.resource.name", obj.Name),
+			attribute.String("k8s.resource.namespace", obj.Namespace),
+			attribute.String("webhook.operation", "create"),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
 	warnings, err := v.validate(obj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation(
+			"APIRoute", "create", "rejected",
+			time.Since(start), len(warnings),
+		)
 		return warnings, err
 	}
 
 	// Check for duplicates
 	if v.DuplicateChecker != nil {
 		if dupErr := v.DuplicateChecker.CheckAPIRouteDuplicate(ctx, obj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation(
+				"APIRoute", "create", "rejected",
+				time.Since(start), len(warnings),
+			)
 			return warnings, dupErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation(
+		"APIRoute", "create", "allowed",
+		time.Since(start), len(warnings),
+	)
 	return warnings, nil
 }
 
@@ -62,18 +123,42 @@ func (v *APIRouteValidator) ValidateUpdate(
 	ctx context.Context,
 	_, newObj *avapigwv1alpha1.APIRoute,
 ) (admission.Warnings, error) {
+	tracer := otel.Tracer(webhookTracerName)
+	ctx, span := tracer.Start(ctx, "Webhook.APIRoute.ValidateUpdate",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("k8s.resource.name", newObj.Name),
+			attribute.String("k8s.resource.namespace", newObj.Namespace),
+			attribute.String("webhook.operation", "update"),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
+		GetWebhookMetrics().RecordValidation(
+			"APIRoute", "update", "rejected",
+			time.Since(start), len(warnings),
+		)
 		return warnings, err
 	}
 
 	// Check for duplicates (excluding self)
 	if v.DuplicateChecker != nil {
 		if dupErr := v.DuplicateChecker.CheckAPIRouteDuplicate(ctx, newObj); dupErr != nil {
+			GetWebhookMetrics().RecordValidation(
+				"APIRoute", "update", "rejected",
+				time.Since(start), len(warnings),
+			)
 			return warnings, dupErr
 		}
 	}
 
+	GetWebhookMetrics().RecordValidation(
+		"APIRoute", "update", "allowed",
+		time.Since(start), len(warnings),
+	)
 	return warnings, nil
 }
 
@@ -184,6 +269,16 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		if err := validateAuthorization(spec.Authorization); err != nil {
 			errs = append(errs, err.Error())
 		}
+	}
+
+	// Security warnings for plaintext secrets in authentication config
+	if spec.Authentication != nil {
+		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+	}
+
+	// Security warnings for plaintext secrets in authorization cache sentinel config
+	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
+		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
 	}
 
 	// Check for conflicting configurations

@@ -1090,6 +1090,69 @@ func TestGRPCBackendValidator_ValidateUpdate(t *testing.T) {
 	}
 }
 
+func TestGRPCBackendValidator_ValidateUpdate_Invalid(t *testing.T) {
+	validator := &GRPCBackendValidator{}
+	oldBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{
+					Address: "grpc-service",
+					Port:    50051,
+					Weight:  100,
+				},
+			},
+		},
+	}
+	newBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{}, // No hosts - invalid
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid new backend (no hosts)")
+	}
+}
+
+func TestGRPCBackendValidator_ValidateUpdate_InvalidPort(t *testing.T) {
+	validator := &GRPCBackendValidator{}
+	oldBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+	}
+	newBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{
+					Address: "grpc-service",
+					Port:    70000, // Port too high - invalid
+					Weight:  100,
+				},
+			},
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
+	if err == nil {
+		t.Error("ValidateUpdate() should return error for invalid port")
+	}
+}
+
 func TestGRPCBackendValidator_ValidateDelete(t *testing.T) {
 	validator := &GRPCBackendValidator{}
 	backend := &avapigwv1alpha1.GRPCBackend{

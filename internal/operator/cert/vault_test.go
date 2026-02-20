@@ -1104,6 +1104,17 @@ func TestGetVaultAuthMetrics_MetricsInitialized(t *testing.T) {
 	assert.NotNil(t, metrics.authRetriesTotal)
 }
 
+func TestInitVaultAuthMetrics_ExportedWrapper(t *testing.T) {
+	// InitVaultAuthMetrics is the exported wrapper for initVaultAuthMetrics.
+	// Since sync.Once is already initialized, this is a no-op but should not panic.
+	InitVaultAuthMetrics(nil)
+
+	// Verify the singleton is still valid after calling the exported wrapper
+	metrics := getVaultAuthMetrics()
+	assert.NotNil(t, metrics)
+	assert.NotNil(t, metrics.authRetriesTotal)
+}
+
 // ============================================================================
 // VaultProviderConfig Retry Defaults Tests
 // ============================================================================
@@ -1749,4 +1760,125 @@ func TestNewVaultProvider_NegativeRetryValues(t *testing.T) {
 	assert.Equal(t, DefaultVaultMaxRetries, config.MaxRetries)
 	assert.Equal(t, DefaultVaultRetryBaseDelay, config.RetryBaseDelay)
 	assert.Equal(t, DefaultVaultRetryMaxDelay, config.RetryMaxDelay)
+}
+
+// ============================================================================
+// errors.Join / errors.Is / errors.As Tests for authenticateWithRetry
+// ============================================================================
+
+func TestAuthenticateWithRetry_ErrorsIs_WorksOnReturnedError(t *testing.T) {
+	// Arrange: create a sentinel error type to verify errors.Is works
+	sentinelErr := errors.New("sentinel auth error")
+	mockClient := new(MockVaultClient)
+	config := &VaultProviderConfig{
+		Address:        "http://localhost:8200",
+		PKIMount:       "pki",
+		Role:           "test-role",
+		MaxRetries:     1,
+		RetryBaseDelay: 5 * time.Millisecond,
+		RetryMaxDelay:  10 * time.Millisecond,
+	}
+	logger := observability.NopLogger()
+	metrics := getVaultAuthMetrics()
+
+	// Mock all calls fail with the sentinel error
+	mockClient.On("Authenticate", mock.Anything).Return(sentinelErr)
+
+	// Act
+	err := authenticateWithRetry(context.Background(), mockClient, config, logger, metrics)
+
+	// Assert: the returned error should contain the sentinel error via errors.Is
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, sentinelErr),
+		"errors.Is should find the sentinel error in the joined error chain")
+	assert.Contains(t, err.Error(), "failed to authenticate with vault")
+	assert.Contains(t, err.Error(), "sentinel auth error")
+}
+
+// customAuthError is a typed error for testing errors.As.
+type customAuthError struct {
+	Code    int
+	Message string
+}
+
+func (e *customAuthError) Error() string {
+	return e.Message
+}
+
+func TestAuthenticateWithRetry_ErrorsAs_WorksOnReturnedError(t *testing.T) {
+	// Arrange: create a typed error to verify errors.As works
+	typedErr := &customAuthError{Code: 403, Message: "forbidden"}
+	mockClient := new(MockVaultClient)
+	config := &VaultProviderConfig{
+		Address:        "http://localhost:8200",
+		PKIMount:       "pki",
+		Role:           "test-role",
+		MaxRetries:     1,
+		RetryBaseDelay: 5 * time.Millisecond,
+		RetryMaxDelay:  10 * time.Millisecond,
+	}
+	logger := observability.NopLogger()
+	metrics := getVaultAuthMetrics()
+
+	// Mock all calls fail with the typed error
+	mockClient.On("Authenticate", mock.Anything).Return(typedErr)
+
+	// Act
+	err := authenticateWithRetry(context.Background(), mockClient, config, logger, metrics)
+
+	// Assert: the returned error should allow errors.As to extract the typed error
+	require.Error(t, err)
+	var target *customAuthError
+	assert.True(t, errors.As(err, &target),
+		"errors.As should extract customAuthError from the joined error chain")
+	assert.Equal(t, 403, target.Code)
+	assert.Equal(t, "forbidden", target.Message)
+}
+
+func TestAuthenticateWithRetry_AllOriginalErrorsPreserved(t *testing.T) {
+	// Arrange: create distinct errors for each attempt
+	err1 := errors.New("attempt-1-error")
+	err2 := errors.New("attempt-2-error")
+	err3 := errors.New("attempt-3-error")
+
+	mockClient := new(MockVaultClient)
+	config := &VaultProviderConfig{
+		Address:        "http://localhost:8200",
+		PKIMount:       "pki",
+		Role:           "test-role",
+		MaxRetries:     3,
+		RetryBaseDelay: 5 * time.Millisecond,
+		RetryMaxDelay:  10 * time.Millisecond,
+	}
+	logger := observability.NopLogger()
+	metrics := getVaultAuthMetrics()
+
+	// Mock: each call returns a different error
+	mockClient.On("Authenticate", mock.Anything).Return(err1).Once()
+	mockClient.On("Authenticate", mock.Anything).Return(err2).Once()
+	mockClient.On("Authenticate", mock.Anything).Return(err3).Once()
+	// Final attempt (retry #3 = 4th call total) also fails
+	mockClient.On("Authenticate", mock.Anything).Return(err3).Once()
+
+	// Act
+	err := authenticateWithRetry(context.Background(), mockClient, config, logger, metrics)
+
+	// Assert: all original errors should be preserved in the chain
+	require.Error(t, err)
+
+	// errors.Is should find each original error
+	assert.True(t, errors.Is(err, err1),
+		"errors.Is should find err1 in the joined error chain")
+	assert.True(t, errors.Is(err, err2),
+		"errors.Is should find err2 in the joined error chain")
+	assert.True(t, errors.Is(err, err3),
+		"errors.Is should find err3 in the joined error chain")
+
+	// The error message should contain all attempt descriptions
+	errMsg := err.Error()
+	assert.Contains(t, errMsg, "attempt-1-error")
+	assert.Contains(t, errMsg, "attempt-2-error")
+	assert.Contains(t, errMsg, "attempt-3-error")
+	assert.Contains(t, errMsg, "failed to authenticate with vault")
+	assert.Contains(t, errMsg, "final error")
 }

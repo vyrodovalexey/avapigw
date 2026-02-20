@@ -89,6 +89,12 @@ func (r *GRPCBackendReconciler) callbacks() *ReconcileCallbacks {
 			metrics.SetResourceCondition("GRPCBackend", resource.GetName(), resource.GetNamespace(), "Ready", 0)
 			metrics.SetResourceCondition("GRPCBackend", resource.GetName(), resource.GetNamespace(), "Healthy", 0)
 		},
+		IsApplied: func(_ context.Context, resource Reconcilable) bool {
+			if r.GRPCServer == nil {
+				return true
+			}
+			return r.GRPCServer.HasGRPCBackend(resource.GetName(), resource.GetNamespace())
+		},
 	}
 }
 
@@ -99,13 +105,29 @@ func (r *GRPCBackendReconciler) reconcileGRPCBackend(
 ) error {
 	configJSON, err := json.Marshal(grpcBackend.Spec)
 	if err != nil {
+		r.Recorder.Eventf(grpcBackend, "Warning", EventReasonReconcileFailed,
+			"Failed to marshal GRPCBackend spec: %v", err)
 		return fmt.Errorf("failed to marshal GRPCBackend spec: %w", err)
+	}
+
+	// Inject the resource name into the JSON spec.
+	// CRD specs don't have a "name" field (it's in ObjectMeta), but the gateway
+	// config types expect a "name" field for backend identification.
+	configJSON, err = injectName(configJSON, grpcBackend.Name)
+	if err != nil {
+		r.Recorder.Eventf(grpcBackend, "Warning", EventReasonReconcileFailed,
+			"Failed to inject name into GRPCBackend spec: %v", err)
+		return fmt.Errorf("failed to inject name into GRPCBackend spec: %w", err)
 	}
 
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.ApplyGRPCBackend(ctx, grpcBackend.Name, grpcBackend.Namespace, configJSON); err != nil {
+			r.Recorder.Eventf(grpcBackend, "Warning", EventReasonReconcileFailed,
+				"Failed to apply GRPCBackend to gateway: %v", err)
 			return fmt.Errorf("failed to apply GRPCBackend to gateway: %w", err)
 		}
+		r.Recorder.Event(grpcBackend, "Normal", EventReasonConfigApplied,
+			"GRPCBackend configuration applied to gateway")
 	}
 
 	return nil
@@ -118,8 +140,12 @@ func (r *GRPCBackendReconciler) cleanupGRPCBackend(
 ) error {
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.DeleteGRPCBackend(ctx, grpcBackend.Name, grpcBackend.Namespace); err != nil {
+			r.Recorder.Eventf(grpcBackend, "Warning", EventReasonCleanupFailed,
+				"Failed to delete GRPCBackend from gateway: %v", err)
 			return fmt.Errorf("failed to delete GRPCBackend from gateway: %w", err)
 		}
+		r.Recorder.Event(grpcBackend, "Normal", EventReasonDeleted,
+			"GRPCBackend configuration removed from gateway")
 	}
 
 	return nil

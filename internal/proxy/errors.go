@@ -19,6 +19,9 @@ const (
 
 	// jsonErrBadRedirect is the JSON response body for unsafe redirect attempts.
 	jsonErrBadRedirect = `{"error":"bad request","message":"unsafe redirect URL"}`
+
+	// jsonErrNoAvailableHosts is the JSON response body when no backend hosts are available.
+	jsonErrNoAvailableHosts = `{"error":"service unavailable","message":"no available backend hosts"}`
 )
 
 // Sentinel errors for proxy operations.
@@ -43,6 +46,9 @@ var (
 
 	// ErrUpstreamUnavailable indicates that the upstream is unavailable.
 	ErrUpstreamUnavailable = errors.New("upstream unavailable")
+
+	// ErrNoAvailableHosts indicates that no backend hosts are available.
+	ErrNoAvailableHosts = errors.New("no available backend hosts")
 )
 
 // ProxyError represents a proxy-related error with details.
@@ -163,6 +169,17 @@ func IsProxyError(err error) bool {
 // IsNoDestinationError checks if an error indicates no destination.
 func IsNoDestinationError(err error) bool {
 	return errors.Is(err, ErrNoDestination) || errors.Is(err, ErrNoDestinationAvailable)
+}
+
+// NewNoAvailableHostsError creates an error for no available backend hosts.
+func NewNoAvailableHostsError(route, backendName string, cause error) *ProxyError {
+	return &ProxyError{
+		Op:      "get_available_host",
+		Route:   route,
+		Target:  backendName,
+		Message: "no available backend hosts",
+		Cause:   cause,
+	}
 }
 
 // IsRouteNotFoundError checks if an error indicates route not found.

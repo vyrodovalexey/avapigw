@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -59,7 +60,7 @@ spec:
 			Listeners: []config.Listener{
 				{
 					Name:     "http",
-					Port:     18080,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -107,7 +108,7 @@ func TestWaitForShutdown_AllPaths(t *testing.T) {
 					{
 						Name:     "http",
 						Bind:     "127.0.0.1",
-						Port:     19080,
+						Port:     0,
 						Protocol: config.ProtocolHTTP,
 					},
 				},
@@ -194,7 +195,7 @@ spec:
 					{
 						Name:     "http",
 						Bind:     "127.0.0.1",
-						Port:     19082,
+						Port:     0,
 						Protocol: config.ProtocolHTTP,
 					},
 				},
@@ -265,7 +266,7 @@ spec:
 					{
 						Name:     "http",
 						Bind:     "127.0.0.1",
-						Port:     19081,
+						Port:     0,
 						Protocol: config.ProtocolHTTP,
 					},
 				},
@@ -343,7 +344,7 @@ func TestInitApplication_ValidConfig(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19083,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -377,7 +378,7 @@ func TestInitApplication_WithObservability(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19084,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -412,7 +413,7 @@ func TestInitApplication_WithRateLimit(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19085,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -449,7 +450,7 @@ func TestInitApplication_WithMaxSessions(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19086,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -645,22 +646,9 @@ func TestInitAuditLogger(t *testing.T) {
 			},
 		}
 
-		// This test may panic due to duplicate Prometheus metric registration
-		// when run with other tests. We catch the panic and skip the test.
-		var auditLogger audit.Logger
-		panicked := false
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					panicked = true
-				}
-			}()
-			auditLogger = initAuditLogger(cfg, logger)
-		}()
-
-		if panicked {
-			t.Skip("skipped: promauto panicked on duplicate metric registration")
-		}
+		// Use a fresh Prometheus registry to avoid duplicate metric registration panics
+		reg := prometheus.NewRegistry()
+		auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 		assert.NotNil(t, auditLogger)
 		assert.NoError(t, auditLogger.Close())
@@ -679,7 +667,7 @@ func TestInitApplication_WithAuditDisabled(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19088,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -758,8 +746,10 @@ func TestInitClientIPExtractor_EmptyProxies(t *testing.T) {
 		},
 	}
 
-	// Should not panic
-	initClientIPExtractor(cfg, logger)
+	// Should not panic with empty proxies list
+	assert.NotPanics(t, func() {
+		initClientIPExtractor(cfg, logger)
+	}, "initClientIPExtractor should not panic with empty proxies")
 }
 
 // ============================================================
@@ -892,7 +882,7 @@ func TestWaitForShutdown_WithAuditLogger(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19089,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1227,7 +1217,7 @@ func TestInitApplication_BackendLoadError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19090,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1285,7 +1275,7 @@ spec:
   listeners:
     - name: http
       bind: 127.0.0.1
-      port: 19093
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -1300,7 +1290,7 @@ spec:
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19093,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1376,7 +1366,7 @@ func TestRunGateway_GatewayStartError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19094,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1433,7 +1423,7 @@ func TestWaitForShutdown_MetricsServerShutdownError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19092,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

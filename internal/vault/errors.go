@@ -77,8 +77,11 @@ func (e *VaultError) Unwrap() error {
 
 // Is checks if the error matches the target.
 func (e *VaultError) Is(target error) bool {
-	_, ok := target.(*VaultError)
-	return ok || errors.Is(e.Cause, target)
+	t, ok := target.(*VaultError)
+	if ok {
+		return e.Operation == t.Operation
+	}
+	return errors.Is(e.Cause, target)
 }
 
 // NewVaultError creates a new VaultError.

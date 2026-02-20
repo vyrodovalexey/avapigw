@@ -93,14 +93,12 @@ func reconcileIngressTwice(
 			Namespace: namespace,
 		},
 	}
-	// First reconcile — adds finalizer
-	result, err := reconciler.Reconcile(ctx, req)
+	// First reconcile — adds finalizer (Patch triggers watch event, no explicit requeue)
+	_, err := reconciler.Reconcile(ctx, req)
 	require.NoError(t, err)
-	if result.Requeue {
-		// Second reconcile — applies config
-		_, err = reconciler.Reconcile(ctx, req)
-		require.NoError(t, err)
-	}
+	// Second reconcile — applies config (always needed after finalizer is added)
+	_, err = reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
 }
 
 // ============================================================================
@@ -642,10 +640,10 @@ func TestE2E_Ingress_UpdateAndDelete(t *testing.T) {
 		},
 	}
 
-	// First reconcile — adds finalizer
+	// First reconcile — adds finalizer (Patch triggers watch event, no explicit requeue)
 	result, err := reconciler.Reconcile(ctx, req)
 	require.NoError(t, err)
-	assert.True(t, result.Requeue)
+	assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 	// Second reconcile — applies config
 	result, err = reconciler.Reconcile(ctx, req)
@@ -1156,10 +1154,10 @@ func TestE2E_GRPCIngress_UpdateAndDelete(t *testing.T) {
 		},
 	}
 
-	// First reconcile — adds finalizer
+	// First reconcile — adds finalizer (Patch triggers watch event, no explicit requeue)
 	result, err := reconciler.Reconcile(ctx, req)
 	require.NoError(t, err)
-	assert.True(t, result.Requeue)
+	assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 	// Second reconcile — applies config
 	result, err = reconciler.Reconcile(ctx, req)

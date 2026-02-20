@@ -62,7 +62,10 @@ func loadAndValidateConfig(configPath string, logger observability.Logger) *conf
 
 // initAuditLogger creates an audit logger from the gateway configuration.
 // If audit is not configured or disabled, a no-op logger is returned.
-func initAuditLogger(cfg *config.GatewayConfig, logger observability.Logger) audit.Logger {
+// The optional opts are forwarded to audit.NewLogger; callers can pass
+// audit.WithLoggerRegisterer to register audit metrics with the
+// gateway's custom Prometheus registry.
+func initAuditLogger(cfg *config.GatewayConfig, logger observability.Logger, opts ...audit.LoggerOption) audit.Logger {
 	if cfg.Spec.Audit == nil || !cfg.Spec.Audit.Enabled {
 		logger.Info("audit logging disabled")
 		return audit.NewNoopLogger()
@@ -94,7 +97,11 @@ func initAuditLogger(cfg *config.GatewayConfig, logger observability.Logger) aud
 		}
 	}
 
-	auditLogger, err := audit.NewLogger(auditCfg, audit.WithLoggerLogger(logger))
+	// Prepend the logger option; caller-supplied opts (e.g. registerer)
+	// come after and can override defaults.
+	allOpts := append([]audit.LoggerOption{audit.WithLoggerLogger(logger)}, opts...)
+
+	auditLogger, err := audit.NewLogger(auditCfg, allOpts...)
 	if err != nil {
 		logger.Warn("failed to create audit logger, using noop", observability.Error(err))
 		return audit.NewNoopLogger()
@@ -115,6 +122,7 @@ func initTracer(cfg *config.GatewayConfig, logger observability.Logger) *observa
 		ServiceName:  "avapigw",
 		Enabled:      false,
 		SamplingRate: 1.0,
+		OTLPInsecure: true, // Default insecure for backward compatibility
 	}
 
 	if cfg.Spec.Observability != nil && cfg.Spec.Observability.Tracing != nil {

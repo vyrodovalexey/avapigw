@@ -205,8 +205,8 @@ func TestMetrics_MustRegister(t *testing.T) {
 			"credential_cache_hits_total metric should be present")
 		assert.True(t, metricNames["test_must_register_backend_auth_credential_cache_misses_total"],
 			"credential_cache_misses_total metric should be present")
-		assert.True(t, metricNames["test_must_register_backend_auth_token_expiry_timestamp_seconds"],
-			"token_expiry_timestamp_seconds metric should be present")
+		assert.True(t, metricNames["test_must_register_backend_auth_token_expiry_seconds"],
+			"token_expiry_seconds metric should be present")
 	})
 }
 
@@ -257,5 +257,26 @@ func TestMetrics_ConcurrentAccess(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			<-done
 		}
+	})
+}
+
+func TestMetrics_Init(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics("test_init")
+
+	// Init should not panic
+	assert.NotPanics(t, func() {
+		metrics.Init()
+	})
+
+	// Verify metrics are pre-populated by gathering from registry
+	mfs, err := metrics.Registry().Gather()
+	require.NoError(t, err)
+	assert.NotEmpty(t, mfs)
+
+	// Init should be idempotent
+	assert.NotPanics(t, func() {
+		metrics.Init()
 	})
 }

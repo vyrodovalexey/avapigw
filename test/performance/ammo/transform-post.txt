@@ -1,0 +1,16 @@
+125 /api/v1/transform/
+{"name":"Widget Alpha","description":"Standard test item for transform","price":29.99,"quantity":10,"category":"electronics"}
+161 /api/v1/transform/
+{"name":"Widget Beta","description":"Item with removable fields","price":49.99,"quantity":5,"category":"hardware","internal_id":"INT-001","debug_info":"verbose"}
+105 /api/v1/transform/
+{"name":"Gadget Gamma","description":"Minimal item","price":9.99,"quantity":100,"category":"accessories"}
+193 /api/v1/transform/
+{"name":"Device Delta","description":"Item with nested metadata","price":199.99,"quantity":2,"category":"premium","metadata":{"color":"blue","weight":1.5,"dimensions":{"width":10,"height":20}}}
+167 /api/v1/transform/
+{"name":"Sensor Epsilon","description":"Item with secret data to strip","price":79.99,"quantity":15,"category":"sensors","secret":"s3cr3t-k3y","internal_id":"INT-002"}
+230 /api/v1/transform/
+{"name":"Module Zeta","description":"Large payload with extra fields for stress testing the transform pipeline","price":349.99,"quantity":1,"category":"industrial","tags":["heavy","certified","premium"],"debug_info":"trace-level"}
+209 /api/v1/transform/
+{"name":"Board Eta","description":"Item with snake_case fields","price":59.99,"quantity":25,"category":"components","created_at":"2025-01-15T10:00:00Z","updated_at":"2025-02-01T12:30:00Z","item_id":"ITEM-007"}
+207 /api/v1/transform/
+{"name":"Chip Theta","description":"Item with all removable fields present","price":14.99,"quantity":500,"category":"microchips","internal_id":"INT-003","debug_info":"full-trace","secret":"top-secret-value"}

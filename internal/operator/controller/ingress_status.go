@@ -68,19 +68,22 @@ func (u *IngressStatusUpdater) UpdateIngressStatus(
 		return nil
 	}
 
+	// Capture the base state before modifications for the merge patch
+	patch := client.MergeFrom(ingress.DeepCopy())
+
 	// Update the status
 	ingress.Status.LoadBalancer.Ingress = []networkingv1.IngressLoadBalancerIngress{desiredIngress}
 
-	if err := u.client.Status().Update(ctx, ingress); err != nil {
-		logger.Error(err, "failed to update Ingress LoadBalancer status",
+	if err := u.client.Status().Patch(ctx, ingress, patch); err != nil {
+		logger.Error(err, "failed to patch Ingress LoadBalancer status",
 			"name", ingress.Name,
 			"namespace", ingress.Namespace,
 			"address", address,
 		)
-		return fmt.Errorf("failed to update Ingress status: %w", err)
+		return fmt.Errorf("failed to patch Ingress status: %w", err)
 	}
 
-	logger.V(1).Info("updated Ingress LoadBalancer status",
+	logger.V(1).Info("patched Ingress LoadBalancer status",
 		"name", ingress.Name,
 		"namespace", ingress.Namespace,
 		"address", address,

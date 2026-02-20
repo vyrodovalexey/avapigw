@@ -135,7 +135,7 @@ spec:
         host: host.docker.internal
         port: 8801
 ---
-# GRPCBackend 1 - gRPC backend on port 8803
+# GRPCBackend 1 - gRPC backend on port 8811 (no auth)
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCBackend
 metadata:
@@ -144,7 +144,7 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8803
+      port: 8811
       weight: 1
   healthCheck:
     enabled: true
@@ -160,7 +160,7 @@ spec:
     maxIdleConns: 50
     idleConnTimeout: 90s
 ---
-# GRPCBackend 2 - gRPC backend on port 8804
+# GRPCBackend 2 - gRPC backend on port 8812 (no auth)
 apiVersion: avapigw.io/v1alpha1
 kind: GRPCBackend
 metadata:
@@ -169,7 +169,7 @@ metadata:
 spec:
   hosts:
     - address: host.docker.internal
-      port: 8804
+      port: 8812
       weight: 1
   healthCheck:
     enabled: true
@@ -198,11 +198,11 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811
       weight: 50
     - destination:
         host: host.docker.internal
-        port: 8804
+        port: 8812
       weight: 50
   timeout: 30s
 ---
@@ -219,4 +219,4 @@ spec:
   route:
     - destination:
         host: host.docker.internal
-        port: 8803
+        port: 8811

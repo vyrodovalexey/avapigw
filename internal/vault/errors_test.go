@@ -89,9 +89,14 @@ func TestVaultError_Is(t *testing.T) {
 		Cause:     cause,
 	}
 
-	// Should match VaultError type
-	if !errors.Is(err, &VaultError{}) {
-		t.Error("Is() should match VaultError type")
+	// Should match VaultError with same Operation
+	if !errors.Is(err, &VaultError{Operation: "read"}) {
+		t.Error("Is() should match VaultError with same Operation")
+	}
+
+	// Should not match VaultError with different Operation
+	if errors.Is(err, &VaultError{Operation: "write"}) {
+		t.Error("Is() should not match VaultError with different Operation")
 	}
 
 	// Should match underlying cause

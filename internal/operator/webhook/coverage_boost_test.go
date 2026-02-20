@@ -82,36 +82,39 @@ func TestDuplicateChecker_SetScope(t *testing.T) {
 	}
 }
 
-func TestDuplicateChecker_IsCacheValid(t *testing.T) {
+func TestDuplicateChecker_IsCacheValidLocked(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = avapigwv1alpha1.AddToScheme(scheme)
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	// Test with cache disabled
-	checker := NewDuplicateChecker(client, WithCacheEnabled(false))
-	if checker.isCacheValid("test-key") {
-		t.Error("isCacheValid() should return false when cache is disabled")
-	}
-
 	// Test with cache enabled but no entry
 	checker2 := NewDuplicateChecker(client, WithCacheEnabled(true))
-	if checker2.isCacheValid("nonexistent-key") {
-		t.Error("isCacheValid() should return false for nonexistent key")
+	checker2.cache.mu.RLock()
+	valid := checker2.isCacheValidLocked("nonexistent-key")
+	checker2.cache.mu.RUnlock()
+	if valid {
+		t.Error("isCacheValidLocked() should return false for nonexistent key")
 	}
 
 	// Test with cache enabled and valid entry
 	checker3 := NewDuplicateChecker(client, WithCacheEnabled(true), WithCacheTTL(1*time.Hour))
 	checker3.updateCacheTimestamp("valid-key")
-	if !checker3.isCacheValid("valid-key") {
-		t.Error("isCacheValid() should return true for valid cache entry")
+	checker3.cache.mu.RLock()
+	valid = checker3.isCacheValidLocked("valid-key")
+	checker3.cache.mu.RUnlock()
+	if !valid {
+		t.Error("isCacheValidLocked() should return true for valid cache entry")
 	}
 
 	// Test with expired cache entry
 	checker4 := NewDuplicateChecker(client, WithCacheEnabled(true), WithCacheTTL(1*time.Nanosecond))
 	checker4.updateCacheTimestamp("expired-key")
 	time.Sleep(10 * time.Millisecond) // Wait for cache to expire
-	if checker4.isCacheValid("expired-key") {
-		t.Error("isCacheValid() should return false for expired cache entry")
+	checker4.cache.mu.RLock()
+	valid = checker4.isCacheValidLocked("expired-key")
+	checker4.cache.mu.RUnlock()
+	if valid {
+		t.Error("isCacheValidLocked() should return false for expired cache entry")
 	}
 }
 

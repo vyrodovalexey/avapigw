@@ -10,10 +10,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/vyrodovalexey/avapigw/internal/audit"
+	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // configField is an atomic pointer for lock-free config access.
@@ -73,6 +78,17 @@ type Gateway struct {
 
 	// Shutdown
 	shutdownTimeout time.Duration
+
+	// TLS metrics
+	tlsMetrics tlspkg.MetricsRecorder
+
+	// gRPC components
+	auditLogger     audit.Logger
+	metricsRegistry *prometheus.Registry
+	grpcMetrics     *grpcmiddleware.GRPCMetrics
+	grpcMetricsOnce sync.Once
+	authMetrics     *auth.Metrics
+	vaultClient     vault.Client
 }
 
 // Option is a functional option for configuring the gateway.
@@ -105,6 +121,51 @@ func WithRouteHandler(handler http.Handler) Option {
 func WithGatewayVaultProviderFactory(factory tlspkg.VaultProviderFactory) Option {
 	return func(g *Gateway) {
 		g.vaultProviderFactory = factory
+	}
+}
+
+// WithAuditLogger sets the audit logger for the gateway.
+// The audit logger is propagated to gRPC listeners to enable
+// audit logging of gRPC requests.
+func WithAuditLogger(logger audit.Logger) Option {
+	return func(g *Gateway) {
+		g.auditLogger = logger
+	}
+}
+
+// WithMetricsRegistry sets the Prometheus registry for the gateway.
+// The registry is used to register gRPC server metrics so they appear
+// on the gateway's /metrics endpoint alongside HTTP metrics.
+func WithMetricsRegistry(registry *prometheus.Registry) Option {
+	return func(g *Gateway) {
+		g.metricsRegistry = registry
+	}
+}
+
+// WithGatewayTLSMetrics sets the TLS metrics recorder for the gateway.
+// The metrics recorder is propagated to all HTTP and gRPC listeners,
+// enabling TLS connection and handshake metrics to be emitted to Prometheus.
+func WithGatewayTLSMetrics(metrics tlspkg.MetricsRecorder) Option {
+	return func(g *Gateway) {
+		g.tlsMetrics = metrics
+	}
+}
+
+// WithGatewayAuthMetrics sets the authentication metrics for the gateway.
+// The metrics are propagated to gRPC listeners to enable per-route
+// authentication metrics in the gRPC proxy director.
+func WithGatewayAuthMetrics(metrics *auth.Metrics) Option {
+	return func(g *Gateway) {
+		g.authMetrics = metrics
+	}
+}
+
+// WithGatewayVaultClient sets the vault client for the gateway.
+// The vault client is propagated to gRPC listeners to enable per-route
+// API key authentication using Vault as the key store.
+func WithGatewayVaultClient(client vault.Client) Option {
+	return func(g *Gateway) {
+		g.vaultClient = client
 	}
 }
 
@@ -284,62 +345,167 @@ func (g *Gateway) setupRoutes() {
 }
 
 // createListeners creates listeners from configuration.
+// If any listener fails to create, all previously created listeners are cleaned up.
 func (g *Gateway) createListeners() error {
 	cfg := g.config.Load()
-	g.listeners = make([]*Listener, 0, len(cfg.Spec.Listeners))
-	g.grpcListeners = make([]*GRPCListener, 0)
+	listeners := make([]*Listener, 0, len(cfg.Spec.Listeners))
+	grpcListeners := make([]*GRPCListener, 0)
 
 	for _, listenerCfg := range cfg.Spec.Listeners {
-		// Check if this is a gRPC listener
 		if listenerCfg.Protocol == config.ProtocolGRPC {
-			grpcOpts := []GRPCListenerOption{
-				WithGRPCListenerLogger(g.logger),
-			}
-			if g.vaultProviderFactory != nil {
-				grpcOpts = append(grpcOpts, WithGRPCVaultProviderFactory(g.vaultProviderFactory))
-			}
-
-			grpcListener, err := NewGRPCListener(listenerCfg, grpcOpts...)
+			grpcListener, err := g.createGRPCListener(listenerCfg, cfg.Spec.GRPCRoutes)
 			if err != nil {
-				return fmt.Errorf(
-					"failed to create gRPC listener %s: %w",
-					listenerCfg.Name, err,
-				)
+				g.cleanupListenersOnError(listeners, grpcListeners)
+				return err
 			}
-
-			// Load gRPC routes
-			if err := grpcListener.LoadRoutes(cfg.Spec.GRPCRoutes); err != nil {
-				return fmt.Errorf(
-					"failed to load gRPC routes for listener %s: %w",
-					listenerCfg.Name, err,
-				)
-			}
-
-			g.grpcListeners = append(g.grpcListeners, grpcListener)
+			grpcListeners = append(grpcListeners, grpcListener)
 		} else {
-			// HTTP listener
-			httpOpts := []ListenerOption{
-				WithListenerLogger(g.logger),
-			}
-			if g.vaultProviderFactory != nil {
-				httpOpts = append(httpOpts, WithVaultProviderFactory(g.vaultProviderFactory))
-			}
-
-			listener, err := NewListener(
-				listenerCfg, g.engine,
-				httpOpts...,
-			)
+			listener, err := g.createHTTPListener(listenerCfg)
 			if err != nil {
-				return fmt.Errorf(
-					"failed to create listener %s: %w",
-					listenerCfg.Name, err,
-				)
+				g.cleanupListenersOnError(listeners, grpcListeners)
+				return err
 			}
-			g.listeners = append(g.listeners, listener)
+			listeners = append(listeners, listener)
 		}
 	}
 
+	g.listeners = listeners
+	g.grpcListeners = grpcListeners
+
 	return nil
+}
+
+// createHTTPListener creates a single HTTP listener from configuration.
+func (g *Gateway) createHTTPListener(listenerCfg config.Listener) (*Listener, error) {
+	httpOpts := []ListenerOption{
+		WithListenerLogger(g.logger),
+	}
+	if g.vaultProviderFactory != nil {
+		httpOpts = append(httpOpts, WithVaultProviderFactory(g.vaultProviderFactory))
+	}
+	if g.tlsMetrics != nil {
+		httpOpts = append(httpOpts, WithTLSMetrics(g.tlsMetrics))
+	}
+
+	listener, err := NewListener(
+		listenerCfg, g.engine,
+		httpOpts...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to create listener %s: %w",
+			listenerCfg.Name, err,
+		)
+	}
+
+	return listener, nil
+}
+
+// createGRPCListener creates a single gRPC listener from configuration and loads its routes.
+func (g *Gateway) createGRPCListener(
+	listenerCfg config.Listener, grpcRoutes []config.GRPCRoute,
+) (*GRPCListener, error) {
+	grpcOpts := []GRPCListenerOption{
+		WithGRPCListenerLogger(g.logger),
+	}
+	if g.vaultProviderFactory != nil {
+		grpcOpts = append(grpcOpts, WithGRPCVaultProviderFactory(g.vaultProviderFactory))
+	}
+	if g.tlsMetrics != nil {
+		grpcOpts = append(grpcOpts, WithGRPCTLSMetrics(g.tlsMetrics))
+	}
+
+	// Create and pass gRPC metrics (once, reused across config reloads).
+	// sync.Once ensures MustRegister is called only once, preventing
+	// duplicate-registration panics on hot-reload.
+	grpcMetrics := g.getOrCreateGRPCMetrics()
+	if grpcMetrics != nil {
+		grpcOpts = append(grpcOpts, WithGRPCMetrics(grpcMetrics))
+	}
+
+	// Pass metrics registry so gRPC proxy metrics (connection pool,
+	// direct requests, streaming, etc.) are registered with the
+	// gateway's custom registry and appear on /metrics.
+	if g.metricsRegistry != nil {
+		grpcOpts = append(grpcOpts, WithGRPCMetricsRegistry(g.metricsRegistry))
+	}
+
+	// Pass audit logger if available
+	if g.auditLogger != nil {
+		grpcOpts = append(grpcOpts, WithGRPCAuditLogger(g.auditLogger))
+	}
+
+	// Pass auth metrics for per-route authentication observability
+	if g.authMetrics != nil {
+		grpcOpts = append(grpcOpts, WithGRPCAuthMetrics(g.authMetrics))
+	}
+
+	// Pass vault client for per-route API key authentication via Vault
+	if g.vaultClient != nil {
+		grpcOpts = append(grpcOpts, WithGRPCVaultClient(g.vaultClient))
+	}
+
+	grpcListener, err := NewGRPCListener(listenerCfg, grpcOpts...)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to create gRPC listener %s: %w",
+			listenerCfg.Name, err,
+		)
+	}
+
+	if err := grpcListener.LoadRoutes(grpcRoutes); err != nil {
+		return nil, fmt.Errorf(
+			"failed to load gRPC routes for listener %s: %w",
+			listenerCfg.Name, err,
+		)
+	}
+
+	return grpcListener, nil
+}
+
+// getOrCreateGRPCMetrics returns the shared gRPC metrics instance,
+// creating it on first call. The sync.Once guarantees that
+// NewGRPCMetrics (which calls registry.MustRegister) is invoked
+// exactly once, even when createGRPCListener is called multiple
+// times during config reloads.
+//
+// Returns nil when no metrics registry is configured, which causes
+// the metrics interceptor to be skipped in buildInterceptors().
+func (g *Gateway) getOrCreateGRPCMetrics() *grpcmiddleware.GRPCMetrics {
+	g.grpcMetricsOnce.Do(func() {
+		if g.metricsRegistry == nil {
+			// No registry configured — skip gRPC metrics registration.
+			// In production the registry is always provided via
+			// WithMetricsRegistry; this path is only hit in tests
+			// that omit the option.
+			return
+		}
+		g.grpcMetrics = grpcmiddleware.NewGRPCMetrics("grpc", g.metricsRegistry)
+		g.logger.Info("gRPC server metrics registered",
+			observability.String("namespace", "grpc"),
+		)
+	})
+	return g.grpcMetrics
+}
+
+// cleanupListenersOnError closes all already-created listeners when a subsequent creation fails.
+func (g *Gateway) cleanupListenersOnError(listeners []*Listener, grpcListeners []*GRPCListener) {
+	for _, l := range listeners {
+		if err := l.Stop(context.Background()); err != nil {
+			g.logger.Error("failed to cleanup listener during rollback",
+				observability.String("name", l.Name()),
+				observability.Error(err),
+			)
+		}
+	}
+	for _, l := range grpcListeners {
+		if err := l.Stop(context.Background()); err != nil {
+			g.logger.Error("failed to cleanup gRPC listener during rollback",
+				observability.String("name", l.Name()),
+				observability.Error(err),
+			)
+		}
+	}
 }
 
 // stopListeners stops all listeners.
@@ -392,6 +558,19 @@ func (g *Gateway) stopListeners(ctx context.Context) {
 		// Wait for remaining listeners to stop (they should respect the context)
 		<-done
 	}
+}
+
+// ClearAllAuthCaches clears the authenticator caches on all gRPC listeners.
+// This should be called when gRPC route authentication configuration changes
+// (e.g., CRD updates via the operator) so that the next request rebuilds
+// authenticators from the updated config.
+func (g *Gateway) ClearAllAuthCaches() {
+	for _, listener := range g.grpcListeners {
+		listener.ClearAuthCache()
+	}
+	g.logger.Debug("all gRPC auth caches cleared",
+		observability.Int("listeners", len(g.grpcListeners)),
+	)
 }
 
 // GetListeners returns all HTTP listeners.

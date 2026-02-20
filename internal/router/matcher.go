@@ -102,31 +102,35 @@ var (
 
 // NewRegexMatcher creates a new regex path matcher.
 func NewRegexMatcher(pattern string) (*RegexMatcher, error) {
-	regexCacheMu.RLock()
-	entry, ok := regexCache[pattern]
-	regexCacheMu.RUnlock()
+	metrics := getRegexCacheMetrics()
 
+	regexCacheMu.Lock()
+	entry, ok := regexCache[pattern]
 	if ok {
-		// Update access order for LRU tracking
-		regexCacheMu.Lock()
+		// Cache hit: update access order for LRU tracking
 		regexAccessCounter++
 		entry.accessOrder = regexAccessCounter
 		regexCacheMu.Unlock()
+
+		metrics.cacheHits.Inc()
 
 		return &RegexMatcher{
 			pattern: pattern,
 			regex:   entry.regex,
 		}, nil
 	}
+	regexCacheMu.Unlock()
 
-	// Compile the regex
+	metrics.cacheMisses.Inc()
+
+	// Compile the regex outside the lock (expensive operation)
 	regex, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, err
 	}
 
 	regexCacheMu.Lock()
-	// Double-check after acquiring write lock
+	// Double-check after acquiring lock (another goroutine may have added it)
 	if existingEntry, exists := regexCache[pattern]; exists {
 		regexAccessCounter++
 		existingEntry.accessOrder = regexAccessCounter
@@ -140,6 +144,7 @@ func NewRegexMatcher(pattern string) (*RegexMatcher, error) {
 	// Evict LRU entry if cache is at capacity
 	if len(regexCache) >= regexCacheMaxSize {
 		evictLRURegexEntry()
+		metrics.cacheEvictions.Inc()
 	}
 
 	regexAccessCounter++
@@ -147,6 +152,7 @@ func NewRegexMatcher(pattern string) (*RegexMatcher, error) {
 		regex:       regex,
 		accessOrder: regexAccessCounter,
 	}
+	metrics.cacheSize.Set(float64(len(regexCache)))
 	regexCacheMu.Unlock()
 
 	return &RegexMatcher{

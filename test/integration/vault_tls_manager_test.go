@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -313,8 +314,8 @@ func TestIntegration_Manager_VaultProvider_WithMetrics(t *testing.T) {
 	factory := createVaultProviderFactory(client)
 	logger := observability.NopLogger()
 
-	// Create metrics with a custom registry
-	metrics := internaltls.NewMetrics("gateway_test")
+	// Create metrics with a custom registry so Registry() returns non-nil
+	metrics := internaltls.NewMetrics("gateway_test", internaltls.WithRegistry(prometheus.NewRegistry()))
 
 	vaultTLSCfg := &internaltls.VaultTLSConfig{
 		Enabled:    true,

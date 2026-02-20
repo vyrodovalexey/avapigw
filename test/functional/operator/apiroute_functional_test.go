@@ -4,6 +4,7 @@
 package operator_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,14 +20,14 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 
 	t.Run("valid basic route", func(t *testing.T) {
 		route := createBasicAPIRoute()
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
 
 	t.Run("valid route with all fields", func(t *testing.T) {
 		route := createFullAPIRoute()
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		// May have warnings for conflicting configs
 		_ = warnings
@@ -38,7 +39,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 			Exact:  "/api/v1",
 			Prefix: "/api",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "only one of exact, prefix, or regex")
 	})
@@ -48,7 +49,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 		route.Spec.Match[0].URI = &avapigwv1alpha1.URIMatch{
 			Regex: "[invalid",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "regex is invalid")
 	})
@@ -56,7 +57,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 	t.Run("invalid HTTP method", func(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Match[0].Methods = []string{"INVALID"}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid HTTP method")
 	})
@@ -64,7 +65,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 	t.Run("invalid destination port", func(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Route[0].Destination.Port = 0
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "port must be between 1 and 65535")
 	})
@@ -72,7 +73,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 	t.Run("invalid destination port - too high", func(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Route[0].Destination.Port = 70000
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "port must be between 1 and 65535")
 	})
@@ -80,7 +81,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 	t.Run("invalid weight - negative", func(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Route[0].Weight = -1
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "weight must be between 0 and 100")
 	})
@@ -88,7 +89,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 	t.Run("invalid weight - too high", func(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Route[0].Weight = 150
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "weight must be between 0 and 100")
 	})
@@ -105,7 +106,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 				Weight:      60,
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "total weight")
 	})
@@ -113,7 +114,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 	t.Run("invalid timeout duration", func(t *testing.T) {
 		route := createBasicAPIRoute()
 		route.Spec.Timeout = "invalid"
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid timeout")
 	})
@@ -123,7 +124,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 		route.Spec.Retries = &avapigwv1alpha1.RetryPolicy{
 			Attempts: 0,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "attempts must be between 1 and 10")
 	})
@@ -133,7 +134,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 		route.Spec.Retries = &avapigwv1alpha1.RetryPolicy{
 			Attempts: 15,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "attempts must be between 1 and 10")
 	})
@@ -144,7 +145,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 			Attempts: 3,
 			RetryOn:  "invalid-condition",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid condition")
 	})
@@ -155,7 +156,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 			URI:  "/new-path",
 			Code: 200,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "redirect.code must be one of")
 	})
@@ -166,7 +167,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 			URI:    "/new-path",
 			Scheme: "ftp",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "redirect.scheme must be")
 	})
@@ -176,7 +177,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 		route.Spec.DirectResponse = &avapigwv1alpha1.DirectResponseConfig{
 			Status: 50,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "directResponse.status must be between 100 and 599")
 	})
@@ -189,7 +190,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 				Percentage: 150,
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "percentage must be between 0 and 100")
 	})
@@ -202,7 +203,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 				Percentage: 10,
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "httpStatus must be between 100 and 599")
 	})
@@ -213,7 +214,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 			URI:  "/new-path",
 			Code: 301,
 		}
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		assert.NotEmpty(t, warnings)
 		assert.Contains(t, warnings[0], "redirect and route are both specified")
@@ -225,7 +226,7 @@ func TestFunctional_APIRoute_Validation(t *testing.T) {
 			Status: 200,
 			Body:   `{"status":"ok"}`,
 		}
-		warnings, err := validator.ValidateCreate(nil, route)
+		warnings, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 		assert.NotEmpty(t, warnings)
 		assert.Contains(t, warnings[0], "directResponse and route are both specified")
@@ -241,7 +242,7 @@ func TestFunctional_APIRoute_HeaderMatch(t *testing.T) {
 		route.Spec.Match[0].Headers = []avapigwv1alpha1.HeaderMatch{
 			{Name: "Authorization", Exact: "Bearer token"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -251,7 +252,7 @@ func TestFunctional_APIRoute_HeaderMatch(t *testing.T) {
 		route.Spec.Match[0].Headers = []avapigwv1alpha1.HeaderMatch{
 			{Name: "Authorization", Present: &present},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -260,7 +261,7 @@ func TestFunctional_APIRoute_HeaderMatch(t *testing.T) {
 		route.Spec.Match[0].Headers = []avapigwv1alpha1.HeaderMatch{
 			{Name: "Authorization", Regex: "^Bearer .+$"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -269,7 +270,7 @@ func TestFunctional_APIRoute_HeaderMatch(t *testing.T) {
 		route.Spec.Match[0].Headers = []avapigwv1alpha1.HeaderMatch{
 			{Name: "", Exact: "value"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "name is required")
 	})
@@ -279,7 +280,7 @@ func TestFunctional_APIRoute_HeaderMatch(t *testing.T) {
 		route.Spec.Match[0].Headers = []avapigwv1alpha1.HeaderMatch{
 			{Name: "Authorization", Regex: "[invalid"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "regex is invalid")
 	})
@@ -294,7 +295,7 @@ func TestFunctional_APIRoute_QueryParamMatch(t *testing.T) {
 		route.Spec.Match[0].QueryParams = []avapigwv1alpha1.QueryParamMatch{
 			{Name: "version", Exact: "v1"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -304,7 +305,7 @@ func TestFunctional_APIRoute_QueryParamMatch(t *testing.T) {
 		route.Spec.Match[0].QueryParams = []avapigwv1alpha1.QueryParamMatch{
 			{Name: "debug", Present: &present},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -313,7 +314,7 @@ func TestFunctional_APIRoute_QueryParamMatch(t *testing.T) {
 		route.Spec.Match[0].QueryParams = []avapigwv1alpha1.QueryParamMatch{
 			{Name: "", Exact: "value"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "name is required")
 	})
@@ -323,7 +324,7 @@ func TestFunctional_APIRoute_QueryParamMatch(t *testing.T) {
 		route.Spec.Match[0].QueryParams = []avapigwv1alpha1.QueryParamMatch{
 			{Name: "version", Regex: "[invalid"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "regex is invalid")
 	})
@@ -341,7 +342,7 @@ func TestFunctional_APIRoute_RateLimit(t *testing.T) {
 			Burst:             200,
 			PerClient:         true,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -352,7 +353,7 @@ func TestFunctional_APIRoute_RateLimit(t *testing.T) {
 			RequestsPerSecond: 0,
 			Burst:             200,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 	})
 }
@@ -371,7 +372,7 @@ func TestFunctional_APIRoute_CORS(t *testing.T) {
 			MaxAge:           86400,
 			AllowCredentials: true,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -388,7 +389,7 @@ func TestFunctional_APIRoute_MaxSessions(t *testing.T) {
 			QueueSize:     100,
 			QueueTimeout:  "10s",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -398,7 +399,7 @@ func TestFunctional_APIRoute_MaxSessions(t *testing.T) {
 			Enabled:       true,
 			MaxConcurrent: 0,
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 	})
 }
@@ -415,7 +416,7 @@ func TestFunctional_APIRoute_Cache(t *testing.T) {
 			KeyComponents:        []string{"path", "query"},
 			StaleWhileRevalidate: "1m",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -425,7 +426,7 @@ func TestFunctional_APIRoute_Cache(t *testing.T) {
 			Enabled: true,
 			TTL:     "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "cache.ttl is invalid")
 	})
@@ -443,7 +444,7 @@ func TestFunctional_APIRoute_TLS(t *testing.T) {
 			SNIHosts:   []string{"api.example.com"},
 			MinVersion: "TLS12",
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -459,7 +460,7 @@ func TestFunctional_APIRoute_TLS(t *testing.T) {
 				TTL:        "24h",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -599,7 +600,7 @@ func TestFunctional_APIRoute_Authentication(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			route := createBasicAPIRoute()
 			route.Spec.Authentication = tt.auth
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -778,7 +779,7 @@ func TestFunctional_APIRoute_Authorization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			route := createBasicAPIRoute()
 			route.Spec.Authorization = tt.authz
-			_, err := validator.ValidateCreate(nil, route)
+			_, err := validator.ValidateCreate(context.Background(), route)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -825,7 +826,7 @@ func TestFunctional_APIRoute_CombinedAuthAuthz(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -858,7 +859,7 @@ func TestFunctional_APIRoute_CombinedAuthAuthz(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -883,7 +884,7 @@ func TestFunctional_APIRoute_CombinedAuthAuthz(t *testing.T) {
 				Timeout: "5s",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 
@@ -914,7 +915,7 @@ func TestFunctional_APIRoute_CombinedAuthAuthz(t *testing.T) {
 			},
 			SkipPaths: []string{"/health"},
 		}
-		_, err := validator.ValidateCreate(nil, route)
+		_, err := validator.ValidateCreate(context.Background(), route)
 		assert.NoError(t, err)
 	})
 }
@@ -927,7 +928,7 @@ func TestFunctional_APIRoute_Update(t *testing.T) {
 		oldRoute := createBasicAPIRoute()
 		newRoute := createBasicAPIRoute()
 		newRoute.Spec.Timeout = "60s"
-		warnings, err := validator.ValidateUpdate(nil, oldRoute, newRoute)
+		warnings, err := validator.ValidateUpdate(context.Background(), oldRoute, newRoute)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
@@ -936,7 +937,7 @@ func TestFunctional_APIRoute_Update(t *testing.T) {
 		oldRoute := createBasicAPIRoute()
 		newRoute := createBasicAPIRoute()
 		newRoute.Spec.Route[0].Destination.Port = 0
-		_, err := validator.ValidateUpdate(nil, oldRoute, newRoute)
+		_, err := validator.ValidateUpdate(context.Background(), oldRoute, newRoute)
 		assert.Error(t, err)
 	})
 }
@@ -947,7 +948,7 @@ func TestFunctional_APIRoute_Delete(t *testing.T) {
 
 	t.Run("delete always succeeds", func(t *testing.T) {
 		route := createBasicAPIRoute()
-		warnings, err := validator.ValidateDelete(nil, route)
+		warnings, err := validator.ValidateDelete(context.Background(), route)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})

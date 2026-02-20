@@ -205,7 +205,9 @@ func (c *memoryDecisionCache) Close() error {
 	return nil
 }
 
-// evictOldest evicts the oldest entries to make room for new ones.
+// evictOldest evicts a batch of oldest entries to make room for new ones.
+// Batch eviction (10% of capacity) amortizes the O(n) scan cost compared
+// to single-entry eviction.
 func (c *memoryDecisionCache) evictOldest() {
 	// Find and remove expired entries first
 	for key, decision := range c.entries {
@@ -214,21 +216,47 @@ func (c *memoryDecisionCache) evictOldest() {
 		}
 	}
 
-	// If still over capacity, remove oldest entries
+	// If still over capacity, evict a batch of oldest entries
 	if len(c.entries) >= c.maxSize {
-		var oldestKey string
-		var oldestTime time.Time
+		c.evictOldestBatch()
+	}
+}
 
-		for key, decision := range c.entries {
-			if oldestKey == "" || decision.CachedAt.Before(oldestTime) {
-				oldestKey = key
-				oldestTime = decision.CachedAt
+// entryAge holds a cache key and its cached timestamp for eviction ordering.
+type entryAge struct {
+	key      string
+	cachedAt time.Time
+}
+
+// evictOldestBatch evicts 10% of capacity worth of oldest entries.
+// Must be called with the mutex held.
+func (c *memoryDecisionCache) evictOldestBatch() {
+	evictCount := c.maxSize / 10
+	if evictCount < 1 {
+		evictCount = 1
+	}
+
+	// Collect all entries with their timestamps for batch eviction
+	entries := make([]entryAge, 0, len(c.entries))
+	for key, decision := range c.entries {
+		entries = append(entries, entryAge{key: key, cachedAt: decision.CachedAt})
+	}
+
+	// Partial sort: find the N oldest entries using selection.
+	// For small evictCount relative to len(entries), this is efficient.
+	for i := 0; i < evictCount && i < len(entries); i++ {
+		minIdx := i
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].cachedAt.Before(entries[minIdx].cachedAt) {
+				minIdx = j
 			}
 		}
+		entries[i], entries[minIdx] = entries[minIdx], entries[i]
+	}
 
-		if oldestKey != "" {
-			delete(c.entries, oldestKey)
-		}
+	// Delete the oldest entries
+	for i := 0; i < evictCount && i < len(entries); i++ {
+		delete(c.entries, entries[i].key)
 	}
 }
 

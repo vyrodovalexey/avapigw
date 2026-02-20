@@ -39,7 +39,7 @@ func TestWaitForOperatorShutdown_AllComponents(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19501,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -66,7 +66,7 @@ func TestWaitForOperatorShutdown_AllComponents(t *testing.T) {
 	msl := middleware.NewMaxSessionsLimiter(100, 0, 0)
 
 	metricsServer := &http.Server{
-		Addr: ":19502",
+		Addr: ":0",
 	}
 
 	opApp := &operatorApplication{
@@ -119,7 +119,7 @@ func TestWaitForOperatorShutdown_MinimalComponents(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19503,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -198,7 +198,7 @@ func TestRunOperatorGateway_BackendStartError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19504,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -345,7 +345,7 @@ func TestWaitForOperatorShutdown_WithAuditLogger(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19505,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

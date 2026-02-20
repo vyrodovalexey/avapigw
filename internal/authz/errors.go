@@ -71,8 +71,11 @@ func (e *AuthzError) Unwrap() error {
 
 // Is checks if the error matches the target.
 func (e *AuthzError) Is(target error) bool {
-	_, ok := target.(*AuthzError)
-	return ok || errors.Is(e.Err, target)
+	t, ok := target.(*AuthzError)
+	if ok {
+		return errors.Is(e.Err, t.Err)
+	}
+	return errors.Is(e.Err, target)
 }
 
 // NewAccessDeniedError creates a new access denied error.

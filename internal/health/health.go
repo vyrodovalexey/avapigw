@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
@@ -59,6 +60,7 @@ type Checker struct {
 	checks    map[string]CheckFunc
 	mu        sync.RWMutex
 	logger    observability.Logger
+	draining  atomic.Bool
 }
 
 // CheckFunc is a function that performs a health check.
@@ -78,6 +80,23 @@ func NewChecker(version string, logger observability.Logger) *Checker {
 		checks:    make(map[string]CheckFunc),
 		logger:    logger,
 	}
+}
+
+// SetDraining marks the health checker as draining. While draining,
+// health and readiness endpoints return 503 Service Unavailable so that
+// load balancers stop sending new traffic before connections are drained.
+func (c *Checker) SetDraining(draining bool) {
+	c.draining.Store(draining)
+	if draining {
+		c.logger.Info("health checker marked as draining")
+	} else {
+		c.logger.Info("health checker draining cleared")
+	}
+}
+
+// IsDraining returns true if the health checker is in draining mode.
+func (c *Checker) IsDraining() bool {
+	return c.draining.Load()
 }
 
 // RegisterCheck registers a health check function.
@@ -129,14 +148,21 @@ func (c *Checker) Readiness() ReadinessResponse {
 		Timestamp: time.Now(),
 	}
 
+	hm := GetHealthMetrics()
 	for name, checkFunc := range c.checks {
 		check := checkFunc()
 		response.Checks[name] = check
 
-		if check.Status == StatusUnhealthy {
+		switch {
+		case check.Status == StatusUnhealthy:
 			response.Status = StatusUnhealthy
-		} else if check.Status == StatusDegraded && response.Status != StatusUnhealthy {
+			hm.checkStatus.WithLabelValues(name).Set(0)
+		case check.Status == StatusDegraded &&
+			response.Status != StatusUnhealthy:
 			response.Status = StatusDegraded
+			hm.checkStatus.WithLabelValues(name).Set(0)
+		default:
+			hm.checkStatus.WithLabelValues(name).Set(1)
 		}
 	}
 
@@ -144,8 +170,36 @@ func (c *Checker) Readiness() ReadinessResponse {
 }
 
 // HealthHandler returns an HTTP handler for the health endpoint.
+// When the checker is in draining mode, it returns 503 Service Unavailable
+// so that load balancers stop sending new traffic.
 func (c *Checker) HealthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		GetHealthMetrics().checksTotal.WithLabelValues(
+			"health",
+		).Inc()
+
+		// Return 503 when draining to signal load balancers
+		if c.draining.Load() {
+			response := HealthResponse{
+				Status:    StatusUnhealthy,
+				Version:   c.version,
+				Timestamp: time.Now(),
+				Details:   map[string]string{"reason": "draining"},
+			}
+			data, err := jsonMarshalFunc(response)
+			if err != nil {
+				c.logger.Error("health: failed to encode draining response", observability.Error(err))
+				http.Error(w, "failed to encode response", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set(HeaderContentType, ContentTypeJSON)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			if _, err := w.Write(data); err != nil {
+				c.logger.Error("health: failed to write draining response", observability.Error(err))
+			}
+			return
+		}
+
 		response := c.Health()
 
 		// Pre-encode the response to catch errors before writing headers
@@ -167,8 +221,37 @@ func (c *Checker) HealthHandler() http.HandlerFunc {
 }
 
 // ReadinessHandler returns an HTTP handler for the readiness endpoint.
+// When the checker is in draining mode, it returns 503 Service Unavailable
+// so that load balancers stop sending new traffic.
 func (c *Checker) ReadinessHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		GetHealthMetrics().checksTotal.WithLabelValues(
+			"readiness",
+		).Inc()
+
+		// Return 503 when draining to signal load balancers
+		if c.draining.Load() {
+			response := ReadinessResponse{
+				Status:    StatusUnhealthy,
+				Timestamp: time.Now(),
+				Checks: map[string]Check{
+					"draining": {Status: StatusUnhealthy, Message: "gateway is draining"},
+				},
+			}
+			data, err := jsonMarshalFunc(response)
+			if err != nil {
+				c.logger.Error("readiness: failed to encode draining response", observability.Error(err))
+				http.Error(w, "failed to encode response", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set(HeaderContentType, ContentTypeJSON)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			if _, err := w.Write(data); err != nil {
+				c.logger.Error("readiness: failed to write draining response", observability.Error(err))
+			}
+			return
+		}
+
 		response := c.Readiness()
 
 		// Pre-encode the response to catch errors before writing headers

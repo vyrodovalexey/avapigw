@@ -173,8 +173,17 @@ func CORS(cfg CORSConfig) func(http.Handler) http.Handler {
 
 			// Handle preflight request
 			if r.Method == http.MethodOptions {
+				GetMiddlewareMetrics().corsRequestsTotal.WithLabelValues(
+					"preflight",
+				).Inc()
 				w.WriteHeader(http.StatusNoContent)
 				return
+			}
+
+			if r.Header.Get("Origin") != "" {
+				GetMiddlewareMetrics().corsRequestsTotal.WithLabelValues(
+					"actual",
+				).Inc()
 			}
 
 			next.ServeHTTP(w, r)

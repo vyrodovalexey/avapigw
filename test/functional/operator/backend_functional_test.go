@@ -4,6 +4,7 @@
 package operator_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,14 +20,14 @@ func TestFunctional_Backend_Validation(t *testing.T) {
 
 	t.Run("valid basic backend", func(t *testing.T) {
 		backend := createBasicBackend()
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
 
 	t.Run("valid backend with all fields", func(t *testing.T) {
 		backend := createFullBackend()
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -34,7 +35,7 @@ func TestFunctional_Backend_Validation(t *testing.T) {
 	t.Run("invalid - no hosts", func(t *testing.T) {
 		backend := createBasicBackend()
 		backend.Spec.Hosts = nil
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "at least one host is required")
 	})
@@ -42,7 +43,7 @@ func TestFunctional_Backend_Validation(t *testing.T) {
 	t.Run("invalid host address - empty", func(t *testing.T) {
 		backend := createBasicBackend()
 		backend.Spec.Hosts[0].Address = ""
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "address is required")
 	})
@@ -50,7 +51,7 @@ func TestFunctional_Backend_Validation(t *testing.T) {
 	t.Run("invalid host port - zero", func(t *testing.T) {
 		backend := createBasicBackend()
 		backend.Spec.Hosts[0].Port = 0
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "port must be between 1 and 65535")
 	})
@@ -58,7 +59,7 @@ func TestFunctional_Backend_Validation(t *testing.T) {
 	t.Run("invalid host port - too high", func(t *testing.T) {
 		backend := createBasicBackend()
 		backend.Spec.Hosts[0].Port = 70000
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "port must be between 1 and 65535")
 	})
@@ -66,7 +67,7 @@ func TestFunctional_Backend_Validation(t *testing.T) {
 	t.Run("invalid host weight - negative", func(t *testing.T) {
 		backend := createBasicBackend()
 		backend.Spec.Hosts[0].Weight = -1
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "weight must be between 0 and 100")
 	})
@@ -74,7 +75,7 @@ func TestFunctional_Backend_Validation(t *testing.T) {
 	t.Run("invalid host weight - too high", func(t *testing.T) {
 		backend := createBasicBackend()
 		backend.Spec.Hosts[0].Weight = 150
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "weight must be between 0 and 100")
 	})
@@ -93,7 +94,7 @@ func TestFunctional_Backend_HealthCheck(t *testing.T) {
 			HealthyThreshold:   2,
 			UnhealthyThreshold: 3,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -102,7 +103,7 @@ func TestFunctional_Backend_HealthCheck(t *testing.T) {
 		backend.Spec.HealthCheck = &avapigwv1alpha1.HealthCheckConfig{
 			Path: "",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "path is required")
 	})
@@ -113,7 +114,7 @@ func TestFunctional_Backend_HealthCheck(t *testing.T) {
 			Path:     "/health",
 			Interval: "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "interval is invalid")
 	})
@@ -124,7 +125,7 @@ func TestFunctional_Backend_HealthCheck(t *testing.T) {
 			Path:    "/health",
 			Timeout: "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "timeout is invalid")
 	})
@@ -135,7 +136,7 @@ func TestFunctional_Backend_HealthCheck(t *testing.T) {
 			Path:             "/health",
 			HealthyThreshold: -1,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "healthyThreshold must be non-negative")
 	})
@@ -150,7 +151,7 @@ func TestFunctional_Backend_LoadBalancer(t *testing.T) {
 		backend.Spec.LoadBalancer = &avapigwv1alpha1.LoadBalancerConfig{
 			Algorithm: avapigwv1alpha1.LoadBalancerRoundRobin,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -159,7 +160,7 @@ func TestFunctional_Backend_LoadBalancer(t *testing.T) {
 		backend.Spec.LoadBalancer = &avapigwv1alpha1.LoadBalancerConfig{
 			Algorithm: avapigwv1alpha1.LoadBalancerWeighted,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -168,7 +169,7 @@ func TestFunctional_Backend_LoadBalancer(t *testing.T) {
 		backend.Spec.LoadBalancer = &avapigwv1alpha1.LoadBalancerConfig{
 			Algorithm: avapigwv1alpha1.LoadBalancerLeastConn,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -177,7 +178,7 @@ func TestFunctional_Backend_LoadBalancer(t *testing.T) {
 		backend.Spec.LoadBalancer = &avapigwv1alpha1.LoadBalancerConfig{
 			Algorithm: avapigwv1alpha1.LoadBalancerRandom,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -194,7 +195,7 @@ func TestFunctional_Backend_TLS(t *testing.T) {
 			CAFile:     "/certs/ca.crt",
 			MinVersion: "TLS12",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -207,7 +208,7 @@ func TestFunctional_Backend_TLS(t *testing.T) {
 			CertFile: "/certs/client.crt",
 			KeyFile:  "/certs/client.key",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -224,7 +225,7 @@ func TestFunctional_Backend_TLS(t *testing.T) {
 				TTL:        "24h",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -236,7 +237,7 @@ func TestFunctional_Backend_TLS(t *testing.T) {
 			CAFile:  "/certs/ca.crt",
 			// Missing CertFile and KeyFile
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "tls.certFile or tls.vault is required for MUTUAL TLS mode")
 	})
@@ -254,7 +255,7 @@ func TestFunctional_Backend_CircuitBreaker(t *testing.T) {
 			Timeout:          "30s",
 			HalfOpenRequests: 3,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -265,7 +266,7 @@ func TestFunctional_Backend_CircuitBreaker(t *testing.T) {
 			Threshold: 0,
 			Timeout:   "30s",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "threshold must be at least 1")
 	})
@@ -277,7 +278,7 @@ func TestFunctional_Backend_CircuitBreaker(t *testing.T) {
 			Threshold: 5,
 			Timeout:   "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "timeout is invalid")
 	})
@@ -297,7 +298,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				StaticToken: "test-token",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -316,7 +317,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -337,7 +338,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -351,7 +352,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				Password: "pass",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -364,7 +365,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				VaultPath: "secret/backend/credentials",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -378,7 +379,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				KeyFile:  "/certs/client.key",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -394,7 +395,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "issuerUrl is required")
 	})
@@ -411,7 +412,7 @@ func TestFunctional_Backend_Authentication(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "clientId is required")
 	})
@@ -429,7 +430,7 @@ func TestFunctional_Backend_MaxSessions(t *testing.T) {
 			QueueSize:     50,
 			QueueTimeout:  "10s",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -439,7 +440,7 @@ func TestFunctional_Backend_MaxSessions(t *testing.T) {
 			Enabled:       true,
 			MaxConcurrent: 0,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 	})
 }
@@ -455,7 +456,7 @@ func TestFunctional_Backend_RateLimit(t *testing.T) {
 			RequestsPerSecond: 100,
 			Burst:             200,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -511,7 +512,7 @@ func TestFunctional_Backend_RequestLimits(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicBackend()
 			backend.Spec.RequestLimits = tt.requestLimits
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -621,7 +622,7 @@ func TestFunctional_Backend_Transform(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicBackend()
 			backend.Spec.Transform = tt.transform
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -709,7 +710,7 @@ func TestFunctional_Backend_Cache(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicBackend()
 			backend.Spec.Cache = tt.cache
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -805,7 +806,7 @@ func TestFunctional_Backend_Encoding(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicBackend()
 			backend.Spec.Encoding = tt.encoding
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -859,7 +860,7 @@ func TestFunctional_Backend_CombinedNewFields(t *testing.T) {
 				Compression: "gzip",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -884,7 +885,7 @@ func TestFunctional_Backend_CombinedNewFields(t *testing.T) {
 				Compression: "gzip",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -897,7 +898,7 @@ func TestFunctional_Backend_Update(t *testing.T) {
 		oldBackend := createBasicBackend()
 		newBackend := createBasicBackend()
 		newBackend.Spec.Hosts[0].Weight = 50
-		warnings, err := validator.ValidateUpdate(nil, oldBackend, newBackend)
+		warnings, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
@@ -906,7 +907,7 @@ func TestFunctional_Backend_Update(t *testing.T) {
 		oldBackend := createBasicBackend()
 		newBackend := createBasicBackend()
 		newBackend.Spec.Hosts[0].Port = 0
-		_, err := validator.ValidateUpdate(nil, oldBackend, newBackend)
+		_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
 		assert.Error(t, err)
 	})
 }
@@ -917,7 +918,7 @@ func TestFunctional_Backend_Delete(t *testing.T) {
 
 	t.Run("delete always succeeds", func(t *testing.T) {
 		backend := createBasicBackend()
-		warnings, err := validator.ValidateDelete(nil, backend)
+		warnings, err := validator.ValidateDelete(context.Background(), backend)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})

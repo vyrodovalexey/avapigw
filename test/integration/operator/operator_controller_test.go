@@ -5,6 +5,7 @@ package operator_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,10 +74,10 @@ func TestIntegration_Controller_APIRoute_Reconcile(t *testing.T) {
 			},
 		}
 
-		// First reconcile - adds finalizer
+		// First reconcile - adds finalizer (Patch triggers watch event, no explicit requeue)
 		result, err := reconciler.Reconcile(ctx, req)
 		require.NoError(t, err)
-		assert.True(t, result.Requeue)
+		assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 		// Second reconcile - applies config
 		result, err = reconciler.Reconcile(ctx, req)
@@ -210,10 +211,10 @@ func TestIntegration_Controller_Backend_Reconcile(t *testing.T) {
 			},
 		}
 
-		// First reconcile - adds finalizer
+		// First reconcile - adds finalizer (Patch triggers watch event, no explicit requeue)
 		result, err := reconciler.Reconcile(ctx, req)
 		require.NoError(t, err)
-		assert.True(t, result.Requeue)
+		assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 		// Second reconcile - applies config
 		result, err = reconciler.Reconcile(ctx, req)
@@ -274,10 +275,10 @@ func TestIntegration_Controller_GRPCRoute_Reconcile(t *testing.T) {
 			},
 		}
 
-		// First reconcile - adds finalizer
+		// First reconcile - adds finalizer (Patch triggers watch event, no explicit requeue)
 		result, err := reconciler.Reconcile(ctx, req)
 		require.NoError(t, err)
-		assert.True(t, result.Requeue)
+		assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 		// Second reconcile - applies config
 		result, err = reconciler.Reconcile(ctx, req)
@@ -334,10 +335,10 @@ func TestIntegration_Controller_GRPCBackend_Reconcile(t *testing.T) {
 			},
 		}
 
-		// First reconcile - adds finalizer
+		// First reconcile - adds finalizer (Patch triggers watch event, no explicit requeue)
 		result, err := reconciler.Reconcile(ctx, req)
 		require.NoError(t, err)
-		assert.True(t, result.Requeue)
+		assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 		// Second reconcile - applies config
 		result, err = reconciler.Reconcile(ctx, req)
@@ -463,13 +464,34 @@ func TestIntegration_Controller_EventRecording(t *testing.T) {
 		_, _ = reconciler.Reconcile(ctx, req)
 		_, _ = reconciler.Reconcile(ctx, req)
 
-		// Check for events
-		select {
-		case event := <-recorder.Events:
-			assert.Contains(t, event, "Reconciled")
-		case <-time.After(time.Second):
-			// Event may not be recorded in all cases
+		// Check for events - reconcileAPIRoute fires ConfigApplied first,
+		// then BaseReconcile fires Reconciled. Drain all events and verify
+		// that both event types are present.
+		var events []string
+		drainDone := false
+		for !drainDone {
+			select {
+			case event := <-recorder.Events:
+				events = append(events, event)
+			case <-time.After(time.Second):
+				drainDone = true
+			}
 		}
+		require.NotEmpty(t, events, "Should have recorded at least one event")
+
+		// Verify we got the ConfigApplied event from reconcileAPIRoute
+		foundConfigApplied := false
+		foundReconciled := false
+		for _, event := range events {
+			if strings.Contains(event, "ConfigApplied") {
+				foundConfigApplied = true
+			}
+			if strings.Contains(event, "Reconciled") {
+				foundReconciled = true
+			}
+		}
+		assert.True(t, foundConfigApplied, "Should find ConfigApplied event, got events: %v", events)
+		assert.True(t, foundReconciled, "Should find Reconciled event, got events: %v", events)
 	})
 }
 

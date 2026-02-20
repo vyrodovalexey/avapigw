@@ -4,6 +4,7 @@
 package operator_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,14 +20,14 @@ func TestFunctional_GRPCBackend_Validation(t *testing.T) {
 
 	t.Run("valid basic gRPC backend", func(t *testing.T) {
 		backend := createBasicGRPCBackend()
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
 
 	t.Run("valid gRPC backend with all fields", func(t *testing.T) {
 		backend := createFullGRPCBackend()
-		warnings, err := validator.ValidateCreate(nil, backend)
+		warnings, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 		_ = warnings
 	})
@@ -34,7 +35,7 @@ func TestFunctional_GRPCBackend_Validation(t *testing.T) {
 	t.Run("invalid - no hosts", func(t *testing.T) {
 		backend := createBasicGRPCBackend()
 		backend.Spec.Hosts = nil
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "at least one host is required")
 	})
@@ -42,7 +43,7 @@ func TestFunctional_GRPCBackend_Validation(t *testing.T) {
 	t.Run("invalid host address - empty", func(t *testing.T) {
 		backend := createBasicGRPCBackend()
 		backend.Spec.Hosts[0].Address = ""
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "address is required")
 	})
@@ -50,7 +51,7 @@ func TestFunctional_GRPCBackend_Validation(t *testing.T) {
 	t.Run("invalid host port - zero", func(t *testing.T) {
 		backend := createBasicGRPCBackend()
 		backend.Spec.Hosts[0].Port = 0
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "port must be between 1 and 65535")
 	})
@@ -58,7 +59,7 @@ func TestFunctional_GRPCBackend_Validation(t *testing.T) {
 	t.Run("invalid host weight - negative", func(t *testing.T) {
 		backend := createBasicGRPCBackend()
 		backend.Spec.Hosts[0].Weight = -1
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "weight must be between 0 and 100")
 	})
@@ -78,7 +79,7 @@ func TestFunctional_GRPCBackend_HealthCheck(t *testing.T) {
 			HealthyThreshold:   2,
 			UnhealthyThreshold: 3,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -90,7 +91,7 @@ func TestFunctional_GRPCBackend_HealthCheck(t *testing.T) {
 			Interval: "10s",
 			Timeout:  "5s",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -100,7 +101,7 @@ func TestFunctional_GRPCBackend_HealthCheck(t *testing.T) {
 			Enabled:  true,
 			Interval: "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "interval is invalid")
 	})
@@ -111,7 +112,7 @@ func TestFunctional_GRPCBackend_HealthCheck(t *testing.T) {
 			Enabled: true,
 			Timeout: "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "timeout is invalid")
 	})
@@ -128,7 +129,7 @@ func TestFunctional_GRPCBackend_ConnectionPool(t *testing.T) {
 			MaxConnsPerHost: 100,
 			IdleConnTimeout: "5m",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -138,7 +139,7 @@ func TestFunctional_GRPCBackend_ConnectionPool(t *testing.T) {
 			MaxIdleConns:    -1,
 			MaxConnsPerHost: 100,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "maxIdleConns must be non-negative")
 	})
@@ -149,7 +150,7 @@ func TestFunctional_GRPCBackend_ConnectionPool(t *testing.T) {
 			MaxIdleConns:    10,
 			MaxConnsPerHost: -1,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "maxConnsPerHost must be non-negative")
 	})
@@ -161,7 +162,7 @@ func TestFunctional_GRPCBackend_ConnectionPool(t *testing.T) {
 			MaxConnsPerHost: 100,
 			IdleConnTimeout: "invalid",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "idleConnTimeout is invalid")
 	})
@@ -179,7 +180,7 @@ func TestFunctional_GRPCBackend_TLS(t *testing.T) {
 			ServerName: "grpc-backend.internal",
 			MinVersion: "TLS12",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -197,7 +198,7 @@ func TestFunctional_GRPCBackend_TLS(t *testing.T) {
 				TTL:        "24h",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -214,7 +215,7 @@ func TestFunctional_GRPCBackend_CircuitBreaker(t *testing.T) {
 			Timeout:          "30s",
 			HalfOpenRequests: 3,
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -225,7 +226,7 @@ func TestFunctional_GRPCBackend_CircuitBreaker(t *testing.T) {
 			Threshold: 0,
 			Timeout:   "30s",
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "threshold must be at least 1")
 	})
@@ -252,7 +253,7 @@ func TestFunctional_GRPCBackend_Authentication(t *testing.T) {
 				HeaderPrefix: "Bearer",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -270,7 +271,7 @@ func TestFunctional_GRPCBackend_Authentication(t *testing.T) {
 				},
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -340,7 +341,7 @@ func TestFunctional_GRPCBackend_MaxSessions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicGRPCBackend()
 			backend.Spec.MaxSessions = tt.maxSessions
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -408,7 +409,7 @@ func TestFunctional_GRPCBackend_RateLimit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicGRPCBackend()
 			backend.Spec.RateLimit = tt.rateLimit
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -501,7 +502,7 @@ func TestFunctional_GRPCBackend_Transform(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicGRPCBackend()
 			backend.Spec.Transform = tt.transform
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -589,7 +590,7 @@ func TestFunctional_GRPCBackend_Cache(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicGRPCBackend()
 			backend.Spec.Cache = tt.cache
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -665,7 +666,7 @@ func TestFunctional_GRPCBackend_Encoding(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := createBasicGRPCBackend()
 			backend.Spec.Encoding = tt.encoding
-			_, err := validator.ValidateCreate(nil, backend)
+			_, err := validator.ValidateCreate(context.Background(), backend)
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.errMsg != "" {
@@ -721,7 +722,7 @@ func TestFunctional_GRPCBackend_CombinedNewFields(t *testing.T) {
 				ContentType: "application/grpc",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 
@@ -753,7 +754,7 @@ func TestFunctional_GRPCBackend_CombinedNewFields(t *testing.T) {
 				ContentType: "application/grpc",
 			},
 		}
-		_, err := validator.ValidateCreate(nil, backend)
+		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
 	})
 }
@@ -766,7 +767,7 @@ func TestFunctional_GRPCBackend_Update(t *testing.T) {
 		oldBackend := createBasicGRPCBackend()
 		newBackend := createBasicGRPCBackend()
 		newBackend.Spec.Hosts[0].Weight = 50
-		warnings, err := validator.ValidateUpdate(nil, oldBackend, newBackend)
+		warnings, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})
@@ -775,7 +776,7 @@ func TestFunctional_GRPCBackend_Update(t *testing.T) {
 		oldBackend := createBasicGRPCBackend()
 		newBackend := createBasicGRPCBackend()
 		newBackend.Spec.Hosts[0].Port = 0
-		_, err := validator.ValidateUpdate(nil, oldBackend, newBackend)
+		_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
 		assert.Error(t, err)
 	})
 }
@@ -786,7 +787,7 @@ func TestFunctional_GRPCBackend_Delete(t *testing.T) {
 
 	t.Run("delete always succeeds", func(t *testing.T) {
 		backend := createBasicGRPCBackend()
-		warnings, err := validator.ValidateDelete(nil, backend)
+		warnings, err := validator.ValidateDelete(context.Background(), backend)
 		assert.NoError(t, err)
 		assert.Empty(t, warnings)
 	})

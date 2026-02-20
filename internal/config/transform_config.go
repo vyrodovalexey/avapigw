@@ -1,6 +1,11 @@
 // Package config provides configuration types and loading for the API Gateway.
 package config
 
+import (
+	"encoding/json"
+	"sort"
+)
+
 // TransformConfig represents the root transformation configuration for a route.
 // It allows configuring both request and response transformations.
 type TransformConfig struct {
@@ -160,6 +165,109 @@ const (
 	// ArrayOperationDeduplicate removes duplicate elements.
 	ArrayOperationDeduplicate = "deduplicate"
 )
+
+// UnmarshalJSON implements custom JSON unmarshaling for ResponseTransformConfig.
+// It handles both CRD format (fieldMappings as map[string]string) and internal format
+// (fieldMappings as []FieldMapping) for compatibility with the operator's CRD spec JSON.
+func (rtc *ResponseTransformConfig) UnmarshalJSON(data []byte) error {
+	// Use an alias to avoid infinite recursion when calling json.Unmarshal.
+	type Alias ResponseTransformConfig
+
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err == nil {
+		*rtc = ResponseTransformConfig(alias)
+		return nil
+	}
+
+	// Standard unmarshal failed — likely because fieldMappings is a map[string]string
+	// from the CRD format instead of []FieldMapping. Parse raw fields manually.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// Handle fieldMappings as map[string]string (CRD format).
+	if fm, ok := raw["fieldMappings"]; ok {
+		var mapFM map[string]string
+		if err := json.Unmarshal(fm, &mapFM); err == nil {
+			for source, target := range mapFM {
+				alias.FieldMappings = append(alias.FieldMappings, FieldMapping{
+					Source: source,
+					Target: target,
+				})
+			}
+			// Sort by Source for deterministic ordering since map iteration is random.
+			sort.Slice(alias.FieldMappings, func(i, j int) bool {
+				return alias.FieldMappings[i].Source < alias.FieldMappings[j].Source
+			})
+			delete(raw, "fieldMappings")
+		}
+	}
+
+	// Re-marshal remaining fields and unmarshal into alias to populate other fields.
+	remaining, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+
+	// Use a secondary alias to unmarshal remaining fields without triggering
+	// the fieldMappings error again (fieldMappings was already removed from raw).
+	type NoFieldMappings struct {
+		AllowFields     []string         `json:"allowFields,omitempty"`
+		DenyFields      []string         `json:"denyFields,omitempty"`
+		GroupFields     []FieldGroup     `json:"groupFields,omitempty"`
+		FlattenFields   []string         `json:"flattenFields,omitempty"`
+		ArrayOperations []ArrayOperation `json:"arrayOperations,omitempty"`
+		Template        string           `json:"template,omitempty"`
+		MergeStrategy   string           `json:"mergeStrategy,omitempty"`
+	}
+
+	var nfm NoFieldMappings
+	if err := json.Unmarshal(remaining, &nfm); err != nil {
+		return err
+	}
+
+	alias.AllowFields = nfm.AllowFields
+	alias.DenyFields = nfm.DenyFields
+	alias.GroupFields = nfm.GroupFields
+	alias.FlattenFields = nfm.FlattenFields
+	alias.ArrayOperations = nfm.ArrayOperations
+	alias.Template = nfm.Template
+	alias.MergeStrategy = nfm.MergeStrategy
+
+	*rtc = ResponseTransformConfig(alias)
+	return nil
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for RequestTransformConfig.
+// It handles both CRD format (JSON key "template") and internal format (JSON key "bodyTemplate")
+// for compatibility with the operator's CRD spec JSON.
+func (rtc *RequestTransformConfig) UnmarshalJSON(data []byte) error {
+	// Use an alias to avoid infinite recursion when calling json.Unmarshal.
+	type Alias RequestTransformConfig
+
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+
+	*rtc = RequestTransformConfig(alias)
+
+	// If bodyTemplate is empty, check if the CRD "template" key was provided instead.
+	if rtc.BodyTemplate == "" {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err == nil {
+			if tmpl, ok := raw["template"]; ok {
+				var t string
+				if err := json.Unmarshal(tmpl, &t); err == nil {
+					rtc.BodyTemplate = t
+				}
+			}
+		}
+	}
+
+	return nil
+}
 
 // IsEmpty returns true if the TransformConfig has no configuration.
 func (tc *TransformConfig) IsEmpty() bool {

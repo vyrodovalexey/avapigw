@@ -1,0 +1,51 @@
+# Yandex Tank Configuration: K8s Ingress Controller Throughput Test
+# Purpose: Measure HTTPS throughput for gateway acting as Ingress Controller
+# Duration: 30 seconds total
+# Target: K8s gateway with Ingress Controller enabled
+# Load: line(1, 100, 30s) - ramp from 1 to 100 RPS over 30s
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:32300
+  load_profile:
+    load_type: rps
+    # Ramp up to 100 RPS over 30 seconds
+    schedule: line(1, 100, 30s)
+
+  ammofile: /var/loadtest/ammo/ingress-get.txt
+  ammo_type: uri
+
+  # Connection settings - SSL enabled for K8s gateway
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 15s
+
+  # Instance settings
+  instances: 200
+  threads: 4
+
+  # HTTP settings
+  header_http: "1.1"
+  # Note: Host header is set in ammo file for ingress routing
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 15% for 15 seconds
+    - http(5xx,15%,15s)
+    # Stop if 50% of requests exceed 5000ms for 15 seconds
+    - time(5000,50%,15s)
+    # Stop if total network errors exceed 10% for 15 seconds
+    - http(net,10%,15s)

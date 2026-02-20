@@ -734,6 +734,45 @@ func TestBuildInterceptors_AllOptional(t *testing.T) {
 	assert.Equal(t, cb, listener.circuitBreaker)
 }
 
+// --- ClearAuthCache tests ---
+
+func TestGRPCListener_ClearAuthCache_DelegatesToProxy(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener-cache",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	listener, err := NewGRPCListener(cfg, WithGRPCListenerLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	// Verify proxy is not nil
+	require.NotNil(t, listener.Proxy())
+
+	// ClearAuthCache should delegate to proxy without panic
+	assert.NotPanics(t, func() {
+		listener.ClearAuthCache()
+	})
+}
+
+func TestGRPCListener_ClearAuthCache_NilProxy_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	// Create a GRPCListener with nil proxy (edge case)
+	listener := &GRPCListener{
+		config: config.Listener{Name: "nil-proxy-listener"},
+		logger: observability.NopLogger(),
+		proxy:  nil,
+	}
+
+	// ClearAuthCache should not panic when proxy is nil
+	assert.NotPanics(t, func() {
+		listener.ClearAuthCache()
+	})
+}
+
 // noopAuditLogger is a minimal audit.Logger for testing.
 type noopAuditLogger struct{}
 

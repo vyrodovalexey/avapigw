@@ -176,11 +176,11 @@ gateway:
       route:
         - destination:
             host: host.docker.internal
-            port: 8803
+            port: 8811
           weight: 50
         - destination:
             host: host.docker.internal
-            port: 8804
+            port: 8812
           weight: 50
       timeout: 30s
 
@@ -191,13 +191,13 @@ gateway:
       route:
         - destination:
             host: host.docker.internal
-            port: 8803
+            port: 8811
 
   grpcBackends:
     - name: grpc-backend-1
       hosts:
         - address: host.docker.internal
-          port: 8803
+          port: 8811
           weight: 1
       healthCheck:
         enabled: true
@@ -211,7 +211,7 @@ gateway:
     - name: grpc-backend-2
       hosts:
         - address: host.docker.internal
-          port: 8804
+          port: 8812
           weight: 1
       healthCheck:
         enabled: true

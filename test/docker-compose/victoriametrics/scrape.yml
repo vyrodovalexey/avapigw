@@ -13,24 +13,91 @@ scrape_configs:
 
   - job_name: 'avapigw-gateway-k8s'
     static_configs:
-      - targets: ['host.docker.internal:32066']
+      - targets: ['host.docker.internal:32591']
         labels:
           instance: 'gateway-k8s'
           component: 'gateway'
     metrics_path: /metrics
 
+  # REST API backends (probe port 9090)
   - job_name: 'rest-backend-1'
     static_configs:
-      - targets: ['rest_api_1:8080']
+      - targets: ['rest_api_1:9090']
         labels:
           instance: 'rest-backend-1'
-          component: 'backend'
+          component: 'backend-rest'
+          auth_mode: 'none'
     metrics_path: /metrics
 
   - job_name: 'rest-backend-2'
     static_configs:
-      - targets: ['rest_api_2:8080']
+      - targets: ['rest_api_2:9090']
         labels:
           instance: 'rest-backend-2'
-          component: 'backend'
+          component: 'backend-rest'
+          auth_mode: 'none'
+    metrics_path: /metrics
+
+  - job_name: 'rest-backend-3-oidc'
+    static_configs:
+      - targets: ['rest_api_3:9090']
+        labels:
+          instance: 'rest-backend-3'
+          component: 'backend-rest'
+          auth_mode: 'oidc'
+    metrics_path: /metrics
+
+  - job_name: 'rest-backend-4-mtls'
+    static_configs:
+      - targets: ['rest_api_4:9090']
+        labels:
+          instance: 'rest-backend-4'
+          component: 'backend-rest'
+          auth_mode: 'mtls'
+    metrics_path: /metrics
+
+  - job_name: 'rest-backend-5-basic'
+    static_configs:
+      - targets: ['rest_api_5:9090']
+        labels:
+          instance: 'rest-backend-5'
+          component: 'backend-rest'
+          auth_mode: 'basic'
+    metrics_path: /metrics
+
+  # gRPC backends (metrics port 9090)
+  - job_name: 'grpc-backend-1'
+    static_configs:
+      - targets: ['grpc_1:9090']
+        labels:
+          instance: 'grpc-backend-1'
+          component: 'backend-grpc'
+          auth_mode: 'none'
+    metrics_path: /metrics
+
+  - job_name: 'grpc-backend-2'
+    static_configs:
+      - targets: ['grpc_2:9090']
+        labels:
+          instance: 'grpc-backend-2'
+          component: 'backend-grpc'
+          auth_mode: 'none'
+    metrics_path: /metrics
+
+  - job_name: 'grpc-backend-3-mtls'
+    static_configs:
+      - targets: ['grpc_3:9090']
+        labels:
+          instance: 'grpc-backend-3'
+          component: 'backend-grpc'
+          auth_mode: 'mtls'
+    metrics_path: /metrics
+
+  - job_name: 'grpc-backend-4-oidc'
+    static_configs:
+      - targets: ['grpc_4:9090']
+        labels:
+          instance: 'grpc-backend-4'
+          component: 'backend-grpc'
+          auth_mode: 'oidc'
     metrics_path: /metrics

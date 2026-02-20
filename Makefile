@@ -31,8 +31,8 @@ TEST_BACKEND1_URL ?= http://127.0.0.1:8801
 TEST_BACKEND2_URL ?= http://127.0.0.1:8802
 
 # Test backend URLs (gRPC)
-TEST_GRPC_BACKEND1_URL ?= 127.0.0.1:8803
-TEST_GRPC_BACKEND2_URL ?= 127.0.0.1:8804
+TEST_GRPC_BACKEND1_URL ?= 127.0.0.1:8811
+TEST_GRPC_BACKEND2_URL ?= 127.0.0.1:8812
 
 # Vault settings
 TEST_VAULT_ADDR ?= http://127.0.0.1:8200
@@ -63,12 +63,19 @@ OPERATOR_CMD_DIR := cmd/operator
 OPERATOR_DOCKER_IMAGE ?= $(DOCKER_REGISTRY)/avapigw/avapigw-operator
 CONTROLLER_GEN := $(shell which controller-gen 2>/dev/null || echo "$(shell go env GOPATH)/bin/controller-gen")
 
+# Test environment variables
+TEST_ENV_DIR := test/docker-compose
+TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avapigw-test
+
 .PHONY: all build build-linux build-darwin build-windows build-all \
         test test-unit test-coverage test-functional test-integration test-e2e test-all \
         test-grpc-unit test-grpc-integration test-grpc-e2e \
         test-auth-unit test-auth-integration test-auth-e2e \
         test-ingress-unit test-ingress-functional \
         test-sentinel \
+        test-env-up test-env-down test-env-status test-env-logs test-env-wait \
+        test-env-setup test-env-setup-vault test-env-setup-keycloak \
+        test-env-restart-auth-backends test-env-verify \
         lint lint-fix fmt vet vuln \
         docker-build docker-run docker-push docker-clean \
         run dev clean deps tools generate proto-generate \
@@ -623,6 +630,113 @@ perf-verify-infra:
 	@$(PERF_SCRIPTS)/setup-keycloak.sh --verify
 
 # ==============================================================================
+# Test environment targets (Docker Compose)
+# ==============================================================================
+
+## test-env-up: Start the test environment (all services)
+test-env-up:
+	@echo "==> Starting test environment..."
+	$(TEST_ENV_COMPOSE) up -d
+	@echo "==> Test environment started"
+	@echo "==> Run 'make test-env-wait' to wait for services, then 'make test-env-setup' to configure"
+
+## test-env-down: Stop the test environment and remove volumes
+test-env-down:
+	@echo "==> Stopping test environment..."
+	$(TEST_ENV_COMPOSE) down -v
+	@echo "==> Test environment stopped"
+
+## test-env-status: Show status of test environment services
+test-env-status:
+	@echo "==> Test environment status:"
+	@$(TEST_ENV_COMPOSE) ps
+
+## test-env-logs: Show logs from test environment services
+test-env-logs:
+	@$(TEST_ENV_COMPOSE) logs --tail=50
+
+## test-env-wait: Wait for all core services to be ready
+test-env-wait:
+	@echo "==> Waiting for Vault..."
+	@for i in $$(seq 1 30); do \
+		if curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1; then \
+			echo "  Vault is ready"; \
+			break; \
+		fi; \
+		sleep 2; \
+	done
+	@echo "==> Waiting for Keycloak..."
+	@for i in $$(seq 1 60); do \
+		if curl -sf http://127.0.0.1:8090/realms/master > /dev/null 2>&1; then \
+			echo "  Keycloak is ready"; \
+			break; \
+		fi; \
+		sleep 3; \
+	done
+	@echo "==> Waiting for REST backend 1..."
+	@for i in $$(seq 1 20); do \
+		if curl -sf http://127.0.0.1:8801/health > /dev/null 2>&1; then \
+			echo "  REST backend 1 is ready"; \
+			break; \
+		fi; \
+		sleep 2; \
+	done
+	@echo "==> Waiting for REST backend 2..."
+	@for i in $$(seq 1 20); do \
+		if curl -sf http://127.0.0.1:8802/health > /dev/null 2>&1; then \
+			echo "  REST backend 2 is ready"; \
+			break; \
+		fi; \
+		sleep 2; \
+	done
+	@echo "==> Waiting for Redis..."
+	@for i in $$(seq 1 20); do \
+		if docker exec redis redis-cli -a password ping 2>/dev/null | grep -q PONG; then \
+			echo "  Redis is ready"; \
+			break; \
+		fi; \
+		sleep 2; \
+	done
+	@echo "==> Core services are ready"
+
+## test-env-setup-vault: Configure Vault PKI and KV for testing
+test-env-setup-vault:
+	@echo "==> Setting up Vault..."
+	@$(TEST_ENV_DIR)/scripts/setup-vault.sh
+
+## test-env-setup-keycloak: Configure Keycloak realms and clients for testing
+test-env-setup-keycloak:
+	@echo "==> Setting up Keycloak..."
+	@$(TEST_ENV_DIR)/scripts/setup-keycloak.sh
+
+## test-env-restart-auth-backends: Restart mTLS and OIDC backends after cert/config setup
+test-env-restart-auth-backends:
+	@echo "==> Restarting auth backends to pick up new certs/config..."
+	$(TEST_ENV_COMPOSE) restart rest_api_3 rest_api_4 grpc_3 grpc_4
+	@echo "==> Auth backends restarted"
+
+## test-env-setup: Full setup - configure Vault, Keycloak, and restart auth backends
+test-env-setup: test-env-setup-vault test-env-setup-keycloak test-env-restart-auth-backends
+	@echo "==> Full test environment setup complete"
+
+## test-env-verify: Verify test environment is properly configured
+test-env-verify:
+	@echo "==> Verifying test environment..."
+	@$(TEST_ENV_DIR)/scripts/setup-vault.sh --verify
+	@$(TEST_ENV_DIR)/scripts/setup-keycloak.sh --verify
+	@echo "==> Checking service health..."
+	@echo -n "  Vault:          " && (curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@echo -n "  Keycloak:       " && (curl -sf http://127.0.0.1:8090/realms/master > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@echo -n "  REST API 1:     " && (curl -sf http://127.0.0.1:8801/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@echo -n "  REST API 2:     " && (curl -sf http://127.0.0.1:8802/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@echo -n "  REST API 3 (OIDC): " && (curl -sf http://127.0.0.1:8803/health > /dev/null 2>&1 && echo "✓ healthy" || echo "⚠ may require OIDC token")
+	@echo -n "  REST API 5 (basic): " && (curl -sf http://127.0.0.1:8805/health > /dev/null 2>&1 && echo "✓ healthy" || echo "⚠ may require auth")
+	@echo -n "  gRPC 1:         " && (curl -sf http://127.0.0.1:9091/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
+	@echo -n "  gRPC 2:         " && (curl -sf http://127.0.0.1:9092/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
+	@echo -n "  Redis:          " && (docker exec redis redis-cli -a password ping 2>/dev/null | grep -q PONG && echo "✓ healthy" || echo "✗ unavailable")
+	@echo "==> Verification complete"
+
+# ==============================================================================
 # CI targets
 # ==============================================================================
 
@@ -765,6 +879,18 @@ help:
 	@echo "  DOCKER_REGISTRY            Docker registry (default: ghcr.io)"
 	@echo "  DOCKER_IMAGE               Docker image name"
 	@echo "  DOCKER_TAG                 Docker image tag (default: VERSION)"
+	@echo ""
+	@echo "Test environment targets:"
+	@echo "  test-env-up              Start test environment (docker compose)"
+	@echo "  test-env-down            Stop test environment and remove volumes"
+	@echo "  test-env-status          Show status of test environment services"
+	@echo "  test-env-logs            Show logs from test environment"
+	@echo "  test-env-wait            Wait for core services to be ready"
+	@echo "  test-env-setup           Full setup (Vault PKI + Keycloak + restart backends)"
+	@echo "  test-env-setup-vault     Configure Vault PKI and KV"
+	@echo "  test-env-setup-keycloak  Configure Keycloak realms and clients"
+	@echo "  test-env-restart-auth-backends  Restart mTLS/OIDC backends"
+	@echo "  test-env-verify          Verify test environment configuration"
 	@echo ""
 	@echo "Helm chart targets:"
 	@echo "  helm-lint                  Lint Helm chart"

@@ -9,7 +9,7 @@
 phantom:
   package: yandextank.plugins.Phantom
   enabled: true
-  address: host.docker.internal:32681
+  address: host.docker.internal:32300
   load_profile:
     load_type: rps
     # Conservative ramp for local K8s with TLS:

@@ -27,10 +27,14 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	operatorv1alpha1 "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1"
 )
+
+// clientStopTimeout is the timeout for waiting for operator client goroutines to stop.
+const clientStopTimeout = 5 * time.Second
 
 // Client errors.
 var (
@@ -347,7 +351,7 @@ func (c *Client) Stop() error {
 	case <-done:
 		// All goroutines stopped cleanly
 		c.logger.Debug("all operator client goroutines stopped")
-	case <-time.After(5 * time.Second):
+	case <-time.After(clientStopTimeout):
 		c.logger.Warn("timeout waiting for operator client goroutines to stop")
 	}
 
@@ -664,6 +668,10 @@ func (c *Client) handleUpdate(ctx context.Context, update *operatorv1alpha1.Conf
 	c.metrics.setLastConfigVersion(update.Sequence)
 	if update.Timestamp != nil {
 		c.metrics.setLastConfigTimestamp(float64(update.Timestamp.AsTime().Unix()))
+	} else {
+		// For snapshots and updates without an explicit timestamp, use the
+		// current time so the metric never stays at epoch 0 (1970-01-01).
+		c.metrics.setLastConfigTimestamp(float64(time.Now().Unix()))
 	}
 
 	// Send acknowledgment
@@ -809,7 +817,7 @@ func (c *Client) buildGatewayStatus(lastConfigApplied time.Time) *operatorv1alph
 	}
 
 	if !lastConfigApplied.IsZero() {
-		status.LastConfigApplied = nil // Would need timestamppb import
+		status.LastConfigApplied = timestamppb.New(lastConfigApplied)
 	}
 
 	if c.statusProvider != nil {
@@ -831,6 +839,20 @@ func (c *Client) buildGatewayStatus(lastConfigApplied time.Time) *operatorv1alph
 func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 	backoffCfg := c.config.ReconnectBackoff
 	maxRetries := backoffCfg.GetMaxRetries()
+
+	// Derive a context that is canceled when stopCh is closed so that
+	// long-running RPCs (Connect, register) are interrupted promptly.
+	reconnectCtx, reconnectCancel := context.WithCancel(ctx)
+	defer reconnectCancel()
+
+	go func() {
+		select {
+		case <-c.stopCh:
+			reconnectCancel()
+		case <-reconnectCtx.Done():
+			// Context already canceled; nothing to do.
+		}
+	}()
 
 	for {
 		select {
@@ -867,7 +889,7 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 		}
 
 		// Attempt reconnection
-		if err := c.Connect(ctx); err != nil {
+		if err := c.Connect(reconnectCtx); err != nil {
 			c.logger.Error("reconnection failed",
 				observability.Error(err),
 				observability.Int("attempt", c.reconnectAttempts),
@@ -876,7 +898,11 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 		}
 
 		// Re-register
-		if err := c.register(ctx); err != nil {
+		if err := c.register(reconnectCtx); err != nil {
+			// If the context was canceled due to stop signal, exit immediately
+			if reconnectCtx.Err() != nil {
+				return false
+			}
 			c.logger.Error("re-registration failed",
 				observability.Error(err),
 				observability.Int("attempt", c.reconnectAttempts),

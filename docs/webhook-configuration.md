@@ -73,6 +73,19 @@ graph TB
 - **Path Type Validation** - Validates supported path types
 - **TLS Configuration Validation** - Validates TLS sections
 
+#### 4. Security Validation Warnings
+The webhooks provide security warnings for potentially unsafe configurations:
+
+- **Plaintext Secrets Warning** - Warns when JWT HMAC secrets or OIDC client secrets are provided as plaintext instead of Vault references
+- **Insecure TLS Warning** - Warns when TLS verification is disabled in production environments
+- **Weak Authentication Warning** - Warns when authentication is disabled on sensitive routes
+
+**Example Warning:**
+```
+SECURITY WARNING: authentication.jwt.secret contains a plaintext HMAC secret. 
+Consider using Vault integration: authentication.jwt.secretVaultPath instead.
+```
+
 ## Certificate Management Modes
 
 The operator supports three certificate management modes for webhook TLS:
@@ -438,11 +451,25 @@ The webhook CA injector automatically manages CA certificates in ValidatingWebho
 
 ### How It Works
 
-1. **Monitor Certificates** - Watch for certificate changes in secrets
-2. **Extract CA Bundle** - Extract CA certificate from webhook certificates
-3. **Update Webhook Configs** - Inject CA bundle into ValidatingWebhookConfigurations
-4. **Handle Failures** - Retry with exponential backoff on failures
-5. **Metrics Collection** - Track injection success/failure rates
+The WebhookCAInjector is now fully implemented and automatically manages CA certificates (DEV-002):
+
+1. **Certificate Monitoring** - Continuously watches certificate secrets for changes
+2. **CA Bundle Extraction** - Extracts CA certificate from webhook TLS certificates (fixed to use CA cert instead of leaf cert)
+3. **Automatic Injection** - Injects CA bundle into ValidatingWebhookConfigurations
+4. **Retry Logic** - Implements exponential backoff for failed injection attempts
+5. **Metrics Collection** - Comprehensive metrics for injection operations
+6. **OpenTelemetry Tracing** - Full tracing support for CA injection operations
+
+### Implementation Details
+
+The CA injector runs as a background goroutine within the operator and:
+
+- **Watches Certificate Secrets** - Monitors webhook certificate secrets for updates
+- **Validates CA Certificates** - Ensures CA certificates are valid before injection
+- **Updates Webhook Configurations** - Patches ValidatingWebhookConfiguration resources
+- **Handles Multiple Webhooks** - Supports injection into multiple webhook configurations
+- **Provides Status Feedback** - Reports injection status via metrics and logs
+- **Supports All Certificate Modes** - Works with self-signed, Vault PKI, and cert-manager
 
 ### Configuration
 

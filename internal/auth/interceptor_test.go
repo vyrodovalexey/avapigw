@@ -14,6 +14,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth/apikey"
 	"github.com/vyrodovalexey/avapigw/internal/auth/jwt"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 func TestNewGRPCAuthenticator(t *testing.T) {
@@ -675,4 +676,252 @@ func TestGRPCAuthenticator_FallbackToAPIKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "key-123", identity.Subject)
 	assert.Equal(t, AuthTypeAPIKey, identity.AuthType)
+}
+
+// mockVaultClientForInterceptor implements vault.Client for interceptor tests.
+type mockVaultClientForInterceptor struct {
+	enabled bool
+}
+
+func (m *mockVaultClientForInterceptor) IsEnabled() bool                      { return m.enabled }
+func (m *mockVaultClientForInterceptor) Authenticate(_ context.Context) error { return nil }
+func (m *mockVaultClientForInterceptor) RenewToken(_ context.Context) error   { return nil }
+func (m *mockVaultClientForInterceptor) Health(_ context.Context) (*vault.HealthStatus, error) {
+	return nil, nil
+}
+func (m *mockVaultClientForInterceptor) PKI() vault.PKIClient         { return nil }
+func (m *mockVaultClientForInterceptor) KV() vault.KVClient           { return nil }
+func (m *mockVaultClientForInterceptor) Transit() vault.TransitClient { return nil }
+func (m *mockVaultClientForInterceptor) Close() error                 { return nil }
+
+func TestNewGRPCAuthenticator_WithVaultClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		vaultClient vault.Client
+		wantSet     bool
+	}{
+		{
+			name:        "vault client is set via option",
+			vaultClient: &mockVaultClientForInterceptor{enabled: true},
+			wantSet:     true,
+		},
+		{
+			name:        "nil vault client",
+			vaultClient: nil,
+			wantSet:     false,
+		},
+		{
+			name:        "disabled vault client",
+			vaultClient: &mockVaultClientForInterceptor{enabled: false},
+			wantSet:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := &Config{
+				Enabled: false,
+			}
+
+			authenticator, err := NewGRPCAuthenticator(config,
+				WithGRPCVaultClient(tt.vaultClient),
+				WithGRPCAuthenticatorLogger(observability.NopLogger()),
+			)
+			require.NoError(t, err)
+			require.NotNil(t, authenticator)
+
+			// Verify the vault client was set by type-asserting to the concrete type
+			grpcAuth, ok := authenticator.(*grpcAuthenticator)
+			require.True(t, ok)
+
+			if tt.wantSet {
+				assert.NotNil(t, grpcAuth.vaultClient)
+				assert.Equal(t, tt.vaultClient, grpcAuth.vaultClient)
+			} else {
+				assert.Nil(t, grpcAuth.vaultClient)
+			}
+		})
+	}
+}
+
+func TestGRPCAuthenticator_APIKey_WithVaultConfig_NoClient(t *testing.T) {
+	t.Parallel()
+
+	// When vault config is present but no vault client is provided,
+	// the authenticator should fall back to memory store (no vault store created).
+	config := &Config{
+		Enabled: true,
+		APIKey: &apikey.Config{
+			Enabled: true,
+			Vault: &apikey.VaultConfig{
+				Enabled: true,
+				KVMount: "secret",
+				Path:    "apikeys",
+			},
+		},
+		Extraction: &ExtractionConfig{
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "x-api-key"},
+			},
+		},
+	}
+
+	// Create authenticator WITHOUT vault client — should fall back to memory store
+	authenticator, err := NewGRPCAuthenticator(config,
+		WithGRPCAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, authenticator)
+
+	// Verify the authenticator was created successfully (memory store fallback)
+	grpcAuth, ok := authenticator.(*grpcAuthenticator)
+	require.True(t, ok)
+	assert.NotNil(t, grpcAuth.apiKeyValidator, "API key validator should be initialized with memory store fallback")
+	assert.Nil(t, grpcAuth.vaultClient, "vault client should be nil when not provided")
+}
+
+func TestGRPCAuthenticator_APIKey_WithVaultConfig_WithClient(t *testing.T) {
+	t.Parallel()
+
+	// When vault config is present AND vault client is provided and enabled,
+	// the authenticator should create a vault store successfully.
+	config := &Config{
+		Enabled: true,
+		APIKey: &apikey.Config{
+			Enabled: true,
+			Vault: &apikey.VaultConfig{
+				Enabled: true,
+				KVMount: "secret",
+				Path:    "apikeys",
+			},
+		},
+		Extraction: &ExtractionConfig{
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "x-api-key"},
+			},
+		},
+	}
+
+	mockClient := &mockVaultClientForInterceptor{enabled: true}
+
+	// Create authenticator WITH vault client — vault store should be created
+	authenticator, err := NewGRPCAuthenticator(config,
+		WithGRPCVaultClient(mockClient),
+		WithGRPCAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, authenticator)
+
+	grpcAuth, ok := authenticator.(*grpcAuthenticator)
+	require.True(t, ok)
+	assert.NotNil(t, grpcAuth.apiKeyValidator, "API key validator should be initialized with vault store")
+	assert.NotNil(t, grpcAuth.vaultClient, "vault client should be set")
+}
+
+func TestGRPCAuthenticator_APIKey_WithVaultConfig_DisabledClient(t *testing.T) {
+	t.Parallel()
+
+	// When vault config is present but vault client is disabled,
+	// the vault store creation should fail because NewVaultStore requires
+	// an enabled client.
+	config := &Config{
+		Enabled: true,
+		APIKey: &apikey.Config{
+			Enabled: true,
+			Vault: &apikey.VaultConfig{
+				Enabled: true,
+				KVMount: "secret",
+				Path:    "apikeys",
+			},
+		},
+		Extraction: &ExtractionConfig{
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "x-api-key"},
+			},
+		},
+	}
+
+	// Disabled vault client — NewVaultStore will reject it
+	mockClient := &mockVaultClientForInterceptor{enabled: false}
+
+	_, err := NewGRPCAuthenticator(config,
+		WithGRPCVaultClient(mockClient),
+		WithGRPCAuthenticatorLogger(observability.NopLogger()),
+	)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "vault")
+}
+
+func TestGRPCAuthenticator_APIKey_VaultDisabled_WithClient(t *testing.T) {
+	t.Parallel()
+
+	// When vault config is present but disabled, vault store should NOT be created
+	// even if a vault client is provided.
+	config := &Config{
+		Enabled: true,
+		APIKey: &apikey.Config{
+			Enabled: true,
+			Vault: &apikey.VaultConfig{
+				Enabled: false, // Vault disabled
+				KVMount: "secret",
+				Path:    "apikeys",
+			},
+		},
+		Extraction: &ExtractionConfig{
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "x-api-key"},
+			},
+		},
+	}
+
+	mockClient := &mockVaultClientForInterceptor{enabled: true}
+
+	authenticator, err := NewGRPCAuthenticator(config,
+		WithGRPCVaultClient(mockClient),
+		WithGRPCAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, authenticator)
+
+	// Verify the authenticator was created with memory store (vault disabled)
+	grpcAuth, ok := authenticator.(*grpcAuthenticator)
+	require.True(t, ok)
+	assert.NotNil(t, grpcAuth.apiKeyValidator)
+	assert.NotNil(t, grpcAuth.vaultClient, "vault client should still be set via option")
+}
+
+func TestGRPCAuthenticator_APIKey_NilVaultConfig_WithClient(t *testing.T) {
+	t.Parallel()
+
+	// When vault config is nil, vault store should NOT be created
+	// even if a vault client is provided.
+	config := &Config{
+		Enabled: true,
+		APIKey: &apikey.Config{
+			Enabled: true,
+			// Vault is nil
+		},
+		Extraction: &ExtractionConfig{
+			APIKey: []ExtractionSource{
+				{Type: ExtractionTypeHeader, Name: "x-api-key"},
+			},
+		},
+	}
+
+	mockClient := &mockVaultClientForInterceptor{enabled: true}
+
+	authenticator, err := NewGRPCAuthenticator(config,
+		WithGRPCVaultClient(mockClient),
+		WithGRPCAuthenticatorLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, authenticator)
+
+	grpcAuth, ok := authenticator.(*grpcAuthenticator)
+	require.True(t, ok)
+	assert.NotNil(t, grpcAuth.apiKeyValidator)
 }

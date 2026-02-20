@@ -3,6 +3,8 @@ package vault
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -144,7 +146,7 @@ func TestNew_WithMetrics(t *testing.T) {
 		Token:      "test-token",
 	}
 
-	metrics := NewMetrics("test")
+	metrics := newTestMetrics("test")
 	client, err := New(cfg, logger, WithMetrics(metrics))
 	if err != nil {
 		t.Errorf("New() error = %v, want nil", err)
@@ -614,7 +616,7 @@ func TestVaultClient_IsTokenExpired(t *testing.T) {
 }
 
 func TestWithMetrics(t *testing.T) {
-	metrics := NewMetrics("test")
+	metrics := newTestMetrics("test")
 	opt := WithMetrics(metrics)
 
 	client := &vaultClient{}
@@ -746,6 +748,98 @@ func TestVaultClient_PerformTokenRenewal(t *testing.T) {
 
 	// Should not panic even when renewal fails
 	vc.performTokenRenewal()
+}
+
+// TestVaultClient_Authenticate_RenewalStartedGuard verifies that calling Authenticate()
+// twice stops the previous renewal goroutine before starting a new one, preventing
+// goroutine leaks and panics.
+func TestVaultClient_Authenticate_RenewalStartedGuard(t *testing.T) {
+	t.Parallel()
+
+	// Create a mock Vault server that returns a valid token lookup
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/auth/token/lookup-self" {
+			w.Header().Set("Content-Type", "application/json")
+			resp := `{"data": {"ttl": 3600}}`
+			_, _ = w.Write([]byte(resp))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    server.URL,
+		AuthMethod: AuthMethodToken,
+		Token:      "test-token",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// First Authenticate call - starts renewal goroutine
+	err = client.Authenticate(context.Background())
+	if err != nil {
+		t.Fatalf("First Authenticate() error = %v", err)
+	}
+
+	vc := client.(*vaultClient)
+	vc.mu.RLock()
+	firstStarted := vc.renewalStarted
+	vc.mu.RUnlock()
+	if !firstStarted {
+		t.Error("renewalStarted should be true after first Authenticate()")
+	}
+
+	// Second Authenticate call - should stop previous renewal and start new one
+	err = client.Authenticate(context.Background())
+	if err != nil {
+		t.Fatalf("Second Authenticate() error = %v", err)
+	}
+
+	vc.mu.RLock()
+	secondStarted := vc.renewalStarted
+	vc.mu.RUnlock()
+	if !secondStarted {
+		t.Error("renewalStarted should be true after second Authenticate()")
+	}
+
+	// Close should not panic or deadlock
+	err = client.Close()
+	if err != nil {
+		t.Errorf("Close() error = %v", err)
+	}
+}
+
+// TestVaultClient_Authenticate_CanceledContext verifies that Authenticate returns
+// an error when the context is already canceled.
+func TestVaultClient_Authenticate_CanceledContext(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := &Config{
+		Enabled:    true,
+		Address:    "http://localhost:8200",
+		AuthMethod: AuthMethodToken,
+		Token:      "test-token",
+	}
+
+	client, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	err = client.Authenticate(ctx)
+	if err == nil {
+		t.Error("Authenticate() should return error for canceled context")
+	}
 }
 
 func TestNew_WithTLSConfig(t *testing.T) {

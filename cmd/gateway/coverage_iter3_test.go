@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -62,7 +63,7 @@ func TestWaitForShutdown_VaultClientCloseSuccess(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19210,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -135,7 +136,7 @@ func TestWaitForShutdown_VaultClientCloseError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19211,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -500,21 +501,9 @@ func TestInitAuditLogger_CreationError(t *testing.T) {
 		},
 	}
 
-	var auditLogger audit.Logger
-	panicked := false
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	// Use a fresh Prometheus registry to avoid duplicate metric registration panics
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	// Error path exercised: audit.NewLogger failed, noop logger returned
 	assert.NotNil(t, auditLogger, "should return noop logger on creation error")

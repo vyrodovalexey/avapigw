@@ -8,6 +8,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/authz/abac"
 	"github.com/vyrodovalexey/avapigw/internal/authz/external"
 	"github.com/vyrodovalexey/avapigw/internal/authz/rbac"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // Policy represents the default authorization policy.
@@ -181,22 +182,9 @@ func (c *Config) GetEffectiveDefaultPolicy() Policy {
 // ShouldSkipPath checks if authorization should be skipped for a path.
 func (c *Config) ShouldSkipPath(path string) bool {
 	for _, skipPath := range c.SkipPaths {
-		if matchPath(skipPath, path) {
+		if util.MatchPath(skipPath, path) {
 			return true
 		}
-	}
-	return false
-}
-
-// matchPath checks if a path matches a pattern.
-func matchPath(pattern, path string) bool {
-	if pattern == path {
-		return true
-	}
-	// Check for wildcard suffix
-	if pattern != "" && pattern[len(pattern)-1] == '*' {
-		prefix := pattern[:len(pattern)-1]
-		return len(path) >= len(prefix) && path[:len(prefix)] == prefix
 	}
 	return false
 }

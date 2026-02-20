@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -70,22 +71,9 @@ func TestInitAuditLogger_EnabledWithDefaultOutput(t *testing.T) {
 		},
 	}
 
-	// This test may panic due to duplicate Prometheus metric registration
-	// when run with other tests. We catch the panic and skip the test.
-	var auditLogger audit.Logger
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	// Use a fresh Prometheus registry to avoid duplicate metric registration panics
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -113,21 +101,8 @@ func TestInitAuditLogger_WithEventsConfig(t *testing.T) {
 		},
 	}
 
-	// This test may panic due to duplicate Prometheus metric registration
-	var auditLogger audit.Logger
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -149,21 +124,8 @@ func TestInitAuditLogger_WithSkipPathsAndRedactFields(t *testing.T) {
 		},
 	}
 
-	// This test may panic due to duplicate Prometheus metric registration
-	var auditLogger audit.Logger
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -286,8 +248,10 @@ func TestReloadComponents_WithRouterError(t *testing.T) {
 		},
 	}
 
-	// Should not panic; error is logged
-	reloadComponents(context.Background(), app, newCfg, logger)
+	// Should not panic; error is logged but reload continues
+	assert.NotPanics(t, func() {
+		reloadComponents(context.Background(), app, newCfg, logger)
+	}, "reloadComponents should not panic with duplicate routes")
 }
 
 func TestReloadComponents_WithBackendError(t *testing.T) {
@@ -453,10 +417,25 @@ func TestGatewayConfigApplier_ApplyFullConfig_GatewayReloadError(t *testing.T) {
 	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
 	require.NoError(t, err)
 
+	// Set the existing config to have an invalid APIVersion so that the merged
+	// config fails validation during gateway.Reload. ApplyFullConfig merges
+	// operator resources into the existing config, preserving fields like
+	// APIVersion, Kind, Metadata, and Listeners from the existing config.
+	invalidExisting := &config.GatewayConfig{
+		APIVersion: "invalid-version",
+		Kind:       "Gateway",
+		Metadata:   config.Metadata{Name: "test"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 8080, Protocol: config.ProtocolHTTP},
+			},
+		},
+	}
+
 	opApp := &operatorApplication{
 		application: &application{
 			gateway: gw,
-			config:  cfg,
+			config:  invalidExisting,
 		},
 	}
 
@@ -467,13 +446,13 @@ func TestGatewayConfigApplier_ApplyFullConfig_GatewayReloadError(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Invalid config that should cause gateway.Reload to fail
-	invalidCfg := &config.GatewayConfig{
-		Metadata: config.Metadata{Name: ""},
-		Spec:     config.GatewaySpec{},
+	// Operator config with valid resources - but the merge with the invalid
+	// existing config will produce an invalid merged config
+	operatorCfg := &config.GatewayConfig{
+		Spec: config.GatewaySpec{},
 	}
 
-	err = applier.ApplyFullConfig(ctx, invalidCfg)
+	err = applier.ApplyFullConfig(ctx, operatorCfg)
 	assert.Error(t, err)
 }
 
@@ -495,7 +474,7 @@ func TestWaitForShutdown_WithAllComponents(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19401,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -523,7 +502,7 @@ func TestWaitForShutdown_WithAllComponents(t *testing.T) {
 
 	// Create a metrics server
 	metricsServer := &http.Server{
-		Addr: ":19402",
+		Addr: ":0",
 	}
 
 	app := &application{
@@ -579,7 +558,7 @@ spec:
   listeners:
     - name: http
       address: 127.0.0.1
-      port: 19403
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -596,7 +575,7 @@ spec:
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19403,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -878,7 +857,7 @@ func TestRunGateway_BackendStartError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19404,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -921,7 +900,7 @@ spec:
   listeners:
     - name: http
       address: 127.0.0.1
-      port: 19404
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []

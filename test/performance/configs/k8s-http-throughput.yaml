@@ -1,12 +1,12 @@
-# Yandex Tank Configuration: K8s HTTPS GET Throughput Test
-# Purpose: Measure HTTPS throughput for gateway deployed in local Kubernetes
+# Yandex Tank Configuration: K8s HTTP GET Throughput Test
+# Purpose: Measure HTTP throughput for gateway deployed in local Kubernetes
 # Duration: 30 seconds total (10s ramp + 15s sustain + 5s cooldown)
 # Target: Conservative load for local K8s (Docker Desktop)
 # Load: line(1, 50, 30s) - ramp from 1 to 50 RPS over 30s
 #
 # Note: The address port is dynamically replaced by run-k8s-test.sh
 # with the actual K8s NodePort discovered via kubectl.
-# SSL is enabled because K8s deployment uses Vault PKI for TLS.
+# SSL is disabled for perftest deployment (no Vault PKI).
 
 phantom:
   package: yandextank.plugins.Phantom
@@ -21,10 +21,10 @@ phantom:
   ammofile: /var/loadtest/ammo/http-get.txt
   ammo_type: uri
 
-  # Connection settings - SSL enabled for K8s with Vault PKI
+  # Connection settings - SSL disabled for perftest deployment
   connection_test: true
   writelog: "0"
-  ssl: true
+  ssl: false
   timeout: 10s
 
   # Instance settings - conservative for local K8s

@@ -31,15 +31,16 @@ type cliFlags struct {
 	showVersion bool
 
 	// Operator mode flags
-	operatorMode       bool
-	operatorAddress    string
-	gatewayName        string
-	gatewayNamespace   string
-	operatorTLS        bool
-	operatorCAFile     string
-	operatorCertFile   string
-	operatorKeyFile    string
-	operatorNamespaces string
+	operatorMode                  bool
+	operatorAddress               string
+	gatewayName                   string
+	gatewayNamespace              string
+	operatorTLS                   bool
+	operatorCAFile                string
+	operatorCertFile              string
+	operatorKeyFile               string
+	operatorNamespaces            string
+	operatorTLSInsecureSkipVerify bool
 }
 
 func main() {
@@ -96,23 +97,27 @@ func parseFlags() cliFlags {
 		"Client key file for operator mTLS")
 	operatorNamespaces := flag.String("operator-namespaces", getEnvOrDefault("GATEWAY_OPERATOR_NAMESPACES", ""),
 		"Comma-separated list of namespaces to watch (empty = all)")
+	operatorTLSInsecureSkipVerify := flag.Bool("operator-tls-insecure",
+		getEnvBool("GATEWAY_OPERATOR_TLS_INSECURE", false),
+		"Skip TLS certificate verification for operator connection (dev/test only)")
 
 	flag.Parse()
 
 	return cliFlags{
-		configPath:         *configPath,
-		logLevel:           *logLevel,
-		logFormat:          *logFormat,
-		showVersion:        *showVersion,
-		operatorMode:       *operatorMode,
-		operatorAddress:    *operatorAddress,
-		gatewayName:        *gatewayName,
-		gatewayNamespace:   *gatewayNamespace,
-		operatorTLS:        *operatorTLS,
-		operatorCAFile:     *operatorCAFile,
-		operatorCertFile:   *operatorCertFile,
-		operatorKeyFile:    *operatorKeyFile,
-		operatorNamespaces: *operatorNamespaces,
+		configPath:                    *configPath,
+		logLevel:                      *logLevel,
+		logFormat:                     *logFormat,
+		showVersion:                   *showVersion,
+		operatorMode:                  *operatorMode,
+		operatorAddress:               *operatorAddress,
+		gatewayName:                   *gatewayName,
+		gatewayNamespace:              *gatewayNamespace,
+		operatorTLS:                   *operatorTLS,
+		operatorCAFile:                *operatorCAFile,
+		operatorCertFile:              *operatorCertFile,
+		operatorKeyFile:               *operatorKeyFile,
+		operatorNamespaces:            *operatorNamespaces,
+		operatorTLSInsecureSkipVerify: *operatorTLSInsecureSkipVerify,
 	}
 }
 
@@ -136,10 +141,11 @@ func buildOperatorConfig(flags cliFlags) *operator.Config {
 	// Configure TLS
 	if flags.operatorTLS {
 		cfg.TLS = &operator.TLSConfig{
-			Enabled:  true,
-			CAFile:   flags.operatorCAFile,
-			CertFile: flags.operatorCertFile,
-			KeyFile:  flags.operatorKeyFile,
+			Enabled:            true,
+			CAFile:             flags.operatorCAFile,
+			CertFile:           flags.operatorCertFile,
+			KeyFile:            flags.operatorKeyFile,
+			InsecureSkipVerify: flags.operatorTLSInsecureSkipVerify,
 		}
 	}
 

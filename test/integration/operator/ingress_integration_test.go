@@ -133,10 +133,10 @@ func TestIntegration_IngressReconciler_CreateIngress(t *testing.T) {
 		},
 	}
 
-	// First reconcile — adds finalizer
+	// First reconcile — adds finalizer (Patch triggers watch event, no explicit requeue)
 	result, err := reconciler.Reconcile(ctx, req)
 	require.NoError(t, err)
-	assert.True(t, result.Requeue, "first reconcile should requeue to add finalizer")
+	assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 	// Second reconcile — applies config
 	result, err = reconciler.Reconcile(ctx, req)
@@ -309,10 +309,16 @@ func TestIntegration_IngressReconciler_IngressClassMatching(t *testing.T) {
 			},
 		}
 
-		// Should process (add finalizer)
+		// Should process (add finalizer, Patch triggers watch event, no explicit requeue)
 		result, err := reconciler.Reconcile(ctx, req)
 		require.NoError(t, err)
-		assert.True(t, result.Requeue, "matching IngressClass should be processed")
+		assert.False(t, result.Requeue, "matching IngressClass should be processed (no requeue, Patch triggers watch)")
+
+		// Verify finalizer was added
+		var updatedIngress networkingv1.Ingress
+		err = client.Get(ctx, req.NamespacedName, &updatedIngress)
+		require.NoError(t, err)
+		assert.Contains(t, updatedIngress.Finalizers, controller.IngressFinalizerName)
 	})
 
 	t.Run("non-matching IngressClass via spec", func(t *testing.T) {
@@ -390,10 +396,16 @@ func TestIntegration_IngressReconciler_IngressClassMatching(t *testing.T) {
 			},
 		}
 
-		// Should process (add finalizer)
+		// Should process (add finalizer, Patch triggers watch event, no explicit requeue)
 		result, err := reconciler.Reconcile(ctx, req)
 		require.NoError(t, err)
-		assert.True(t, result.Requeue, "legacy annotation IngressClass should be processed")
+		assert.False(t, result.Requeue, "legacy annotation IngressClass should be processed (no requeue, Patch triggers watch)")
+
+		// Verify finalizer was added
+		var updatedIngress networkingv1.Ingress
+		err = client.Get(ctx, req.NamespacedName, &updatedIngress)
+		require.NoError(t, err)
+		assert.Contains(t, updatedIngress.Finalizers, controller.IngressFinalizerName)
 	})
 
 	t.Run("no IngressClass specified", func(t *testing.T) {
@@ -628,10 +640,10 @@ func TestIntegration_IngressReconciler_GRPCIngress(t *testing.T) {
 		},
 	}
 
-	// First reconcile — adds finalizer
+	// First reconcile — adds finalizer (Patch triggers watch event, no explicit requeue)
 	result, err := reconciler.Reconcile(ctx, req)
 	require.NoError(t, err)
-	assert.True(t, result.Requeue, "first reconcile should requeue to add finalizer")
+	assert.False(t, result.Requeue, "first reconcile should not requeue (Patch triggers watch event)")
 
 	// Second reconcile — applies gRPC config
 	result, err = reconciler.Reconcile(ctx, req)
@@ -716,6 +728,10 @@ func TestIntegration_IngressReconciler_GRPCIngressUpdate(t *testing.T) {
 			},
 		},
 	)
+	// Fake client does not auto-increment Generation on spec changes
+	// (unlike a real Kubernetes API server), so bump it manually to
+	// ensure the generation-based reconciliation skip is not triggered.
+	updatedIngress.Generation++
 	err = client.Update(ctx, &updatedIngress)
 	require.NoError(t, err)
 

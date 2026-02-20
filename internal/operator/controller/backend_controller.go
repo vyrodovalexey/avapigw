@@ -89,6 +89,12 @@ func (r *BackendReconciler) callbacks() *ReconcileCallbacks {
 			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Ready", 0)
 			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Healthy", 0)
 		},
+		IsApplied: func(_ context.Context, resource Reconcilable) bool {
+			if r.GRPCServer == nil {
+				return true
+			}
+			return r.GRPCServer.HasBackend(resource.GetName(), resource.GetNamespace())
+		},
 	}
 }
 
@@ -96,13 +102,29 @@ func (r *BackendReconciler) callbacks() *ReconcileCallbacks {
 func (r *BackendReconciler) reconcileBackend(ctx context.Context, backend *avapigwv1alpha1.Backend) error {
 	configJSON, err := json.Marshal(backend.Spec)
 	if err != nil {
+		r.Recorder.Eventf(backend, "Warning", EventReasonReconcileFailed,
+			"Failed to marshal Backend spec: %v", err)
 		return fmt.Errorf("failed to marshal Backend spec: %w", err)
+	}
+
+	// Inject the resource name into the JSON spec.
+	// CRD specs don't have a "name" field (it's in ObjectMeta), but the gateway
+	// config types expect a "name" field for backend identification.
+	configJSON, err = injectName(configJSON, backend.Name)
+	if err != nil {
+		r.Recorder.Eventf(backend, "Warning", EventReasonReconcileFailed,
+			"Failed to inject name into Backend spec: %v", err)
+		return fmt.Errorf("failed to inject name into Backend spec: %w", err)
 	}
 
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.ApplyBackend(ctx, backend.Name, backend.Namespace, configJSON); err != nil {
+			r.Recorder.Eventf(backend, "Warning", EventReasonReconcileFailed,
+				"Failed to apply Backend to gateway: %v", err)
 			return fmt.Errorf("failed to apply Backend to gateway: %w", err)
 		}
+		r.Recorder.Event(backend, "Normal", EventReasonConfigApplied,
+			"Backend configuration applied to gateway")
 	}
 
 	return nil
@@ -112,8 +134,12 @@ func (r *BackendReconciler) reconcileBackend(ctx context.Context, backend *avapi
 func (r *BackendReconciler) cleanupBackend(ctx context.Context, backend *avapigwv1alpha1.Backend) error {
 	if r.GRPCServer != nil {
 		if err := r.GRPCServer.DeleteBackend(ctx, backend.Name, backend.Namespace); err != nil {
+			r.Recorder.Eventf(backend, "Warning", EventReasonCleanupFailed,
+				"Failed to delete Backend from gateway: %v", err)
 			return fmt.Errorf("failed to delete Backend from gateway: %w", err)
 		}
+		r.Recorder.Event(backend, "Normal", EventReasonDeleted,
+			"Backend configuration removed from gateway")
 	}
 
 	return nil

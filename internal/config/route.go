@@ -27,6 +27,12 @@ type Route struct {
 	// Security configures security headers for this route (overrides global).
 	Security *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
 
+	// Authentication configures route-level authentication.
+	Authentication *AuthenticationConfig `yaml:"authentication,omitempty" json:"authentication,omitempty"`
+
+	// Authorization configures route-level authorization.
+	Authorization *AuthorizationConfig `yaml:"authorization,omitempty" json:"authorization,omitempty"`
+
 	// MaxSessions configures maximum concurrent sessions for this route (overrides global).
 	MaxSessions *MaxSessionsConfig `yaml:"maxSessions,omitempty" json:"maxSessions,omitempty"`
 

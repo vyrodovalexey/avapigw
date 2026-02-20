@@ -266,8 +266,9 @@ func TestIngressReconciler_Reconcile_AddFinalizer(t *testing.T) {
 	if err != nil {
 		t.Errorf("Reconcile() error = %v, want nil", err)
 	}
-	if !result.Requeue {
-		t.Error("Reconcile() should requeue after adding finalizer")
+	// Patch triggers a watch event automatically; no explicit requeue needed.
+	if result.Requeue {
+		t.Error("Reconcile() should not requeue after adding finalizer (Patch triggers watch event)")
 	}
 
 	// Verify finalizer was added

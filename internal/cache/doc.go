@@ -4,11 +4,14 @@
 // for API responses. It supports:
 //
 //   - In-memory LRU cache with configurable size
-//   - Redis-based distributed cache
-//   - Configurable TTL per entry
+//   - Redis-based distributed cache with Sentinel support
+//   - Configurable TTL per entry with jitter
 //   - Cache key generation based on request attributes
 //   - Stale-while-revalidate support
 //   - Negative caching for error responses
+//   - Centralized retry logic with exponential backoff
+//   - OpenTelemetry tracing for cache operations
+//   - Comprehensive Prometheus metrics
 //
 // # Example Usage
 //

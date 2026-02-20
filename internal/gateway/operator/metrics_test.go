@@ -69,15 +69,15 @@ func TestNewClientMetrics_WithRegistry(t *testing.T) {
 
 	// Verify expected metrics are present
 	expectedMetrics := []string{
-		"avapigw_gateway_operator_connected",
-		"avapigw_gateway_operator_reconnects_total",
-		"avapigw_gateway_operator_config_updates_total",
-		"avapigw_gateway_operator_config_apply_duration_seconds",
-		"avapigw_gateway_operator_heartbeat_latency_seconds",
-		"avapigw_gateway_operator_stream_errors_total",
-		"avapigw_gateway_operator_registration_errors_total",
-		"avapigw_gateway_operator_last_config_version",
-		"avapigw_gateway_operator_last_config_timestamp_seconds",
+		"gateway_operator_client_connected",
+		"gateway_operator_client_reconnects_total",
+		"gateway_operator_client_config_updates_total",
+		"gateway_operator_client_config_apply_duration_seconds",
+		"gateway_operator_client_heartbeat_latency_seconds",
+		"gateway_operator_client_stream_errors_total",
+		"gateway_operator_client_registration_errors_total",
+		"gateway_operator_client_last_config_version",
+		"gateway_operator_client_last_config_timestamp_seconds",
 	}
 
 	for _, name := range expectedMetrics {

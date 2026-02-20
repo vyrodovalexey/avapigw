@@ -21,16 +21,16 @@ The performance testing suite includes:
 
 ## Latest Performance Test Results
 
-The following results were obtained on 2026-01-26 running on a local development machine.
+The following results were obtained on 2026-02-17 running in Kubernetes operator mode with local Docker Desktop.
 
 ### Summary
 
 | Protocol | Test | Duration | Max RPS | Avg Latency | P95 Latency | P99 Latency | Error Rate |
 |----------|------|----------|---------|-------------|-------------|-------------|------------|
 | HTTP | Throughput | 5 min | 2000 RPS | 1.0 ms | 5.5 ms | 460 ms | 0.00% |
-| HTTPS | TLS Throughput | 5 min | ~1500 RPS | ~2.0 ms | ~8.0 ms | ~500 ms | 0.00% |
+| HTTPS | TLS Throughput (K8s) | 30 sec | 100 RPS | 3.85 ms | 10.37 ms | 22.49 ms | 0.00% |
 | gRPC | Unary (Direct) | ~22 sec | 16,443 RPS | 4.55 ms | 8.39 ms | 12.88 ms | 0.00% |
-| gRPC TLS | Unary with TLS | ~22 sec | ~12,000 RPS | ~6.0 ms | ~12.0 ms | ~18.0 ms | 0.00% |
+| gRPC TLS | Unary with TLS (K8s) | ~23 sec | 2,216 RPS | 4.31 ms | 16.22 ms | 22.15 ms | 0.00% |
 
 ### HTTP Throughput Test (Yandex Tank)
 
@@ -468,19 +468,35 @@ make perf-test-websocket-concurrent
 
 #### Kubernetes Tests
 ```bash
-# Run all K8s performance tests
-make perf-test-k8s
+# Run all K8s performance tests (operator mode)
+./test/performance/scripts/run-k8s-test.sh all
 
 # Run specific K8s tests
+./test/performance/scripts/run-k8s-test.sh http
+./test/performance/scripts/run-k8s-test.sh https
+./test/performance/scripts/run-k8s-test.sh grpc-tls
+./test/performance/scripts/run-k8s-test.sh websocket
+./test/performance/scripts/run-k8s-test.sh auth
+
+# Legacy Makefile targets (still supported)
+make perf-test-k8s
 make perf-test-k8s-http
 make perf-test-k8s-grpc
 ```
+
+**K8s Operator Mode Test Types:**
+The `run-k8s-test.sh all` command runs the following test suite:
+- **HTTPS Test**: TLS throughput using Vault PKI certificates
+- **gRPC TLS Test**: gRPC with TLS encryption and authentication
+- **WebSocket Test**: WSS (WebSocket Secure) message throughput
+- **Auth Test**: JWT authentication over HTTPS with Keycloak integration
 
 **Prerequisites for K8s Tests:**
 1. Docker Desktop with Kubernetes enabled
 2. Helm 3.x installed
 3. Gateway Docker image built locally: `make docker-build`
 4. Backend services running: `docker-compose up -d`
+5. Vault configured with K8s auth: `./scripts/setup-vault-k8s.sh`
 
 #### TLS and Authentication Tests
 ```bash
@@ -583,8 +599,10 @@ make perf-generate-charts
 | Test | Duration | Load Profile | Purpose | Command |
 |------|----------|--------------|---------|---------|
 | **K8s HTTP Test** | 5 minutes | Ramp to 1000 RPS | HTTP performance in K8s | `make perf-test-k8s-http` |
+| **K8s HTTPS Test** | 30 seconds | Ramp to 100 RPS | HTTPS performance in K8s operator mode | `./scripts/run-k8s-test.sh https` |
 | **K8s gRPC Test** | 5 minutes | 50 workers, 1000 RPS | gRPC performance in K8s | `make perf-test-k8s-grpc` |
-| **All K8s Tests** | ~10 minutes | Combined HTTP + gRPC | Complete K8s validation | `make perf-test-k8s` |
+| **K8s gRPC TLS Test** | 23 seconds | 10 workers, 500 total | gRPC TLS performance in K8s operator mode | `./scripts/run-k8s-test.sh grpc-tls` |
+| **All K8s Tests** | ~10 minutes | Combined HTTP + gRPC | Complete K8s validation | `./scripts/run-k8s-test.sh all` |
 
 ### TLS and Authentication Tests
 
@@ -625,6 +643,13 @@ make perf-generate-charts
 - **Metrics**: HTTP throughput, latency, and error rates in K8s environment
 - **Purpose**: Validate performance characteristics when deployed in Kubernetes
 
+**K8s HTTPS Test (Operator Mode)**
+- **Deployment**: Gateway deployed in operator mode with 25 CRDs in local K8s
+- **Configuration**: Vault PKI integration for TLS certificates
+- **Latest Results (2026-02-17)**: 1,515 requests, 100% success rate, P99: 22.49ms
+- **Load Profile**: Linear ramp from 1 to 100 RPS over 30 seconds
+- **Purpose**: Validate HTTPS performance in Kubernetes operator deployment
+
 **K8s gRPC Test**
 - **Deployment**: Same K8s deployment with gRPC listener enabled
 - **Configuration**: gRPC port exposed via NodePort service with optional TLS
@@ -632,6 +657,13 @@ make perf-generate-charts
 - **TLS**: gRPC TLS via Vault PKI with optional gRPC-specific overrides
 - **Metrics**: gRPC call throughput, latency, and connection efficiency
 - **Purpose**: Validate gRPC performance in Kubernetes environment
+
+**K8s gRPC TLS Test (Operator Mode)**
+- **Deployment**: Gateway deployed in operator mode with gRPC TLS enabled
+- **Configuration**: Uses Vault PKI for gRPC TLS certificates
+- **Latest Results (2026-02-17)**: 500 requests, 2,216 RPS, P99: 22.15ms
+- **Load Profile**: 10 concurrent workers, 500 total requests
+- **Purpose**: Validate gRPC TLS performance in Kubernetes operator deployment
 
 **Prerequisites for K8s Tests**
 - Docker Desktop with Kubernetes enabled
@@ -1406,6 +1438,32 @@ timestamp tag interval_real connect_time send_time latency receive_time interval
 1. **Analyze results** - Use the analysis script
 2. **Compare with baseline** - Track performance over time
 3. **Document findings** - Record any anomalies or insights
+
+## Known Issues
+
+### Operator Mode Testing Issues
+
+**WebSocket Latency Tracking**
+- **Issue**: WebSocket tests may timeout during execution in K8s operator mode
+- **Status**: Under investigation
+- **Workaround**: Run WebSocket tests individually with extended timeout
+- **Command**: `./scripts/run-k8s-test.sh websocket --verbose`
+
+**Auth Route Matching in Operator Mode**
+- **Issue**: JWT audience mismatch between Keycloak tokens and APIRoute configuration
+- **Details**: Token has 'account' audience, route expects 'gateway-client'
+- **Status**: Configuration alignment needed
+- **Workaround**: Update Keycloak client configuration or APIRoute audience settings
+
+### Latest Test Results Summary (2026-02-17)
+
+**Successful Tests:**
+- HTTPS throughput: 1,515 requests, 100% success, P99: 22.49ms
+- gRPC TLS: 500 requests, 2,216 RPS, P99: 22.15ms
+
+**Skipped/Failed Tests:**
+- WebSocket WSS: Timeout during execution
+- JWT Auth: Audience mismatch configuration issue
 
 ## Troubleshooting
 

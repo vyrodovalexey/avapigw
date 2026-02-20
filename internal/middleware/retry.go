@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/retry"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // DefaultMaxBodySize is the default maximum body size for retry buffering (1MB).
@@ -67,12 +69,6 @@ func Retry(cfg RetryConfig, logger observability.Logger) func(http.Handler) http
 			executeWithRetry(w, r, next, cfg, bodyBytes, logger)
 		})
 	}
-}
-
-// isWebSocketUpgrade checks if the request is a WebSocket upgrade request.
-func isWebSocketUpgrade(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
 // readRequestBodyWithLimit reads and buffers the request body up to maxSize.
@@ -137,6 +133,7 @@ func executeWithRetry(
 		rw := &retryResponseWriter{
 			ResponseWriter: w,
 			body:           &bytes.Buffer{},
+			header:         make(http.Header),
 			status:         http.StatusOK,
 		}
 
@@ -148,6 +145,11 @@ func executeWithRetry(
 		lastStatus = rw.status
 
 		if !shouldRetry(rw.status, cfg.RetryOn) {
+			if attempt > 0 {
+				GetMiddlewareMetrics().retrySuccessTotal.WithLabelValues(
+					r.URL.Path,
+				).Inc()
+			}
 			writeResponse(w, rw)
 			return
 		}
@@ -191,20 +193,39 @@ func applyPerTryTimeout(ctx context.Context, timeout time.Duration) contextWithC
 
 // writeResponse writes the captured response to the client.
 func writeResponse(w http.ResponseWriter, rw *retryResponseWriter) {
-	if !rw.headerWritten {
-		w.WriteHeader(rw.status)
+	// Copy captured headers to the actual ResponseWriter
+	for key, values := range rw.header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
 	}
+	w.WriteHeader(rw.status)
 	_, _ = w.Write(rw.body.Bytes())
 }
 
 // logRetryAttempt logs a retry attempt.
-func logRetryAttempt(logger observability.Logger, r *http.Request, attempt, maxAttempts, status int) {
+func logRetryAttempt(
+	logger observability.Logger,
+	r *http.Request,
+	attempt, maxAttempts, status int,
+) {
 	logger.Warn("retrying request",
 		observability.String("path", r.URL.Path),
 		observability.Int("attempt", attempt+1),
 		observability.Int("max_attempts", maxAttempts),
 		observability.Int("status", status),
 	)
+
+	GetMiddlewareMetrics().retryAttemptsTotal.WithLabelValues(
+		r.URL.Path,
+	).Inc()
+
+	// Record route-level retry attempt
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordRetry(routeName, r.Method)
 }
 
 // writeRetryExhaustedResponse writes the response when all retries are exhausted.
@@ -220,6 +241,15 @@ func writeRetryExhaustedResponse(
 		observability.Int("last_status", lastStatus),
 	)
 
+	// Record route-level retry exhaustion
+	routeName := util.RouteFromContext(r.Context())
+	if routeName == "" {
+		routeName = unknownRoute
+	}
+	routepkg.GetRouteMetrics().RecordRetryExhausted(
+		routeName, r.Method,
+	)
+
 	w.Header().Set(HeaderContentType, ContentTypeJSON)
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = io.WriteString(w, ErrBadGateway)
@@ -229,17 +259,30 @@ func writeRetryExhaustedResponse(
 type retryResponseWriter struct {
 	http.ResponseWriter
 	body          *bytes.Buffer
+	header        http.Header
 	status        int
 	headerWritten bool
 }
 
-// WriteHeader captures the status code.
+// Header returns the captured response headers.
+func (rw *retryResponseWriter) Header() http.Header {
+	return rw.header
+}
+
+// WriteHeader captures the status code and marks headers as written.
 func (rw *retryResponseWriter) WriteHeader(code int) {
+	if rw.headerWritten {
+		return
+	}
+	rw.headerWritten = true
 	rw.status = code
 }
 
 // Write captures the response body.
 func (rw *retryResponseWriter) Write(b []byte) (int, error) {
+	if !rw.headerWritten {
+		rw.WriteHeader(http.StatusOK)
+	}
 	return rw.body.Write(b)
 }
 
