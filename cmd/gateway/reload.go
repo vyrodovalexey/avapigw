@@ -339,7 +339,14 @@ func configSectionChanged(oldSection, newSection interface{}) bool {
 	if oldOK && newOK {
 		return oldHash != newHash
 	}
-	// Fallback to reflect.DeepEqual when hashing fails
+	// Fallback to reflect.DeepEqual when hashing fails. This path is
+	// only reached for types that cannot be JSON-marshaled (e.g. types
+	// with unexported fields or channel fields). Log a warning so
+	// operators are aware of the slower comparison path.
+	observability.GetGlobalLogger().Warn(
+		"config section hash failed, falling back to reflect.DeepEqual",
+		observability.String("old_type", reflect.TypeOf(oldSection).String()),
+	)
 	return !reflect.DeepEqual(oldSection, newSection)
 }
 

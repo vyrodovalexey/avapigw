@@ -26,6 +26,12 @@ import (
 
 // IngressReconciler reconciles networking.k8s.io/v1 Ingress objects
 // that are assigned to the avapigw IngressClass.
+//
+// Unlike APIRouteReconciler and other CRD controllers, IngressReconciler does
+// NOT embed BaseReconciler because Ingress is a native Kubernetes resource that
+// does not implement the Reconcilable interface (GetConditions/SetConditions).
+// The BaseReconcile pattern requires CRDs with status conditions for the
+// standardized reconciliation loop, which is not applicable to native resources.
 type IngressReconciler struct {
 	client.Client
 	Scheme              *runtime.Scheme

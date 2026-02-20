@@ -40,6 +40,13 @@ func buildMiddlewareChain(
 	var rateLimiter *middleware.RateLimiter
 	var maxSessionsLimiter *middleware.MaxSessionsLimiter
 
+	// Body limit middleware wraps the handler closest to the proxy (innermost,
+	// before auth) so oversized requests are rejected before authentication
+	// processing. This prevents resource exhaustion from large payloads.
+	if cfg.Spec.RequestLimits != nil && cfg.Spec.RequestLimits.MaxBodySize > 0 {
+		h = middleware.BodyLimitFromRequestLimits(cfg.Spec.RequestLimits, logger)(h)
+	}
+
 	// Auth middleware wraps the handler closest to the proxy (innermost).
 	// If auth is explicitly enabled but fails to initialize, return an error
 	// so the gateway does not start without required authentication.

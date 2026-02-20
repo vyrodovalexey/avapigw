@@ -14,6 +14,10 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Compile-time assertion: BackendValidator must implement admission.Validator
+// for the typed *avapigwv1alpha1.Backend parameter.
+var _ admission.Validator[*avapigwv1alpha1.Backend] = (*BackendValidator)(nil)
+
 // BackendValidator validates Backend resources.
 type BackendValidator struct {
 	Client           client.Client

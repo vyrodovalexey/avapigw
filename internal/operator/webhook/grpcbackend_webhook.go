@@ -14,6 +14,10 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Compile-time assertion: GRPCBackendValidator must implement admission.Validator
+// for the typed *avapigwv1alpha1.GRPCBackend parameter.
+var _ admission.Validator[*avapigwv1alpha1.GRPCBackend] = (*GRPCBackendValidator)(nil)
+
 // GRPCBackendValidator validates GRPCBackend resources.
 type GRPCBackendValidator struct {
 	Client           client.Client

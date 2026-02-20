@@ -51,7 +51,7 @@ func TestRunOperatorGateway_BackendStartError_Target90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19701,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -125,7 +125,7 @@ func TestRunOperatorGateway_GatewayStartError_Target90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19702,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -189,7 +189,7 @@ func TestWaitForOperatorShutdown_WithAllComponents_Target90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19703,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -216,7 +216,7 @@ func TestWaitForOperatorShutdown_WithAllComponents_Target90(t *testing.T) {
 	msl := middleware.NewMaxSessionsLimiter(100, 0, 0)
 
 	metricsServer := &http.Server{
-		Addr: ":19704",
+		Addr: ":0",
 	}
 
 	opApp := &operatorApplication{
@@ -381,7 +381,7 @@ func TestRunGateway_GatewayStartError_Target90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19705,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -430,7 +430,7 @@ spec:
   listeners:
     - name: http
       address: 127.0.0.1
-      port: 19705
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []

@@ -96,7 +96,7 @@ func TestRunOperatorGateway_OperatorClientStartError90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19810,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -160,7 +160,7 @@ func TestRunOperatorGateway_SuccessPath90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19811,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -237,7 +237,7 @@ func TestWaitForOperatorShutdown_OperatorClientStopSuccess90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19812,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -316,7 +316,7 @@ func TestWaitForOperatorShutdown_OperatorClientStopError90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19813,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -389,7 +389,7 @@ func TestWaitForOperatorShutdown_WithMetricsAndAuditErrors90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19814,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -414,7 +414,7 @@ func TestWaitForOperatorShutdown_WithMetricsAndAuditErrors90(t *testing.T) {
 
 	// Create and start a real metrics server
 	metricsServer := &http.Server{
-		Addr:    "127.0.0.1:19815",
+		Addr:    "127.0.0.1:0",
 		Handler: http.NewServeMux(),
 	}
 	go func() {
@@ -482,7 +482,7 @@ spec:
   listeners:
     - name: http
       bind: 127.0.0.1
-      port: 19816
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -497,7 +497,7 @@ spec:
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19816,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

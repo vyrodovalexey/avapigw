@@ -917,7 +917,7 @@ func TestWaitForShutdown_WithVaultClient(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19400,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

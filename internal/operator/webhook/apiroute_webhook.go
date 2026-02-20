@@ -22,6 +22,12 @@ import (
 // webhookTracerName is the OpenTelemetry tracer name for webhook operations.
 const webhookTracerName = "avapigw-operator/webhook"
 
+// Compile-time assertion: APIRouteValidator must implement admission.Validator
+// for the typed *avapigwv1alpha1.APIRoute parameter. This ensures that if
+// controller-runtime changes the Validator interface, the build will fail
+// rather than silently breaking webhook registration at runtime.
+var _ admission.Validator[*avapigwv1alpha1.APIRoute] = (*APIRouteValidator)(nil)
+
 // APIRouteValidator validates APIRoute resources.
 type APIRouteValidator struct {
 	Client           client.Client

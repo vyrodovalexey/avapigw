@@ -135,7 +135,7 @@ func TestStopCoreServices_AllComponents(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19900,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -163,7 +163,7 @@ func TestStopCoreServices_AllComponents(t *testing.T) {
 
 	// Create and start a metrics server
 	metricsServer := &http.Server{
-		Addr:    "127.0.0.1:19901",
+		Addr:    "127.0.0.1:0",
 		Handler: http.NewServeMux(),
 	}
 	go func() {
@@ -203,7 +203,7 @@ func TestStopCoreServices_WithErrors(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19902,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -255,7 +255,7 @@ func TestStopCoreServices_NilComponents(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19903,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

@@ -510,7 +510,7 @@ func TestWaitForShutdown_WithAllComponents(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19401,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -538,7 +538,7 @@ func TestWaitForShutdown_WithAllComponents(t *testing.T) {
 
 	// Create a metrics server
 	metricsServer := &http.Server{
-		Addr: ":19402",
+		Addr: ":0",
 	}
 
 	app := &application{
@@ -594,7 +594,7 @@ spec:
   listeners:
     - name: http
       address: 127.0.0.1
-      port: 19403
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -611,7 +611,7 @@ spec:
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19403,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -893,7 +893,7 @@ func TestRunGateway_BackendStartError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19404,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -936,7 +936,7 @@ spec:
   listeners:
     - name: http
       address: 127.0.0.1
-      port: 19404
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []

@@ -50,7 +50,7 @@ func TestRunOperatorGateway_SuccessfulStart_90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19601,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -110,7 +110,7 @@ func TestWaitForOperatorShutdown_WithOperatorClient_90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19602,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -137,7 +137,7 @@ func TestWaitForOperatorShutdown_WithOperatorClient_90(t *testing.T) {
 	msl := middleware.NewMaxSessionsLimiter(100, 0, 0)
 
 	metricsServer := &http.Server{
-		Addr: ":19603",
+		Addr: ":0",
 	}
 
 	opApp := &operatorApplication{
@@ -193,7 +193,7 @@ func TestWaitForOperatorShutdown_WithVaultClient_90(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19604,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
@@ -151,7 +150,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	gwOpts := []gateway.Option{
 		gateway.WithLogger(logger),
 		gateway.WithRouteHandler(middlewareResult.handler),
-		gateway.WithShutdownTimeout(30 * time.Second),
+		gateway.WithShutdownTimeout(shutdownTimeout),
 		gateway.WithAuditLogger(auditLogger),
 		gateway.WithMetricsRegistry(metrics.Registry()),
 		gateway.WithGatewayTLSMetrics(tlsMetrics),
@@ -313,27 +312,15 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 	gsm.MustRegister(registry)
 	gsm.Init()
 
+	subsystems := []string{
+		"cache", "encoding", "transform", "vault", "backend_auth",
+		"middleware", "security", "health", "router",
+		"apikey", "jwt", "oidc", "mtls",
+		"rbac", "abac", "external_authz",
+		"route", "backend", "ws_streaming", "grpc_streaming",
+	}
 	logger.Info("subsystem metrics registered with gateway registry",
-		observability.Bool("cache", true),
-		observability.Bool("encoding", true),
-		observability.Bool("transform", true),
-		observability.Bool("vault", vaultMetrics != nil),
-		observability.Bool("backend_auth", true),
-		observability.Bool("middleware", true),
-		observability.Bool("security", true),
-		observability.Bool("health", true),
-		observability.Bool("router", true),
-		observability.Bool("apikey", true),
-		observability.Bool("jwt", true),
-		observability.Bool("oidc", true),
-		observability.Bool("mtls", true),
-		observability.Bool("rbac", true),
-		observability.Bool("abac", true),
-		observability.Bool("external_authz", true),
-		observability.Bool("route", true),
-		observability.Bool("backend", true),
-		observability.Bool("ws_streaming", true),
-		observability.Bool("grpc_streaming", true),
+		observability.Int("subsystem_count", len(subsystems)),
 	)
 }
 

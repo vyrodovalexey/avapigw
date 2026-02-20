@@ -320,15 +320,10 @@ func (c *DuplicateChecker) SetScope(scope DuplicateDetectionScope) {
 	c.namespaceScoped.Store(scope == ScopeNamespace)
 }
 
-// isCacheValid checks if the cache for a given key is still valid.
-func (c *DuplicateChecker) isCacheValid(cacheKey string) bool {
-	if !c.cacheEnabled {
-		return false
-	}
-
-	c.cache.mu.RLock()
-	defer c.cache.mu.RUnlock()
-
+// isCacheValidLocked checks if the cache for a given key is still valid.
+// The caller MUST hold cache.mu.RLock (or cache.mu.Lock) before calling.
+// This avoids the TOCTOU race between checking validity and reading cached data.
+func (c *DuplicateChecker) isCacheValidLocked(cacheKey string) bool {
 	lastRefresh, ok := c.cache.lastRefresh[cacheKey]
 	if !ok {
 		return false
@@ -449,12 +444,17 @@ func (c *DuplicateChecker) CheckAPIRouteDuplicate(
 	cacheKey := c.buildCacheKey(resourceType, route.Namespace)
 	var routes *avapigwv1alpha1.APIRouteList
 
-	// Try to use cached data
-	if c.isCacheValid(cacheKey) {
+	// Try to use cached data under a single RLock to avoid TOCTOU race
+	// between validity check and data read.
+	if c.cacheEnabled {
 		c.cache.mu.RLock()
-		routes = c.cache.apiRoutes[cacheKey]
+		if c.isCacheValidLocked(cacheKey) {
+			routes = c.cache.apiRoutes[cacheKey]
+		}
 		c.cache.mu.RUnlock()
-		dm.cacheHits.WithLabelValues(resourceType).Inc()
+		if routes != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
 	}
 
 	// Fetch from API if cache miss or invalid
@@ -547,12 +547,17 @@ func (c *DuplicateChecker) CheckBackendDuplicate(
 	cacheKey := c.buildCacheKey(resourceType, backend.Namespace)
 	var backends *avapigwv1alpha1.BackendList
 
-	// Try to use cached data
-	if c.isCacheValid(cacheKey) {
+	// Try to use cached data under a single RLock to avoid TOCTOU race
+	// between validity check and data read.
+	if c.cacheEnabled {
 		c.cache.mu.RLock()
-		backends = c.cache.backends[cacheKey]
+		if c.isCacheValidLocked(cacheKey) {
+			backends = c.cache.backends[cacheKey]
+		}
 		c.cache.mu.RUnlock()
-		dm.cacheHits.WithLabelValues(resourceType).Inc()
+		if backends != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
 	}
 
 	// Fetch from API if cache miss or invalid
@@ -630,12 +635,17 @@ func (c *DuplicateChecker) CheckGRPCRouteDuplicate(
 	cacheKey := c.buildCacheKey(resourceType, route.Namespace)
 	var routes *avapigwv1alpha1.GRPCRouteList
 
-	// Try to use cached data
-	if c.isCacheValid(cacheKey) {
+	// Try to use cached data under a single RLock to avoid TOCTOU race
+	// between validity check and data read.
+	if c.cacheEnabled {
 		c.cache.mu.RLock()
-		routes = c.cache.grpcRoutes[cacheKey]
+		if c.isCacheValidLocked(cacheKey) {
+			routes = c.cache.grpcRoutes[cacheKey]
+		}
 		c.cache.mu.RUnlock()
-		dm.cacheHits.WithLabelValues(resourceType).Inc()
+		if routes != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
 	}
 
 	// Fetch from API if cache miss or invalid
@@ -710,12 +720,17 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 	cacheKey := c.buildCacheKey(resourceType, backend.Namespace)
 	var backends *avapigwv1alpha1.GRPCBackendList
 
-	// Try to use cached data
-	if c.isCacheValid(cacheKey) {
+	// Try to use cached data under a single RLock to avoid TOCTOU race
+	// between validity check and data read.
+	if c.cacheEnabled {
 		c.cache.mu.RLock()
-		backends = c.cache.grpcBackends[cacheKey]
+		if c.isCacheValidLocked(cacheKey) {
+			backends = c.cache.grpcBackends[cacheKey]
+		}
 		c.cache.mu.RUnlock()
-		dm.cacheHits.WithLabelValues(resourceType).Inc()
+		if backends != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
 	}
 
 	// Fetch from API if cache miss or invalid
@@ -997,10 +1012,12 @@ func (c *DuplicateChecker) CheckBackendCrossConflicts(
 	cacheKey := c.buildCacheKey("grpcbackend", backend.Namespace)
 	var grpcBackends *avapigwv1alpha1.GRPCBackendList
 
-	// Try to use cached data
-	if c.isCacheValid(cacheKey) {
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
 		c.cache.mu.RLock()
-		grpcBackends = c.cache.grpcBackends[cacheKey]
+		if c.isCacheValidLocked(cacheKey) {
+			grpcBackends = c.cache.grpcBackends[cacheKey]
+		}
 		c.cache.mu.RUnlock()
 	}
 
@@ -1060,10 +1077,12 @@ func (c *DuplicateChecker) CheckGRPCBackendCrossConflicts(
 	cacheKey := c.buildCacheKey("backend", grpcBackend.Namespace)
 	var backends *avapigwv1alpha1.BackendList
 
-	// Try to use cached data
-	if c.isCacheValid(cacheKey) {
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
 		c.cache.mu.RLock()
-		backends = c.cache.backends[cacheKey]
+		if c.isCacheValidLocked(cacheKey) {
+			backends = c.cache.backends[cacheKey]
+		}
 		c.cache.mu.RUnlock()
 	}
 

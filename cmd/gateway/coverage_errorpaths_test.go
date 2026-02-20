@@ -52,7 +52,7 @@ func TestInitApplication_RouteLoadError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19200,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -268,7 +268,7 @@ func TestWaitForShutdown_GatewayStopError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19201,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -434,7 +434,7 @@ func TestWaitForShutdown_AuditLoggerCloseError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19206,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -504,7 +504,7 @@ func TestWaitForShutdown_NilAuditLogger(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19203,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -588,7 +588,7 @@ spec:
   listeners:
     - name: http
       bind: 127.0.0.1
-      port: 19204
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -603,14 +603,14 @@ spec:
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19204,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
 			Observability: &config.ObservabilityConfig{
 				Metrics: &config.MetricsConfig{
 					Enabled: true,
-					Port:    19205,
+					Port:    0,
 					Path:    "/metrics",
 				},
 			},

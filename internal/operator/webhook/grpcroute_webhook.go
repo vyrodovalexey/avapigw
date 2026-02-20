@@ -15,6 +15,10 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Compile-time assertion: GRPCRouteValidator must implement admission.Validator
+// for the typed *avapigwv1alpha1.GRPCRoute parameter.
+var _ admission.Validator[*avapigwv1alpha1.GRPCRoute] = (*GRPCRouteValidator)(nil)
+
 // GRPCRouteValidator validates GRPCRoute resources.
 type GRPCRouteValidator struct {
 	Client           client.Client

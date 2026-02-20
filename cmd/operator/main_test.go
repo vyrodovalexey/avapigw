@@ -6,9 +6,20 @@ import (
 	"flag"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// resetOperatorBuildInfoForTesting resets the operator build info metrics
+// singleton so tests can re-initialize with a fresh Prometheus registry.
+// This prevents "duplicate metrics collector registration" panics when
+// multiple tests need isolated metrics instances. Must only be called
+// from tests.
+func resetOperatorBuildInfoForTesting() {
+	operatorBuildInfo = nil
+	operatorBuildInfoOnce = sync.Once{}
+}
 
 // ============================================================================
 // parseIntEnv Tests

@@ -840,6 +840,20 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 	backoffCfg := c.config.ReconnectBackoff
 	maxRetries := backoffCfg.GetMaxRetries()
 
+	// Derive a context that is canceled when stopCh is closed so that
+	// long-running RPCs (Connect, register) are interrupted promptly.
+	reconnectCtx, reconnectCancel := context.WithCancel(ctx)
+	defer reconnectCancel()
+
+	go func() {
+		select {
+		case <-c.stopCh:
+			reconnectCancel()
+		case <-reconnectCtx.Done():
+			// Context already canceled; nothing to do.
+		}
+	}()
+
 	for {
 		select {
 		case <-c.stopCh:
@@ -875,7 +889,7 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 		}
 
 		// Attempt reconnection
-		if err := c.Connect(ctx); err != nil {
+		if err := c.Connect(reconnectCtx); err != nil {
 			c.logger.Error("reconnection failed",
 				observability.Error(err),
 				observability.Int("attempt", c.reconnectAttempts),
@@ -884,7 +898,11 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 		}
 
 		// Re-register
-		if err := c.register(ctx); err != nil {
+		if err := c.register(reconnectCtx); err != nil {
+			// If the context was canceled due to stop signal, exit immediately
+			if reconnectCtx.Err() != nil {
+				return false
+			}
 			c.logger.Error("re-registration failed",
 				observability.Error(err),
 				observability.Int("attempt", c.reconnectAttempts),

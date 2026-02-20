@@ -11,6 +11,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// resetCertMetricsForTesting resets the cert metrics singleton so tests can
+// re-initialize with a fresh Prometheus registry. This prevents "duplicate
+// metrics collector registration" panics when multiple tests need isolated
+// metrics instances. Must only be called from tests.
+func resetCertMetricsForTesting() {
+	certMetricsInstance = nil
+	certMetricsOnce = sync.Once{}
+}
+
+// resetVaultAuthMetricsForTesting resets the Vault auth metrics singleton so
+// tests can re-initialize with a fresh Prometheus registry.
+func resetVaultAuthMetricsForTesting() {
+	vaultAuthMetricsInstance = nil
+	vaultAuthMetricsOnce = sync.Once{}
+}
+
+// resetWebhookInjectorMetricsForTesting resets the webhook injector metrics
+// singleton so tests can re-initialize with a fresh Prometheus registry.
+func resetWebhookInjectorMetricsForTesting() {
+	webhookInjectorMetricsInstance = nil
+	webhookInjectorMetricsOnce = sync.Once{}
+}
+
 func TestGetCertMetrics_Singleton(t *testing.T) {
 	m1 := GetCertMetrics()
 	m2 := GetCertMetrics()

@@ -823,7 +823,7 @@ func TestRunMetricsServer_ServerClosed(t *testing.T) {
 	metrics := observability.NewMetrics("test")
 	healthChecker := health.NewChecker("test", observability.NopLogger())
 
-	server := createMetricsServer(19999, "/metrics", metrics, healthChecker, logger)
+	server := createMetricsServer(0, "/metrics", metrics, healthChecker, logger)
 
 	// Start server in goroutine
 	done := make(chan struct{})

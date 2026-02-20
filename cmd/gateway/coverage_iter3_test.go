@@ -62,7 +62,7 @@ func TestWaitForShutdown_VaultClientCloseSuccess(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19210,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -135,7 +135,7 @@ func TestWaitForShutdown_VaultClientCloseError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19211,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

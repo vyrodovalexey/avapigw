@@ -263,12 +263,16 @@ func (a *gatewayConfigApplier) ApplyGRPCRoutes(_ context.Context, routes []confi
 }
 
 // ApplyGRPCBackends applies gRPC backend configuration.
-// Note: gRPC backends require gateway restart for full effect.
-func (a *gatewayConfigApplier) ApplyGRPCBackends(ctx context.Context, backends []config.GRPCBackend) error {
-	a.logger.Warn("gRPC backends received from operator - gRPC backends are NOT hot-reloaded",
+// Note: gRPC backends require gateway restart for full effect because gRPC
+// connections are long-lived with persistent connection pools and active
+// streams that cannot be safely drained and replaced at runtime.
+func (a *gatewayConfigApplier) ApplyGRPCBackends(_ context.Context, backends []config.GRPCBackend) error {
+	a.logger.Warn("gRPC backends received from operator but NOT hot-reloaded; "+
+		"gRPC connection pools and active streams cannot be safely replaced at runtime; "+
+		"restart the gateway pod to apply gRPC backend changes",
 		observability.Int("count", len(backends)),
+		observability.String("action_required", "restart"),
 	)
-	// gRPC backends cannot be hot-reloaded, log a warning
 	return nil
 }
 

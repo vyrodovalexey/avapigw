@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// resetServerMetricsForTesting resets the gRPC server metrics singleton so
+// tests can re-initialize with a fresh Prometheus registry. This prevents
+// "duplicate metrics collector registration" panics when multiple tests need
+// isolated metrics instances. Must only be called from tests.
+func resetServerMetricsForTesting() {
+	defaultMetrics = nil
+	defaultMetricsOnce = sync.Once{}
+}
+
 // testServer is a shared server instance for tests to avoid duplicate metrics registration.
 var (
 	testServer     *Server

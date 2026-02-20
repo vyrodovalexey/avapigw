@@ -59,7 +59,7 @@ spec:
 			Listeners: []config.Listener{
 				{
 					Name:     "http",
-					Port:     18080,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -107,7 +107,7 @@ func TestWaitForShutdown_AllPaths(t *testing.T) {
 					{
 						Name:     "http",
 						Bind:     "127.0.0.1",
-						Port:     19080,
+						Port:     0,
 						Protocol: config.ProtocolHTTP,
 					},
 				},
@@ -194,7 +194,7 @@ spec:
 					{
 						Name:     "http",
 						Bind:     "127.0.0.1",
-						Port:     19082,
+						Port:     0,
 						Protocol: config.ProtocolHTTP,
 					},
 				},
@@ -265,7 +265,7 @@ spec:
 					{
 						Name:     "http",
 						Bind:     "127.0.0.1",
-						Port:     19081,
+						Port:     0,
 						Protocol: config.ProtocolHTTP,
 					},
 				},
@@ -343,7 +343,7 @@ func TestInitApplication_ValidConfig(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19083,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -377,7 +377,7 @@ func TestInitApplication_WithObservability(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19084,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -412,7 +412,7 @@ func TestInitApplication_WithRateLimit(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19085,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -449,7 +449,7 @@ func TestInitApplication_WithMaxSessions(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19086,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -679,7 +679,7 @@ func TestInitApplication_WithAuditDisabled(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19088,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -892,7 +892,7 @@ func TestWaitForShutdown_WithAuditLogger(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19089,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1227,7 +1227,7 @@ func TestInitApplication_BackendLoadError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19090,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1285,7 +1285,7 @@ spec:
   listeners:
     - name: http
       bind: 127.0.0.1
-      port: 19093
+      port: 8080
       protocol: HTTP
   routes: []
   backends: []
@@ -1300,7 +1300,7 @@ spec:
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19093,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1376,7 +1376,7 @@ func TestRunGateway_GatewayStartError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19094,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},
@@ -1433,7 +1433,7 @@ func TestWaitForShutdown_MetricsServerShutdownError(t *testing.T) {
 				{
 					Name:     "http",
 					Bind:     "127.0.0.1",
-					Port:     19092,
+					Port:     0,
 					Protocol: config.ProtocolHTTP,
 				},
 			},

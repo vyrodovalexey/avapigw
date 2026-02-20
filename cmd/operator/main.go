@@ -55,6 +55,9 @@ var (
 	operatorGitCommit = "unknown"
 )
 
+// defaultWebhookConfigName is the default name of the ValidatingWebhookConfiguration resource.
+const defaultWebhookConfigName = "avapigw-operator-validating-webhook-configuration"
+
 var setupTracingFunc = defaultSetupTracing
 
 var (
@@ -138,6 +141,10 @@ type Config struct {
 	// When set, the webhook server uses tls.crt and tls.key from this directory.
 	// If empty, the controller-runtime default cert directory is used.
 	WebhookCertDir string
+
+	// WebhookConfigName is the name of the ValidatingWebhookConfiguration resource.
+	// Defaults to "avapigw-operator-validating-webhook-configuration".
+	WebhookConfigName string
 
 	// GRPCPort is the port that the gRPC server serves at.
 	GRPCPort int
@@ -258,6 +265,22 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	certManager, mgr, err := setupCertManagerAndControllerManager(ctx, cfg, restConfig)
 	if err != nil {
 		return err
+	}
+
+	// Schedule cleanup of temporary webhook certificate directory after the
+	// manager stops. The cert dir may contain private key material that must
+	// not persist on disk beyond the operator's lifetime.
+	if cfg.WebhookCertDir != "" && strings.HasPrefix(cfg.WebhookCertDir, os.TempDir()) {
+		defer func() {
+			setupLog.Info("cleaning up temporary webhook certificate directory",
+				"cert_dir", cfg.WebhookCertDir,
+			)
+			if removeErr := os.RemoveAll(cfg.WebhookCertDir); removeErr != nil {
+				setupLog.Error(removeErr, "failed to remove temporary webhook certificate directory",
+					"cert_dir", cfg.WebhookCertDir,
+				)
+			}
+		}()
 	}
 
 	// Initialize all operator metrics with controller-runtime's registry
@@ -449,7 +472,10 @@ func setupWebhookCAInjectorIfEnabled(
 		return nil, nil
 	}
 
-	webhookConfigName := "avapigw-operator-validating-webhook-configuration"
+	webhookConfigName := cfg.WebhookConfigName
+	if webhookConfigName == "" {
+		webhookConfigName = defaultWebhookConfigName
+	}
 
 	injector, err := cert.NewWebhookCAInjector(&cert.WebhookInjectorConfig{
 		WebhookConfigName: webhookConfigName,
@@ -541,6 +567,8 @@ func defineFlags(cfg *Config) {
 	flag.StringVar(&cfg.WebhookCertDir, "webhook-cert-dir", "",
 		"The directory containing TLS certificates for the webhook server. "+
 			"If empty, certificates are generated from the cert manager.")
+	flag.StringVar(&cfg.WebhookConfigName, "webhook-config-name", defaultWebhookConfigName,
+		"The name of the ValidatingWebhookConfiguration resource.")
 	flag.IntVar(&cfg.GRPCPort, "grpc-port", 9444,
 		"The port that the gRPC server serves at.")
 	flag.StringVar(&cfg.CertProvider, "cert-provider", "selfsigned",
@@ -609,6 +637,7 @@ func applyEnvOverrides(cfg *Config) {
 	// Int overrides
 	applyIntEnv(&cfg.WebhookPort, "WEBHOOK_PORT")
 	applyStringEnv(&cfg.WebhookCertDir, "WEBHOOK_CERT_DIR")
+	applyStringEnv(&cfg.WebhookConfigName, "WEBHOOK_CONFIG_NAME")
 	applyIntEnv(&cfg.GRPCPort, "GRPC_PORT")
 
 	// Float overrides

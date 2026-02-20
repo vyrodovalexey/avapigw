@@ -12,6 +12,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// resetWebhookMetricsForTesting resets the webhook metrics singleton so
+// tests can re-initialize with a fresh Prometheus registry. This prevents
+// "duplicate metrics collector registration" panics when multiple tests need
+// isolated metrics instances. Must only be called from tests.
+func resetWebhookMetricsForTesting() {
+	webhookMetricsInstance = nil
+	webhookMetricsOnce = sync.Once{}
+}
+
+// resetDuplicateMetricsForTesting resets the duplicate detection metrics
+// singleton so tests can re-initialize with a fresh Prometheus registry.
+func resetDuplicateMetricsForTesting() {
+	duplicateMetricsInstance = nil
+	duplicateMetricsOnce = sync.Once{}
+}
+
 func TestGetWebhookMetrics_Singleton(t *testing.T) {
 	m1 := GetWebhookMetrics()
 	m2 := GetWebhookMetrics()

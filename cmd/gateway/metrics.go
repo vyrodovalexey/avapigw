@@ -9,10 +9,21 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// defaultMetricsPort is the default port for the metrics HTTP server
+// when not explicitly configured.
+const defaultMetricsPort = 9090
+
 // securityHeadersMiddleware wraps an http.Handler and adds security
 // headers to every response. This hardens the metrics/health endpoints
 // against content-type sniffing, click-jacking, and caching of
 // sensitive data.
+//
+// NOTE: This intentionally does NOT reuse the internal/security package's
+// SecurityHeadersMiddleware because the metrics server is a separate
+// http.Server with its own mux, independent of the gateway's middleware
+// chain. The security package middleware is designed for the gateway's
+// configurable pipeline (with HSTS, CSP, etc.), while the metrics
+// server only needs a minimal, static set of hardening headers.
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -48,6 +59,7 @@ func createMetricsServer(
 		ReadTimeout:       10 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
@@ -72,7 +84,7 @@ func startMetricsServerIfEnabled(app *application, logger observability.Logger) 
 
 	metricsPort := obs.Metrics.Port
 	if metricsPort == 0 {
-		metricsPort = 9090
+		metricsPort = defaultMetricsPort
 	}
 
 	app.metricsServer = createMetricsServer(metricsPort, metricsPath, app.metrics, app.healthChecker, logger)

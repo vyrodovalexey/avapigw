@@ -16,6 +16,10 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/operator/controller"
 )
 
+// Compile-time assertion: IngressValidator must implement admission.Validator
+// for the typed *networkingv1.Ingress parameter.
+var _ admission.Validator[*networkingv1.Ingress] = (*IngressValidator)(nil)
+
 // IngressValidator validates Kubernetes Ingress resources assigned to the avapigw IngressClass.
 // It ensures host/path combinations are valid, TLS configuration references valid secrets,
 // backend service references are valid, and there are no conflicts with existing APIRoute or GRPCRoute CRDs.
