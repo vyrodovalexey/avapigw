@@ -21968,7 +21968,7 @@
           "type": "prometheus",
           "uid": "victoriametrics"
         },
-        "definition": "label_values(gateway_requests_total, instance)",
+        "definition": "label_values(gateway_build_info, instance)",
         "hide": 0,
         "includeAll": true,
         "label": "Instance",
@@ -21976,7 +21976,7 @@
         "name": "instance",
         "options": [],
         "query": {
-          "query": "label_values(gateway_requests_total, instance)",
+          "query": "label_values(gateway_build_info, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,

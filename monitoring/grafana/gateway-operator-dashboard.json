@@ -27436,7 +27436,7 @@
           "type": "prometheus",
           "uid": "victoriametrics"
         },
-        "definition": "label_values(gateway_requests_total, instance)",
+        "definition": "label_values(gateway_build_info, instance)",
         "description": "Gateway instance",
         "includeAll": true,
         "label": "Gateway Instance",
@@ -27445,7 +27445,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values(gateway_requests_total, instance)",
+          "query": "label_values(gateway_build_info, instance)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -27466,7 +27466,7 @@
           "type": "prometheus",
           "uid": "victoriametrics"
         },
-        "definition": "label_values(controller_runtime_reconcile_total, instance)",
+        "definition": "label_values(avapigw_operator_build_info, instance)",
         "description": "Operator instance",
         "includeAll": true,
         "label": "Operator Instance",
@@ -27475,7 +27475,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values(controller_runtime_reconcile_total, instance)",
+          "query": "label_values(avapigw_operator_build_info, instance)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
