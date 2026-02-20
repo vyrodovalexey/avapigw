@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -470,21 +471,8 @@ func TestInitAuditLogger_NilEvents(t *testing.T) {
 		},
 	}
 
-	var auditLogger audit.Logger
-	panicked := false
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -626,8 +614,10 @@ func TestReloadComponents_BackendReloadErrorAfterGatewaySuccess(t *testing.T) {
 		},
 	}
 
-	// Should not panic
-	reloadComponents(context.Background(), app, newCfg, logger)
+	// Should not panic even with duplicate backend names
+	assert.NotPanics(t, func() {
+		reloadComponents(context.Background(), app, newCfg, logger)
+	}, "reloadComponents should not panic with duplicate backend names")
 }
 
 // ============================================================
@@ -675,7 +665,9 @@ func TestReloadComponents_RouteReloadErrorAfterGatewaySuccess(t *testing.T) {
 	}
 
 	// Should not panic - gateway.Reload may reject this config
-	reloadComponents(context.Background(), app, newCfg, logger)
+	assert.NotPanics(t, func() {
+		reloadComponents(context.Background(), app, newCfg, logger)
+	}, "reloadComponents should not panic with duplicate route names")
 }
 
 // ============================================================
@@ -851,21 +843,8 @@ func TestInitAuditLogger_EmptyOutput(t *testing.T) {
 		},
 	}
 
-	var auditLogger audit.Logger
-	panicked := false
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()

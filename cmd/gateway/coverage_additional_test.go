@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -645,22 +646,9 @@ func TestInitAuditLogger(t *testing.T) {
 			},
 		}
 
-		// This test may panic due to duplicate Prometheus metric registration
-		// when run with other tests. We catch the panic and skip the test.
-		var auditLogger audit.Logger
-		panicked := false
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					panicked = true
-				}
-			}()
-			auditLogger = initAuditLogger(cfg, logger)
-		}()
-
-		if panicked {
-			t.Skip("skipped: promauto panicked on duplicate metric registration")
-		}
+		// Use a fresh Prometheus registry to avoid duplicate metric registration panics
+		reg := prometheus.NewRegistry()
+		auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 		assert.NotNil(t, auditLogger)
 		assert.NoError(t, auditLogger.Close())
@@ -758,8 +746,10 @@ func TestInitClientIPExtractor_EmptyProxies(t *testing.T) {
 		},
 	}
 
-	// Should not panic
-	initClientIPExtractor(cfg, logger)
+	// Should not panic with empty proxies list
+	assert.NotPanics(t, func() {
+		initClientIPExtractor(cfg, logger)
+	}, "initClientIPExtractor should not panic with empty proxies")
 }
 
 // ============================================================

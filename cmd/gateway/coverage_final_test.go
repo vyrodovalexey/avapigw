@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -70,22 +71,9 @@ func TestInitAuditLogger_EnabledWithDefaultOutput(t *testing.T) {
 		},
 	}
 
-	// This test may panic due to duplicate Prometheus metric registration
-	// when run with other tests. We catch the panic and skip the test.
-	var auditLogger audit.Logger
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	// Use a fresh Prometheus registry to avoid duplicate metric registration panics
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -113,21 +101,8 @@ func TestInitAuditLogger_WithEventsConfig(t *testing.T) {
 		},
 	}
 
-	// This test may panic due to duplicate Prometheus metric registration
-	var auditLogger audit.Logger
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -149,21 +124,8 @@ func TestInitAuditLogger_WithSkipPathsAndRedactFields(t *testing.T) {
 		},
 	}
 
-	// This test may panic due to duplicate Prometheus metric registration
-	var auditLogger audit.Logger
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()
@@ -286,8 +248,10 @@ func TestReloadComponents_WithRouterError(t *testing.T) {
 		},
 	}
 
-	// Should not panic; error is logged
-	reloadComponents(context.Background(), app, newCfg, logger)
+	// Should not panic; error is logged but reload continues
+	assert.NotPanics(t, func() {
+		reloadComponents(context.Background(), app, newCfg, logger)
+	}, "reloadComponents should not panic with duplicate routes")
 }
 
 func TestReloadComponents_WithBackendError(t *testing.T) {

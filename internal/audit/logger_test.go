@@ -625,18 +625,9 @@ func TestLogger_LogEvent_NilEvent(t *testing.T) {
 	logger, err := NewLogger(config, WithLoggerWriter(&buf), WithLoggerMetrics(newNoopMetrics()))
 	require.NoError(t, err)
 
-	// Should handle nil event gracefully (or panic - depends on implementation)
-	// This test documents the behavior
-	defer func() {
-		if r := recover(); r != nil {
-			// Expected if nil event causes panic
-		}
-	}()
-
-	// Note: The actual implementation may or may not handle nil events
-	// This test is here to document the behavior
-
-	_ = logger.Close()
+	// Verify logger was created successfully and can be closed
+	assert.NotNil(t, logger, "logger should be created successfully")
+	assert.NoError(t, logger.Close(), "logger should close without error")
 }
 
 func TestLogger_LogEvent_ResponseHeaders(t *testing.T) {

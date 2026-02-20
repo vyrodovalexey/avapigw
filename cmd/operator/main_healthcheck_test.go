@@ -178,20 +178,10 @@ func TestSetupWebhooksIfEnabled_EnabledNilManager(t *testing.T) {
 		EnableWebhooks: true,
 	}
 
-	// This will panic because mgr is nil, so we recover
-	var err error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Expected: nil manager causes panic
-				err = errors.New("panic recovered")
-			}
-		}()
-		err = setupWebhooksIfEnabled(context.Background(), nil, cfg)
-	}()
-
-	// Either returns error or panics (both are acceptable)
-	assert.Error(t, err)
+	// Calling with nil manager should panic; verify the panic occurs
+	assert.Panics(t, func() {
+		_ = setupWebhooksIfEnabled(context.Background(), nil, cfg)
+	}, "setupWebhooksIfEnabled should panic with nil manager when webhooks are enabled")
 }
 
 // ============================================================================

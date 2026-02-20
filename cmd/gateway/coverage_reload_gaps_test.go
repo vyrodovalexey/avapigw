@@ -418,6 +418,7 @@ func TestReloadAuditLogger_ConfigChanged_Success(t *testing.T) {
 	app := &application{
 		config:      oldCfg,
 		auditLogger: mockAudit,
+		metrics:     observability.NewMetrics("test"), // Use custom registry to avoid Prometheus conflicts
 	}
 
 	// New config with different audit settings
@@ -431,20 +432,7 @@ func TestReloadAuditLogger_ConfigChanged_Success(t *testing.T) {
 		},
 	}
 
-	// This may panic due to duplicate Prometheus metric registration
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		reloadAuditLogger(app, newCfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reloadAuditLogger(app, newCfg, logger)
 
 	// Close should have been called on the old audit logger
 	assert.True(t, mockAudit.closeCalled, "old audit logger should be closed")
@@ -550,6 +538,7 @@ func TestReloadComponents_WithAuditConfigChange(t *testing.T) {
 		router:          r,
 		config:          cfg,
 		auditLogger:     mockAudit,
+		metrics:         observability.NewMetrics("test"), // Use custom registry to avoid Prometheus conflicts
 	}
 
 	// New config with different audit settings
@@ -560,20 +549,7 @@ func TestReloadComponents_WithAuditConfigChange(t *testing.T) {
 		Output:  "stdout",
 	}
 
-	// This may panic due to duplicate Prometheus metric registration
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		reloadComponents(context.Background(), app, newCfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reloadComponents(context.Background(), app, newCfg, logger)
 
 	// Config should be updated
 	assert.Equal(t, newCfg, app.config)
@@ -679,6 +655,7 @@ func TestReloadComponents_WithAllConfigChanges(t *testing.T) {
 		router:          r,
 		config:          cfg,
 		auditLogger:     audit.NewNoopLogger(),
+		metrics:         observability.NewMetrics("test"), // Use custom registry to avoid Prometheus conflicts
 	}
 
 	// New config with all different settings
@@ -696,20 +673,7 @@ func TestReloadComponents_WithAllConfigChanges(t *testing.T) {
 		Output:  "stdout",
 	}
 
-	// This may panic due to duplicate Prometheus metric registration
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		reloadComponents(context.Background(), app, newCfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reloadComponents(context.Background(), app, newCfg, logger)
 
 	// Config should be updated
 	assert.Equal(t, newCfg, app.config)

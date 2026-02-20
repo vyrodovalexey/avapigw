@@ -259,10 +259,19 @@ copy_certs_to_volume() {
 
     log_info "Copying certificates into Docker volume 'mtls_certs'..."
 
+    # Detect the correct volume name (project name may vary)
+    local volume_name
+    volume_name=$(docker volume ls --format '{{.Name}}' | grep '_mtls_certs$' | head -1)
+    if [ -z "$volume_name" ]; then
+        volume_name="${COMPOSE_PROJECT_NAME:-avapigw-test}_mtls_certs"
+        log_warn "No mtls_certs volume found, using default: ${volume_name}"
+    fi
+    log_info "Using Docker volume: ${volume_name}"
+
     # Use a temporary container to copy files into the named volume
     docker run --rm \
         -v "$(cd "${source_dir}" && pwd)":/source:ro \
-        -v docker-compose_mtls_certs:/certs \
+        -v "${volume_name}":/certs \
         alpine sh -c "cp /source/* /certs/ && chmod 644 /certs/*"
 
     log_info "Certificates copied to Docker volume"

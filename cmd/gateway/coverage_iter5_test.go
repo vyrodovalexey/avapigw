@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -836,8 +837,10 @@ func TestInitClientIPExtractor_WithTrustedProxies_Iter5(t *testing.T) {
 		},
 	}
 
-	// Should not panic
-	initClientIPExtractor(cfg, logger)
+	// Should not panic when called with trusted proxies
+	assert.NotPanics(t, func() {
+		initClientIPExtractor(cfg, logger)
+	}, "initClientIPExtractor should not panic with trusted proxies")
 }
 
 func TestInitClientIPExtractor_WithoutTrustedProxies_Iter5(t *testing.T) {
@@ -849,8 +852,10 @@ func TestInitClientIPExtractor_WithoutTrustedProxies_Iter5(t *testing.T) {
 		},
 	}
 
-	// Should not panic
-	initClientIPExtractor(cfg, logger)
+	// Should not panic when called without trusted proxies
+	assert.NotPanics(t, func() {
+		initClientIPExtractor(cfg, logger)
+	}, "initClientIPExtractor should not panic without trusted proxies")
 }
 
 // ============================================================
@@ -879,21 +884,8 @@ func TestInitAuditLogger_AllEventTypes(t *testing.T) {
 		},
 	}
 
-	var auditLogger audit.Logger
-	panicked := false
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		auditLogger = initAuditLogger(cfg, logger)
-	}()
-
-	if panicked {
-		t.Skip("skipped: promauto panicked on duplicate metric registration")
-	}
+	reg := prometheus.NewRegistry()
+	auditLogger := initAuditLogger(cfg, logger, audit.WithLoggerRegisterer(reg))
 
 	assert.NotNil(t, auditLogger)
 	_ = auditLogger.Close()

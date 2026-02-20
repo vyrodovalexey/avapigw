@@ -674,12 +674,18 @@ func TestPKIClient_GetCA_WithMockServer(t *testing.T) {
 	}
 
 	pki := client.PKI()
-	_, err = pki.GetCA(context.Background(), "pki")
+	ca, err := pki.GetCA(context.Background(), "pki")
 
-	// The certificate in the mock is not valid, so parsing will fail
-	// but we're testing the API call path
-	if err == nil {
-		t.Log("GetCA() succeeded (certificate was parseable)")
+	// The certificate in the mock is not valid base64, so parsing will fail.
+	// We verify the API call path was exercised by checking the error.
+	if err != nil {
+		if ca != nil {
+			t.Error("CA should be nil when parsing fails")
+		}
+	} else {
+		if ca == nil {
+			t.Error("CA should not be nil when parsing succeeds")
+		}
 	}
 }
 
