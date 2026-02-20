@@ -9,7 +9,7 @@ spec:
         prefix: api.v1
   route:
     - destination:
-        host: grpc-backend
-        port: 9000
+        host: basic-grpc-backend
+        port: 8811
       weight: 100
   timeout: 30s

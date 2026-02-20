@@ -736,6 +736,11 @@ spec:
         exact: api.v1.TestService
       method:
         exact: Unary
+      # Only match when Authorization header is present, so the basic
+      # gRPC throughput test (without auth) falls through to a non-auth route.
+      metadata:
+        - name: authorization
+          present: true
   route:
     - destination:
         host: host.docker.internal
@@ -768,6 +773,10 @@ spec:
   match:
     - service:
         prefix: "api.v1."
+      # Only match when x-api-key header is present
+      metadata:
+        - name: x-api-key
+          present: true
   route:
     - destination:
         host: host.docker.internal

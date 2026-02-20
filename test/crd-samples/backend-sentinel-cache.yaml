@@ -5,11 +5,14 @@ metadata:
   namespace: avapigw-test
 spec:
   hosts:
-    - address: 10.0.1.10
-      port: 8080
+    # For local K8s testing, use host.docker.internal to reach
+    # REST backends running in docker-compose.
+    # In production, use the actual K8s service FQDN or IP.
+    - address: host.docker.internal
+      port: 8801
       weight: 50
-    - address: 10.0.1.11
-      port: 8080
+    - address: host.docker.internal
+      port: 8802
       weight: 50
   healthCheck:
     path: /health

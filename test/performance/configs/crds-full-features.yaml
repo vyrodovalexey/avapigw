@@ -780,6 +780,11 @@ spec:
   match:
     - service:
         exact: api.v1.TestService
+      # Only match when Authorization header is present, so the basic
+      # gRPC throughput test (without auth) falls through to a non-auth route.
+      metadata:
+        - name: authorization
+          present: true
   route:
     - destination:
         host: host.docker.internal

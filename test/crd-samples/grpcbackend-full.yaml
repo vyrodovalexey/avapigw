@@ -5,11 +5,14 @@ metadata:
   namespace: avapigw-test
 spec:
   hosts:
-    - address: grpc-service-1.default.svc.cluster.local
-      port: 9000
+    # For local K8s testing, use host.docker.internal to reach
+    # gRPC backends running in docker-compose.
+    # In production, use the actual K8s service FQDN.
+    - address: host.docker.internal
+      port: 8811
       weight: 60
-    - address: grpc-service-2.default.svc.cluster.local
-      port: 9000
+    - address: host.docker.internal
+      port: 8812
       weight: 40
   healthCheck:
     enabled: true
