@@ -19,7 +19,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
-  "id": 2,
+  "id": null,
   "links": [],
   "panels": [
     {
@@ -5336,7 +5336,7 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.5, rate(gateway_proxy_backend_duration_seconds_bucket{component=\"gateway\"}[1m]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_proxy_backend_duration_seconds_bucket{job=~\"$job\"}[1m]))",
           "legendFormat": "p50",
           "range": true,
           "refId": "A"
@@ -5347,7 +5347,7 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.9, rate(gateway_proxy_backend_duration_seconds_bucket{component=\"gateway\"}[1m]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_proxy_backend_duration_seconds_bucket{job=~\"$job\"}[1m]))",
           "legendFormat": "p90",
           "range": true,
           "refId": "B"
@@ -5357,7 +5357,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_proxy_backend_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_proxy_backend_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -5457,7 +5457,7 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.5, rate(gateway_tls_handshake_duration_seconds_bucket{component=\"gateway\"}[1m]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_tls_handshake_duration_seconds_bucket{job=~\"$job\"}[1m]))",
           "legendFormat": "p50 {{version}} {{mode}}",
           "range": true,
           "refId": "A"
@@ -5468,7 +5468,7 @@
             "uid": "victoriametrics"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.9, rate(gateway_tls_handshake_duration_seconds_bucket{component=\"gateway\"}[1m]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_tls_handshake_duration_seconds_bucket{job=~\"$job\"}[1m]))",
           "legendFormat": "p90 {{version}} {{mode}}",
           "range": true,
           "refId": "B"
@@ -5478,7 +5478,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_tls_handshake_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_tls_handshake_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{version}} {{mode}}",
           "refId": "C"
         }
@@ -6777,7 +6777,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_grpc_proxy_direct_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_grpc_proxy_direct_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{method}}",
           "refId": "A"
         },
@@ -6786,7 +6786,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_grpc_proxy_direct_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_grpc_proxy_direct_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{method}}",
           "refId": "B"
         },
@@ -6795,7 +6795,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_grpc_proxy_direct_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_grpc_proxy_direct_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{method}}",
           "refId": "C"
         }
@@ -6894,7 +6894,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(grpc_server_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(grpc_server_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{service}}/{{method}}",
           "refId": "A"
         },
@@ -6903,7 +6903,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(grpc_server_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(grpc_server_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{service}}/{{method}}",
           "refId": "B"
         },
@@ -6912,7 +6912,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(grpc_server_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(grpc_server_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{service}}/{{method}}",
           "refId": "C"
         }
@@ -7011,7 +7011,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_grpc_proxy_request_size_bytes_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_grpc_proxy_request_size_bytes_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{method}}",
           "refId": "A"
         },
@@ -7020,7 +7020,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_grpc_proxy_request_size_bytes_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_grpc_proxy_request_size_bytes_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{method}}",
           "refId": "B"
         }
@@ -7119,7 +7119,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_grpc_proxy_response_size_bytes_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_grpc_proxy_response_size_bytes_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{method}}",
           "refId": "A"
         },
@@ -7128,7 +7128,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_grpc_proxy_response_size_bytes_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_grpc_proxy_response_size_bytes_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{method}}",
           "refId": "B"
         }
@@ -8079,7 +8079,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_cache_operation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_cache_operation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{backend}} {{operation}}",
           "refId": "A"
         },
@@ -8088,7 +8088,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_cache_operation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_cache_operation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{backend}} {{operation}}",
           "refId": "B"
         },
@@ -8097,7 +8097,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_cache_operation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_cache_operation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{backend}} {{operation}}",
           "refId": "C"
         }
@@ -8797,7 +8797,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_transform_operation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_transform_operation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{direction}}",
           "refId": "A"
         },
@@ -8806,7 +8806,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_transform_operation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_transform_operation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{direction}}",
           "refId": "B"
         },
@@ -8815,7 +8815,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_transform_operation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_transform_operation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{direction}}",
           "refId": "C"
         }
@@ -10768,7 +10768,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_jwt_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_jwt_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{algorithm}}",
           "refId": "A"
         },
@@ -10777,7 +10777,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_jwt_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_jwt_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{algorithm}}",
           "refId": "B"
         },
@@ -10786,7 +10786,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_jwt_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_jwt_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{algorithm}}",
           "refId": "C"
         }
@@ -10885,7 +10885,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_jwt_signing_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_jwt_signing_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{algorithm}}",
           "refId": "A"
         },
@@ -10894,7 +10894,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_jwt_signing_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_jwt_signing_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{algorithm}}",
           "refId": "B"
         },
@@ -10903,7 +10903,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_jwt_signing_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_jwt_signing_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{algorithm}}",
           "refId": "C"
         }
@@ -11002,7 +11002,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_jwt_jwks_refresh_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_jwt_jwks_refresh_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 ",
           "refId": "A"
         },
@@ -11011,7 +11011,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_jwt_jwks_refresh_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_jwt_jwks_refresh_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 ",
           "refId": "B"
         },
@@ -11020,7 +11020,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_jwt_jwks_refresh_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_jwt_jwks_refresh_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 ",
           "refId": "C"
         }
@@ -11119,7 +11119,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_apikey_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_apikey_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 ",
           "refId": "A"
         },
@@ -11128,7 +11128,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_apikey_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_apikey_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 ",
           "refId": "B"
         },
@@ -11137,7 +11137,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_apikey_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_apikey_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 ",
           "refId": "C"
         }
@@ -11236,7 +11236,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_mtls_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_mtls_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 ",
           "refId": "A"
         },
@@ -11245,7 +11245,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_mtls_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_mtls_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 ",
           "refId": "B"
         },
@@ -11254,7 +11254,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_mtls_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_mtls_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 ",
           "refId": "C"
         }
@@ -11353,7 +11353,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_oidc_token_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_oidc_token_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{provider}}",
           "refId": "A"
         },
@@ -11362,7 +11362,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_oidc_token_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_oidc_token_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{provider}}",
           "refId": "B"
         },
@@ -11371,7 +11371,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_oidc_token_validation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_oidc_token_validation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{provider}}",
           "refId": "C"
         }
@@ -11470,7 +11470,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_oidc_introspection_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_oidc_introspection_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{provider}}",
           "refId": "A"
         },
@@ -11479,7 +11479,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_oidc_introspection_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_oidc_introspection_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{provider}}",
           "refId": "B"
         },
@@ -11488,7 +11488,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_oidc_introspection_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_oidc_introspection_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{provider}}",
           "refId": "C"
         }
@@ -11587,7 +11587,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_auth_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_auth_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{auth_type}}",
           "refId": "A"
         },
@@ -11596,7 +11596,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_auth_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_auth_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{auth_type}}",
           "refId": "B"
         },
@@ -11605,7 +11605,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_auth_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_auth_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{auth_type}}",
           "refId": "C"
         }
@@ -11704,7 +11704,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_backend_auth_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_backend_auth_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{auth_type}} {{operation}}",
           "refId": "A"
         },
@@ -11713,7 +11713,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_backend_auth_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_backend_auth_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{auth_type}} {{operation}}",
           "refId": "B"
         },
@@ -11722,7 +11722,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_backend_auth_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_backend_auth_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{auth_type}} {{operation}}",
           "refId": "C"
         }
@@ -13252,7 +13252,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_authz_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_authz_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{engine}}",
           "refId": "A"
         },
@@ -13261,7 +13261,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_authz_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_authz_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{engine}}",
           "refId": "B"
         },
@@ -13270,7 +13270,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_authz_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_authz_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{engine}}",
           "refId": "C"
         }
@@ -13369,7 +13369,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_rbac_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_rbac_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{policy}}",
           "refId": "A"
         },
@@ -13378,7 +13378,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_rbac_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_rbac_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{policy}}",
           "refId": "B"
         },
@@ -13387,7 +13387,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_rbac_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_rbac_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{policy}}",
           "refId": "C"
         }
@@ -13486,7 +13486,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_abac_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_abac_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{policy}}",
           "refId": "A"
         },
@@ -13495,7 +13495,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_abac_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_abac_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{policy}}",
           "refId": "B"
         },
@@ -13504,7 +13504,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_abac_evaluation_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_abac_evaluation_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{policy}}",
           "refId": "C"
         }
@@ -13603,7 +13603,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_external_authz_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_external_authz_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{type}}",
           "refId": "A"
         },
@@ -13612,7 +13612,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_external_authz_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_external_authz_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{type}}",
           "refId": "B"
         },
@@ -13621,7 +13621,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_external_authz_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_external_authz_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{type}}",
           "refId": "C"
         }
@@ -13720,7 +13720,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_authz_external_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_authz_external_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50 {{provider}}",
           "refId": "A"
         },
@@ -13729,7 +13729,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_authz_external_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_authz_external_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90 {{provider}}",
           "refId": "B"
         },
@@ -13738,7 +13738,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_authz_external_request_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_authz_external_request_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99 {{provider}}",
           "refId": "C"
         }
@@ -14178,7 +14178,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_config_reload_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_config_reload_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -14187,7 +14187,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_config_reload_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_config_reload_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90",
           "refId": "B"
         },
@@ -14196,7 +14196,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_config_reload_duration_seconds_bucket{component=\"gateway\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_config_reload_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -14295,7 +14295,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_operator_client_config_apply_duration_seconds_bucket{component=\"operator\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_operator_client_config_apply_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -14304,7 +14304,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_operator_client_config_apply_duration_seconds_bucket{component=\"operator\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_operator_client_config_apply_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90",
           "refId": "B"
         },
@@ -14313,7 +14313,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_operator_client_config_apply_duration_seconds_bucket{component=\"operator\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_operator_client_config_apply_duration_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -14412,7 +14412,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.5, rate(gateway_operator_client_heartbeat_latency_seconds_bucket{component=\"operator\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.5, rate(gateway_operator_client_heartbeat_latency_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -14421,7 +14421,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.9, rate(gateway_operator_client_heartbeat_latency_seconds_bucket{component=\"operator\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.9, rate(gateway_operator_client_heartbeat_latency_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p90",
           "refId": "B"
         },
@@ -14430,7 +14430,7 @@
             "type": "prometheus",
             "uid": "victoriametrics"
           },
-          "expr": "histogram_quantile(0.99, rate(gateway_operator_client_heartbeat_latency_seconds_bucket{component=\"operator\"}[$__rate_interval]))",
+          "expr": "histogram_quantile(0.99, rate(gateway_operator_client_heartbeat_latency_seconds_bucket{job=~\"$job\"}[$__rate_interval]))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -21968,7 +21968,7 @@
           "type": "prometheus",
           "uid": "victoriametrics"
         },
-        "definition": "label_values(gateway_build_info, instance)",
+        "definition": "label_values(gateway_requests_total, instance)",
         "hide": 0,
         "includeAll": true,
         "label": "Instance",
@@ -21976,7 +21976,7 @@
         "name": "instance",
         "options": [],
         "query": {
-          "query": "label_values(gateway_build_info, instance)",
+          "query": "label_values(gateway_requests_total, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
