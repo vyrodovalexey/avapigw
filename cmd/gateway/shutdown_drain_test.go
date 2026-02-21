@@ -180,7 +180,7 @@ func TestStopCoreServices_AllComponents(t *testing.T) {
 		maxSessionsLimiter: msl,
 		metricsServer:      metricsServer,
 		vaultClient:        &mockVaultClientForShutdown{closeErr: nil},
-		auditLogger:        audit.NewNoopLogger(),
+		auditLogger:        audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -232,7 +232,7 @@ func TestStopCoreServices_WithErrors(t *testing.T) {
 		tracer:          tracer,
 		config:          cfg,
 		vaultClient:     &mockVaultClientForShutdown{closeErr: errors.New("vault close error")},
-		auditLogger:     &errorAuditLogger90{},
+		auditLogger:     audit.NewAtomicAuditLogger(&errorAuditLogger90{}),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

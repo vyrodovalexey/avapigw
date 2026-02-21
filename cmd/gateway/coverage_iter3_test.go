@@ -93,7 +93,7 @@ func TestWaitForShutdown_VaultClientCloseSuccess(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 		vaultClient:     &mockVaultClientForShutdown{closeErr: nil}, // Success path
 	}
 
@@ -166,7 +166,7 @@ func TestWaitForShutdown_VaultClientCloseError(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 		vaultClient:     &mockVaultClientForShutdown{closeErr: fmt.Errorf("mock vault close error")},
 	}
 

@@ -6,11 +6,13 @@ package operator_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/operator/webhook"
 )
 
@@ -756,6 +758,360 @@ func TestFunctional_GRPCBackend_CombinedNewFields(t *testing.T) {
 		}
 		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.NoError(t, err)
+	})
+}
+
+// TestFunctional_GRPCBackend_ConfigConversion tests GRPCBackendToBackend conversion.
+func TestFunctional_GRPCBackend_ConfigConversion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("basic conversion preserves name and hosts", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-svc",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 60},
+				{Address: "10.0.0.2", Port: 9000, Weight: 40},
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.Equal(t, "grpc-svc", b.Name)
+		assert.Len(t, b.Hosts, 2)
+		assert.Equal(t, "10.0.0.1", b.Hosts[0].Address)
+		assert.Equal(t, 9000, b.Hosts[0].Port)
+		assert.Equal(t, 60, b.Hosts[0].Weight)
+		assert.Equal(t, "10.0.0.2", b.Hosts[1].Address)
+		assert.Equal(t, 40, b.Hosts[1].Weight)
+	})
+
+	t.Run("conversion with health check enabled", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-hc",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			HealthCheck: &config.GRPCHealthCheckConfig{
+				Enabled:            true,
+				Service:            "grpc.health.v1.Health",
+				Interval:           config.Duration(10 * time.Second),
+				Timeout:            config.Duration(5 * time.Second),
+				HealthyThreshold:   2,
+				UnhealthyThreshold: 3,
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.NotNil(t, b.HealthCheck)
+		assert.Equal(t, "/grpc.health.v1.Health/Check", b.HealthCheck.Path)
+		assert.Equal(t, config.Duration(10*time.Second), b.HealthCheck.Interval)
+		assert.Equal(t, config.Duration(5*time.Second), b.HealthCheck.Timeout)
+		assert.Equal(t, 2, b.HealthCheck.HealthyThreshold)
+		assert.Equal(t, 3, b.HealthCheck.UnhealthyThreshold)
+	})
+
+	t.Run("conversion with health check disabled", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-no-hc",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			HealthCheck: &config.GRPCHealthCheckConfig{
+				Enabled: false,
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+		assert.Nil(t, b.HealthCheck)
+	})
+
+	t.Run("conversion with nil health check", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-nil-hc",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			HealthCheck: nil,
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+		assert.Nil(t, b.HealthCheck)
+	})
+
+	t.Run("conversion with TLS simple mode", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-tls",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			TLS: &config.TLSConfig{
+				Enabled:    true,
+				Mode:       "SIMPLE",
+				CertFile:   "/certs/tls.crt",
+				KeyFile:    "/certs/tls.key",
+				CAFile:     "/certs/ca.crt",
+				MinVersion: "TLS12",
+				MaxVersion: "TLS13",
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.NotNil(t, b.TLS)
+		assert.True(t, b.TLS.Enabled)
+		assert.Equal(t, "SIMPLE", b.TLS.Mode)
+		assert.Equal(t, "/certs/tls.crt", b.TLS.CertFile)
+		assert.Equal(t, "/certs/tls.key", b.TLS.KeyFile)
+		assert.Equal(t, "/certs/ca.crt", b.TLS.CAFile)
+		assert.Equal(t, "TLS12", b.TLS.MinVersion)
+		assert.Equal(t, "TLS13", b.TLS.MaxVersion)
+		assert.Nil(t, b.TLS.Vault)
+	})
+
+	t.Run("conversion with TLS and Vault config", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-vault-tls",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			TLS: &config.TLSConfig{
+				Enabled:    true,
+				Mode:       "MUTUAL",
+				MinVersion: "TLS12",
+				Vault: &config.VaultGRPCTLSConfig{
+					Enabled:    true,
+					PKIMount:   "pki",
+					Role:       "grpc-client",
+					CommonName: "gateway-grpc-client",
+					AltNames:   []string{"gateway.local"},
+				},
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.NotNil(t, b.TLS)
+		assert.True(t, b.TLS.Enabled)
+		assert.Equal(t, "MUTUAL", b.TLS.Mode)
+		assert.NotNil(t, b.TLS.Vault)
+		assert.True(t, b.TLS.Vault.Enabled)
+		assert.Equal(t, "pki", b.TLS.Vault.PKIMount)
+		assert.Equal(t, "grpc-client", b.TLS.Vault.Role)
+		assert.Equal(t, "gateway-grpc-client", b.TLS.Vault.CommonName)
+		assert.Equal(t, []string{"gateway.local"}, b.TLS.Vault.AltNames)
+	})
+
+	t.Run("conversion with Vault TLS disabled", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-vault-disabled",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			TLS: &config.TLSConfig{
+				Enabled: true,
+				Mode:    "SIMPLE",
+				Vault: &config.VaultGRPCTLSConfig{
+					Enabled: false,
+				},
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.NotNil(t, b.TLS)
+		assert.Nil(t, b.TLS.Vault, "Vault should be nil when disabled")
+	})
+
+	t.Run("conversion with circuit breaker", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-cb",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			CircuitBreaker: &config.CircuitBreakerConfig{
+				Enabled:          true,
+				Threshold:        5,
+				Timeout:          config.Duration(30 * time.Second),
+				HalfOpenRequests: 3,
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.NotNil(t, b.CircuitBreaker)
+		assert.True(t, b.CircuitBreaker.Enabled)
+		assert.Equal(t, 5, b.CircuitBreaker.Threshold)
+		assert.Equal(t, config.Duration(30*time.Second), b.CircuitBreaker.Timeout)
+		assert.Equal(t, 3, b.CircuitBreaker.HalfOpenRequests)
+	})
+
+	t.Run("conversion with load balancer", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-lb",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			LoadBalancer: &config.LoadBalancer{
+				Algorithm: "roundRobin",
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.NotNil(t, b.LoadBalancer)
+		assert.Equal(t, "roundRobin", b.LoadBalancer.Algorithm)
+	})
+
+	t.Run("conversion with authentication", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-auth",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			Authentication: &config.BackendAuthConfig{
+				Type: "jwt",
+				JWT: &config.BackendJWTAuthConfig{
+					Enabled:      true,
+					TokenSource:  "static",
+					StaticToken:  "test-token",
+					HeaderName:   "authorization",
+					HeaderPrefix: "Bearer",
+				},
+			},
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+
+		assert.NotNil(t, b.Authentication)
+		assert.Equal(t, "jwt", b.Authentication.Type)
+		assert.NotNil(t, b.Authentication.JWT)
+		assert.True(t, b.Authentication.JWT.Enabled)
+		assert.Equal(t, "static", b.Authentication.JWT.TokenSource)
+	})
+
+	t.Run("conversion with nil TLS", func(t *testing.T) {
+		t.Parallel()
+
+		gb := config.GRPCBackend{
+			Name: "grpc-no-tls",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 9000, Weight: 1},
+			},
+			TLS: nil,
+		}
+
+		b := config.GRPCBackendToBackend(gb)
+		assert.Nil(t, b.TLS)
+	})
+}
+
+// TestFunctional_GRPCBackend_BatchConversion tests GRPCBackendsToBackends batch conversion.
+func TestFunctional_GRPCBackend_BatchConversion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty slice returns empty", func(t *testing.T) {
+		t.Parallel()
+
+		result := config.GRPCBackendsToBackends([]config.GRPCBackend{})
+		assert.NotNil(t, result)
+		assert.Empty(t, result)
+	})
+
+	t.Run("nil slice returns empty", func(t *testing.T) {
+		t.Parallel()
+
+		result := config.GRPCBackendsToBackends(nil)
+		assert.NotNil(t, result)
+		assert.Empty(t, result)
+	})
+
+	t.Run("multiple backends converted correctly", func(t *testing.T) {
+		t.Parallel()
+
+		gbs := []config.GRPCBackend{
+			{
+				Name: "backend-1",
+				Hosts: []config.BackendHost{
+					{Address: "10.0.0.1", Port: 9000, Weight: 1},
+				},
+				HealthCheck: &config.GRPCHealthCheckConfig{
+					Enabled:  true,
+					Interval: config.Duration(10 * time.Second),
+					Timeout:  config.Duration(5 * time.Second),
+				},
+			},
+			{
+				Name: "backend-2",
+				Hosts: []config.BackendHost{
+					{Address: "10.0.0.2", Port: 9001, Weight: 1},
+				},
+				TLS: &config.TLSConfig{
+					Enabled: true,
+					Mode:    "SIMPLE",
+				},
+			},
+			{
+				Name: "backend-3",
+				Hosts: []config.BackendHost{
+					{Address: "10.0.0.3", Port: 9002, Weight: 1},
+				},
+				CircuitBreaker: &config.CircuitBreakerConfig{
+					Enabled:   true,
+					Threshold: 5,
+					Timeout:   config.Duration(30 * time.Second),
+				},
+			},
+		}
+
+		result := config.GRPCBackendsToBackends(gbs)
+
+		assert.Len(t, result, 3)
+		assert.Equal(t, "backend-1", result[0].Name)
+		assert.NotNil(t, result[0].HealthCheck)
+		assert.Equal(t, "backend-2", result[1].Name)
+		assert.NotNil(t, result[1].TLS)
+		assert.Equal(t, "backend-3", result[2].Name)
+		assert.NotNil(t, result[2].CircuitBreaker)
+	})
+
+	t.Run("single backend converted correctly", func(t *testing.T) {
+		t.Parallel()
+
+		gbs := []config.GRPCBackend{
+			{
+				Name: "single-backend",
+				Hosts: []config.BackendHost{
+					{Address: "10.0.0.1", Port: 9000, Weight: 100},
+				},
+			},
+		}
+
+		result := config.GRPCBackendsToBackends(gbs)
+
+		assert.Len(t, result, 1)
+		assert.Equal(t, "single-backend", result[0].Name)
+		assert.Equal(t, 100, result[0].Hosts[0].Weight)
 	})
 }
 

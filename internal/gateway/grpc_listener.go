@@ -11,6 +11,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
@@ -43,6 +44,7 @@ type GRPCListener struct {
 	metricsRegistry      *prometheus.Registry
 	authMetrics          *auth.Metrics
 	vaultClient          vault.Client
+	backendRegistry      *backend.Registry
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -149,6 +151,15 @@ func WithGRPCVaultClient(client vault.Client) GRPCListenerOption {
 	}
 }
 
+// WithGRPCBackendRegistry sets the backend registry for the gRPC listener.
+// When set, the gRPC proxy director resolves backend names to actual host
+// addresses using the backend's load balancer.
+func WithGRPCBackendRegistry(registry *backend.Registry) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.backendRegistry = registry
+	}
+}
+
 // NewGRPCListener creates a new gRPC listener.
 func NewGRPCListener(
 	cfg config.Listener,
@@ -181,6 +192,9 @@ func NewGRPCListener(
 	}
 	if l.vaultClient != nil {
 		proxyOpts = append(proxyOpts, grpcproxy.WithProxyVaultClient(l.vaultClient))
+	}
+	if l.backendRegistry != nil {
+		proxyOpts = append(proxyOpts, grpcproxy.WithBackendRegistry(l.backendRegistry))
 	}
 	l.proxy = grpcproxy.New(l.router, proxyOpts...)
 
@@ -632,6 +646,58 @@ func (l *GRPCListener) ClearAuthCache() {
 			observability.String("name", l.config.Name),
 		)
 	}
+}
+
+// ReloadBackends reloads gRPC backend configuration and cleans up stale connections.
+// It delegates to the backend registry's ReloadFromConfig for the copy-on-write swap,
+// then cleans up connections to removed or changed backends.
+func (l *GRPCListener) ReloadBackends(ctx context.Context, backends []config.Backend) error {
+	if l.backendRegistry == nil {
+		return fmt.Errorf("no backend registry configured for gRPC listener %s", l.config.Name)
+	}
+
+	// Collect current backend targets before reload
+	oldTargets := l.collectBackendTargets()
+
+	// Reload backends using copy-on-write pattern
+	if err := l.backendRegistry.ReloadFromConfig(ctx, backends); err != nil {
+		return fmt.Errorf("failed to reload gRPC backends on listener %s: %w", l.config.Name, err)
+	}
+
+	// Collect new backend targets after reload
+	newTargets := l.collectBackendTargets()
+
+	// Clean up stale connections
+	if l.proxy != nil {
+		l.proxy.CleanupStaleConnections(newTargets)
+	}
+
+	l.logger.Info("gRPC backends reloaded",
+		observability.String("listener", l.config.Name),
+		observability.Int("old_targets", len(oldTargets)),
+		observability.Int("new_targets", len(newTargets)),
+	)
+
+	return nil
+}
+
+// collectBackendTargets collects all host:port targets from the backend registry.
+func (l *GRPCListener) collectBackendTargets() map[string]bool {
+	targets := make(map[string]bool)
+	if l.backendRegistry == nil {
+		return targets
+	}
+	for _, b := range l.backendRegistry.GetAll() {
+		sb, ok := b.(*backend.ServiceBackend)
+		if !ok {
+			continue
+		}
+		for _, host := range sb.GetHosts() {
+			target := fmt.Sprintf("%s:%d", host.Address, host.Port)
+			targets[target] = true
+		}
+	}
+	return targets
 }
 
 // LoadRoutes loads gRPC routes from configuration.

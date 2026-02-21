@@ -14,6 +14,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
@@ -83,12 +84,13 @@ type Gateway struct {
 	tlsMetrics tlspkg.MetricsRecorder
 
 	// gRPC components
-	auditLogger     audit.Logger
-	metricsRegistry *prometheus.Registry
-	grpcMetrics     *grpcmiddleware.GRPCMetrics
-	grpcMetricsOnce sync.Once
-	authMetrics     *auth.Metrics
-	vaultClient     vault.Client
+	auditLogger         audit.Logger
+	metricsRegistry     *prometheus.Registry
+	grpcMetrics         *grpcmiddleware.GRPCMetrics
+	grpcMetricsOnce     sync.Once
+	authMetrics         *auth.Metrics
+	vaultClient         vault.Client
+	grpcBackendRegistry *backend.Registry
 }
 
 // Option is a functional option for configuring the gateway.
@@ -166,6 +168,15 @@ func WithGatewayAuthMetrics(metrics *auth.Metrics) Option {
 func WithGatewayVaultClient(client vault.Client) Option {
 	return func(g *Gateway) {
 		g.vaultClient = client
+	}
+}
+
+// WithGatewayGRPCBackendRegistry sets the backend registry for gRPC backends.
+// The registry is propagated to all gRPC listeners created by the gateway,
+// enabling load-balanced backend resolution and hot-reload of gRPC backends.
+func WithGatewayGRPCBackendRegistry(registry *backend.Registry) Option {
+	return func(g *Gateway) {
+		g.grpcBackendRegistry = registry
 	}
 }
 
@@ -445,6 +456,11 @@ func (g *Gateway) createGRPCListener(
 		grpcOpts = append(grpcOpts, WithGRPCVaultClient(g.vaultClient))
 	}
 
+	// Pass gRPC backend registry for load-balanced backend resolution
+	if g.grpcBackendRegistry != nil {
+		grpcOpts = append(grpcOpts, WithGRPCBackendRegistry(g.grpcBackendRegistry))
+	}
+
 	grpcListener, err := NewGRPCListener(listenerCfg, grpcOpts...)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -581,4 +597,21 @@ func (g *Gateway) GetListeners() []*Listener {
 // GetGRPCListeners returns all gRPC listeners.
 func (g *Gateway) GetGRPCListeners() []*GRPCListener {
 	return g.grpcListeners
+}
+
+// ReloadGRPCBackends reloads gRPC backend configuration on all gRPC listeners.
+// It delegates to each listener's ReloadBackends method which performs the
+// copy-on-write swap and cleans up stale connections.
+func (g *Gateway) ReloadGRPCBackends(ctx context.Context, backends []config.Backend) error {
+	for _, listener := range g.grpcListeners {
+		if err := listener.ReloadBackends(ctx, backends); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetGRPCBackendRegistry returns the gRPC backend registry.
+func (g *Gateway) GetGRPCBackendRegistry() *backend.Registry {
+	return g.grpcBackendRegistry
 }

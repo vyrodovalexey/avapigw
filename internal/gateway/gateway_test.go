@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -626,4 +627,145 @@ func TestGateway_ClearAllAuthCaches_WithHTTPAndGRPCListeners(t *testing.T) {
 	assert.NotPanics(t, func() {
 		gw.ClearAllAuthCaches()
 	})
+}
+
+// --- WithGatewayGRPCBackendRegistry tests ---
+
+func TestGateway_WithGatewayGRPCBackendRegistry_SetsRegistry(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+	}
+
+	gw, err := New(cfg,
+		WithLogger(logger),
+		WithGatewayGRPCBackendRegistry(reg),
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, reg, gw.GetGRPCBackendRegistry())
+}
+
+func TestGateway_GetGRPCBackendRegistry_NilWhenNotSet(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	assert.Nil(t, gw.GetGRPCBackendRegistry())
+}
+
+func TestGateway_GetGRPCBackendRegistry_ReturnsRegistryWhenSet(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+	}
+
+	gw, err := New(cfg,
+		WithLogger(logger),
+		WithGatewayGRPCBackendRegistry(reg),
+	)
+	require.NoError(t, err)
+
+	result := gw.GetGRPCBackendRegistry()
+	assert.NotNil(t, result)
+	assert.Equal(t, reg, result)
+}
+
+// --- ReloadGRPCBackends tests ---
+
+func TestGateway_ReloadGRPCBackends_NoListeners(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "http", Port: 0, Protocol: "HTTP"},
+			},
+		},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = gw.Stop(ctx) }()
+
+	// No gRPC listeners — should succeed with no-op
+	err = gw.ReloadGRPCBackends(ctx, []config.Backend{})
+	assert.NoError(t, err)
+}
+
+func TestGateway_ReloadGRPCBackends_PropagatesToListeners(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{Name: "grpc", Port: 0, Protocol: config.ProtocolGRPC},
+			},
+		},
+	}
+
+	gw, err := New(cfg,
+		WithLogger(logger),
+		WithGatewayGRPCBackendRegistry(reg),
+	)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = gw.Start(ctx)
+	require.NoError(t, err)
+	defer func() { _ = gw.Stop(ctx) }()
+
+	// Verify we have a gRPC listener
+	require.Len(t, gw.GetGRPCListeners(), 1)
+
+	// Reload with new backends
+	backends := []config.Backend{
+		{
+			Name: "test-backend",
+			Hosts: []config.BackendHost{
+				{Address: "localhost", Port: 50051},
+			},
+		},
+	}
+
+	err = gw.ReloadGRPCBackends(ctx, backends)
+	assert.NoError(t, err)
+}
+
+func TestGateway_ReloadGRPCBackends_BeforeStart(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.GatewayConfig{
+		Metadata: config.Metadata{Name: "test-gateway"},
+	}
+
+	gw, err := New(cfg, WithLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	// Before start, grpcListeners is nil — should succeed with no-op
+	ctx := context.Background()
+	err = gw.ReloadGRPCBackends(ctx, []config.Backend{})
+	assert.NoError(t, err)
 }

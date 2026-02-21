@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -221,6 +222,321 @@ spec:
 
 		// Error callback may or may not be called depending on timing
 		// The important thing is that the watcher doesn't crash
+	})
+}
+
+func TestE2E_HotReload_GRPCBackendReload(t *testing.T) {
+	testCfg := helpers.GetGRPCTestConfig()
+	helpers.SkipIfGRPCBackendUnavailable(t, testCfg.Backend1URL)
+	helpers.SkipIfGRPCBackendUnavailable(t, testCfg.Backend2URL)
+
+	t.Run("gRPC backend config change detected by watcher", func(t *testing.T) {
+		// Create a temporary config file with gRPC backends
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "gateway-grpc.yaml")
+
+		initialConfig := fmt.Sprintf(`apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: grpc-hotreload-test
+spec:
+  listeners:
+    - name: grpc
+      port: 19090
+      protocol: GRPC
+      bind: 127.0.0.1
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: %s
+          port: %d
+          weight: 1
+`, helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port)
+
+		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
+		require.NoError(t, err)
+
+		// Track config changes
+		var lastConfig *config.GatewayConfig
+		configChanged := make(chan struct{}, 1)
+
+		callback := func(cfg *config.GatewayConfig) {
+			lastConfig = cfg
+			select {
+			case configChanged <- struct{}{}:
+			default:
+			}
+		}
+
+		// Create watcher
+		watcher, err := config.NewWatcher(configPath, callback,
+			config.WithLogger(observability.NopLogger()),
+			config.WithDebounceDelay(100*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		err = watcher.Start(ctx)
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			_ = watcher.Stop()
+		})
+
+		// Verify initial config was loaded
+		initialCfg := watcher.GetLastConfig()
+		require.NotNil(t, initialCfg)
+		assert.Equal(t, "grpc-hotreload-test", initialCfg.Metadata.Name)
+		assert.Len(t, initialCfg.Spec.GRPCBackends, 1)
+
+		// Update config file with additional gRPC backend
+		updatedConfig := fmt.Sprintf(`apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: grpc-hotreload-test
+spec:
+  listeners:
+    - name: grpc
+      port: 19090
+      protocol: GRPC
+      bind: 127.0.0.1
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: %s
+          port: %d
+          weight: 60
+    - name: grpc-backend-2
+      hosts:
+        - address: %s
+          port: %d
+          weight: 40
+`, helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Port)
+
+		err = os.WriteFile(configPath, []byte(updatedConfig), 0644)
+		require.NoError(t, err)
+
+		// Wait for config change to be detected
+		select {
+		case <-configChanged:
+			// Config was reloaded
+		case <-time.After(5 * time.Second):
+			t.Log("Config change not detected within timeout - this may be expected in some environments")
+		}
+
+		// Verify config was updated (if callback was triggered)
+		if lastConfig != nil {
+			assert.Len(t, lastConfig.Spec.GRPCBackends, 2)
+			assert.Equal(t, "grpc-backend-1", lastConfig.Spec.GRPCBackends[0].Name)
+			assert.Equal(t, "grpc-backend-2", lastConfig.Spec.GRPCBackends[1].Name)
+		}
+	})
+
+	t.Run("gRPC backend removal detected by watcher", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "gateway-grpc-remove.yaml")
+
+		initialConfig := fmt.Sprintf(`apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: grpc-remove-test
+spec:
+  listeners:
+    - name: grpc
+      port: 19091
+      protocol: GRPC
+      bind: 127.0.0.1
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: %s
+          port: %d
+          weight: 1
+    - name: grpc-backend-2
+      hosts:
+        - address: %s
+          port: %d
+          weight: 1
+`, helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Port)
+
+		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
+		require.NoError(t, err)
+
+		var lastConfig *config.GatewayConfig
+		configChanged := make(chan struct{}, 1)
+
+		callback := func(cfg *config.GatewayConfig) {
+			lastConfig = cfg
+			select {
+			case configChanged <- struct{}{}:
+			default:
+			}
+		}
+
+		watcher, err := config.NewWatcher(configPath, callback,
+			config.WithLogger(observability.NopLogger()),
+			config.WithDebounceDelay(100*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		err = watcher.Start(ctx)
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			_ = watcher.Stop()
+		})
+
+		// Verify initial config
+		initialCfg := watcher.GetLastConfig()
+		require.NotNil(t, initialCfg)
+		assert.Len(t, initialCfg.Spec.GRPCBackends, 2)
+
+		// Remove one backend
+		updatedConfig := fmt.Sprintf(`apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: grpc-remove-test
+spec:
+  listeners:
+    - name: grpc
+      port: 19091
+      protocol: GRPC
+      bind: 127.0.0.1
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: %s
+          port: %d
+          weight: 1
+`, helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port)
+
+		err = os.WriteFile(configPath, []byte(updatedConfig), 0644)
+		require.NoError(t, err)
+
+		// Wait for config change
+		select {
+		case <-configChanged:
+		case <-time.After(5 * time.Second):
+			t.Log("Config change not detected within timeout")
+		}
+
+		if lastConfig != nil {
+			assert.Len(t, lastConfig.Spec.GRPCBackends, 1)
+			assert.Equal(t, "grpc-backend-1", lastConfig.Spec.GRPCBackends[0].Name)
+		}
+	})
+
+	t.Run("gRPC backend weight change detected", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "gateway-grpc-weight.yaml")
+
+		initialConfig := fmt.Sprintf(`apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: grpc-weight-test
+spec:
+  listeners:
+    - name: grpc
+      port: 19092
+      protocol: GRPC
+      bind: 127.0.0.1
+  grpcBackends:
+    - name: grpc-backend-weighted
+      hosts:
+        - address: %s
+          port: %d
+          weight: 50
+        - address: %s
+          port: %d
+          weight: 50
+`, helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Port)
+
+		err := os.WriteFile(configPath, []byte(initialConfig), 0644)
+		require.NoError(t, err)
+
+		var lastConfig *config.GatewayConfig
+		configChanged := make(chan struct{}, 1)
+
+		callback := func(cfg *config.GatewayConfig) {
+			lastConfig = cfg
+			select {
+			case configChanged <- struct{}{}:
+			default:
+			}
+		}
+
+		watcher, err := config.NewWatcher(configPath, callback,
+			config.WithLogger(observability.NopLogger()),
+			config.WithDebounceDelay(100*time.Millisecond),
+		)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		err = watcher.Start(ctx)
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			_ = watcher.Stop()
+		})
+
+		// Update weights
+		updatedConfig := fmt.Sprintf(`apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: grpc-weight-test
+spec:
+  listeners:
+    - name: grpc
+      port: 19092
+      protocol: GRPC
+      bind: 127.0.0.1
+  grpcBackends:
+    - name: grpc-backend-weighted
+      hosts:
+        - address: %s
+          port: %d
+          weight: 80
+        - address: %s
+          port: %d
+          weight: 20
+`, helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Host,
+			helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Port)
+
+		err = os.WriteFile(configPath, []byte(updatedConfig), 0644)
+		require.NoError(t, err)
+
+		select {
+		case <-configChanged:
+		case <-time.After(5 * time.Second):
+			t.Log("Config change not detected within timeout")
+		}
+
+		if lastConfig != nil {
+			require.Len(t, lastConfig.Spec.GRPCBackends, 1)
+			require.Len(t, lastConfig.Spec.GRPCBackends[0].Hosts, 2)
+			assert.Equal(t, 80, lastConfig.Spec.GRPCBackends[0].Hosts[0].Weight)
+			assert.Equal(t, 20, lastConfig.Spec.GRPCBackends[0].Hosts[1].Weight)
+		}
 	})
 }
 

@@ -305,7 +305,7 @@ func TestWaitForShutdown_GatewayStopError(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	done := make(chan struct{})
@@ -464,7 +464,7 @@ func TestWaitForShutdown_AuditLoggerCloseError(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     &errorAuditLogger{}, // Mock that returns error on Close
+		auditLogger:     audit.NewAtomicAuditLogger(&errorAuditLogger{}), // Mock that returns error on Close
 	}
 
 	done := make(chan struct{})
@@ -637,7 +637,7 @@ spec:
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	done := make(chan struct{})

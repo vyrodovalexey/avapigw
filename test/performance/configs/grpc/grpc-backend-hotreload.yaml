@@ -1,0 +1,93 @@
+# gRPC Backend Hot-Reload Performance Test Configuration
+# Purpose: Measure gRPC backend hot-reload performance under load
+# Duration: 10 minutes total (2m warmup + 6m sustain + 2m cooldown)
+# Target: Backend reload latency < 50ms P99
+# Tool: ghz (https://ghz.sh)
+
+# Test metadata
+name: grpc-backend-hotreload
+description: gRPC backend hot-reload performance test through API Gateway
+
+# Target configuration
+target:
+  host: "127.0.0.1"
+  port: 9000
+  # Use gateway's gRPC port
+  
+# Call configuration
+call:
+  # Service and method to call
+  # Format: package.Service/Method
+  service: "api.v1.TestService"
+  method: "Echo"
+  
+  # Use server reflection
+  reflection: true
+
+# Request data
+data:
+  message: "Hot-reload performance test message"
+  timestamp: "2024-01-01T00:00:00Z"
+
+# Load configuration
+load:
+  # Total number of requests
+  total: 1200000
+  
+  # Concurrency (number of workers)
+  concurrency: 100
+  
+  # Requests per second - sustained load during reload
+  rps: 2000
+  
+  # Duration: 10 minutes total
+  duration: "10m"
+
+# Connection configuration
+connection:
+  # Connection timeout
+  timeout: "10s"
+  
+  # Keep-alive settings
+  keepalive:
+    time: "30s"
+    timeout: "10s"
+  
+  # Use insecure connection (no TLS)
+  insecure: true
+  
+  # Number of connections to use
+  connections: 20
+
+# Metadata (headers)
+metadata:
+  "x-perf-test": "grpc-backend-hotreload"
+  "x-request-id": "{{.RequestNumber}}"
+
+# Output configuration
+output:
+  # Output format: summary, csv, json, pretty, html, influx-summary, influx-details
+  format: "json"
+
+# Advanced options
+options:
+  # Enable binary data output
+  binary: false
+  
+  # Skip TLS verification
+  skipTLSVerify: true
+
+# Hot-reload test specific configuration
+# This test should be run alongside a script that triggers backend reloads
+hotreload:
+  # Reload interval during test
+  reload_interval: "30s"
+  
+  # Number of backends to reload
+  backend_count: 10
+  
+  # Expected metrics
+  slo:
+    max_p99_reload_latency_ms: 50
+    max_request_error_rate_percent: 0.1
+    max_connection_reset_rate_percent: 0.5

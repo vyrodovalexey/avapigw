@@ -513,7 +513,7 @@ func TestWaitForShutdown_WithAllComponents(t *testing.T) {
 		metricsServer:      metricsServer,
 		tracer:             tracer,
 		config:             cfg,
-		auditLogger:        audit.NewNoopLogger(),
+		auditLogger:        audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 		rateLimiter:        rl,
 		maxSessionsLimiter: msl,
 		vaultClient:        nil,
@@ -605,7 +605,7 @@ spec:
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	watcher := startConfigWatcher(context.Background(), app, configPath, logger)
@@ -884,7 +884,7 @@ func TestRunGateway_BackendStartError(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	// Create a temporary config file

@@ -648,6 +648,256 @@ func TestE2E_GRPCGateway_RouteMatching(t *testing.T) {
 	})
 }
 
+func TestE2E_GRPCGateway_BackendHotReload(t *testing.T) {
+	testCfg := helpers.GetGRPCTestConfig()
+	helpers.SkipIfGRPCBackendUnavailable(t, testCfg.Backend1URL)
+	helpers.SkipIfGRPCBackendUnavailable(t, testCfg.Backend2URL)
+
+	t.Run("hot-reload gRPC backends end-to-end", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Get a free port
+		port, err := helpers.GetFreeGRPCPort()
+		require.NoError(t, err)
+
+		// Create initial configuration with single backend
+		cfg := helpers.CreateGRPCTestConfigSingleBackend(port, testCfg.Backend1URL)
+
+		// Start gateway
+		gi, err := helpers.StartGRPCGatewayWithConfig(ctx, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, gi)
+
+		t.Cleanup(func() {
+			_ = gi.Stop(ctx)
+		})
+
+		// Wait for gateway to be ready
+		err = helpers.WaitForGRPCReady(gi.Address, 10*time.Second)
+		require.NoError(t, err)
+
+		// Verify initial state - single backend route
+		route, exists := gi.Router.GetRoute("test-service")
+		require.True(t, exists)
+		assert.Len(t, route.Config.Route, 1)
+		assert.Equal(t, 100, route.Config.Route[0].Weight)
+
+		// Connect to gateway and verify it works
+		conn, err := grpc.DialContext(ctx, gi.Address,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Verify health check works before reload
+		healthClient := healthpb.NewHealthClient(conn)
+		resp, err := healthClient.Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
+		require.NoError(t, err)
+		assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.GetStatus())
+
+		// Now reload routes with two backends (simulating backend hot-reload)
+		err = gi.Router.LoadRoutes([]config.GRPCRoute{
+			{
+				Name: "test-service",
+				Match: []config.GRPCRouteMatch{
+					{
+						Service: &config.StringMatch{Exact: "api.v1.TestService"},
+					},
+				},
+				Route: []config.RouteDestination{
+					{
+						Destination: config.Destination{
+							Host: helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+							Port: helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port,
+						},
+						Weight: 50,
+					},
+					{
+						Destination: config.Destination{
+							Host: helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Host,
+							Port: helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Port,
+						},
+						Weight: 50,
+					},
+				},
+				Timeout: config.Duration(30 * time.Second),
+			},
+		})
+		require.NoError(t, err)
+
+		// Verify updated state - two backend routes
+		route, exists = gi.Router.GetRoute("test-service")
+		require.True(t, exists)
+		assert.Len(t, route.Config.Route, 2)
+		assert.Equal(t, 50, route.Config.Route[0].Weight)
+		assert.Equal(t, 50, route.Config.Route[1].Weight)
+
+		// Verify health check still works after reload
+		resp, err = healthClient.Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
+		require.NoError(t, err)
+		assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.GetStatus())
+
+		// Verify gateway is still running
+		assert.True(t, gi.Listener.IsRunning())
+	})
+
+	t.Run("hot-reload preserves existing connections", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		port, err := helpers.GetFreeGRPCPort()
+		require.NoError(t, err)
+
+		// Start with two backends
+		cfg := helpers.CreateGRPCTestConfig(port, testCfg.Backend1URL, testCfg.Backend2URL)
+
+		gi, err := helpers.StartGRPCGatewayWithConfig(ctx, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, gi)
+
+		t.Cleanup(func() {
+			_ = gi.Stop(ctx)
+		})
+
+		err = helpers.WaitForGRPCReady(gi.Address, 10*time.Second)
+		require.NoError(t, err)
+
+		// Establish connection before reload
+		conn, err := grpc.DialContext(ctx, gi.Address,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Verify connection works
+		healthClient := healthpb.NewHealthClient(conn)
+		resp, err := healthClient.Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
+		require.NoError(t, err)
+		assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.GetStatus())
+
+		// Reload routes (change weights)
+		err = gi.Router.LoadRoutes([]config.GRPCRoute{
+			{
+				Name: "test-service",
+				Match: []config.GRPCRouteMatch{
+					{
+						Service: &config.StringMatch{Exact: "api.v1.TestService"},
+					},
+				},
+				Route: []config.RouteDestination{
+					{
+						Destination: config.Destination{
+							Host: helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+							Port: helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port,
+						},
+						Weight: 80,
+					},
+					{
+						Destination: config.Destination{
+							Host: helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Host,
+							Port: helpers.GetGRPCBackendInfo(testCfg.Backend2URL).Port,
+						},
+						Weight: 20,
+					},
+				},
+				Timeout: config.Duration(30 * time.Second),
+			},
+		})
+		require.NoError(t, err)
+
+		// Existing connection should still work after reload
+		resp, err = healthClient.Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
+		require.NoError(t, err)
+		assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.GetStatus())
+
+		// Verify updated route
+		route, exists := gi.Router.GetRoute("test-service")
+		require.True(t, exists)
+		assert.Equal(t, 80, route.Config.Route[0].Weight)
+		assert.Equal(t, 20, route.Config.Route[1].Weight)
+	})
+
+	t.Run("hot-reload with backend removal", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		port, err := helpers.GetFreeGRPCPort()
+		require.NoError(t, err)
+
+		// Start with two backends
+		cfg := helpers.CreateGRPCTestConfig(port, testCfg.Backend1URL, testCfg.Backend2URL)
+
+		gi, err := helpers.StartGRPCGatewayWithConfig(ctx, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, gi)
+
+		t.Cleanup(func() {
+			_ = gi.Stop(ctx)
+		})
+
+		err = helpers.WaitForGRPCReady(gi.Address, 10*time.Second)
+		require.NoError(t, err)
+
+		// Verify initial state
+		route, exists := gi.Router.GetRoute("test-service")
+		require.True(t, exists)
+		assert.Len(t, route.Config.Route, 2)
+
+		// Reload with only one backend (remove backend2)
+		err = gi.Router.LoadRoutes([]config.GRPCRoute{
+			{
+				Name: "test-service",
+				Match: []config.GRPCRouteMatch{
+					{
+						Service: &config.StringMatch{Exact: "api.v1.TestService"},
+					},
+				},
+				Route: []config.RouteDestination{
+					{
+						Destination: config.Destination{
+							Host: helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Host,
+							Port: helpers.GetGRPCBackendInfo(testCfg.Backend1URL).Port,
+						},
+						Weight: 100,
+					},
+				},
+				Timeout: config.Duration(30 * time.Second),
+			},
+		})
+		require.NoError(t, err)
+
+		// Clean up stale connections to removed backend
+		if gi.Proxy != nil {
+			validTargets := map[string]bool{
+				testCfg.Backend1URL: true,
+			}
+			gi.Proxy.CleanupStaleConnections(validTargets)
+		}
+
+		// Verify updated state
+		route, exists = gi.Router.GetRoute("test-service")
+		require.True(t, exists)
+		assert.Len(t, route.Config.Route, 1)
+		assert.Equal(t, 100, route.Config.Route[0].Weight)
+
+		// Verify gateway still works
+		conn, err := grpc.DialContext(ctx, gi.Address,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+		)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		healthClient := healthpb.NewHealthClient(conn)
+		resp, err := healthClient.Check(ctx, &healthpb.HealthCheckRequest{Service: ""})
+		require.NoError(t, err)
+		assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.GetStatus())
+	})
+}
+
 func TestE2E_GRPCGateway_ErrorHandling(t *testing.T) {
 	t.Parallel()
 

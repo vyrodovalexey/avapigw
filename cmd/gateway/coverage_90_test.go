@@ -149,7 +149,7 @@ func TestWaitForOperatorShutdown_WithOperatorClient_90(t *testing.T) {
 			metricsServer:      metricsServer,
 			tracer:             tracer,
 			config:             cfg,
-			auditLogger:        audit.NewNoopLogger(),
+			auditLogger:        audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 			rateLimiter:        rl,
 			maxSessionsLimiter: msl,
 			vaultClient:        nil,
@@ -222,7 +222,7 @@ func TestWaitForOperatorShutdown_WithVaultClient_90(t *testing.T) {
 			backendRegistry: backendReg,
 			tracer:          tracer,
 			config:          cfg,
-			auditLogger:     audit.NewNoopLogger(),
+			auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 			// vaultClient is nil - tests the nil check path
 		},
 		operatorClient: nil,

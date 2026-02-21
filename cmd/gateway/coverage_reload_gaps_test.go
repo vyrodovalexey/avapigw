@@ -383,7 +383,7 @@ func TestReloadAuditLogger_ConfigUnchanged(t *testing.T) {
 	mockAudit := &closableAuditLogger{}
 	app := &application{
 		config:      cfg,
-		auditLogger: mockAudit,
+		auditLogger: audit.NewAtomicAuditLogger(mockAudit),
 	}
 
 	// New config with same audit settings
@@ -417,7 +417,7 @@ func TestReloadAuditLogger_ConfigChanged_Success(t *testing.T) {
 	mockAudit := &closableAuditLogger{}
 	app := &application{
 		config:      oldCfg,
-		auditLogger: mockAudit,
+		auditLogger: audit.NewAtomicAuditLogger(mockAudit),
 		metrics:     observability.NewMetrics("test"), // Use custom registry to avoid Prometheus conflicts
 	}
 
@@ -459,7 +459,7 @@ func TestReloadAuditLogger_ConfigChanged_CloseError(t *testing.T) {
 	}
 	app := &application{
 		config:      oldCfg,
-		auditLogger: mockAudit,
+		auditLogger: audit.NewAtomicAuditLogger(mockAudit),
 	}
 
 	// New config with different audit settings
@@ -493,7 +493,7 @@ func TestReloadAuditLogger_NilOldAuditLogger(t *testing.T) {
 
 	app := &application{
 		config:      oldCfg,
-		auditLogger: nil, // nil audit logger
+		auditLogger: nil, // nil AtomicAuditLogger pointer
 	}
 
 	// New config with audit enabled
@@ -505,11 +505,14 @@ func TestReloadAuditLogger_NilOldAuditLogger(t *testing.T) {
 		},
 	}
 
-	// Should not panic with nil audit logger
+	// Should not panic with nil audit logger — the swap is skipped
+	// when app.auditLogger is nil (no atomic wrapper to swap into)
 	reloadAuditLogger(app, newCfg, logger)
 
-	// New audit logger should be set
-	assert.NotNil(t, app.auditLogger, "new audit logger should be set")
+	// auditLogger remains nil because there is no AtomicAuditLogger
+	// wrapper to swap into. In production, initApplication() always
+	// creates the wrapper, so this nil case only occurs in tests.
+	assert.Nil(t, app.auditLogger, "audit logger should remain nil when no atomic wrapper exists")
 }
 
 // ============================================================================
@@ -537,7 +540,7 @@ func TestReloadComponents_WithAuditConfigChange(t *testing.T) {
 		backendRegistry: reg,
 		router:          r,
 		config:          cfg,
-		auditLogger:     mockAudit,
+		auditLogger:     audit.NewAtomicAuditLogger(mockAudit),
 		metrics:         observability.NewMetrics("test"), // Use custom registry to avoid Prometheus conflicts
 	}
 
@@ -654,7 +657,7 @@ func TestReloadComponents_WithAllConfigChanges(t *testing.T) {
 		backendRegistry: reg,
 		router:          r,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 		metrics:         observability.NewMetrics("test"), // Use custom registry to avoid Prometheus conflicts
 	}
 

@@ -135,7 +135,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Access Logs** - Detailed request/response logging
 
 ### Operations
-- **Hot Configuration Reload** - Update configuration without restart with atomic config updates and hash-based change detection
+- **Hot Configuration Reload** - Update configuration without restart with atomic config updates and hash-based change detection (includes gRPC backend hot-reload)
 - **Graceful Shutdown** - Clean shutdown with connection draining and configurable timeouts
 - **Docker Support** - Production-ready container images with security optimizations
 - **Kubernetes & Helm** - Production-ready Helm charts with local K8s deployment support via values-local.yaml

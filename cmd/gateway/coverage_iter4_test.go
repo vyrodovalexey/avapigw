@@ -544,7 +544,7 @@ spec:
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	done := make(chan struct{})
@@ -723,7 +723,7 @@ func TestWaitForShutdown_TracerShutdownError(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	done := make(chan struct{})
@@ -795,7 +795,7 @@ func TestWaitForShutdown_BackendStopError(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	done := make(chan struct{})

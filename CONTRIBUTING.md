@@ -409,7 +409,7 @@ When making changes that may affect performance:
 - **Profiling**: Profile code for performance bottlenecks
 - **Resource cleanup**: Always clean up timers, goroutines, and other resources
 - **Timer management**: Use defer statements to prevent timer leaks (see config watcher implementation)
-- **Hot-reload limitations**: Be aware that gRPC routes/backends do NOT support hot-reload and require restart
+- **Hot-reload limitations**: Be aware that gRPC routes do NOT support hot-reload in file-based mode (only in operator mode), but gRPC backends ARE hot-reloaded in both modes
 - **Metrics impact**: Consider the performance impact of new metrics (use bounded cardinality)
 - **Performance testing**: Run performance tests for changes that may affect throughput or latency
 

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
@@ -26,6 +27,7 @@ type Proxy struct {
 	metricsRegistry *prometheus.Registry
 	authMetrics     *auth.Metrics
 	vaultClient     vault.Client
+	backendRegistry *backend.Registry
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -87,6 +89,16 @@ func WithProxyVaultClient(client vault.Client) ProxyOption {
 	}
 }
 
+// WithBackendRegistry sets the backend registry for the proxy's director.
+// When set, the director resolves backend names to actual host addresses
+// using the backend's load balancer instead of using the route destination
+// host directly.
+func WithBackendRegistry(registry *backend.Registry) ProxyOption {
+	return func(p *Proxy) {
+		p.backendRegistry = registry
+	}
+}
+
 // New creates a new gRPC proxy.
 func New(r *router.Router, opts ...ProxyOption) *Proxy {
 	p := &Proxy{
@@ -114,6 +126,9 @@ func New(r *router.Router, opts ...ProxyOption) *Proxy {
 	// Create director if not provided
 	if p.director == nil {
 		directorOpts := []DirectorOption{WithDirectorLogger(p.logger)}
+		if p.backendRegistry != nil {
+			directorOpts = append(directorOpts, WithDirectorBackendRegistry(p.backendRegistry))
+		}
 		if p.authMetrics != nil {
 			directorOpts = append(directorOpts, WithDirectorAuthMetrics(p.authMetrics))
 		}
@@ -240,6 +255,29 @@ func (p *Proxy) Close() error {
 		return p.connPool.Close()
 	}
 	return nil
+}
+
+// CleanupStaleConnections closes connections to targets that are no longer
+// in the provided set of valid targets. This should be called after a
+// backend reload to clean up connections to removed or changed backends.
+func (p *Proxy) CleanupStaleConnections(validTargets map[string]bool) {
+	if p.connPool == nil {
+		return
+	}
+	for _, target := range p.connPool.Targets() {
+		if !validTargets[target] {
+			if err := p.connPool.CloseConn(target); err != nil {
+				p.logger.Warn("failed to close stale gRPC connection",
+					observability.String("target", target),
+					observability.Error(err),
+				)
+			} else {
+				p.logger.Info("closed stale gRPC connection after backend reload",
+					observability.String("target", target),
+				)
+			}
+		}
+	}
 }
 
 // Router returns the router.

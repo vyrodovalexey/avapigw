@@ -35,22 +35,24 @@ import (
 
 // application holds all application components.
 type application struct {
-	gateway            *gateway.Gateway
-	backendRegistry    *backend.Registry
-	router             *router.Router
-	healthChecker      *health.Checker
-	metrics            *observability.Metrics
-	reloadMetrics      *reloadMetrics
-	metricsServer      *http.Server
-	tracer             *observability.Tracer
-	config             *config.GatewayConfig
-	rateLimiter        *middleware.RateLimiter
-	maxSessionsLimiter *middleware.MaxSessionsLimiter
-	auditLogger        audit.Logger
-	vaultClient        vault.Client
-	authMetrics        *auth.Metrics
-	cacheFactory       *gateway.CacheFactory
-	routeMiddlewareMgr *gateway.RouteMiddlewareManager
+	gateway             *gateway.Gateway
+	backendRegistry     *backend.Registry
+	grpcBackendRegistry *backend.Registry
+	router              *router.Router
+	healthChecker       *health.Checker
+	metrics             *observability.Metrics
+	reloadMetrics       *reloadMetrics
+	metricsServer       *http.Server
+	tracer              *observability.Tracer
+	config              *config.GatewayConfig
+	rateLimiter         *middleware.RateLimiter
+	maxSessionsLimiter  *middleware.MaxSessionsLimiter
+	auditLogger         *audit.AtomicAuditLogger
+	auditMetrics        *audit.Metrics
+	vaultClient         vault.Client
+	authMetrics         *auth.Metrics
+	cacheFactory        *gateway.CacheFactory
+	routeMiddlewareMgr  *gateway.RouteMiddlewareManager
 }
 
 // initApplication initializes all application components.
@@ -60,9 +62,15 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	metrics.SetBuildInfo(version, gitCommit, buildTime)
 	tracer := initTracer(cfg, logger)
 	healthChecker := health.NewChecker(version, logger)
-	auditLogger := initAuditLogger(cfg, logger,
-		audit.WithLoggerRegisterer(metrics.Registry()),
+
+	// Create audit metrics once and share across reloads. This avoids
+	// Prometheus duplicate-registration errors when the audit logger is
+	// hot-reloaded — the same counter instance remains in the registry.
+	auditMetrics := audit.NewMetricsWithRegisterer("gateway", metrics.Registry())
+	rawAuditLogger := initAuditLogger(cfg, logger,
+		audit.WithLoggerMetrics(auditMetrics),
 	)
+	auditLogger := audit.NewAtomicAuditLogger(rawAuditLogger)
 
 	// Initialize subsystem metric singletons and register them with the
 	// gateway's custom Prometheus registry. These singletons use promauto
@@ -93,6 +101,18 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	if err := backendRegistry.LoadFromConfig(cfg.Spec.Backends); err != nil {
 		fatalWithSync(logger, "failed to load backends", observability.Error(err))
 		return nil // unreachable in production; allows test to continue
+	}
+
+	// Create gRPC backend registry for gRPC backend hot-reload.
+	// Uses the same infrastructure as HTTP backends (load balancing, health checking).
+	grpcRegistryOpts := []backend.RegistryOption{backend.WithRegistryMetrics(metrics)}
+	if vaultClient != nil {
+		grpcRegistryOpts = append(grpcRegistryOpts, backend.WithRegistryVaultClient(vaultClient))
+	}
+	grpcBackendRegistry := backend.NewRegistry(logger, grpcRegistryOpts...)
+	if err := grpcBackendRegistry.LoadFromConfig(config.GRPCBackendsToBackends(cfg.Spec.GRPCBackends)); err != nil {
+		fatalWithSync(logger, "failed to load gRPC backends", observability.Error(err))
+		return nil
 	}
 
 	r := router.New()
@@ -162,6 +182,9 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	if vaultClient != nil {
 		gwOpts = append(gwOpts, gateway.WithGatewayVaultClient(vaultClient))
 	}
+	if grpcBackendRegistry != nil {
+		gwOpts = append(gwOpts, gateway.WithGatewayGRPCBackendRegistry(grpcBackendRegistry))
+	}
 
 	gw, err := gateway.New(cfg, gwOpts...)
 	if err != nil {
@@ -170,21 +193,23 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	}
 
 	return &application{
-		gateway:            gw,
-		backendRegistry:    backendRegistry,
-		router:             r,
-		healthChecker:      healthChecker,
-		metrics:            metrics,
-		reloadMetrics:      newReloadMetrics(metrics),
-		tracer:             tracer,
-		config:             cfg,
-		rateLimiter:        middlewareResult.rateLimiter,
-		maxSessionsLimiter: middlewareResult.maxSessionsLimiter,
-		auditLogger:        auditLogger,
-		vaultClient:        vaultClient,
-		authMetrics:        authMetrics,
-		cacheFactory:       cacheFactory,
-		routeMiddlewareMgr: routeMiddlewareMgr,
+		gateway:             gw,
+		backendRegistry:     backendRegistry,
+		grpcBackendRegistry: grpcBackendRegistry,
+		router:              r,
+		healthChecker:       healthChecker,
+		metrics:             metrics,
+		reloadMetrics:       newReloadMetrics(metrics),
+		tracer:              tracer,
+		config:              cfg,
+		rateLimiter:         middlewareResult.rateLimiter,
+		maxSessionsLimiter:  middlewareResult.maxSessionsLimiter,
+		auditLogger:         auditLogger,
+		auditMetrics:        auditMetrics,
+		vaultClient:         vaultClient,
+		authMetrics:         authMetrics,
+		cacheFactory:        cacheFactory,
+		routeMiddlewareMgr:  routeMiddlewareMgr,
 	}
 }
 

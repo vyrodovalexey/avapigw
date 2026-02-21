@@ -3093,3 +3093,145 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   3. Verify keys are hashed in Redis
   4. Verify TTLs vary (jitter applied with hashed keys)
 - **Expected Results**: Both features work together correctly
+
+## gRPC Backend Hot-Reload Tests
+
+### TestFunctional_GRPCBackend_ConfigConversion
+- **Description**: Test GRPCBackendToBackend conversion preserves all fields
+- **Preconditions**: None
+- **Steps**:
+  1. Create GRPCBackend with name and hosts
+  2. Convert to Backend using GRPCBackendToBackend
+  3. Verify name, hosts, weights preserved
+  4. Test with health check enabled/disabled/nil
+  5. Test with TLS simple mode
+  6. Test with TLS and Vault config
+  7. Test with Vault TLS disabled
+  8. Test with circuit breaker
+  9. Test with load balancer
+  10. Test with authentication
+  11. Test with nil TLS
+- **Expected Results**: All fields correctly converted from GRPCBackend to Backend
+
+### TestFunctional_GRPCBackend_BatchConversion
+- **Description**: Test GRPCBackendsToBackends batch conversion
+- **Preconditions**: None
+- **Steps**:
+  1. Convert empty slice
+  2. Convert nil slice
+  3. Convert multiple backends
+  4. Convert single backend
+- **Expected Results**: Batch conversion works correctly for all cases
+
+### TestFunctional_GRPCConfig_BackendConversion
+- **Description**: Test gRPC backend config conversion in functional context
+- **Preconditions**: None
+- **Steps**:
+  1. Test full field preservation (name, hosts, health check, LB, TLS, Vault, CB, auth)
+  2. Test batch conversion
+  3. Test empty/nil handling
+  4. Test health check disabled produces nil
+  5. Test TLS with disabled/nil Vault
+  6. Test cipher suites and insecure skip verify
+- **Expected Results**: Config conversion works correctly for all edge cases
+
+### TestIntegration_GRPCBackendReload_RegistryReload
+- **Description**: Test backend registry reload with copy-on-write pattern
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Load initial backends into registry
+  2. Reload with additional backend
+  3. Verify new backend added
+  4. Reload with removed backend
+  5. Verify old backend removed
+  6. Reload with updated weights
+- **Expected Results**: Registry reload works correctly with add/remove/update
+
+### TestIntegration_GRPCBackendReload_ConcurrentAccess
+- **Description**: Test concurrent access during backend reload
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Load initial backends
+  2. Spawn concurrent readers
+  3. Spawn concurrent reloaders
+  4. Verify no errors during concurrent operations
+- **Expected Results**: Concurrent reads and reloads are thread-safe
+
+### TestIntegration_GRPCBackendReload_ConnectionCleanup
+- **Description**: Test stale connection cleanup after backend reload
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Create proxy with two backends
+  2. Establish connections to both
+  3. Clean up connections to removed backend
+  4. Verify only valid connections remain
+  5. Test cleanup with empty valid targets
+- **Expected Results**: Stale connections are properly cleaned up
+
+### TestIntegration_GRPCBackendReload_ListenerReload
+- **Description**: Test GRPCListener.ReloadBackends method
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Create listener with backend registry
+  2. Start listener
+  3. Reload backends
+  4. Verify listener still running
+  5. Test reload without registry returns error
+- **Expected Results**: Listener reload works correctly
+
+### TestIntegration_GRPCBackendReload_GRPCBackendConversion
+- **Description**: Test full conversion pipeline from GRPCBackend to Backend in reload
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Create GRPCBackend configs
+  2. Convert to Backend configs
+  3. Load into registry
+  4. Reload with updated GRPCBackend configs
+  5. Verify registry state
+- **Expected Results**: Full conversion pipeline works with reload
+
+### TestIntegration_GRPCBackendReload_ProxyDirectorAfterReload
+- **Description**: Test proxy director routes correctly after reload
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Create proxy with route to backend1
+  2. Verify routing to backend1
+  3. Reload routes to point to backend2
+  4. Clean up stale connections
+  5. Verify routing to backend2
+- **Expected Results**: Director routes to new backends after reload
+
+### TestIntegration_GRPCBackendReload_EmptyBackends
+- **Description**: Test reload with empty backends
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Load initial backends
+  2. Reload with empty backends
+  3. Verify registry is empty
+- **Expected Results**: Empty reload clears registry
+
+### TestE2E_GRPCGateway_BackendHotReload
+- **Description**: Test gRPC backend hot-reload end-to-end
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Start gateway with single backend
+  2. Verify initial routing
+  3. Connect and verify health check
+  4. Reload routes with two backends
+  5. Verify updated routing
+  6. Verify health check still works
+  7. Test connection preservation during reload
+  8. Test backend removal with connection cleanup
+- **Expected Results**: Hot-reload works end-to-end without service interruption
+
+### TestE2E_HotReload_GRPCBackendReload
+- **Description**: Test gRPC backend config change detection via file watcher
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Create config file with gRPC backends
+  2. Start config watcher
+  3. Update config with additional backend
+  4. Verify change detected
+  5. Test backend removal detection
+  6. Test weight change detection
+- **Expected Results**: File watcher detects gRPC backend config changes

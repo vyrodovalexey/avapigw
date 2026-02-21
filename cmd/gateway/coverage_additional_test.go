@@ -912,7 +912,7 @@ func TestWaitForShutdown_WithAuditLogger(t *testing.T) {
 		metrics:         observability.NewMetrics("test"),
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	done := make(chan struct{})
@@ -1467,7 +1467,7 @@ func TestWaitForShutdown_MetricsServerShutdownError(t *testing.T) {
 		metricsServer:   metricsServer,
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	done := make(chan struct{})

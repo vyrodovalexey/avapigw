@@ -263,16 +263,31 @@ func (a *gatewayConfigApplier) ApplyGRPCRoutes(_ context.Context, routes []confi
 }
 
 // ApplyGRPCBackends applies gRPC backend configuration.
-// Note: gRPC backends require gateway restart for full effect because gRPC
-// connections are long-lived with persistent connection pools and active
-// streams that cannot be safely drained and replaced at runtime.
-func (a *gatewayConfigApplier) ApplyGRPCBackends(_ context.Context, backends []config.GRPCBackend) error {
-	a.logger.Warn("gRPC backends received from operator but NOT hot-reloaded; "+
-		"gRPC connection pools and active streams cannot be safely replaced at runtime; "+
-		"restart the gateway pod to apply gRPC backend changes",
+// gRPC backends are hot-reloaded via the backend registry's copy-on-write
+// ReloadFromConfig method. After reload, stale connections to removed or
+// changed backends are cleaned up.
+func (a *gatewayConfigApplier) ApplyGRPCBackends(ctx context.Context, backends []config.GRPCBackend) error {
+	a.logger.Info("applying gRPC backends from operator",
 		observability.Int("count", len(backends)),
-		observability.String("action_required", "restart"),
 	)
+
+	rm := ensureReloadMetrics(a.app.application)
+
+	// Convert gRPC backends to the shared Backend format
+	converted := config.GRPCBackendsToBackends(backends)
+
+	// Reload via the gateway's gRPC backend registry
+	if a.app.gateway != nil {
+		if err := a.app.gateway.ReloadGRPCBackends(ctx, converted); err != nil {
+			a.logger.Error("failed to reload gRPC backends",
+				observability.Error(err),
+			)
+			rm.configReloadComponentTotal.WithLabelValues("grpc_backends", "error").Inc()
+			return err
+		}
+		rm.configReloadComponentTotal.WithLabelValues("grpc_backends", "success").Inc()
+	}
+
 	return nil
 }
 
@@ -302,12 +317,22 @@ func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *c
 			Authentication: existing.Spec.Authentication,
 			Authorization:  existing.Spec.Authorization,
 			Security:       existing.Spec.Security,
-			Audit:          existing.Spec.Audit,
+			Audit:          mergeAuditConfig(existing.Spec.Audit, cfg.Spec.Audit),
 			RequestLimits:  existing.Spec.RequestLimits,
 			MaxSessions:    cfg.Spec.MaxSessions,
 			TrustedProxies: existing.Spec.TrustedProxies,
 		},
 	}
+}
+
+// mergeAuditConfig returns the operator's audit config if provided,
+// falling back to the existing config. This allows the operator to
+// update audit settings via full config pushes.
+func mergeAuditConfig(existing, incoming *config.AuditConfig) *config.AuditConfig {
+	if incoming != nil {
+		return incoming
+	}
+	return existing
 }
 
 // applyMergedComponents applies routes, backends, gRPC routes, and middleware
@@ -329,6 +354,30 @@ func (a *gatewayConfigApplier) applyMergedComponents(
 		}
 	}
 
+	if err := a.applyMergedGRPCComponents(ctx, merged); err != nil {
+		return err
+	}
+
+	if a.app.rateLimiter != nil && merged.Spec.RateLimit != nil {
+		a.app.rateLimiter.UpdateConfig(merged.Spec.RateLimit)
+	}
+
+	if a.app.maxSessionsLimiter != nil && merged.Spec.MaxSessions != nil {
+		a.app.maxSessionsLimiter.UpdateConfig(merged.Spec.MaxSessions)
+	}
+
+	// Reload audit logger if audit configuration changed.
+	// reloadAuditLogger checks auditConfigChanged internally and
+	// handles nil app.auditLogger gracefully.
+	reloadAuditLogger(a.app.application, merged, a.logger)
+
+	return nil
+}
+
+// applyMergedGRPCComponents applies gRPC routes and backends from the merged configuration.
+func (a *gatewayConfigApplier) applyMergedGRPCComponents(
+	ctx context.Context, merged *config.GatewayConfig,
+) error {
 	// Hot-reload gRPC routes via the router's thread-safe LoadRoutes method.
 	if len(merged.Spec.GRPCRoutes) > 0 {
 		for _, listener := range a.app.gateway.GetGRPCListeners() {
@@ -342,20 +391,15 @@ func (a *gatewayConfigApplier) applyMergedComponents(
 		}
 	}
 
-	// gRPC backends involve connection pools that cannot be safely
-	// hot-reloaded; log a warning so operators know a restart is needed.
-	if len(merged.Spec.GRPCBackends) > 0 {
-		a.logger.Warn("gRPC backends received from operator - gRPC backends are NOT hot-reloaded",
-			observability.Int("grpc_backends", len(merged.Spec.GRPCBackends)),
-		)
-	}
-
-	if a.app.rateLimiter != nil && merged.Spec.RateLimit != nil {
-		a.app.rateLimiter.UpdateConfig(merged.Spec.RateLimit)
-	}
-
-	if a.app.maxSessionsLimiter != nil && merged.Spec.MaxSessions != nil {
-		a.app.maxSessionsLimiter.UpdateConfig(merged.Spec.MaxSessions)
+	// Hot-reload gRPC backends via the backend registry's copy-on-write pattern.
+	if len(merged.Spec.GRPCBackends) > 0 && a.app.gateway != nil {
+		converted := config.GRPCBackendsToBackends(merged.Spec.GRPCBackends)
+		if err := a.app.gateway.ReloadGRPCBackends(ctx, converted); err != nil {
+			a.logger.Error("failed to reload gRPC backends",
+				observability.Error(err),
+			)
+			return err
+		}
 	}
 
 	return nil

@@ -574,8 +574,8 @@ Metrics for hot configuration reload operations and configuration watcher.
 ### gateway_config_reload_component_total
 - **Type:** Counter
 - **Labels:** `component`, `status`
-- **Description:** Total number of component reload operations (CORS, security headers, audit config, etc.)
-- **Example:** `gateway_config_reload_component_total{component="cors",status="success"} 8`
+- **Description:** Total number of component reload operations (rate_limiter, max_sessions, routes, backends, audit, grpc_routes, grpc_backends, etc.)
+- **Example:** `gateway_config_reload_component_total{component="grpc_backends",status="success"} 8`
 
 ## Health Check Metrics
 

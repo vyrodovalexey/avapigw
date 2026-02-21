@@ -528,7 +528,7 @@ func TestGatewayConfigApplier_ApplyGRPCBackends(t *testing.T) {
 
 	ctx := context.Background()
 
-	// gRPC backends are not hot-reloaded, should just log warning
+	// gRPC backends are hot-reloaded in both file-based and operator modes
 	grpcBackends := []config.GRPCBackend{
 		{
 			Name: "test-grpc-backend",
@@ -942,7 +942,7 @@ func TestWaitForShutdown_WithVaultClient(t *testing.T) {
 		metrics:            observability.NewMetrics("test"),
 		tracer:             tracer,
 		config:             cfg,
-		auditLogger:        audit.NewNoopLogger(),
+		auditLogger:        audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 		rateLimiter:        rl,
 		maxSessionsLimiter: msl,
 		vaultClient:        nil, // No vault client

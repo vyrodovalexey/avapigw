@@ -60,7 +60,7 @@ func TestWaitForOperatorShutdown_WithOperatorClientP90(t *testing.T) {
 			backendRegistry: backendReg,
 			tracer:          tracer,
 			config:          cfg,
-			auditLogger:     audit.NewNoopLogger(),
+			auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 		},
 		operatorClient: &mockOperatorClient{sessionID: "test-session-p90"},
 		operatorConfig: operator.DefaultConfig(),
@@ -363,7 +363,7 @@ func TestRunGateway_WithShutdownP90(t *testing.T) {
 		config:             cfg,
 		rateLimiter:        rl,
 		maxSessionsLimiter: msl,
-		auditLogger:        audit.NewNoopLogger(),
+		auditLogger:        audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	// Create a temp config file for the watcher
@@ -492,7 +492,7 @@ func TestWaitForOperatorShutdown_WithVaultClientP90(t *testing.T) {
 			tracer:             tracer,
 			config:             cfg,
 			vaultClient:        &mockVaultClient90{},
-			auditLogger:        audit.NewNoopLogger(),
+			auditLogger:        audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 			rateLimiter:        middleware.NewRateLimiter(100, 200, false),
 			maxSessionsLimiter: middleware.NewMaxSessionsLimiter(100, 0, 0),
 		},

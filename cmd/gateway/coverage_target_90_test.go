@@ -228,7 +228,7 @@ func TestWaitForOperatorShutdown_WithAllComponents_Target90(t *testing.T) {
 			metricsServer:      metricsServer,
 			tracer:             tracer,
 			config:             cfg,
-			auditLogger:        audit.NewNoopLogger(),
+			auditLogger:        audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 			rateLimiter:        rl,
 			maxSessionsLimiter: msl,
 			vaultClient:        nil,
@@ -415,7 +415,7 @@ func TestRunGateway_GatewayStartError_Target90(t *testing.T) {
 		backendRegistry: backendReg,
 		tracer:          tracer,
 		config:          cfg,
-		auditLogger:     audit.NewNoopLogger(),
+		auditLogger:     audit.NewAtomicAuditLogger(audit.NewNoopLogger()),
 	}
 
 	// Create a temporary config file
