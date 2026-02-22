@@ -33,6 +33,14 @@ func runGateway(app *application, configPath string, logger observability.Logger
 		return // unreachable in production; allows test to continue
 	}
 
+	// Start gRPC backends (health checks, connections)
+	if app.grpcBackendRegistry != nil {
+		if err := app.grpcBackendRegistry.StartAll(ctx); err != nil {
+			fatalWithSync(logger, "failed to start gRPC backends", observability.Error(err))
+			return
+		}
+	}
+
 	if err := app.gateway.Start(ctx); err != nil {
 		fatalWithSync(logger, "failed to start gateway", observability.Error(err))
 		return // unreachable in production; allows test to continue
@@ -126,6 +134,13 @@ func stopCoreServices(ctx context.Context, app *application, logger observabilit
 		logger.Error("failed to stop gateway gracefully", observability.Error(err))
 	}
 
+	stopDependencies(ctx, app, logger)
+	stopBackgroundWorkers(app, logger)
+}
+
+// stopDependencies closes caches, Vault, backends, and tracer in the
+// correct dependency order.
+func stopDependencies(ctx context.Context, app *application, logger observability.Logger) {
 	// Close cache factory before Vault client — caches may depend on Vault
 	// for credentials (e.g. Redis auth via Vault KV).
 	if app.cacheFactory != nil {
@@ -147,10 +162,21 @@ func stopCoreServices(ctx context.Context, app *application, logger observabilit
 		logger.Error("failed to stop backends", observability.Error(err))
 	}
 
+	// Stop gRPC backend registry (health checks, connections)
+	if app.grpcBackendRegistry != nil {
+		if err := app.grpcBackendRegistry.StopAll(ctx); err != nil {
+			logger.Error("failed to stop gRPC backends", observability.Error(err))
+		}
+	}
+
 	if err := app.tracer.Shutdown(ctx); err != nil {
 		logger.Error("failed to shutdown tracer", observability.Error(err))
 	}
+}
 
+// stopBackgroundWorkers stops rate limiter, max sessions limiter, and
+// flushes the audit logger.
+func stopBackgroundWorkers(app *application, logger observability.Logger) {
 	// Stop rate limiter cleanup goroutine
 	if app.rateLimiter != nil {
 		app.rateLimiter.Stop()

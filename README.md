@@ -136,6 +136,8 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 ### Operations
 - **Hot Configuration Reload** - Update configuration without restart with atomic config updates and hash-based change detection
+  - **gRPC Backend Hot-Reload** - gRPC backends support hot-reload in both file-based and operator modes
+  - **Audit Logger Hot-Reload** - AtomicAuditLogger enables lock-free audit configuration updates in operator mode
 - **Graceful Shutdown** - Clean shutdown with connection draining and configurable timeouts
 - **Docker Support** - Production-ready container images with security optimizations
 - **Kubernetes & Helm** - Production-ready Helm charts with local K8s deployment support via values-local.yaml
@@ -225,6 +227,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Traffic Management](#-traffic-management)
 - [Observability](#-observability)
 - [Middleware Architecture](#-middleware-architecture)
+- [Hot-Reload Capabilities](#-hot-reload-capabilities)
 - [Performance](#-performance)
 - [Development](#-development)
 - [Kubernetes & Helm](#️-kubernetes--helm)
@@ -919,6 +922,58 @@ spec:
 ```
 
 For detailed middleware architecture documentation, see [Middleware Architecture Guide](docs/middleware-architecture.md).
+
+## 🔄 Hot-Reload Capabilities
+
+The AV API Gateway supports comprehensive hot configuration reload through two distinct modes, each with different capabilities and limitations.
+
+### Two Hot-Reload Modes
+
+1. **File-Based Config Mode**: Uses `fsnotify` file watcher to detect configuration file changes
+2. **Operator/CRD Mode**: Receives configuration updates via gRPC stream from the Kubernetes operator
+
+### What IS Hot-Reloaded
+
+✅ **HTTP Routes & Backends** - Route definitions, backend configurations, health checks (both modes)
+✅ **gRPC Backends** - Backend host addresses, ports, weights, health checks (both modes)  
+✅ **gRPC Routes** - Service and method routing (operator mode only)
+✅ **Rate Limiter** - Global, route-level, and backend-level rate limiting (both modes)
+✅ **Max Sessions** - Concurrent connection limiting configuration (both modes)
+✅ **Audit Logger** - Logger configuration with AtomicAuditLogger for lock-free updates (both modes)
+
+### What Requires Restart
+
+❌ **CORS Middleware** - Global and route-level CORS settings
+❌ **Security Headers** - Global and route-level security headers  
+❌ **Circuit Breaker** - Circuit breaker configuration (sony/gobreaker limitation)
+❌ **Listeners** - HTTP/HTTPS/gRPC listener ports, addresses, TLS settings
+❌ **Observability** - Tracing, metrics, logging configuration
+❌ **Global Auth/Authz** - Global authentication and authorization middleware
+
+### Key Differences Between Modes
+
+| Component | File-Based Mode | Operator/CRD Mode |
+|---|---|---|
+| gRPC Routes | ❌ Not reloaded | ✅ Reloaded |
+| gRPC Auth Cache | ❌ Not cleared | ✅ Cleared |
+| Audit Logger | ✅ Reloaded | ✅ Reloaded with operator config merge |
+
+### Monitoring Hot-Reload
+
+Monitor hot-reload performance with these metrics:
+
+```prometheus
+# Reload success rate
+rate(gateway_config_reload_total{result="success"}[5m])
+
+# Reload duration
+histogram_quantile(0.95, rate(gateway_config_reload_duration_seconds_bucket[5m]))
+
+# Component reload status
+rate(gateway_config_reload_component_total[5m])
+```
+
+For detailed hot-reload documentation, see [Hot-Reload Limitations Guide](docs/hot-reload-limitations.md).
 
 ## 🚀 Performance
 

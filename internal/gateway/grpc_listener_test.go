@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	grpcrouter "github.com/vyrodovalexey/avapigw/internal/grpc/router"
@@ -771,6 +772,196 @@ func TestGRPCListener_ClearAuthCache_NilProxy_NoPanic(t *testing.T) {
 	assert.NotPanics(t, func() {
 		listener.ClearAuthCache()
 	})
+}
+
+// --- WithGRPCBackendRegistry tests ---
+
+func TestGRPCListener_WithGRPCBackendRegistry_SetsRegistry(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(logger),
+		WithGRPCBackendRegistry(reg),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Equal(t, reg, listener.backendRegistry)
+}
+
+func TestGRPCListener_WithGRPCBackendRegistry_NilRegistry(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+		WithGRPCBackendRegistry(nil),
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, listener)
+	assert.Nil(t, listener.backendRegistry)
+}
+
+// --- ReloadBackends tests ---
+
+func TestGRPCListener_ReloadBackends_NilRegistry(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(observability.NopLogger()),
+	)
+	require.NoError(t, err)
+
+	// No backend registry configured — should return error
+	ctx := context.Background()
+	err = listener.ReloadBackends(ctx, []config.Backend{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no backend registry configured")
+}
+
+func TestGRPCListener_ReloadBackends_ValidRegistry(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(logger),
+		WithGRPCBackendRegistry(reg),
+	)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	backends := []config.Backend{
+		{
+			Name: "test-backend",
+			Hosts: []config.BackendHost{
+				{Address: "localhost", Port: 50051},
+			},
+		},
+	}
+
+	err = listener.ReloadBackends(ctx, backends)
+	assert.NoError(t, err)
+}
+
+func TestGRPCListener_ReloadBackends_EmptyBackends(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Listener{
+		Name:     "grpc-listener",
+		Port:     0,
+		Protocol: config.ProtocolGRPC,
+	}
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	listener, err := NewGRPCListener(cfg,
+		WithGRPCListenerLogger(logger),
+		WithGRPCBackendRegistry(reg),
+	)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	err = listener.ReloadBackends(ctx, []config.Backend{})
+	assert.NoError(t, err)
+}
+
+// --- collectBackendTargets tests ---
+
+func TestGRPCListener_CollectBackendTargets_NilRegistry(t *testing.T) {
+	t.Parallel()
+
+	listener := &GRPCListener{
+		config:          config.Listener{Name: "test"},
+		logger:          observability.NopLogger(),
+		backendRegistry: nil,
+	}
+
+	targets := listener.collectBackendTargets()
+	assert.NotNil(t, targets)
+	assert.Len(t, targets, 0)
+}
+
+func TestGRPCListener_CollectBackendTargets_PopulatedRegistry(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	// Load backends into the registry
+	err := reg.LoadFromConfig([]config.Backend{
+		{
+			Name: "svc-1",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.1", Port: 8080},
+				{Address: "10.0.0.2", Port: 8080},
+			},
+		},
+		{
+			Name: "svc-2",
+			Hosts: []config.BackendHost{
+				{Address: "10.0.0.3", Port: 9090},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	listener := &GRPCListener{
+		config:          config.Listener{Name: "test"},
+		logger:          logger,
+		backendRegistry: reg,
+	}
+
+	targets := listener.collectBackendTargets()
+	assert.NotNil(t, targets)
+	assert.True(t, targets["10.0.0.1:8080"])
+	assert.True(t, targets["10.0.0.2:8080"])
+	assert.True(t, targets["10.0.0.3:9090"])
+	assert.Len(t, targets, 3)
+}
+
+func TestGRPCListener_CollectBackendTargets_EmptyRegistry(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	reg := backend.NewRegistry(logger)
+
+	listener := &GRPCListener{
+		config:          config.Listener{Name: "test"},
+		logger:          logger,
+		backendRegistry: reg,
+	}
+
+	targets := listener.collectBackendTargets()
+	assert.NotNil(t, targets)
+	assert.Len(t, targets, 0)
 }
 
 // noopAuditLogger is a minimal audit.Logger for testing.

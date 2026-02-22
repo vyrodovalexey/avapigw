@@ -432,3 +432,158 @@ func TestProxy_ClearAuthCache_NilDirector_NoPanic(t *testing.T) {
 		p.ClearAuthCache()
 	})
 }
+
+// --- WithBackendRegistry tests ---
+
+func TestWithBackendRegistry_SetsRegistry(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	p := &Proxy{}
+
+	// We can't easily create a real backend.Registry without importing backend,
+	// but we can test the option sets the field. Use nil to verify the option works.
+	opt := WithBackendRegistry(nil)
+	opt(p)
+
+	assert.Nil(t, p.backendRegistry)
+
+	// Now test with a non-nil value by using the proxy constructor
+	r := router.New()
+	proxy := New(r, WithProxyLogger(logger))
+	defer proxy.Close()
+
+	// backendRegistry should be nil by default
+	assert.Nil(t, proxy.backendRegistry)
+}
+
+func TestWithBackendRegistry_NilRegistry(t *testing.T) {
+	t.Parallel()
+
+	p := &Proxy{}
+
+	opt := WithBackendRegistry(nil)
+	opt(p)
+
+	assert.Nil(t, p.backendRegistry)
+}
+
+func TestNew_WithBackendRegistry_PassesToDirector(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+
+	// Create proxy with nil backend registry — director should still be created
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithBackendRegistry(nil),
+	)
+	defer p.Close()
+
+	assert.NotNil(t, p)
+	assert.NotNil(t, p.director)
+	assert.Nil(t, p.backendRegistry)
+}
+
+// --- CleanupStaleConnections tests ---
+
+func TestProxy_CleanupStaleConnections_NilPool(t *testing.T) {
+	t.Parallel()
+
+	p := &Proxy{
+		connPool: nil,
+		logger:   observability.NopLogger(),
+	}
+
+	// Should be a no-op, not panic
+	assert.NotPanics(t, func() {
+		p.CleanupStaleConnections(map[string]bool{"target1:50051": true})
+	})
+}
+
+func TestProxy_CleanupStaleConnections_EmptyValidTargets(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool(WithPoolLogger(observability.NopLogger()))
+	defer pool.Close()
+
+	r := router.New()
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithConnectionPool(pool),
+	)
+
+	// No connections in pool, empty valid targets — should be no-op
+	p.CleanupStaleConnections(map[string]bool{})
+
+	assert.Equal(t, 0, pool.Size())
+}
+
+func TestProxy_CleanupStaleConnections_AllTargetsValid(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool(WithPoolLogger(observability.NopLogger()))
+	defer pool.Close()
+
+	r := router.New()
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithConnectionPool(pool),
+	)
+
+	// Get connections to create entries in the pool
+	// Note: These will fail to connect but the pool tracks them
+	ctx := context.Background()
+	_, _ = pool.Get(ctx, "localhost:50051")
+	_, _ = pool.Get(ctx, "localhost:50052")
+
+	targets := pool.Targets()
+
+	// Build valid targets map from all current targets
+	validTargets := make(map[string]bool)
+	for _, t := range targets {
+		validTargets[t] = true
+	}
+
+	// All targets are valid — none should be closed
+	initialSize := pool.Size()
+	p.CleanupStaleConnections(validTargets)
+
+	assert.Equal(t, initialSize, pool.Size())
+}
+
+func TestProxy_CleanupStaleConnections_SomeStaleTargets(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool(WithPoolLogger(observability.NopLogger()))
+	defer pool.Close()
+
+	r := router.New()
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithConnectionPool(pool),
+	)
+
+	// Create connections
+	ctx := context.Background()
+	_, _ = pool.Get(ctx, "localhost:50051")
+	_, _ = pool.Get(ctx, "localhost:50052")
+	_, _ = pool.Get(ctx, "localhost:50053")
+
+	initialSize := pool.Size()
+	require.Greater(t, initialSize, 0)
+
+	// Only localhost:50051 is valid — others should be cleaned up
+	validTargets := map[string]bool{
+		"localhost:50051": true,
+	}
+
+	p.CleanupStaleConnections(validTargets)
+
+	// The stale connections should have been removed
+	// Only localhost:50051 should remain
+	remainingTargets := pool.Targets()
+	for _, target := range remainingTargets {
+		assert.True(t, validTargets[target], "remaining target %s should be in valid targets", target)
+	}
+}

@@ -115,6 +115,8 @@ func (rm *reloadMetrics) Init() {
 		"routes",
 		"backends",
 		"audit",
+		"grpc_routes",
+		"grpc_backends",
 	}
 	for _, c := range components {
 		for _, r := range results {
@@ -174,10 +176,9 @@ func startConfigWatcher(
 // reconfiguration; a gateway restart is required to change its
 // threshold or timeout settings.
 //
-// NOTE: gRPC routes and backends are NOT hot-reloaded. gRPC connections
-// are long-lived and streaming must be drained, so changes to gRPC
-// configuration require a full gateway restart. Only HTTP routes and
-// backends are reloaded here.
+// NOTE: gRPC routes are NOT hot-reloaded in file-based mode (only in operator mode).
+// gRPC backends ARE hot-reloaded in both modes using the same copy-on-write pattern
+// as HTTP backends. HTTP routes and backends are always reloaded in both modes.
 func reloadComponents(
 	ctx context.Context,
 	app *application,
@@ -199,16 +200,11 @@ func reloadComponents(
 		return
 	}
 
-	// Warn if gRPC configuration has changed — gRPC routes/backends are NOT hot-reloaded
-	if grpcConfigChanged(app.config, newCfg) {
-		logger.Warn("gRPC configuration has changed but gRPC routes/backends are NOT hot-reloaded; "+
-			"restart the gateway to apply gRPC changes",
-			observability.Int("old_grpc_routes", len(app.config.Spec.GRPCRoutes)),
-			observability.Int("new_grpc_routes", len(newCfg.Spec.GRPCRoutes)),
-			observability.Int("old_grpc_backends", len(app.config.Spec.GRPCBackends)),
-			observability.Int("new_grpc_backends", len(newCfg.Spec.GRPCBackends)),
-		)
-	}
+	// Reload gRPC backends if changed
+	reloadGRPCBackendsIfChanged(ctx, app, newCfg, logger, rm)
+
+	// Warn if gRPC routes have changed — gRPC routes are NOT hot-reloaded in file-based mode
+	warnGRPCRoutesChanged(app, newCfg, logger)
 
 	// Update rate limiter
 	if app.rateLimiter != nil && newCfg.Spec.RateLimit != nil {
@@ -286,7 +282,56 @@ func reloadComponents(
 	logger.Info("all components reloaded successfully")
 }
 
+// reloadGRPCBackendsIfChanged reloads gRPC backends when the configuration has changed.
+func reloadGRPCBackendsIfChanged(
+	ctx context.Context,
+	app *application,
+	newCfg *config.GatewayConfig,
+	logger observability.Logger,
+	rm *reloadMetrics,
+) {
+	if !grpcBackendsChanged(app.config, newCfg) {
+		return
+	}
+	if app.grpcBackendRegistry == nil {
+		return
+	}
+
+	converted := config.GRPCBackendsToBackends(newCfg.Spec.GRPCBackends)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if err := app.gateway.ReloadGRPCBackends(timeoutCtx, converted); err != nil {
+		logger.Error("failed to reload gRPC backends",
+			observability.Error(err),
+		)
+		rm.configReloadComponentTotal.WithLabelValues("grpc_backends", "error").Inc()
+	} else {
+		rm.configReloadComponentTotal.WithLabelValues("grpc_backends", "success").Inc()
+	}
+}
+
+// warnGRPCRoutesChanged logs a warning if gRPC routes have changed in file-based mode.
+func warnGRPCRoutesChanged(
+	app *application,
+	newCfg *config.GatewayConfig,
+	logger observability.Logger,
+) {
+	if !grpcRoutesChanged(app.config, newCfg) {
+		return
+	}
+	logger.Warn("gRPC routes have changed but gRPC routes are NOT hot-reloaded in file-based mode; "+
+		"restart the gateway or use operator mode to apply gRPC route changes",
+		observability.Int("old_grpc_routes", len(app.config.Spec.GRPCRoutes)),
+		observability.Int("new_grpc_routes", len(newCfg.Spec.GRPCRoutes)),
+	)
+}
+
 // reloadAuditLogger replaces the audit logger if audit configuration has changed.
+// It creates a new logger with the updated configuration and atomically swaps
+// it into the AtomicAuditLogger wrapper. All in-flight requests using the
+// wrapper will see the new logger on their next call. The old logger is closed
+// after the swap to flush pending events.
 func reloadAuditLogger(
 	app *application,
 	newCfg *config.GatewayConfig,
@@ -298,23 +343,34 @@ func reloadAuditLogger(
 
 	logger.Info("audit configuration changed, reloading audit logger")
 
-	// Close the old audit logger to flush pending events
-	if app.auditLogger != nil {
-		if err := app.auditLogger.Close(); err != nil {
-			logger.Error("failed to close old audit logger", observability.Error(err))
-		}
-	}
-
-	// Create a new audit logger with the updated configuration,
-	// registering audit metrics with the gateway's custom registry
-	// when available.
+	// Create a new audit logger with the updated configuration.
+	// Reuse the existing audit metrics instance to avoid Prometheus
+	// duplicate-registration errors — the same counter remains in
+	// the registry and continues to be incremented by the new logger.
 	var auditOpts []audit.LoggerOption
-	if app.metrics != nil {
+	if app.auditMetrics != nil {
+		auditOpts = append(auditOpts,
+			audit.WithLoggerMetrics(app.auditMetrics),
+		)
+	} else if app.metrics != nil {
 		auditOpts = append(auditOpts,
 			audit.WithLoggerRegisterer(app.metrics.Registry()),
 		)
 	}
-	app.auditLogger = initAuditLogger(newCfg, logger, auditOpts...)
+	newLogger := initAuditLogger(newCfg, logger, auditOpts...)
+
+	// Atomically swap the inner logger. All in-flight requests using
+	// the AtomicAuditLogger wrapper will see the new logger on their
+	// next call. Close the old logger to flush pending events.
+	if app.auditLogger != nil {
+		old := app.auditLogger.Swap(newLogger)
+		if old != nil {
+			if err := old.Close(); err != nil {
+				logger.Error("failed to close old audit logger", observability.Error(err))
+			}
+		}
+	}
+
 	ensureReloadMetrics(app).configReloadComponentTotal.WithLabelValues("audit", "success").Inc()
 }
 
@@ -343,20 +399,37 @@ func configSectionChanged(oldSection, newSection interface{}) bool {
 	// only reached for types that cannot be JSON-marshaled (e.g. types
 	// with unexported fields or channel fields). Log a warning so
 	// operators are aware of the slower comparison path.
+	typeName := "unknown"
+	if oldSection != nil {
+		typeName = reflect.TypeOf(oldSection).String()
+	}
 	observability.GetGlobalLogger().Warn(
 		"config section hash failed, falling back to reflect.DeepEqual",
-		observability.String("old_type", reflect.TypeOf(oldSection).String()),
+		observability.String("old_type", typeName),
 	)
 	return !reflect.DeepEqual(oldSection, newSection)
 }
 
 // grpcConfigChanged checks if gRPC routes or backends have changed between configs.
+// This function is used by tests to verify combined gRPC change detection.
+//
+//nolint:unused // used in test files (main_test.go, operator_mode_targeted_test.go, coverage_iter2_test.go)
 func grpcConfigChanged(oldCfg, newCfg *config.GatewayConfig) bool {
+	return grpcRoutesChanged(oldCfg, newCfg) || grpcBackendsChanged(oldCfg, newCfg)
+}
+
+// grpcRoutesChanged checks if gRPC routes have changed between configs.
+func grpcRoutesChanged(oldCfg, newCfg *config.GatewayConfig) bool {
 	if oldCfg == nil || newCfg == nil {
 		return oldCfg != newCfg
 	}
-	if configSectionChanged(oldCfg.Spec.GRPCRoutes, newCfg.Spec.GRPCRoutes) {
-		return true
+	return configSectionChanged(oldCfg.Spec.GRPCRoutes, newCfg.Spec.GRPCRoutes)
+}
+
+// grpcBackendsChanged checks if gRPC backends have changed between configs.
+func grpcBackendsChanged(oldCfg, newCfg *config.GatewayConfig) bool {
+	if oldCfg == nil || newCfg == nil {
+		return oldCfg != newCfg
 	}
 	return configSectionChanged(oldCfg.Spec.GRPCBackends, newCfg.Spec.GRPCBackends)
 }

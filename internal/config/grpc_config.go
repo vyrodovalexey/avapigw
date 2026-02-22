@@ -572,6 +572,68 @@ func DefaultGRPCRetryPolicy() *GRPCRetryPolicy {
 	}
 }
 
+// GRPCBackendToBackend converts a GRPCBackend to a Backend configuration.
+// This enables reuse of the shared backend.Registry infrastructure (load balancing,
+// health checking, connection management) for gRPC backends.
+func GRPCBackendToBackend(gb GRPCBackend) Backend {
+	b := Backend{
+		Name:           gb.Name,
+		Hosts:          gb.Hosts,
+		LoadBalancer:   gb.LoadBalancer,
+		CircuitBreaker: gb.CircuitBreaker,
+		Authentication: gb.Authentication,
+	}
+
+	// Convert gRPC health check to HTTP health check format.
+	// The backend registry uses HTTP health checks, but for gRPC backends
+	// we set a path that the health checker can use.
+	if gb.HealthCheck != nil && gb.HealthCheck.Enabled {
+		b.HealthCheck = &HealthCheck{
+			Path:               "/grpc.health.v1.Health/Check",
+			Interval:           gb.HealthCheck.Interval,
+			Timeout:            gb.HealthCheck.Timeout,
+			HealthyThreshold:   gb.HealthCheck.HealthyThreshold,
+			UnhealthyThreshold: gb.HealthCheck.UnhealthyThreshold,
+		}
+	}
+
+	// Convert TLSConfig to BackendTLSConfig
+	if gb.TLS != nil {
+		b.TLS = &BackendTLSConfig{
+			Enabled:            gb.TLS.Enabled,
+			Mode:               gb.TLS.Mode,
+			CertFile:           gb.TLS.CertFile,
+			KeyFile:            gb.TLS.KeyFile,
+			CAFile:             gb.TLS.CAFile,
+			MinVersion:         gb.TLS.MinVersion,
+			MaxVersion:         gb.TLS.MaxVersion,
+			CipherSuites:       gb.TLS.CipherSuites,
+			InsecureSkipVerify: gb.TLS.InsecureSkipVerify,
+		}
+		// Convert Vault TLS config if present
+		if gb.TLS.Vault != nil && gb.TLS.Vault.Enabled {
+			b.TLS.Vault = &VaultBackendTLSConfig{
+				Enabled:    gb.TLS.Vault.Enabled,
+				PKIMount:   gb.TLS.Vault.PKIMount,
+				Role:       gb.TLS.Vault.Role,
+				CommonName: gb.TLS.Vault.CommonName,
+				AltNames:   gb.TLS.Vault.AltNames,
+			}
+		}
+	}
+
+	return b
+}
+
+// GRPCBackendsToBackends converts a slice of GRPCBackend to a slice of Backend.
+func GRPCBackendsToBackends(gbs []GRPCBackend) []Backend {
+	backends := make([]Backend, 0, len(gbs))
+	for _, gb := range gbs {
+		backends = append(backends, GRPCBackendToBackend(gb))
+	}
+	return backends
+}
+
 // IsEmpty returns true if the GRPCRouteMatch has no conditions.
 func (m *GRPCRouteMatch) IsEmpty() bool {
 	if m.Service != nil && !m.Service.IsEmpty() {
