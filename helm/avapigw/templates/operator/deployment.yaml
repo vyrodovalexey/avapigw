@@ -56,6 +56,7 @@ spec:
             {{- if .Values.operator.webhook.enabled }}
             - --webhook-port={{ .Values.operator.webhook.port }}
             - --enable-webhooks=true
+            - --webhook-config-name={{ include "avapigw.operator.fullname" . }}-validating-webhook
             - --cert-provider={{ .Values.operator.webhook.tls.mode | default "selfsigned" }}
             - --cert-service-name={{ include "avapigw.operator.webhookServiceName" . }}
             - --cert-namespace={{ .Release.Namespace }}

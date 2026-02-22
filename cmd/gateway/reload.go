@@ -399,9 +399,13 @@ func configSectionChanged(oldSection, newSection interface{}) bool {
 	// only reached for types that cannot be JSON-marshaled (e.g. types
 	// with unexported fields or channel fields). Log a warning so
 	// operators are aware of the slower comparison path.
+	typeName := "unknown"
+	if oldSection != nil {
+		typeName = reflect.TypeOf(oldSection).String()
+	}
 	observability.GetGlobalLogger().Warn(
 		"config section hash failed, falling back to reflect.DeepEqual",
-		observability.String("old_type", reflect.TypeOf(oldSection).String()),
+		observability.String("old_type", typeName),
 	)
 	return !reflect.DeepEqual(oldSection, newSection)
 }

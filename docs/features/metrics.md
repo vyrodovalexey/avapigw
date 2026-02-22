@@ -989,6 +989,43 @@ groups:
       summary: "TLS certificate expiring soon"
 ```
 
+## Audit Metrics
+
+Metrics for audit logging operations across authentication, authorization, and security events.
+
+### gateway_audit_events_total
+- **Type:** Counter
+- **Labels:** `type`, `action`, `outcome`
+- **Description:** Total number of audit events logged by the gateway
+- **Example:** `gateway_audit_events_total{type="authentication",action="access",outcome="success"} 1200`
+
+#### Event Types
+- `authentication` - Authentication events (login, token validation, etc.)
+- `authorization` - Authorization events (access control decisions)
+- `request` - Request-level audit events
+- `security` - Security-related events
+
+#### Actions
+- `access` - Access attempts or requests
+- `modify` - Modification or configuration change events
+
+#### Outcomes
+- `success` - Successful operations
+- `failure` - Failed operations
+
+### Audit Metrics Usage
+
+```bash
+# Get all audit events
+curl http://localhost:9090/metrics | grep gateway_audit_events_total
+
+# Authentication success rate
+rate(gateway_audit_events_total{type="authentication",outcome="success"}[5m]) / rate(gateway_audit_events_total{type="authentication"}[5m])
+
+# Authorization failure rate
+rate(gateway_audit_events_total{type="authorization",outcome="failure"}[5m])
+```
+
 ## Recent Improvements
 
 ### Latest Metrics Fixes (Current Release)

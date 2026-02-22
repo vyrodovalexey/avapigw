@@ -794,7 +794,8 @@ Added new features and improvements:
 - **Config reload race fix** - Gateway config now uses atomic.Pointer for lock-free concurrent access
 - **Hot-reload completion** - Rate limiter, max sessions, router, and backends now properly reload on config change
 - **Circuit breaker limitation** - Circuit breaker does NOT support runtime reconfiguration (documented limitation)
-- **gRPC hot-reload limitation** - gRPC routes do NOT support hot-reload in file-based mode (only in operator mode), but gRPC backends ARE hot-reloaded in both modes
+- **gRPC hot-reload capabilities** - gRPC backends support hot-reload in both file-based and operator modes; gRPC routes support hot-reload in operator mode only
+- **Audit logger hot-reload** - AtomicAuditLogger enables lock-free audit configuration updates in both modes
 - **TLS deprecation warnings** - ValidateConfigWithWarnings() API now warns about TLS 1.0/1.1 usage
 - **gRPC plaintext warning** - Gateway logs warning when gRPC listener runs without TLS
 - **WebSocket proxy fixes** - Fixed hop-by-hop header handling for WebSocket connections

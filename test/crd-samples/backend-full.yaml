@@ -87,9 +87,6 @@ spec:
         - id
         - name
         - status
-      denyFields:
-        - password
-        - secret
       fieldMappings:
         created_at: createdAt
   cache:

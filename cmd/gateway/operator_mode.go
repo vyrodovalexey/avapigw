@@ -159,6 +159,14 @@ func runOperatorGateway(opApp *operatorApplication, logger observability.Logger)
 		return
 	}
 
+	// Start gRPC backends (health checks, connections)
+	if opApp.grpcBackendRegistry != nil {
+		if err := opApp.grpcBackendRegistry.StartAll(ctx); err != nil {
+			fatalWithSync(logger, "failed to start gRPC backends", observability.Error(err))
+			return
+		}
+	}
+
 	// Start gateway
 	if err := opApp.gateway.Start(ctx); err != nil {
 		fatalWithSync(logger, "failed to start gateway", observability.Error(err))

@@ -93,25 +93,12 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		}
 	}
 
-	registryOpts := []backend.RegistryOption{backend.WithRegistryMetrics(metrics)}
-	if vaultClient != nil {
-		registryOpts = append(registryOpts, backend.WithRegistryVaultClient(vaultClient))
+	backendRegistry := initBackendRegistry(cfg.Spec.Backends, logger, metrics, vaultClient)
+	if backendRegistry == nil {
+		return nil
 	}
-	backendRegistry := backend.NewRegistry(logger, registryOpts...)
-	if err := backendRegistry.LoadFromConfig(cfg.Spec.Backends); err != nil {
-		fatalWithSync(logger, "failed to load backends", observability.Error(err))
-		return nil // unreachable in production; allows test to continue
-	}
-
-	// Create gRPC backend registry for gRPC backend hot-reload.
-	// Uses the same infrastructure as HTTP backends (load balancing, health checking).
-	grpcRegistryOpts := []backend.RegistryOption{backend.WithRegistryMetrics(metrics)}
-	if vaultClient != nil {
-		grpcRegistryOpts = append(grpcRegistryOpts, backend.WithRegistryVaultClient(vaultClient))
-	}
-	grpcBackendRegistry := backend.NewRegistry(logger, grpcRegistryOpts...)
-	if err := grpcBackendRegistry.LoadFromConfig(config.GRPCBackendsToBackends(cfg.Spec.GRPCBackends)); err != nil {
-		fatalWithSync(logger, "failed to load gRPC backends", observability.Error(err))
+	grpcBackendRegistry := initGRPCBackendRegistry(cfg.Spec.GRPCBackends, logger, metrics, vaultClient)
+	if grpcBackendRegistry == nil {
 		return nil
 	}
 
@@ -347,6 +334,45 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 	logger.Info("subsystem metrics registered with gateway registry",
 		observability.Int("subsystem_count", len(subsystems)),
 	)
+}
+
+// initBackendRegistry creates and loads the HTTP backend registry.
+func initBackendRegistry(
+	backends []config.Backend,
+	logger observability.Logger,
+	metrics *observability.Metrics,
+	vaultClient vault.Client,
+) *backend.Registry {
+	opts := []backend.RegistryOption{backend.WithRegistryMetrics(metrics)}
+	if vaultClient != nil {
+		opts = append(opts, backend.WithRegistryVaultClient(vaultClient))
+	}
+	reg := backend.NewRegistry(logger, opts...)
+	if err := reg.LoadFromConfig(backends); err != nil {
+		fatalWithSync(logger, "failed to load backends", observability.Error(err))
+		return nil // unreachable in production; allows test to continue
+	}
+	return reg
+}
+
+// initGRPCBackendRegistry creates and loads the gRPC backend registry.
+// Uses the same infrastructure as HTTP backends (load balancing, health checking).
+func initGRPCBackendRegistry(
+	grpcBackends []config.GRPCBackend,
+	logger observability.Logger,
+	metrics *observability.Metrics,
+	vaultClient vault.Client,
+) *backend.Registry {
+	opts := []backend.RegistryOption{backend.WithRegistryMetrics(metrics)}
+	if vaultClient != nil {
+		opts = append(opts, backend.WithRegistryVaultClient(vaultClient))
+	}
+	reg := backend.NewRegistry(logger, opts...)
+	if err := reg.LoadFromConfig(config.GRPCBackendsToBackends(grpcBackends)); err != nil {
+		fatalWithSync(logger, "failed to load gRPC backends", observability.Error(err))
+		return nil // unreachable in production; allows test to continue
+	}
+	return reg
 }
 
 // initClientIPExtractor creates and sets the global ClientIPExtractor

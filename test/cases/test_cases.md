@@ -3235,3 +3235,151 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   5. Test backend removal detection
   6. Test weight change detection
 - **Expected Results**: File watcher detects gRPC backend config changes
+
+## Audit Logger Hot-Reload Tests
+
+### TestFunctional_AuditLogger_AtomicSwap
+- **Description**: Test AtomicAuditLogger atomic swap functionality
+- **Preconditions**: None
+- **Steps**:
+  1. Create AtomicAuditLogger with initial logger
+  2. Verify initial logger is loaded
+  3. Swap with new logger configuration
+  4. Verify new logger is active
+  5. Test concurrent access during swap
+- **Expected Results**: Logger swap is atomic and thread-safe
+
+### TestIntegration_AuditLogger_HotReload
+- **Description**: Test audit logger hot-reload in gateway
+- **Preconditions**: Gateway running with audit logging
+- **Steps**:
+  1. Start gateway with initial audit configuration
+  2. Generate audit events
+  3. Update audit configuration (output, format, level)
+  4. Trigger configuration reload
+  5. Verify new audit configuration is active
+  6. Verify audit metrics are preserved
+- **Expected Results**: Audit logger reloads without losing events
+
+### TestE2E_AuditLogger_OperatorMode
+- **Description**: Test audit logger hot-reload in operator mode
+- **Preconditions**: Operator and gateway running
+- **Steps**:
+  1. Configure audit logging via operator
+  2. Generate audit events
+  3. Update audit configuration via CRD
+  4. Verify operator merges audit config
+  5. Verify gateway receives updated config
+  6. Test audit event filtering changes
+- **Expected Results**: Operator mode audit hot-reload works end-to-end
+
+### TestE2E_AuditLogger_ConfigMerge
+- **Description**: Test audit configuration merging in operator mode
+- **Preconditions**: Operator running with audit config
+- **Steps**:
+  1. Configure global audit settings
+  2. Configure operator-specific audit settings
+  3. Verify operator config takes precedence
+  4. Test partial operator config (inherits global)
+  5. Test audit metrics preservation across merges
+- **Expected Results**: Audit configuration merging works correctly
+
+## gRPC Backend Hot-Reload Tests
+
+### TestFunctional_GRPCBackend_CopyOnWrite
+- **Description**: Test gRPC backend copy-on-write pattern
+- **Preconditions**: None
+- **Steps**:
+  1. Create gRPC backend registry
+  2. Add initial backends
+  3. Trigger copy-on-write update
+  4. Verify old connections preserved
+  5. Verify new connections use new backends
+  6. Test concurrent access during update
+- **Expected Results**: Copy-on-write pattern works correctly
+
+### TestIntegration_GRPCBackend_HotReload_FileMode
+- **Description**: Test gRPC backend hot-reload in file-based mode
+- **Preconditions**: gRPC backend services running
+- **Steps**:
+  1. Start gateway with gRPC backend configuration
+  2. Establish gRPC connections
+  3. Update backend configuration file
+  4. Verify configuration reload
+  5. Test existing connections preserved
+  6. Test new connections use updated backends
+- **Expected Results**: gRPC backend hot-reload works in file mode
+
+### TestIntegration_GRPCBackend_HotReload_OperatorMode
+- **Description**: Test gRPC backend hot-reload in operator mode
+- **Preconditions**: Operator and gRPC backends running
+- **Steps**:
+  1. Create GRPCBackend CRDs
+  2. Establish gRPC connections
+  3. Update GRPCBackend CRDs
+  4. Verify operator pushes updates
+  5. Test connection preservation
+  6. Test backend health check updates
+- **Expected Results**: gRPC backend hot-reload works in operator mode
+
+### TestE2E_GRPCBackend_LoadBalancing_HotReload
+- **Description**: Test gRPC backend load balancing during hot-reload
+- **Preconditions**: Multiple gRPC backend services
+- **Steps**:
+  1. Configure weighted gRPC backends
+  2. Generate load across backends
+  3. Update backend weights via hot-reload
+  4. Verify new weight distribution
+  5. Test backend addition/removal
+  6. Verify load balancing algorithm changes
+- **Expected Results**: Load balancing updates correctly during hot-reload
+
+### TestE2E_GRPCBackend_HealthCheck_HotReload
+- **Description**: Test gRPC backend health check updates during hot-reload
+- **Preconditions**: gRPC backends with health checks
+- **Steps**:
+  1. Configure backends with health checks
+  2. Verify initial health status
+  3. Update health check configuration
+  4. Trigger hot-reload
+  5. Verify new health check behavior
+  6. Test health check interval changes
+- **Expected Results**: Health check configuration updates correctly
+
+## Combined Hot-Reload Feature Tests
+
+### TestE2E_HotReload_AllFeatures
+- **Description**: Test all hot-reload features together
+- **Preconditions**: Full gateway setup with all features
+- **Steps**:
+  1. Configure HTTP routes, gRPC backends, audit logging
+  2. Generate traffic and audit events
+  3. Update all configurations simultaneously
+  4. Verify all components reload correctly
+  5. Test feature interaction during reload
+  6. Verify metrics and monitoring
+- **Expected Results**: All hot-reload features work together
+
+### TestE2E_HotReload_Performance_Impact
+- **Description**: Test performance impact of hot-reload operations
+- **Preconditions**: Load testing setup
+- **Steps**:
+  1. Generate baseline load
+  2. Trigger hot-reload during load
+  3. Measure latency impact
+  4. Measure throughput impact
+  5. Test reload frequency limits
+  6. Verify resource usage
+- **Expected Results**: Hot-reload has minimal performance impact
+
+### TestE2E_HotReload_Failure_Recovery
+- **Description**: Test hot-reload failure scenarios and recovery
+- **Preconditions**: Gateway with invalid configurations
+- **Steps**:
+  1. Start with valid configuration
+  2. Attempt reload with invalid config
+  3. Verify rollback to previous config
+  4. Test partial reload failures
+  5. Verify error reporting and metrics
+  6. Test recovery after failures
+- **Expected Results**: Hot-reload failures are handled gracefully
