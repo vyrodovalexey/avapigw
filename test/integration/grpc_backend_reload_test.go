@@ -807,6 +807,6 @@ func TestIntegration_GRPCBackendReload_GatewayPropagation(t *testing.T) {
 		assert.Equal(t, gi.Address, addr)
 
 		// Verify the listener has a valid port
-		assert.Equal(t, fmt.Sprintf("127.0.0.1:%d", port), addr)
+		assert.Equal(t, fmt.Sprintf("0.0.0.0:%d", port), addr)
 	})
 }
