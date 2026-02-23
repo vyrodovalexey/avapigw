@@ -42,6 +42,11 @@ annotations:
       name: grpcroutes.avapigw.io
       displayName: gRPC Route
       description: gRPC route configuration for the API Gateway
+    - kind: GraphQLRoute
+      version: v1alpha1
+      name: graphqlroutes.avapigw.io
+      displayName: GraphQL Route
+      description: GraphQL route configuration for the API Gateway
     - kind: Backend
       version: v1alpha1
       name: backends.avapigw.io
@@ -52,6 +57,11 @@ annotations:
       name: grpcbackends.avapigw.io
       displayName: gRPC Backend
       description: gRPC backend configuration for the API Gateway
+    - kind: GraphQLBackend
+      version: v1alpha1
+      name: graphqlbackends.avapigw.io
+      displayName: GraphQL Backend
+      description: GraphQL backend configuration for the API Gateway
   artifacthub.io/crdsExamples: |
     - apiVersion: avapigw.io/v1alpha1
       kind: APIRoute

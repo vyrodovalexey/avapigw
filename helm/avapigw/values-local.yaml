@@ -140,6 +140,12 @@ gateway:
   # No inline gRPC backends - all config comes from CRDs via operator
   grpcBackends: []
 
+  # No inline GraphQL routes - all config comes from CRDs via operator
+  graphqlRoutes: []
+
+  # No inline GraphQL backends - all config comes from CRDs via operator
+  graphqlBackends: []
+
   # Global rate limit defaults
   rateLimit:
     enabled: true

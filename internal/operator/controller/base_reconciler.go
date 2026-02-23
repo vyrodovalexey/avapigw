@@ -241,7 +241,7 @@ func baseHandleDeletion(
 // deletionMessage returns the appropriate deletion message for a resource kind.
 func deletionMessage(kind string) string {
 	switch kind {
-	case "Backend", "GRPCBackend":
+	case "Backend", "GRPCBackend", "GraphQLBackend":
 		return MessageBackendDeleted
 	default:
 		return MessageRouteDeleted

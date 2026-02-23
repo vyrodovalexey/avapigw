@@ -1405,6 +1405,511 @@ kubectl logs -l app=avapigw | grep "unsafe redirect"
 curl http://localhost:9090/metrics | grep redirect
 ```
 
+## GraphQL Configuration
+
+The AV API Gateway provides comprehensive GraphQL support with advanced features including query analysis, depth limiting, complexity analysis, introspection control, and WebSocket subscriptions.
+
+### GraphQL Routes Configuration
+
+GraphQL routes define how GraphQL requests are matched and routed to backend services.
+
+#### Basic GraphQL Route
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: main-graphql
+      match:
+        - path:
+            exact: "/graphql"
+      route:
+        - destination:
+            host: graphql-backend
+            port: 4000
+          weight: 100
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      introspectionEnabled: true
+      allowedOperations:
+        - query
+        - mutation
+        - subscription
+```
+
+#### Advanced GraphQL Route Matching
+
+```yaml
+spec:
+  graphqlRoutes:
+    # Route by operation type
+    - name: graphql-mutations
+      match:
+        - path:
+            exact: "/graphql"
+          operationType: mutation
+      route:
+        - destination:
+            host: mutation-backend
+            port: 4000
+      timeout: 60s
+      depthLimit: 5
+      complexityLimit: 200
+    
+    # Route by operation name
+    - name: user-operations
+      match:
+        - path:
+            exact: "/graphql"
+          operationName:
+            prefix: "User"
+      route:
+        - destination:
+            host: user-service
+            port: 4000
+    
+    # Route by headers
+    - name: admin-graphql
+      match:
+        - path:
+            exact: "/graphql"
+          headers:
+            - name: "X-Admin-Token"
+              present: true
+            - name: "X-API-Version"
+              exact: "v2"
+      route:
+        - destination:
+            host: admin-backend
+            port: 4000
+      introspectionEnabled: false
+      allowedOperations:
+        - query
+        - mutation
+```
+
+#### GraphQL Security and Limits
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: secure-graphql
+      match:
+        - path:
+            exact: "/graphql"
+      route:
+        - destination:
+            host: graphql-backend
+            port: 4000
+      
+      # Query analysis and protection
+      depthLimit: 15                    # Maximum query depth
+      complexityLimit: 1000             # Maximum query complexity
+      introspectionEnabled: false       # Disable introspection in production
+      allowedOperations:                # Restrict operation types
+        - query
+        - mutation
+      
+      # Authentication and authorization
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: "https://auth.example.com"
+          audience: "graphql-api"
+      
+      # Rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+        perClient: true
+      
+      # CORS configuration
+      cors:
+        allowOrigins:
+          - "https://app.example.com"
+        allowMethods:
+          - "POST"
+        allowHeaders:
+          - "Content-Type"
+          - "Authorization"
+      
+      # Caching
+      cache:
+        enabled: true
+        ttl: "5m"
+        keyComponents:
+          - "path"
+          - "query"
+          - "headers.Authorization"
+```
+
+### GraphQL Backends Configuration
+
+GraphQL backends define the backend services that handle GraphQL requests.
+
+#### Basic GraphQL Backend
+
+```yaml
+spec:
+  graphqlBackends:
+    - name: graphql-backend
+      hosts:
+        - address: "graphql-service.default.svc.cluster.local"
+          port: 4000
+          weight: 1
+      healthCheck:
+        enabled: true
+        path: "/health"
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+```
+
+#### Advanced GraphQL Backend
+
+```yaml
+spec:
+  graphqlBackends:
+    - name: ha-graphql-backend
+      hosts:
+        - address: "graphql-1.example.com"
+          port: 4000
+          weight: 1
+        - address: "graphql-2.example.com"
+          port: 4000
+          weight: 1
+        - address: "graphql-3.example.com"
+          port: 4000
+          weight: 1
+      
+      # Health checking
+      healthCheck:
+        enabled: true
+        path: "/health"
+        method: "GET"
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+        expectedStatus: [200]
+        headers:
+          User-Agent: "avapigw-health-checker"
+      
+      # Load balancing
+      loadBalancer:
+        algorithm: roundRobin
+        sessionAffinity:
+          enabled: true
+          cookieName: "GRAPHQL_SESSION"
+          ttl: "3600s"
+      
+      # Circuit breaker
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+        halfOpenRequests: 3
+        successThreshold: 2
+      
+      # TLS configuration
+      tls:
+        enabled: true
+        mode: SIMPLE
+        caFile: "/certs/graphql-ca.crt"
+        serverName: "graphql.example.com"
+        minVersion: "1.2"
+      
+      # Backend authentication
+      authentication:
+        jwt:
+          enabled: true
+          tokenSource: "oidc"
+          oidc:
+            issuerUrl: "https://keycloak.example.com/realms/backend"
+            clientId: "graphql-backend"
+            clientSecret: "backend-secret"
+            scopes: ["openid", "graphql-access"]
+          headerName: "Authorization"
+          headerPrefix: "Bearer "
+```
+
+### GraphQL Configuration Reference
+
+#### GraphQLRoute Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | - | Unique name of the route |
+| `match` | []GraphQLRouteMatch | Yes | - | Matching conditions |
+| `route` | []RouteDestination | Yes | - | Backend destinations |
+| `timeout` | duration | No | 30s | Request timeout |
+| `retries` | RetryPolicy | No | - | Retry configuration |
+| `headers` | HeaderManipulation | No | - | Header manipulation |
+| `rateLimit` | RateLimitConfig | No | - | Rate limiting |
+| `cache` | CacheConfig | No | - | Caching configuration |
+| `cors` | CORSConfig | No | - | CORS configuration |
+| `security` | SecurityConfig | No | - | Security headers |
+| `tls` | RouteTLSConfig | No | - | Route-level TLS |
+| `authentication` | AuthenticationConfig | No | - | Authentication |
+| `authorization` | AuthorizationConfig | No | - | Authorization |
+| `depthLimit` | int | No | 0 | Maximum query depth (0 = disabled) |
+| `complexityLimit` | int | No | 0 | Maximum query complexity (0 = disabled) |
+| `introspectionEnabled` | bool | No | true | Allow introspection queries |
+| `allowedOperations` | []string | No | all | Allowed operation types |
+
+#### GraphQLRouteMatch Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `path` | StringMatch | No | - | HTTP path matching |
+| `operationType` | string | No | - | GraphQL operation type (query, mutation, subscription) |
+| `operationName` | StringMatch | No | - | GraphQL operation name matching |
+| `headers` | []HeaderMatchConfig | No | - | HTTP header matching |
+
+#### GraphQLBackend Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | - | Unique name of the backend |
+| `hosts` | []BackendHost | Yes | - | Backend host configurations |
+| `healthCheck` | HealthCheck | No | - | Health check configuration |
+| `loadBalancer` | LoadBalancer | No | - | Load balancer configuration |
+| `tls` | BackendTLSConfig | No | - | TLS configuration |
+| `circuitBreaker` | CircuitBreakerConfig | No | - | Circuit breaker configuration |
+| `authentication` | BackendAuthConfig | No | - | Backend authentication |
+
+### GraphQL Middleware Features
+
+#### Query Depth Limiting
+
+Prevents deeply nested queries that could cause performance issues:
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: depth-limited-graphql
+      depthLimit: 10  # Maximum nesting depth of 10 levels
+```
+
+Example of a query that would be blocked with `depthLimit: 3`:
+```graphql
+query DeepQuery {
+  user {
+    posts {
+      comments {
+        replies {  # This would exceed depth limit of 3
+          author {
+            name
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+#### Query Complexity Analysis
+
+Prevents complex queries that could consume excessive resources:
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: complexity-limited-graphql
+      complexityLimit: 1000  # Maximum complexity score of 1000
+```
+
+Complexity is calculated by counting fields and their nesting levels. Each field adds to the complexity score, with nested fields contributing multiplicatively.
+
+#### Introspection Control
+
+Controls whether schema introspection is allowed:
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: production-graphql
+      introspectionEnabled: false  # Disable introspection in production
+    
+    - name: development-graphql
+      introspectionEnabled: true   # Allow introspection in development
+```
+
+#### Operation Type Filtering
+
+Restricts which GraphQL operation types are allowed:
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: read-only-graphql
+      allowedOperations:
+        - query  # Only allow queries, block mutations and subscriptions
+    
+    - name: full-access-graphql
+      allowedOperations:
+        - query
+        - mutation
+        - subscription
+```
+
+### WebSocket Subscriptions
+
+The gateway supports GraphQL subscriptions over WebSocket connections using the `graphql-ws` protocol.
+
+#### Subscription Configuration
+
+```yaml
+spec:
+  listeners:
+    - name: graphql-ws
+      port: 8080
+      protocol: HTTP  # WebSocket upgrades over HTTP
+  
+  graphqlRoutes:
+    - name: subscription-route
+      match:
+        - path:
+            exact: "/graphql"
+          operationType: subscription
+      route:
+        - destination:
+            host: subscription-backend
+            port: 4000
+      allowedOperations:
+        - subscription
+```
+
+#### WebSocket Protocol Support
+
+- **Protocol**: `graphql-ws` (GraphQL over WebSocket Protocol)
+- **Connection Management**: Automatic connection lifecycle management
+- **Message Routing**: Bidirectional message proxying between client and backend
+- **Error Handling**: Proper error propagation and connection cleanup
+
+### GraphQL Metrics and Observability
+
+The gateway provides comprehensive metrics for GraphQL operations:
+
+#### GraphQL-Specific Metrics
+
+```yaml
+spec:
+  observability:
+    metrics:
+      enabled: true
+      graphql:
+        enabled: true
+        operations: true      # Track operation types and names
+        complexity: true      # Track query complexity scores
+        depth: true          # Track query depth
+        introspection: true  # Track introspection attempts
+        subscriptions: true  # Track WebSocket subscription metrics
+```
+
+#### Available GraphQL Metrics
+
+- `graphql_requests_total` - Total GraphQL requests by operation type
+- `graphql_request_duration_seconds` - Request duration histogram
+- `graphql_query_depth` - Query depth distribution
+- `graphql_query_complexity` - Query complexity distribution
+- `graphql_introspection_requests_total` - Introspection request count
+- `graphql_subscription_connections_active` - Active WebSocket connections
+- `graphql_subscription_messages_total` - WebSocket message count
+- `graphql_errors_total` - GraphQL error count by type
+
+### Example Configurations
+
+#### Production GraphQL Gateway
+
+```yaml
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: production-graphql-gateway
+spec:
+  listeners:
+    - name: https
+      port: 443
+      protocol: HTTPS
+      tls:
+        certFile: "/certs/tls.crt"
+        keyFile: "/certs/tls.key"
+  
+  graphqlRoutes:
+    - name: api-graphql
+      match:
+        - path:
+            exact: "/graphql"
+      route:
+        - destination:
+            host: graphql-api
+            port: 4000
+      
+      # Security configuration
+      depthLimit: 15
+      complexityLimit: 1000
+      introspectionEnabled: false
+      allowedOperations:
+        - query
+        - mutation
+      
+      # Authentication
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: "https://auth.company.com"
+          audience: "api.company.com"
+      
+      # Rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+        perClient: true
+      
+      # Caching
+      cache:
+        enabled: true
+        ttl: "5m"
+        type: "redis"
+        redis:
+          address: "redis.cache.svc.cluster.local:6379"
+          keyPrefix: "graphql:cache:"
+  
+  graphqlBackends:
+    - name: graphql-api
+      hosts:
+        - address: "graphql-api-1.prod.svc.cluster.local"
+          port: 4000
+          weight: 1
+        - address: "graphql-api-2.prod.svc.cluster.local"
+          port: 4000
+          weight: 1
+      
+      healthCheck:
+        enabled: true
+        path: "/health"
+        interval: 10s
+        timeout: 5s
+      
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+      
+      tls:
+        enabled: true
+        mode: SIMPLE
+        caFile: "/certs/backend-ca.crt"
+```
+
 ## Recent Updates
 
 ### Dependency Upgrades

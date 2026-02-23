@@ -86,3 +86,44 @@ func (b *GRPCBackend) SetHealthInfo(totalHosts, healthyHosts int, lastHealthChec
 	b.Status.HealthyHosts = healthyHosts
 	b.Status.LastHealthCheck = lastHealthCheck
 }
+
+// RouteStatusUpdatable interface methods for GraphQLRoute.
+
+// GetConditions returns the conditions for GraphQLRoute.
+func (r *GraphQLRoute) GetConditions() []Condition {
+	return r.Status.Conditions
+}
+
+// SetConditions sets the conditions for GraphQLRoute.
+func (r *GraphQLRoute) SetConditions(conditions []Condition) {
+	r.Status.Conditions = conditions
+}
+
+// SetObservedGeneration sets the observed generation for GraphQLRoute.
+func (r *GraphQLRoute) SetObservedGeneration(generation int64) {
+	r.Status.ObservedGeneration = generation
+}
+
+// BackendStatusUpdatable interface methods for GraphQLBackend.
+
+// GetConditions returns the conditions for GraphQLBackend.
+func (b *GraphQLBackend) GetConditions() []Condition {
+	return b.Status.Conditions
+}
+
+// SetConditions sets the conditions for GraphQLBackend.
+func (b *GraphQLBackend) SetConditions(conditions []Condition) {
+	b.Status.Conditions = conditions
+}
+
+// SetObservedGeneration sets the observed generation for GraphQLBackend.
+func (b *GraphQLBackend) SetObservedGeneration(generation int64) {
+	b.Status.ObservedGeneration = generation
+}
+
+// SetHealthInfo sets the health information for GraphQLBackend.
+func (b *GraphQLBackend) SetHealthInfo(totalHosts, healthyHosts int, lastHealthCheck *metav1.Time) {
+	b.Status.TotalHosts = totalHosts
+	b.Status.HealthyHosts = healthyHosts
+	b.Status.LastHealthCheck = lastHealthCheck
+}

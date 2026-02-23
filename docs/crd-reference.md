@@ -2,7 +2,7 @@
 
 ## Overview
 
-The AVAPIGW Operator provides four Custom Resource Definitions (CRDs) for Kubernetes-native configuration management. This document provides a comprehensive reference for all CRD types, their fields, and usage examples.
+The AVAPIGW Operator provides six Custom Resource Definitions (CRDs) for Kubernetes-native configuration management. This document provides a comprehensive reference for all CRD types, their fields, and usage examples.
 
 ## Table of Contents
 
@@ -10,6 +10,8 @@ The AVAPIGW Operator provides four Custom Resource Definitions (CRDs) for Kubern
 - [Backend CRD](#backend-crd)
 - [GRPCRoute CRD](#grpcroute-crd)
 - [GRPCBackend CRD](#grpcbackend-crd)
+- [GraphQLRoute CRD](#graphqlroute-crd)
+- [GraphQLBackend CRD](#graphqlbackend-crd)
 - [Status Fields](#status-fields)
 - [Cross-Reference Validation](#cross-reference-validation)
 - [Examples](#examples)
@@ -709,6 +711,414 @@ spec:
     alpn: ["h2"]                        # ALPN protocols
 ```
 
+## GraphQLRoute CRD
+
+The `GraphQLRoute` CRD defines GraphQL routing rules and GraphQL-specific policies.
+
+### APIVersion and Kind
+
+```yaml
+apiVersion: avapigw.io/v1
+kind: GraphQLRoute
+```
+
+### Spec Fields
+
+#### Match Conditions
+
+```yaml
+spec:
+  match:
+    - path:
+        exact: "/graphql"                # Exact path match
+        # OR
+        prefix: "/api/graphql"           # Prefix match
+        # OR
+        regex: "^/graphql/v[0-9]+$"      # Regex match
+      
+      operationType: "query"             # GraphQL operation type
+      # Supported values: query, mutation, subscription
+      
+      operationName:                     # GraphQL operation name matching
+        exact: "GetUser"                 # Exact operation name
+        # OR
+        prefix: "Get"                    # Operation name prefix
+        # OR
+        regex: "(Get|List).*"            # Operation name regex
+      
+      headers:                           # HTTP header matching
+        - name: "Authorization"
+          exact: "Bearer token123"        # Exact header value
+        - name: "X-API-Version"
+          prefix: "v"                    # Header value prefix
+        - name: "Content-Type"
+          regex: "application/(json|graphql)" # Header value regex
+```
+
+#### Route Destinations
+
+```yaml
+spec:
+  route:
+    - destination:
+        host: "graphql-service"          # Backend service name
+        port: 4000                       # GraphQL port
+      weight: 80                         # Traffic weight
+    
+    - destination:
+        host: "graphql-service-v2"
+        port: 4000
+      weight: 20                         # Weighted load balancing
+```
+
+#### GraphQL-Specific Configuration
+
+```yaml
+spec:
+  # Request timeout
+  timeout: "30s"
+  
+  # Retry policy
+  retries:
+    attempts: 3
+    perTryTimeout: "10s"
+    retryOn: "5xx,reset,connect-failure"
+    backoffBaseInterval: "1s"
+    backoffMaxInterval: "10s"
+  
+  # GraphQL query analysis and protection
+  depthLimit: 15                         # Maximum query depth (0 = disabled)
+  complexityLimit: 1000                  # Maximum query complexity (0 = disabled)
+  introspectionEnabled: false            # Allow introspection queries
+  allowedOperations:                     # Restrict operation types
+    - "query"
+    - "mutation"
+    # - "subscription"  # Commented out to disable subscriptions
+  
+  # Header manipulation
+  headers:
+    request:
+      set:
+        X-GraphQL-Gateway: "avapigw"
+      add:
+        X-Request-ID: "{{.RequestID}}"
+      remove:
+        - "X-Internal-Header"
+    response:
+      set:
+        X-Response-Time: "{{.Duration}}"
+      add:
+        X-Server: "avapigw"
+      remove:
+        - "X-Debug-Info"
+```
+
+#### Security and Rate Limiting
+
+```yaml
+spec:
+  # Authentication
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: "https://auth.example.com"
+      audience: "graphql-api"
+      jwksUrl: "https://auth.example.com/.well-known/jwks.json"
+      algorithm: "RS256"
+      claimMapping:
+        roles: "roles"
+        permissions: "permissions"
+        email: "email"
+    allowAnonymous: false
+  
+  # Authorization
+  authorization:
+    enabled: true
+    rbac:
+      enabled: true
+      policies:
+        - role: "admin"
+          permissions: ["read", "write", "delete"]
+        - role: "user"
+          permissions: ["read"]
+    abac:
+      enabled: true
+      policies:
+        - name: "business-hours"
+          expression: 'hour(now()) >= 9 && hour(now()) <= 17'
+  
+  # Rate limiting
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+  
+  # Max sessions
+  maxSessions:
+    enabled: true
+    maxConcurrent: 1000
+    queueSize: 100
+    queueTimeout: "30s"
+  
+  # Request limits
+  requestLimits:
+    maxBodySize: 1048576                 # 1MB max request body
+    maxHeaderSize: 8192                  # 8KB max headers
+  
+  # CORS
+  cors:
+    allowOrigins:
+      - "https://app.example.com"
+      - "https://*.example.com"
+    allowMethods:
+      - "POST"
+      - "OPTIONS"
+    allowHeaders:
+      - "Content-Type"
+      - "Authorization"
+    exposeHeaders:
+      - "X-Request-ID"
+    maxAge: 86400
+    allowCredentials: true
+  
+  # Security headers
+  security:
+    enabled: true
+    headers:
+      enabled: true
+      xFrameOptions: "DENY"
+      xContentTypeOptions: "nosniff"
+      xXSSProtection: "1; mode=block"
+      customHeaders:
+        X-GraphQL-Security: "enabled"
+```
+
+#### Caching
+
+```yaml
+spec:
+  cache:
+    enabled: true
+    ttl: "300s"                          # Cache TTL
+    keyComponents:                       # Cache key components
+      - "path"
+      - "query"                          # GraphQL query content
+      - "variables"                      # GraphQL variables
+      - "headers.Authorization"
+    staleWhileRevalidate: "60s"         # Serve stale while revalidating
+    type: "redis"
+    redis:
+      address: "redis.cache.svc.cluster.local:6379"
+      keyPrefix: "graphql:cache:"
+      ttlJitter: 0.1
+      hashKeys: true
+```
+
+#### TLS Configuration
+
+```yaml
+spec:
+  tls:
+    certFile: "/certs/graphql-route.crt" # Route-specific certificate
+    keyFile: "/certs/graphql-route.key"  # Route-specific private key
+    sniHosts:                            # SNI hostnames
+      - "graphql.example.com"
+      - "*.graphql.example.com"
+    minVersion: "1.2"
+    maxVersion: "1.3"
+    
+    # Vault PKI integration
+    vault:
+      enabled: true
+      pkiMount: "pki"
+      role: "graphql-certs"
+      commonName: "graphql.example.com"
+      altNames:
+        - "*.graphql.example.com"
+      ttl: "24h"
+      renewBefore: "1h"
+```
+
+## GraphQLBackend CRD
+
+The `GraphQLBackend` CRD defines GraphQL backend services and their configuration.
+
+### APIVersion and Kind
+
+```yaml
+apiVersion: avapigw.io/v1
+kind: GraphQLBackend
+```
+
+### Spec Fields
+
+#### Host Configuration
+
+```yaml
+spec:
+  hosts:
+    - address: "graphql-service-1.example.com"
+      port: 4000
+      weight: 1
+    - address: "graphql-service-2.example.com"
+      port: 4000
+      weight: 2
+    - address: "10.0.1.15"
+      port: 4000
+      weight: 1
+      metadata:
+        zone: "us-east-1a"
+        version: "v1.2.0"
+        schema_version: "2024-01-15"
+```
+
+#### Health Checks
+
+```yaml
+spec:
+  healthCheck:
+    enabled: true
+    path: "/health"                      # Health check path
+    method: "GET"                        # Health check method
+    interval: "10s"                      # Check interval
+    timeout: "5s"                        # Check timeout
+    healthyThreshold: 2                  # Healthy threshold
+    unhealthyThreshold: 3                # Unhealthy threshold
+    headers:                             # Health check headers
+      Authorization: "Bearer health-token"
+      User-Agent: "avapigw-graphql-health-checker"
+    expectedStatus: [200, 204]           # Expected status codes
+    expectedBody: "OK"                   # Expected response body
+```
+
+#### Load Balancing
+
+```yaml
+spec:
+  loadBalancer:
+    algorithm: "roundRobin"              # roundRobin, weighted, leastConn, random
+    consistentHash:                      # For consistent hashing
+      enabled: true
+      hashKey: "source_ip"              # Hash key source
+    sessionAffinity:                     # Session affinity
+      enabled: true
+      cookieName: "GRAPHQL_SESSION"
+      ttl: "3600s"
+```
+
+#### Backend Authentication
+
+```yaml
+spec:
+  authentication:
+    # JWT authentication
+    jwt:
+      enabled: true
+      tokenSource: "oidc"               # oidc, static, vault
+      oidc:
+        issuerUrl: "https://keycloak.example.com/realms/graphql"
+        clientId: "graphql-backend"
+        clientSecret: "secret-key"
+        scopes: ["openid", "graphql-access"]
+      headerName: "Authorization"
+      headerPrefix: "Bearer "
+    
+    # Basic authentication
+    basic:
+      enabled: true
+      username: "graphql-user"
+      password: "graphql-pass"
+      # Or from Vault
+      vaultPath: "secret/graphql-auth"
+      usernameKey: "username"
+      passwordKey: "password"
+    
+    # mTLS authentication
+    mtls:
+      enabled: true
+      certFile: "/certs/graphql-client.crt"
+      keyFile: "/certs/graphql-client.key"
+      caFile: "/certs/graphql-ca.crt"
+```
+
+#### TLS Configuration
+
+```yaml
+spec:
+  tls:
+    enabled: true
+    mode: "SIMPLE"                       # SIMPLE, MUTUAL, OPTIONAL_MUTUAL
+    caFile: "/certs/graphql-ca.crt"
+    certFile: "/certs/graphql-client.crt" # For mTLS
+    keyFile: "/certs/graphql-client.key"  # For mTLS
+    serverName: "graphql.example.com"    # SNI server name
+    insecureSkipVerify: false            # Skip certificate verification
+    minVersion: "1.2"
+    maxVersion: "1.3"
+```
+
+#### Traffic Management
+
+```yaml
+spec:
+  # Circuit breaker
+  circuitBreaker:
+    enabled: true
+    threshold: 5                         # Failure threshold
+    timeout: "30s"                       # Open state timeout
+    halfOpenRequests: 3                  # Half-open requests
+    successThreshold: 2                  # Success threshold to close
+  
+  # Rate limiting
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+  
+  # Max sessions
+  maxSessions:
+    enabled: true
+    maxConcurrent: 500
+    queueSize: 50
+    queueTimeout: "10s"
+```
+
+#### Caching
+
+```yaml
+spec:
+  cache:
+    enabled: true
+    ttl: "10m"
+    keyComponents:
+      - "query"                          # GraphQL query content
+      - "variables"                      # GraphQL variables
+      - "operationName"                  # GraphQL operation name
+      - "headers.Authorization"
+    staleWhileRevalidate: "2m"
+    type: "redis"
+    redis:
+      address: "redis.cache.svc.cluster.local:6379"
+      keyPrefix: "graphql:backend:cache:"
+      ttlJitter: 0.1
+      hashKeys: true
+```
+
+#### Encoding
+
+```yaml
+spec:
+  encoding:
+    request:
+      contentType: "application/json"
+      compression: "gzip"                # Compress requests
+    response:
+      contentType: "application/json"
+      compression: "gzip"                # Compress responses
+```
+
 ## Status Fields
 
 All CRDs include comprehensive status reporting for observability and debugging.
@@ -1023,6 +1433,154 @@ spec:
     mode: "SIMPLE"
     caFile: "/certs/grpc-ca.crt"
     serverName: "user-grpc-service.production.svc.cluster.local"
+```
+
+### Complete GraphQLRoute Example
+
+```yaml
+apiVersion: avapigw.io/v1
+kind: GraphQLRoute
+metadata:
+  name: user-graphql-api
+  namespace: production
+  labels:
+    app: user-service
+    version: v1
+    protocol: graphql
+spec:
+  match:
+    - path:
+        exact: "/graphql"
+      headers:
+        - name: "Authorization"
+          present: true
+  
+  route:
+    - destination:
+        host: "user-graphql-backend"
+        port: 4000
+      weight: 100
+  
+  timeout: "30s"
+  retries:
+    attempts: 3
+    perTryTimeout: "10s"
+    retryOn: "5xx,reset,connect-failure"
+  
+  # GraphQL-specific configuration
+  depthLimit: 15
+  complexityLimit: 1000
+  introspectionEnabled: false
+  allowedOperations:
+    - "query"
+    - "mutation"
+  
+  # Authentication
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: "https://auth.example.com"
+      jwksUrl: "https://auth.example.com/.well-known/jwks.json"
+      audience: "graphql-api"
+  
+  # Authorization
+  authorization:
+    enabled: true
+    rbac:
+      enabled: true
+      policies:
+        - role: "user"
+          permissions: ["read"]
+        - role: "admin"
+          permissions: ["read", "write", "delete"]
+  
+  # Rate limiting
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+  
+  # CORS
+  cors:
+    allowOrigins: ["https://app.example.com"]
+    allowMethods: ["POST", "OPTIONS"]
+    allowHeaders: ["Content-Type", "Authorization"]
+    allowCredentials: true
+  
+  # Caching
+  cache:
+    enabled: true
+    ttl: "300s"
+    keyComponents: ["path", "query", "variables", "headers.Authorization"]
+    type: "redis"
+    redis:
+      address: "redis.cache.svc.cluster.local:6379"
+      keyPrefix: "graphql:cache:"
+```
+
+### Complete GraphQLBackend Example
+
+```yaml
+apiVersion: avapigw.io/v1
+kind: GraphQLBackend
+metadata:
+  name: user-graphql-backend
+  namespace: production
+spec:
+  hosts:
+    - address: "user-graphql-service-1.production.svc.cluster.local"
+      port: 4000
+      weight: 1
+    - address: "user-graphql-service-2.production.svc.cluster.local"
+      port: 4000
+      weight: 1
+  
+  healthCheck:
+    enabled: true
+    path: "/health"
+    interval: "10s"
+    timeout: "5s"
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    headers:
+      User-Agent: "avapigw-graphql-health-checker"
+  
+  loadBalancer:
+    algorithm: "roundRobin"
+    sessionAffinity:
+      enabled: true
+      cookieName: "GRAPHQL_SESSION"
+      ttl: "3600s"
+  
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: "30s"
+    halfOpenRequests: 3
+  
+  tls:
+    enabled: true
+    mode: "SIMPLE"
+    caFile: "/certs/graphql-ca.crt"
+    serverName: "user-graphql-service.production.svc.cluster.local"
+  
+  authentication:
+    jwt:
+      enabled: true
+      tokenSource: "oidc"
+      oidc:
+        issuerUrl: "https://keycloak.example.com/realms/backend"
+        clientId: "user-graphql-service"
+        clientSecret: "secret-key"
+        scopes: ["openid", "user-service", "graphql-access"]
+  
+  cache:
+    enabled: true
+    ttl: "5m"
+    keyComponents: ["query", "variables", "operationName"]
+    type: "memory"
 ```
 
 ## Related Documentation

@@ -45,6 +45,9 @@ const (
 
 	// CacheTypeRedis is the Redis cache type.
 	CacheTypeRedis = "redis"
+
+	// TLSModeInsecure is the insecure TLS mode value.
+	TLSModeInsecure = "INSECURE"
 )
 
 // validateDuration validates a duration string using Go's time.ParseDuration.

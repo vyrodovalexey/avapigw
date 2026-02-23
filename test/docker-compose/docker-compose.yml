@@ -6,8 +6,8 @@ version: '3.6'
 # Port allocation:
 #   8200       - Vault (dev mode, root token: myroot)
 #   8090/8091  - Keycloak (admin/admin)
-#   8801       - REST API 1 (no auth)          - /health, /api/v1/items, /ws
-#   8802       - REST API 2 (no auth)          - /health, /api/v1/items, /ws
+#   8801       - REST API 1 (no auth)          - /health, /api/v1/items, /ws, /graphql
+#   8802       - REST API 2 (no auth)          - /health, /api/v1/items, /ws, /graphql
 #   8803       - REST API 3 (OIDC auth)        - validates JWT from Keycloak
 #   8804       - REST API 4 (mTLS auth)        - requires client certs from Vault PKI
 #   8805       - REST API 5 (basic auth)       - HTTP Basic authentication

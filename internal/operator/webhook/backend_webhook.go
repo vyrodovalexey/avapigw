@@ -225,7 +225,7 @@ func (v *BackendValidator) validate(backend *avapigwv1alpha1.Backend) (admission
 		warnings = append(warnings, "tls.insecureSkipVerify is enabled; this should only be used in development")
 	}
 
-	if spec.TLS != nil && spec.TLS.Mode == "INSECURE" {
+	if spec.TLS != nil && spec.TLS.Mode == TLSModeInsecure {
 		warnings = append(warnings, "tls.mode is INSECURE; this should only be used in development")
 	}
 

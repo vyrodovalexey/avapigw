@@ -1,0 +1,149 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: graphql-test-gateway
+  labels:
+    app: avapigw
+    environment: test
+spec:
+  listeners:
+    - name: http
+      port: 18080
+      protocol: HTTP
+      bind: 0.0.0.0
+
+  graphqlRoutes:
+    - name: test-graphql
+      match:
+        - path:
+            exact: "/graphql"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8821
+          weight: 100
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      introspectionEnabled: true
+      allowedOperations:
+        - query
+        - mutation
+
+    - name: test-graphql-restricted
+      match:
+        - path:
+            exact: "/graphql-restricted"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8821
+          weight: 100
+      timeout: 15s
+      depthLimit: 5
+      complexityLimit: 50
+      introspectionEnabled: false
+      allowedOperations:
+        - query
+
+    - name: test-graphql-mutation
+      match:
+        - path:
+            exact: "/graphql"
+          operationType: mutation
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8822
+          weight: 100
+      timeout: 60s
+
+    - name: test-graphql-by-operation
+      match:
+        - path:
+            prefix: "/graphql"
+          operationName:
+            exact: "GetUsers"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8821
+          weight: 100
+
+    - name: test-graphql-header-match
+      match:
+        - path:
+            exact: "/graphql"
+          headers:
+            - name: X-API-Version
+              exact: "v2"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8822
+          weight: 100
+
+    - name: catch-all-graphql
+      match:
+        - path:
+            prefix: "/graphql"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8821
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8822
+          weight: 50
+
+  graphqlBackends:
+    - name: graphql-backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8821
+          weight: 1
+      healthCheck:
+        enabled: true
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+    - name: graphql-backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8822
+          weight: 1
+      healthCheck:
+        enabled: true
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+    halfOpenRequests: 3
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+    logging:
+      level: debug
+      format: json

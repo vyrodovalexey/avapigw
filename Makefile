@@ -34,6 +34,10 @@ TEST_BACKEND2_URL ?= http://127.0.0.1:8802
 TEST_GRPC_BACKEND1_URL ?= 127.0.0.1:8811
 TEST_GRPC_BACKEND2_URL ?= 127.0.0.1:8812
 
+# Test backend URLs (GraphQL) - reuses REST API backends which also serve /graphql
+TEST_GRAPHQL_BACKEND1_URL ?= http://127.0.0.1:8801
+TEST_GRAPHQL_BACKEND2_URL ?= http://127.0.0.1:8802
+
 # Vault settings
 TEST_VAULT_ADDR ?= http://127.0.0.1:8200
 TEST_VAULT_TOKEN ?= myroot
@@ -70,6 +74,7 @@ TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avap
 .PHONY: all build build-linux build-darwin build-windows build-all \
         test test-unit test-coverage test-functional test-integration test-e2e test-all \
         test-grpc-unit test-grpc-integration test-grpc-e2e \
+        test-graphql-unit test-graphql-functional test-graphql-integration test-graphql-e2e \
         test-auth-unit test-auth-integration test-auth-e2e \
         test-ingress-unit test-ingress-functional \
         test-sentinel \
@@ -233,6 +238,42 @@ test-grpc-e2e:
 	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
 		$(GO) test -race -coverprofile=$(COVERAGE_DIR)/grpc-e2e.out -covermode=atomic -tags=e2e -run ".*[Gg]rpc.*|.*[Gg]RPC.*" ./test/e2e/...
 	@echo "==> gRPC e2e tests completed"
+
+# ==============================================================================
+# GraphQL-specific test targets
+# ==============================================================================
+
+## test-graphql-unit: Run GraphQL unit tests
+test-graphql-unit:
+	@echo "==> Running GraphQL unit tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -race -count=1 -timeout 60s -coverprofile=$(COVERAGE_DIR)/graphql-unit.out ./internal/graphql/...
+	@echo "==> GraphQL unit tests completed"
+
+## test-graphql-functional: Run GraphQL functional tests
+test-graphql-functional:
+	@echo "==> Running GraphQL functional tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -tags=functional -race -count=1 -timeout 60s -coverprofile=$(COVERAGE_DIR)/graphql-functional.out -run ".*[Gg]raph[Qq][Ll].*" ./test/functional/...
+	@echo "==> GraphQL functional tests completed"
+
+## test-graphql-integration: Run GraphQL integration tests (requires REST backends on 8801, 8802 which serve /graphql)
+test-graphql-integration:
+	@echo "==> Running GraphQL integration tests..."
+	@echo "==> GraphQL backends expected at $(TEST_GRAPHQL_BACKEND1_URL) and $(TEST_GRAPHQL_BACKEND2_URL)"
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_GRAPHQL_BACKEND1_URL=$(TEST_GRAPHQL_BACKEND1_URL) TEST_GRAPHQL_BACKEND2_URL=$(TEST_GRAPHQL_BACKEND2_URL) \
+		$(GO) test -tags=integration -race -count=1 -timeout 10m -coverprofile=$(COVERAGE_DIR)/graphql-integration.out -run ".*[Gg]raph[Qq][Ll].*" ./test/integration/...
+	@echo "==> GraphQL integration tests completed"
+
+## test-graphql-e2e: Run GraphQL e2e tests (requires REST backends on 8801, 8802 which serve /graphql)
+test-graphql-e2e:
+	@echo "==> Running GraphQL e2e tests..."
+	@echo "==> GraphQL backends expected at $(TEST_GRAPHQL_BACKEND1_URL) and $(TEST_GRAPHQL_BACKEND2_URL)"
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_GRAPHQL_BACKEND1_URL=$(TEST_GRAPHQL_BACKEND1_URL) TEST_GRAPHQL_BACKEND2_URL=$(TEST_GRAPHQL_BACKEND2_URL) \
+		$(GO) test -tags=e2e -race -count=1 -timeout 15m -coverprofile=$(COVERAGE_DIR)/graphql-e2e.out -run ".*[Gg]raph[Qq][Ll].*" ./test/e2e/...
+	@echo "==> GraphQL e2e tests completed"
 
 # ==============================================================================
 # Auth-specific test targets
@@ -784,6 +825,12 @@ help:
 	@echo "  test-grpc-integration Run gRPC integration tests (requires gRPC backends)"
 	@echo "  test-grpc-e2e         Run gRPC e2e tests (requires gRPC backends)"
 	@echo ""
+	@echo "GraphQL test targets:"
+	@echo "  test-graphql-unit        Run GraphQL unit tests"
+	@echo "  test-graphql-functional  Run GraphQL functional tests"
+	@echo "  test-graphql-integration Run GraphQL integration tests (requires REST backends with /graphql)"
+	@echo "  test-graphql-e2e         Run GraphQL e2e tests (requires REST backends with /graphql)"
+	@echo ""
 	@echo "Auth test targets:"
 	@echo "  test-auth-unit        Run auth unit tests"
 	@echo "  test-auth-integration Run auth integration tests (requires Vault and Keycloak)"
@@ -865,8 +912,10 @@ help:
 	@echo "Environment variables:"
 	@echo "  TEST_BACKEND1_URL          HTTP Backend 1 URL (default: http://127.0.0.1:8801)"
 	@echo "  TEST_BACKEND2_URL          HTTP Backend 2 URL (default: http://127.0.0.1:8802)"
-	@echo "  TEST_GRPC_BACKEND1_URL     gRPC Backend 1 URL (default: 127.0.0.1:8803)"
-	@echo "  TEST_GRPC_BACKEND2_URL     gRPC Backend 2 URL (default: 127.0.0.1:8804)"
+	@echo "  TEST_GRPC_BACKEND1_URL     gRPC Backend 1 URL (default: 127.0.0.1:8811)"
+	@echo "  TEST_GRPC_BACKEND2_URL     gRPC Backend 2 URL (default: 127.0.0.1:8812)"
+	@echo "  TEST_GRAPHQL_BACKEND1_URL  GraphQL Backend 1 URL (default: http://127.0.0.1:8801)"
+	@echo "  TEST_GRAPHQL_BACKEND2_URL  GraphQL Backend 2 URL (default: http://127.0.0.1:8802)"
 	@echo "  TEST_VAULT_ADDR            Vault address (default: http://127.0.0.1:8200)"
 	@echo "  TEST_VAULT_TOKEN           Vault token (default: myroot)"
 	@echo "  TEST_KEYCLOAK_ADDR         Keycloak address (default: http://127.0.0.1:8090)"
