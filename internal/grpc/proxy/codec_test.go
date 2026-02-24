@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestRawCodec_Marshal_Frame(t *testing.T) {
@@ -39,6 +40,25 @@ func TestRawCodec_Marshal_EmptyFrame(t *testing.T) {
 	data, err := codec.Marshal(frame)
 	require.NoError(t, err)
 	assert.Empty(t, data)
+}
+
+func TestRawCodec_Marshal_ProtoMessage(t *testing.T) {
+	t.Parallel()
+
+	codec := &rawCodec{}
+
+	// Use a real proto.Message type
+	msg := wrapperspb.String("hello world")
+
+	data, err := codec.Marshal(msg)
+	require.NoError(t, err)
+	assert.NotEmpty(t, data)
+
+	// Verify we can unmarshal it back
+	decoded := &wrapperspb.StringValue{}
+	err = codec.Unmarshal(data, decoded)
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", decoded.GetValue())
 }
 
 func TestRawCodec_Marshal_NonFrame(t *testing.T) {
@@ -84,6 +104,23 @@ func TestRawCodec_Unmarshal_NilData(t *testing.T) {
 	err := codec.Unmarshal(nil, frame)
 	require.NoError(t, err)
 	assert.Nil(t, frame.payload)
+}
+
+func TestRawCodec_Unmarshal_ProtoMessage(t *testing.T) {
+	t.Parallel()
+
+	codec := &rawCodec{}
+
+	// First marshal a proto message
+	original := wrapperspb.String("test value")
+	data, err := codec.Marshal(original)
+	require.NoError(t, err)
+
+	// Then unmarshal into a proto message
+	decoded := &wrapperspb.StringValue{}
+	err = codec.Unmarshal(data, decoded)
+	require.NoError(t, err)
+	assert.Equal(t, "test value", decoded.GetValue())
 }
 
 func TestRawCodec_Unmarshal_NonFrame(t *testing.T) {
@@ -160,9 +197,34 @@ func TestFrame_Reset(t *testing.T) {
 func TestFrame_ProtoMessage(t *testing.T) {
 	t.Parallel()
 
-	frame := NewFrame([]byte("data"))
-	// Should not panic
-	frame.ProtoMessage()
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name:    "with data",
+			payload: []byte("data"),
+		},
+		{
+			name:    "empty payload",
+			payload: []byte{},
+		},
+		{
+			name:    "nil payload",
+			payload: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			frame := NewFrame(tt.payload)
+			// ProtoMessage should not panic and is a no-op
+			assert.NotPanics(t, func() {
+				frame.ProtoMessage()
+			})
+		})
+	}
 }
 
 func TestFrame_ProtoReflect(t *testing.T) {

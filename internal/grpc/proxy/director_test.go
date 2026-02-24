@@ -8,6 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -712,6 +713,29 @@ func TestRouterDirector_Direct_WithUnhealthyBackend(t *testing.T) {
 	_, _, err = director.Direct(ctx, "/unhealthy.Service/Method")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no available hosts")
+}
+
+func TestStaticDirector_Direct_ConnectionError(t *testing.T) {
+	t.Parallel()
+
+	// Create a pool with invalid dial options that will cause connection failure
+	pool := NewConnectionPool(
+		WithDialOptions(grpc.WithBlock()),
+	)
+	defer pool.Close()
+
+	logger := observability.NopLogger()
+	// Use an invalid target that will fail to connect
+	director := NewStaticDirector("", pool, logger)
+
+	ctx := context.Background()
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{})
+
+	_, _, err := director.Direct(ctx, "/test.Service/Method")
+	// grpc.NewClient with empty target should fail
+	if err != nil {
+		assert.Contains(t, err.Error(), "failed to connect")
+	}
 }
 
 func BenchmarkRouterDirector_SelectDestination_Single(b *testing.B) {

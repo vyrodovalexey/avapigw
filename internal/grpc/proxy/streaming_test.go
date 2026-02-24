@@ -572,6 +572,112 @@ func BenchmarkStreamHandler_ForwardClientToServer(b *testing.B) {
 	}
 }
 
+func TestStreamHandler_ForwardClientToServer_SendHeaderError(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	// Setup client stream with messages and valid header
+	clientStream := newMockClientStream(context.Background())
+	clientStream.recvMsgs = []interface{}{
+		NewFrame([]byte("response1")),
+	}
+	clientStream.headerMD = metadata.MD{"x-backend": []string{"value"}}
+
+	// Setup server stream that fails on SendHeader
+	serverStream := &mockServerStreamWithSendHeaderError{
+		mockServerStream: newMockServerStream(context.Background()),
+	}
+
+	// Should still succeed — SendHeader error is logged but not fatal
+	err := handler.forwardClientToServer(clientStream, serverStream)
+	assert.NoError(t, err)
+
+	// Verify message was still sent despite header error
+	assert.Len(t, serverStream.mockServerStream.sentMsgs, 1)
+}
+
+// mockServerStreamWithSendHeaderError wraps mockServerStream but fails on SendHeader
+type mockServerStreamWithSendHeaderError struct {
+	*mockServerStream
+}
+
+func (m *mockServerStreamWithSendHeaderError) SendHeader(_ metadata.MD) error {
+	return errors.New("send header failed")
+}
+
+func (m *mockServerStreamWithSendHeaderError) Context() context.Context {
+	return m.mockServerStream.ctx
+}
+
+func (m *mockServerStreamWithSendHeaderError) SendMsg(msg interface{}) error {
+	return m.mockServerStream.SendMsg(msg)
+}
+
+func (m *mockServerStreamWithSendHeaderError) RecvMsg(msg interface{}) error {
+	return m.mockServerStream.RecvMsg(msg)
+}
+
+func (m *mockServerStreamWithSendHeaderError) SetTrailer(md metadata.MD) {
+	m.mockServerStream.SetTrailer(md)
+}
+
+func TestStreamHandler_ForwardClientToServer_NilHeader(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	// Setup client stream with messages but nil header
+	clientStream := newMockClientStream(context.Background())
+	clientStream.recvMsgs = []interface{}{
+		NewFrame([]byte("response1")),
+	}
+	clientStream.headerMD = nil // nil header
+
+	// Setup server stream
+	serverStream := newMockServerStream(context.Background())
+
+	err := handler.forwardClientToServer(clientStream, serverStream)
+	assert.NoError(t, err)
+
+	// Verify message was sent
+	assert.Len(t, serverStream.sentMsgs, 1)
+	// Header should not have been sent (nil header)
+	assert.Nil(t, serverStream.sentHeader)
+}
+
+func TestStreamHandler_ForwardClientToServer_MultipleMessages(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	// Setup client stream with multiple messages
+	clientStream := newMockClientStream(context.Background())
+	clientStream.recvMsgs = []interface{}{
+		NewFrame([]byte("response1")),
+		NewFrame([]byte("response2")),
+		NewFrame([]byte("response3")),
+	}
+	clientStream.headerMD = metadata.MD{"x-backend": []string{"value"}}
+
+	// Setup server stream
+	serverStream := newMockServerStream(context.Background())
+
+	err := handler.forwardClientToServer(clientStream, serverStream)
+	assert.NoError(t, err)
+
+	// Verify all messages were sent
+	assert.Len(t, serverStream.sentMsgs, 3)
+	// Header should only be sent once (before first message)
+	assert.NotNil(t, serverStream.sentHeader)
+}
+
 func BenchmarkWrapServerStream(b *testing.B) {
 	innerStream := newMockServerStream(context.Background())
 	ctx := context.WithValue(context.Background(), "key", "value")

@@ -86,3 +86,69 @@ func TestGRPCProxyMetrics_RecordDirectDuration(t *testing.T) {
 		m.directDuration.WithLabelValues("/service/Method").Observe(0.5)
 	})
 }
+
+func TestGRPCProxyMetrics_RecordRequestSize(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.requestSize.WithLabelValues("/service/Method").Observe(1024)
+	})
+}
+
+func TestGRPCProxyMetrics_RecordResponseSize(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.responseSize.WithLabelValues("/service/Method").Observe(2048)
+	})
+}
+
+func TestGRPCProxyMetrics_RecordStreamMsgSent(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.streamMsgSent.WithLabelValues("/service/Method").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_RecordStreamMsgReceived(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.streamMsgReceived.WithLabelValues("/service/Method").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_RecordBackendSelections(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.backendSelections.WithLabelValues("test-route", "localhost:50051", "weighted").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_RecordTimeoutOccurrences(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.timeoutOccurrences.WithLabelValues("/service/Method").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_AllFieldsInitialized(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	require.NotNil(t, m)
+	assert.NotNil(t, m.poolSize)
+	assert.NotNil(t, m.connectionCreated)
+	assert.NotNil(t, m.connectionErrors)
+	assert.NotNil(t, m.connectionClosed)
+	assert.NotNil(t, m.directRequests)
+	assert.NotNil(t, m.directDuration)
+	assert.NotNil(t, m.requestSize)
+	assert.NotNil(t, m.responseSize)
+	assert.NotNil(t, m.streamMsgSent)
+	assert.NotNil(t, m.streamMsgReceived)
+	assert.NotNil(t, m.backendSelections)
+	assert.NotNil(t, m.timeoutOccurrences)
+}

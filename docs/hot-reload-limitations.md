@@ -19,6 +19,8 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 | HTTP backends | ✅ Reloaded | ✅ Reloaded | `backendRegistry.ReloadFromConfig()` |
 | gRPC routes | ❌ Not reloaded | ✅ Reloaded | **Key difference between modes** |
 | gRPC backends | ✅ Reloaded | ✅ Reloaded | `backendRegistry.ReloadFromConfig()` with copy-on-write |
+| GraphQL routes | ✅ Reloaded | ✅ Reloaded | Reuses HTTP route infrastructure |
+| GraphQL backends | ✅ Reloaded | ✅ Reloaded | `GraphQLBackendsToBackends()` conversion |
 | Rate limiter | ✅ Reloaded | ✅ Reloaded | `rateLimiter.UpdateConfig()` |
 | Max sessions | ✅ Reloaded | ✅ Reloaded | `maxSessionsLimiter.UpdateConfig()` |
 | Audit logger | ✅ Reloaded | ✅ Reloaded | `AtomicAuditLogger` atomic swap |
@@ -58,6 +60,18 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 - Load balancing algorithms, backend-level timeouts
 - Backend authentication settings (JWT, Basic Auth, mTLS)
 - Reloaded via `gateway.ReloadGRPCBackends()` with copy-on-write pattern (reload.go:301-313)
+
+✅ **GraphQL Routes**
+- GraphQL route definitions, path matching, operation type/name matching
+- Depth limits, complexity limits, introspection settings
+- Route-level authentication, authorization, rate limiting
+- Reloaded via HTTP route infrastructure (GraphQL routes are converted to HTTP routes)
+
+✅ **GraphQL Backends**
+- Backend host addresses, ports, weights, health checks
+- Load balancing algorithms, circuit breaker settings
+- Backend authentication settings (JWT, Basic Auth, mTLS)
+- Converted via `GraphQLBackendsToBackends()` and reloaded via `backendRegistry.ReloadFromConfig()`
 
 ✅ **HTTP Route Middleware Cache**
 - Cache cleared so next request rebuilds middleware chain (reload.go:239-242)
@@ -131,6 +145,14 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 ✅ **gRPC Routes** ⭐ **Key Advantage**
 - Applied via `ApplyGRPCRoutes()` (operator_mode.go:244-263)
 - Iterates all gRPC listeners, calls `listener.LoadRoutes(routes)` → `router.LoadRoutes()` (Clear + AddRoute under `sync.RWMutex`)
+
+✅ **GraphQL Routes**
+- Applied via HTTP route infrastructure after conversion from GraphQL-specific format
+- Supports all GraphQL-specific matching (operation type, operation name, headers)
+
+✅ **GraphQL Backends**
+- Converted to standard Backend format via `GraphQLBackendsToBackends()`
+- Applied via `ApplyBackends()` using shared backend.Registry infrastructure
 
 ✅ **Rate Limiter**
 - Via `ApplyFullConfig()` → `applyMergedComponents()` (operator_mode.go:353-355)
@@ -527,6 +549,7 @@ INFO  Cache invalidation completed
 
 - **[Configuration Reference](configuration-reference.md)** - Complete configuration options
 - **[Operator](operator.md)** - Kubernetes operator documentation
+- **[GraphQL Documentation](graphql.md)** - GraphQL proxy configuration and features
 - **[Metrics Reference](features/metrics.md)** - Hot-reload metrics documentation
 - **[Performance Testing](performance-testing.md)** - Hot-reload performance characteristics
 - **[Troubleshooting Guide](troubleshooting-vault-pki.md)** - General troubleshooting procedures
