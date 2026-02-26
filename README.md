@@ -145,7 +145,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Docker Support** - Production-ready container images with security optimizations
 - **Kubernetes & Helm** - Production-ready Helm charts with local K8s deployment support via values-local.yaml
 - **Multi-platform Builds** - Support for Linux, macOS, and Windows
-- **AVAPIGW Operator** - Kubernetes-native configuration management with CRDs and admission webhooks
+- **AVAPIGW Operator** - Kubernetes-native configuration management with CRDs, admission webhooks, and cross-route intersection prevention
 - **Ingress Controller Mode** - Standard Kubernetes Ingress support with rich annotation processing
 - **Certificate Management** - Automated TLS certificate management with Vault PKI integration
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
@@ -153,41 +153,12 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Performance Validated** - Comprehensive performance testing across deployment scenarios
 - **Enterprise Monitoring** - 130+ metrics, 4 Grafana dashboards, and OTEL tracing integration
 
-### Recent Improvements (Latest Release)
-
-#### Critical Bug Fixes and Performance Improvements
-- **CRITICAL-1**: Fixed nil pointer dereference in Redis cache when URL has no userinfo
-- **CRITICAL-2/3/4**: Fixed broken `errors.Is()` semantics in auth, vault, and authz error types — now compare by Type/Operation/Err fields
-- **CRITICAL-5**: Fixed unbounded Prometheus metric cardinality in rate limiter — now uses route name from context instead of raw URL path
-- **MAJOR-2**: Fixed write lock held during Vault PKI network call in operator cert provider
-- **MAJOR-3**: Extracted duplicate `matchPath` to `internal/util/validation.go` as `util.MatchPath`
-- **MAJOR-4**: Extracted duplicate `claimsToIdentity`/`keyInfoToIdentity` to `internal/auth/identity_helpers.go`
-- **MAJOR-5**: Consolidated duplicate `isWebSocketUpgrade` functions in middleware package
-- **MAJOR-8**: Optimized authz cache eviction from O(n) single-entry to batch eviction (10% of capacity)
-- **MAJOR-10**: Added webhook validation warnings for plaintext secrets in CRD specs
-
-#### Metrics Fixes and Middleware Architecture Enhancements
-- **Issue 1**: Fixed config reload timestamp metrics - corrected Grafana dashboard query for millisecond compatibility
-- **Issue 2**: Integrated authentication metrics - wired auth middleware into global HTTP middleware chain with proper config conversion
-- **Issue 3**: Implemented cache metrics - added per-route cache middleware with 10MB body limit, GET-only caching, and Cache-Control support
-- **Issue 4**: Added transform/encoding metrics - implemented request/response transformation and content negotiation middleware
 
 #### Two-Tier Middleware Architecture
 - **Global Middleware Chain**: Recovery → RequestID → Logging → Tracing → Audit → Metrics → CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 - **Per-Route Middleware Chain**: Security Headers → CORS → Body Limit → Headers → Cache → Transform → Encoding → [proxy to backend]
 - **RouteMiddlewareApplier Interface**: Decoupled proxy from gateway package to avoid import cycles while enabling per-route middleware
 - **Thread-Safe Cache Factory**: Per-route cache instances with lazy initialization and double-check locking
-
-#### Core Reliability and Performance (DEV-001 to DEV-009)
-- **DEV-001**: Fixed reload metrics registry mismatch - reload metrics now use custom registry for consistency
-- **DEV-002**: Optimized config change detection with hash-based comparison for efficient hot-reload
-- **DEV-003**: Fixed gRPC proxy context timeout on unmatched routes to prevent resource leaks
-- **DEV-004**: Added security headers to metrics server endpoint for enhanced security posture
-- **DEV-005**: Added missing gRPC proxy metrics (request/response sizes, stream messages, backend selections, timeouts)
-- **DEV-006**: Added OTEL tracing spans for transform operations with comprehensive span attributes
-- **DEV-007**: Added OTEL tracing spans for auth/authz decisions with detailed context propagation
-- **DEV-008**: Added OTEL span events for circuit breaker state changes for better observability
-- **DEV-009**: Fixed audit metrics to use custom registry for consistent metric collection
 
 #### Comprehensive Test Coverage and Quality Assurance
 - **Unit Test Coverage**: 94.1% across all 41 packages (all packages ≥90% coverage)

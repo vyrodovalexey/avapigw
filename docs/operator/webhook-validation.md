@@ -14,12 +14,13 @@ The AVAPIGW Operator includes comprehensive admission webhooks that validate Cus
 
 ## Overview
 
-The admission webhooks provide four main types of validation with enhanced validation constants and improved thread safety:
+The admission webhooks provide five main types of validation with enhanced validation constants and improved thread safety:
 
 1. **Schema Validation** - Ensures all required fields are present and have valid values using named constants for port ranges and weights
-2. **Cross-CRD Duplicate Detection** - Prevents conflicting route configurations across Backend vs GRPCBackend with context-based cleanup lifecycle
-3. **Ingress Webhook Validation** - Validates Ingress resources when ingress controller is enabled
-4. **Cross-Reference Validation** - Ensures referenced resources exist with enhanced validation rules
+2. **Cross-Route Intersection Prevention** - Prevents path conflicts between APIRoute and GraphQLRoute CRDs
+3. **Cross-CRD Duplicate Detection** - Prevents conflicting route configurations across Backend vs GRPCBackend with context-based cleanup lifecycle
+4. **Ingress Webhook Validation** - Validates Ingress resources when ingress controller is enabled
+5. **Cross-Reference Validation** - Ensures referenced resources exist with enhanced validation rules
 
 ### Webhook Types
 
@@ -157,6 +158,105 @@ healthCheck:
 ## Cross-CRD Duplicate Detection
 
 The webhook prevents duplicate route configurations that could cause conflicts across different CRD types:
+
+### Cross-Route Intersection Prevention
+
+**NEW FEATURE**: The webhook now prevents path intersections between APIRoute and GraphQLRoute CRDs to avoid routing conflicts.
+
+#### Overlap Detection Logic
+
+Routes are considered overlapping if their paths intersect:
+
+- **Exact path vs Exact path**: Overlap if paths are identical
+- **Prefix match vs Exact path**: Overlap if the exact path starts with the prefix
+- **Exact path vs Prefix match**: Overlap if the exact path starts with the prefix  
+- **Prefix match vs Prefix match**: Overlap if either prefix starts with the other
+- **Nil/empty match**: Treated as "catch-all" and overlaps with everything
+
+#### Examples of Conflicting Routes
+
+```yaml
+# CONFLICT: APIRoute prefix overlaps with GraphQLRoute exact path
+# APIRoute
+apiVersion: avapigw.io/v1
+kind: APIRoute
+metadata:
+  name: api-route
+spec:
+  match:
+    - uri:
+        prefix: "/graphql"  # Conflicts with GraphQLRoute below
+
+---
+# GraphQLRoute  
+apiVersion: avapigw.io/v1
+kind: GraphQLRoute
+metadata:
+  name: graphql-route
+spec:
+  match:
+    - path:
+        exact: "/graphql"   # CONFLICT: exact path starts with APIRoute prefix
+```
+
+```yaml
+# CONFLICT: GraphQLRoute path overlaps with APIRoute prefix
+# APIRoute
+apiVersion: avapigw.io/v1
+kind: APIRoute
+metadata:
+  name: api-route
+spec:
+  match:
+    - uri:
+        prefix: "/api"      # Conflicts with GraphQLRoute below
+
+---
+# GraphQLRoute
+apiVersion: avapigw.io/v1
+kind: GraphQLRoute
+metadata:
+  name: graphql-route
+spec:
+  match:
+    - path:
+        exact: "/api/graphql"  # CONFLICT: exact path starts with APIRoute prefix
+```
+
+#### Examples of Non-Conflicting Routes
+
+```yaml
+# NO CONFLICT: Non-overlapping paths
+# APIRoute
+apiVersion: avapigw.io/v1
+kind: APIRoute
+metadata:
+  name: api-route
+spec:
+  match:
+    - uri:
+        prefix: "/api/v1"   # No conflict with GraphQLRoute
+
+---
+# GraphQLRoute
+apiVersion: avapigw.io/v1
+kind: GraphQLRoute
+metadata:
+  name: graphql-route
+spec:
+  match:
+    - path:
+        exact: "/graphql"   # No conflict with APIRoute
+```
+
+#### Validation Modes
+
+Cross-route intersection prevention works in two modes:
+
+1. **Operator Mode (Webhooks)**: When using CRDs, the validating webhook checks for conflicts during CREATE and UPDATE operations
+2. **Config Mode (Validator)**: When using YAML configuration files, the config validator checks for conflicts during configuration loading
+
+Both modes use the same overlap detection logic to ensure consistent behavior across deployment scenarios.
 
 ### HTTP Route Conflicts
 
@@ -379,6 +479,25 @@ The webhook provides detailed error messages for validation failures:
         "reason": "NotFound",
         "message": "referenced backend 'missing-backend' not found in namespace 'default'",
         "field": "spec.route[0].destination.host"
+      }
+    ]
+  }
+}
+```
+
+### Cross-Route Intersection Errors
+
+```json
+{
+  "message": "admission webhook denied the request",
+  "details": {
+    "name": "conflicting-route",
+    "kind": "APIRoute",
+    "causes": [
+      {
+        "reason": "PathConflict",
+        "message": "route path '/graphql' conflicts with existing GraphQLRoute 'graphql-api' in namespace 'default': prefix '/graphql' overlaps with exact path '/graphql'",
+        "field": "spec.match[0].uri.prefix"
       }
     ]
   }

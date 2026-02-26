@@ -236,15 +236,18 @@ gateway:
 # Vault Configuration
 # =============================================================================
 # Vault PKI provides TLS certificates for HTTP and gRPC listeners.
-# Token auth is used for local testing.
-# The deployment template reads the token from K8s secret "<fullname>-vault" (key: token).
-# Ensure the secret "avapigw-vault" exists in namespace avapigw-test with the Vault token.
-# Create it with: kubectl create secret generic avapigw-vault --from-literal=token=myroot -n avapigw-test
+# Kubernetes auth is used for local testing with Docker Desktop K8s.
+# The gateway authenticates to Vault using its K8s service account token.
+#
+# Prerequisites:
+#   - Run: ./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test --setup-pki
+#   - This creates Vault K8s auth role "avapigw" bound to SA "avapigw" in NS "avapigw-test"
 vault:
   enabled: true
   address: "http://host.docker.internal:8200"
-  authMethod: token
-  token: ""
+  authMethod: kubernetes
+  role: "avapigw"
+  kubernetesMountPath: "kubernetes"
   pki:
     enabled: true
     pkiMount: "pki"
@@ -316,12 +319,13 @@ operator:
       selfsigned:
         validity: 8760h
 
-  # Vault integration - disabled for local testing (using selfsigned certs)
-  # Note: Vault PKI mode requires Kubernetes auth which is not available in local Docker Desktop
+  # Vault integration - enabled with Kubernetes auth for local testing
+  # Used for operator gRPC TLS when tls.mode is "vault"
   vault:
-    enabled: false
+    enabled: true
     address: "http://host.docker.internal:8200"
-    authMethod: token
+    authMethod: kubernetes
+    role: "avapigw-operator"
     kubernetesMountPath: kubernetes
 
   # Metrics configuration

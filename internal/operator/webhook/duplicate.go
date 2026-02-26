@@ -1606,6 +1606,242 @@ func (c *DuplicateChecker) CheckBackendCrossConflictsWithGraphQL(
 	return nil
 }
 
+// ============================================================================
+// REST/GraphQL Cross-Route Intersection Detection
+// ============================================================================
+
+// CheckAPIRouteCrossConflictsWithGraphQL checks if an APIRoute has path conflicts
+// with existing GraphQLRoutes. This prevents REST and GraphQL endpoints from
+// overlapping on the same path, which would cause routing ambiguity.
+func (c *DuplicateChecker) CheckAPIRouteCrossConflictsWithGraphQL(
+	ctx context.Context,
+	apiRoute *avapigwv1alpha1.APIRoute,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := "apiroute"
+
+	dm := getDuplicateMetrics()
+	defer func() {
+		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey("graphqlroute", apiRoute.Namespace)
+	var graphqlRoutes *avapigwv1alpha1.GraphQLRouteList
+
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
+		c.cache.mu.RLock()
+		if c.isCacheValidLocked(cacheKey) {
+			graphqlRoutes = c.cache.graphqlRoutes[cacheKey]
+		}
+		c.cache.mu.RUnlock()
+	}
+
+	// Fetch from API if cache miss or invalid
+	if graphqlRoutes == nil {
+		graphqlRoutes = &avapigwv1alpha1.GraphQLRouteList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped.Load() {
+			listOpts = append(listOpts, client.InNamespace(apiRoute.Namespace))
+		}
+		if err := c.client.List(ctx, graphqlRoutes, listOpts...); err != nil {
+			dm.checkTotal.WithLabelValues(resourceType, scope, "error").Inc()
+			return fmt.Errorf("failed to list GraphQLRoutes for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.graphqlRoutes[cacheKey] = graphqlRoutes
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for path conflicts between APIRoute and GraphQLRoutes
+	var conflicts []string
+	for i := range graphqlRoutes.Items {
+		existing := &graphqlRoutes.Items[i]
+		if c.apiRouteAndGraphQLRouteOverlap(apiRoute, existing) {
+			conflicts = append(conflicts,
+				"GraphQLRoute:"+keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
+		c.logger.Warn("cross-CRD APIRoute/GraphQLRoute path conflict detected",
+			observability.String("apiroute", keys.ResourceKey(apiRoute.Namespace, apiRoute.Name)),
+			observability.Any("conflicting_graphqlroutes", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"APIRoute %s/%s has path conflict with %s",
+			apiRoute.Namespace, apiRoute.Name, strings.Join(conflicts, ", "))
+	}
+
+	dm.checkTotal.WithLabelValues(resourceType, scope, "ok").Inc()
+	return nil
+}
+
+// CheckGraphQLRouteCrossConflictsWithAPIRoute checks if a GraphQLRoute has path conflicts
+// with existing APIRoutes. This prevents GraphQL and REST endpoints from
+// overlapping on the same path, which would cause routing ambiguity.
+func (c *DuplicateChecker) CheckGraphQLRouteCrossConflictsWithAPIRoute(
+	ctx context.Context,
+	graphqlRoute *avapigwv1alpha1.GraphQLRoute,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := "graphqlroute"
+
+	dm := getDuplicateMetrics()
+	defer func() {
+		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey("apiroute", graphqlRoute.Namespace)
+	var apiRoutes *avapigwv1alpha1.APIRouteList
+
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
+		c.cache.mu.RLock()
+		if c.isCacheValidLocked(cacheKey) {
+			apiRoutes = c.cache.apiRoutes[cacheKey]
+		}
+		c.cache.mu.RUnlock()
+	}
+
+	// Fetch from API if cache miss or invalid
+	if apiRoutes == nil {
+		apiRoutes = &avapigwv1alpha1.APIRouteList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped.Load() {
+			listOpts = append(listOpts, client.InNamespace(graphqlRoute.Namespace))
+		}
+		if err := c.client.List(ctx, apiRoutes, listOpts...); err != nil {
+			dm.checkTotal.WithLabelValues(resourceType, scope, "error").Inc()
+			return fmt.Errorf("failed to list APIRoutes for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.apiRoutes[cacheKey] = apiRoutes
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for path conflicts between GraphQLRoute and APIRoutes
+	var conflicts []string
+	for i := range apiRoutes.Items {
+		existing := &apiRoutes.Items[i]
+		if c.graphqlRouteAndAPIRouteOverlap(graphqlRoute, existing) {
+			conflicts = append(conflicts,
+				"APIRoute:"+keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
+		c.logger.Warn("cross-CRD GraphQLRoute/APIRoute path conflict detected",
+			observability.String("graphqlroute",
+				keys.ResourceKey(graphqlRoute.Namespace, graphqlRoute.Name)),
+			observability.Any("conflicting_apiroutes", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"GraphQLRoute %s/%s has path conflict with %s",
+			graphqlRoute.Namespace, graphqlRoute.Name, strings.Join(conflicts, ", "))
+	}
+
+	dm.checkTotal.WithLabelValues(resourceType, scope, "ok").Inc()
+	return nil
+}
+
+// apiRouteAndGraphQLRouteOverlap checks if an APIRoute and a GraphQLRoute have overlapping paths.
+func (c *DuplicateChecker) apiRouteAndGraphQLRouteOverlap(
+	apiRoute *avapigwv1alpha1.APIRoute,
+	graphqlRoute *avapigwv1alpha1.GraphQLRoute,
+) bool {
+	// An empty match list means "catch-all" — it matches everything.
+	// If either route is a catch-all, it overlaps with any other route.
+	if len(apiRoute.Spec.Match) == 0 || len(graphqlRoute.Spec.Match) == 0 {
+		return true
+	}
+
+	for i := range apiRoute.Spec.Match {
+		apiMatch := &apiRoute.Spec.Match[i]
+		for j := range graphqlRoute.Spec.Match {
+			graphqlMatch := &graphqlRoute.Spec.Match[j]
+			if c.apiRouteAndGraphQLRoutePathsOverlap(apiMatch, graphqlMatch) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// graphqlRouteAndAPIRouteOverlap checks if a GraphQLRoute and an APIRoute have overlapping paths.
+// This is the reverse direction of apiRouteAndGraphQLRouteOverlap for symmetry.
+func (c *DuplicateChecker) graphqlRouteAndAPIRouteOverlap(
+	graphqlRoute *avapigwv1alpha1.GraphQLRoute,
+	apiRoute *avapigwv1alpha1.APIRoute,
+) bool {
+	return c.apiRouteAndGraphQLRouteOverlap(apiRoute, graphqlRoute)
+}
+
+// apiRouteAndGraphQLRoutePathsOverlap checks if an APIRoute match and a GraphQLRoute match
+// have overlapping paths. Path overlap alone is considered a conflict because REST and GraphQL
+// routes serving on the same path would cause routing ambiguity regardless of operation type.
+func (c *DuplicateChecker) apiRouteAndGraphQLRoutePathsOverlap(
+	apiMatch *avapigwv1alpha1.RouteMatch,
+	graphqlMatch *avapigwv1alpha1.GraphQLRouteMatch,
+) bool {
+	// If the APIRoute has no URI match, it matches all paths
+	if apiMatch.URI == nil {
+		return true
+	}
+
+	// If the GraphQLRoute has no path match, it matches all paths
+	if graphqlMatch.Path == nil {
+		return true
+	}
+
+	// Check exact-exact overlap
+	if apiMatch.URI.Exact != "" && graphqlMatch.Path.Exact != "" {
+		return apiMatch.URI.Exact == graphqlMatch.Path.Exact
+	}
+
+	// Check prefix-prefix overlap
+	if apiMatch.URI.Prefix != "" && graphqlMatch.Path.Prefix != "" {
+		return strings.HasPrefix(apiMatch.URI.Prefix, graphqlMatch.Path.Prefix) ||
+			strings.HasPrefix(graphqlMatch.Path.Prefix, apiMatch.URI.Prefix)
+	}
+
+	// Check exact-prefix overlap (APIRoute exact vs GraphQLRoute prefix)
+	if apiMatch.URI.Exact != "" && graphqlMatch.Path.Prefix != "" {
+		return strings.HasPrefix(apiMatch.URI.Exact, graphqlMatch.Path.Prefix)
+	}
+
+	// Check prefix-exact overlap (APIRoute prefix vs GraphQLRoute exact)
+	if apiMatch.URI.Prefix != "" && graphqlMatch.Path.Exact != "" {
+		return strings.HasPrefix(graphqlMatch.Path.Exact, apiMatch.URI.Prefix)
+	}
+
+	return false
+}
+
 // CheckGRPCBackendCrossConflictsWithGraphQL checks if a GRPCBackend has host:port conflicts
 // with existing GraphQLBackends.
 func (c *DuplicateChecker) CheckGRPCBackendCrossConflictsWithGraphQL(

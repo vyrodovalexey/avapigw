@@ -503,7 +503,20 @@ type GRPCHealthCheckConfig struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 
 	// Service is the service name to check. Empty string checks overall health.
+	// Used only when UseHTTP is false (default gRPC health check mode).
 	Service string `yaml:"service,omitempty" json:"service,omitempty"`
+
+	// UseHTTP switches health checking from gRPC protocol to HTTP GET.
+	// When true, the health checker sends HTTP GET requests to HTTPPath
+	// on HTTPPort instead of using grpc.health.v1.Health/Check.
+	UseHTTP bool `yaml:"useHTTP,omitempty" json:"useHTTP,omitempty"`
+
+	// HTTPPath is the HTTP path for health checks when UseHTTP is true.
+	HTTPPath string `yaml:"httpPath,omitempty" json:"httpPath,omitempty"`
+
+	// HTTPPort is the port for HTTP health checks when UseHTTP is true.
+	// If not set, the backend's main port is used.
+	HTTPPort int `yaml:"httpPort,omitempty" json:"httpPort,omitempty"`
 
 	// Interval is the health check interval.
 	Interval Duration `yaml:"interval,omitempty" json:"interval,omitempty"`
@@ -584,16 +597,36 @@ func GRPCBackendToBackend(gb GRPCBackend) Backend {
 		Authentication: gb.Authentication,
 	}
 
-	// Convert gRPC health check to HTTP health check format.
-	// The backend registry uses HTTP health checks, but for gRPC backends
-	// we set a path that the health checker can use.
+	// Convert gRPC health check to internal health check format.
 	if gb.HealthCheck != nil && gb.HealthCheck.Enabled {
-		b.HealthCheck = &HealthCheck{
-			Path:               "/grpc.health.v1.Health/Check",
-			Interval:           gb.HealthCheck.Interval,
-			Timeout:            gb.HealthCheck.Timeout,
-			HealthyThreshold:   gb.HealthCheck.HealthyThreshold,
-			UnhealthyThreshold: gb.HealthCheck.UnhealthyThreshold,
+		if gb.HealthCheck.UseHTTP {
+			// Use HTTP health check on a separate monitoring port.
+			// This is useful for gRPC backends that require auth on
+			// gRPC but expose an unauthenticated HTTP health endpoint.
+			httpPath := gb.HealthCheck.HTTPPath
+			if httpPath == "" {
+				httpPath = "/healthz"
+			}
+			b.HealthCheck = &HealthCheck{
+				Path:               httpPath,
+				Interval:           gb.HealthCheck.Interval,
+				Timeout:            gb.HealthCheck.Timeout,
+				HealthyThreshold:   gb.HealthCheck.HealthyThreshold,
+				UnhealthyThreshold: gb.HealthCheck.UnhealthyThreshold,
+				UseGRPC:            false,
+				Port:               gb.HealthCheck.HTTPPort,
+			}
+		} else {
+			// Default: use native gRPC health checking.
+			b.HealthCheck = &HealthCheck{
+				Path:               "/grpc.health.v1.Health/Check",
+				Interval:           gb.HealthCheck.Interval,
+				Timeout:            gb.HealthCheck.Timeout,
+				HealthyThreshold:   gb.HealthCheck.HealthyThreshold,
+				UnhealthyThreshold: gb.HealthCheck.UnhealthyThreshold,
+				UseGRPC:            true,
+				GRPCService:        gb.HealthCheck.Service,
+			}
 		}
 	}
 

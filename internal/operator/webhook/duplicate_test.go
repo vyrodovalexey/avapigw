@@ -3811,3 +3811,481 @@ func TestDuplicateChecker_CheckGRPCBackendCrossConflictsWithGraphQL_ClusterScope
 		t.Error("Cluster-scoped checker should detect cross-namespace conflict")
 	}
 }
+
+// ============================================================================
+// REST/GraphQL Cross-Route Intersection Detection Tests
+// ============================================================================
+
+func TestDuplicateChecker_CheckAPIRouteCrossConflictsWithGraphQL_NilClient(t *testing.T) {
+	checker := NewDuplicateChecker(nil)
+
+	apiRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckAPIRouteCrossConflictsWithGraphQL(context.Background(), apiRoute)
+	if err != nil {
+		t.Errorf("CheckAPIRouteCrossConflictsWithGraphQL() with nil client should return nil, got %v", err)
+	}
+}
+
+func TestDuplicateChecker_CheckAPIRouteCrossConflictsWithGraphQL_NoConflicts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingGraphQLRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-graphql-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGraphQLRoute).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	apiRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-api-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckAPIRouteCrossConflictsWithGraphQL(context.Background(), apiRoute)
+	if err != nil {
+		t.Errorf("CheckAPIRouteCrossConflictsWithGraphQL() should not detect conflict, got %v", err)
+	}
+}
+
+func TestDuplicateChecker_CheckAPIRouteCrossConflictsWithGraphQL_PrefixOverlap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingGraphQLRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-graphql-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Exact: "/api/graphql"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGraphQLRoute).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	apiRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-api-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckAPIRouteCrossConflictsWithGraphQL(context.Background(), apiRoute)
+	if err == nil {
+		t.Error("CheckAPIRouteCrossConflictsWithGraphQL() should detect prefix overlap conflict")
+	}
+}
+
+func TestDuplicateChecker_CheckAPIRouteCrossConflictsWithGraphQL_ExactOverlap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingGraphQLRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-graphql-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGraphQLRoute).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	apiRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-api-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Exact: "/graphql"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckAPIRouteCrossConflictsWithGraphQL(context.Background(), apiRoute)
+	if err == nil {
+		t.Error("CheckAPIRouteCrossConflictsWithGraphQL() should detect exact overlap conflict")
+	}
+}
+
+func TestDuplicateChecker_CheckAPIRouteCrossConflictsWithGraphQL_ClusterScoped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingGraphQLRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-graphql-route",
+			Namespace: "other-ns",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGraphQLRoute).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient, WithNamespaceScoped(false))
+
+	apiRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-api-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckAPIRouteCrossConflictsWithGraphQL(context.Background(), apiRoute)
+	if err == nil {
+		t.Error("Cluster-scoped checker should detect cross-namespace conflict")
+	}
+}
+
+func TestDuplicateChecker_CheckAPIRouteCrossConflictsWithGraphQL_WithCache(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingGraphQLRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-graphql-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGraphQLRoute).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient,
+		WithCacheEnabled(true),
+		WithCacheTTL(10*time.Second),
+	)
+	t.Cleanup(func() { checker.Stop() })
+
+	apiRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-api-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"},
+				},
+			},
+		},
+	}
+
+	// First call populates cache
+	err := checker.CheckAPIRouteCrossConflictsWithGraphQL(context.Background(), apiRoute)
+	if err == nil {
+		t.Error("First call should detect conflict")
+	}
+
+	// Second call should use cache
+	err = checker.CheckAPIRouteCrossConflictsWithGraphQL(context.Background(), apiRoute)
+	if err == nil {
+		t.Error("Cached call should detect conflict")
+	}
+}
+
+func TestDuplicateChecker_CheckGraphQLRouteCrossConflictsWithAPIRoute_NilClient(t *testing.T) {
+	checker := NewDuplicateChecker(nil)
+
+	graphqlRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Prefix: "/graphql"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckGraphQLRouteCrossConflictsWithAPIRoute(context.Background(), graphqlRoute)
+	if err != nil {
+		t.Errorf("CheckGraphQLRouteCrossConflictsWithAPIRoute() with nil client should return nil, got %v", err)
+	}
+}
+
+func TestDuplicateChecker_CheckGraphQLRouteCrossConflictsWithAPIRoute_NoConflicts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingAPIRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-api-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingAPIRoute).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	graphqlRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-graphql-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckGraphQLRouteCrossConflictsWithAPIRoute(context.Background(), graphqlRoute)
+	if err != nil {
+		t.Errorf("CheckGraphQLRouteCrossConflictsWithAPIRoute() should not detect conflict, got %v", err)
+	}
+}
+
+func TestDuplicateChecker_CheckGraphQLRouteCrossConflictsWithAPIRoute_Overlap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingAPIRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-api-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingAPIRoute).
+		Build()
+
+	checker := NewDuplicateChecker(fakeClient)
+
+	graphqlRoute := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-graphql-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{Exact: "/api/graphql"},
+				},
+			},
+		},
+	}
+
+	err := checker.CheckGraphQLRouteCrossConflictsWithAPIRoute(context.Background(), graphqlRoute)
+	if err == nil {
+		t.Error("CheckGraphQLRouteCrossConflictsWithAPIRoute() should detect overlap conflict")
+	}
+}
+
+func TestDuplicateChecker_APIRouteAndGraphQLRoutePathsOverlap(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	checker := NewDuplicateChecker(fakeClient)
+
+	tests := []struct {
+		name         string
+		apiMatch     avapigwv1alpha1.RouteMatch
+		graphqlMatch avapigwv1alpha1.GraphQLRouteMatch
+		wantOverlap  bool
+	}{
+		{
+			name:         "nil URI matches all - overlap",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: nil},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"}},
+			wantOverlap:  true,
+		},
+		{
+			name:         "nil Path matches all - overlap",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: nil},
+			wantOverlap:  true,
+		},
+		{
+			name:         "both nil - overlap",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: nil},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: nil},
+			wantOverlap:  true,
+		},
+		{
+			name:         "exact-exact same path - overlap",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Exact: "/graphql"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"}},
+			wantOverlap:  true,
+		},
+		{
+			name:         "exact-exact different path - no overlap",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Exact: "/api"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"}},
+			wantOverlap:  false,
+		},
+		{
+			name:         "prefix-prefix overlap - api is parent",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Prefix: "/api/graphql"}},
+			wantOverlap:  true,
+		},
+		{
+			name:         "prefix-prefix overlap - graphql is parent",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"}},
+			wantOverlap:  true,
+		},
+		{
+			name:         "prefix-prefix no overlap - different trees",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Prefix: "/graphql"}},
+			wantOverlap:  false,
+		},
+		{
+			name:         "exact-prefix overlap - exact under prefix",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Exact: "/api/graphql"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"}},
+			wantOverlap:  true,
+		},
+		{
+			name:         "exact-prefix no overlap - exact not under prefix",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Exact: "/other"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"}},
+			wantOverlap:  false,
+		},
+		{
+			name:         "prefix-exact overlap - exact under prefix",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Exact: "/api/graphql"}},
+			wantOverlap:  true,
+		},
+		{
+			name:         "prefix-exact no overlap - exact not under prefix",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Exact: "/other"}},
+			wantOverlap:  false,
+		},
+		{
+			name:         "prefix-prefix same path - overlap",
+			apiMatch:     avapigwv1alpha1.RouteMatch{URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"}},
+			graphqlMatch: avapigwv1alpha1.GraphQLRouteMatch{Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"}},
+			wantOverlap:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := checker.apiRouteAndGraphQLRoutePathsOverlap(&tt.apiMatch, &tt.graphqlMatch)
+			if got != tt.wantOverlap {
+				t.Errorf("apiRouteAndGraphQLRoutePathsOverlap() = %v, want %v", got, tt.wantOverlap)
+			}
+		})
+	}
+}

@@ -517,6 +517,377 @@ func TestFunctional_GraphQLConfig_BackendConversion(t *testing.T) {
 	})
 }
 
+// TestFunctional_GraphQLConfig_RouteIntersectionValidation tests that config
+// validation detects overlapping REST and GraphQL routes (TC-CROSS-005).
+func TestFunctional_GraphQLConfig_RouteIntersectionValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("overlapping prefix REST route and exact GraphQL route", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				Routes: []config.Route{
+					{
+						Name: "rest-route",
+						Match: []config.RouteMatch{
+							{
+								URI: &config.URIMatch{Prefix: "/api"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "rest-backend", Port: 8080},
+								Weight:      100,
+							},
+						},
+					},
+				},
+				GraphQLRoutes: []config.GraphQLRoute{
+					{
+						Name: "graphql-route",
+						Match: []config.GraphQLRouteMatch{
+							{
+								Path: &config.StringMatch{Exact: "/api/graphql"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "graphql-backend", Port: 8821},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overlapping")
+	})
+
+	t.Run("exact REST route matches exact GraphQL route", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				Routes: []config.Route{
+					{
+						Name: "rest-route",
+						Match: []config.RouteMatch{
+							{
+								URI: &config.URIMatch{Exact: "/graphql"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "rest-backend", Port: 8080},
+								Weight:      100,
+							},
+						},
+					},
+				},
+				GraphQLRoutes: []config.GraphQLRoute{
+					{
+						Name: "graphql-route",
+						Match: []config.GraphQLRouteMatch{
+							{
+								Path: &config.StringMatch{Exact: "/graphql"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "graphql-backend", Port: 8821},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overlapping")
+	})
+
+	t.Run("non-overlapping REST and GraphQL routes pass validation", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				Routes: []config.Route{
+					{
+						Name: "rest-route",
+						Match: []config.RouteMatch{
+							{
+								URI: &config.URIMatch{Prefix: "/api/v1"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "rest-backend", Port: 8080},
+								Weight:      100,
+							},
+						},
+					},
+				},
+				GraphQLRoutes: []config.GraphQLRoute{
+					{
+						Name: "graphql-route",
+						Match: []config.GraphQLRouteMatch{
+							{
+								Path: &config.StringMatch{Exact: "/graphql"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "graphql-backend", Port: 8821},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		assert.NoError(t, err)
+	})
+
+	t.Run("catch-all REST route conflicts with any GraphQL route", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				Routes: []config.Route{
+					{
+						Name:  "catch-all-route",
+						Match: []config.RouteMatch{}, // empty match = catch-all
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "rest-backend", Port: 8080},
+								Weight:      100,
+							},
+						},
+					},
+				},
+				GraphQLRoutes: []config.GraphQLRoute{
+					{
+						Name: "graphql-route",
+						Match: []config.GraphQLRouteMatch{
+							{
+								Path: &config.StringMatch{Exact: "/graphql"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "graphql-backend", Port: 8821},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overlapping")
+	})
+
+	t.Run("catch-all GraphQL route conflicts with any REST route", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				Routes: []config.Route{
+					{
+						Name: "rest-route",
+						Match: []config.RouteMatch{
+							{
+								URI: &config.URIMatch{Prefix: "/api/v1"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "rest-backend", Port: 8080},
+								Weight:      100,
+							},
+						},
+					},
+				},
+				GraphQLRoutes: []config.GraphQLRoute{
+					{
+						Name:  "graphql-catch-all",
+						Match: []config.GraphQLRouteMatch{}, // empty match = catch-all
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "graphql-backend", Port: 8821},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overlapping")
+	})
+
+	t.Run("prefix-prefix overlap between REST and GraphQL routes", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				Routes: []config.Route{
+					{
+						Name: "rest-route",
+						Match: []config.RouteMatch{
+							{
+								URI: &config.URIMatch{Prefix: "/shared"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "rest-backend", Port: 8080},
+								Weight:      100,
+							},
+						},
+					},
+				},
+				GraphQLRoutes: []config.GraphQLRoute{
+					{
+						Name: "graphql-route",
+						Match: []config.GraphQLRouteMatch{
+							{
+								Path: &config.StringMatch{Prefix: "/shared/graphql"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "graphql-backend", Port: 8821},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "overlapping")
+	})
+
+	t.Run("no GraphQL routes means no intersection errors", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				Routes: []config.Route{
+					{
+						Name: "rest-route",
+						Match: []config.RouteMatch{
+							{
+								URI: &config.URIMatch{Prefix: "/api"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "rest-backend", Port: 8080},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		assert.NoError(t, err)
+	})
+
+	t.Run("no REST routes means no intersection errors", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := &config.GatewayConfig{
+			APIVersion: "gateway.avapigw.io/v1",
+			Kind:       "Gateway",
+			Metadata:   config.Metadata{Name: "test-gateway"},
+			Spec: config.GatewaySpec{
+				Listeners: []config.Listener{
+					{Name: "http", Port: 8080, Protocol: "HTTP"},
+				},
+				GraphQLRoutes: []config.GraphQLRoute{
+					{
+						Name: "graphql-route",
+						Match: []config.GraphQLRouteMatch{
+							{
+								Path: &config.StringMatch{Exact: "/graphql"},
+							},
+						},
+						Route: []config.RouteDestination{
+							{
+								Destination: config.Destination{Host: "graphql-backend", Port: 8821},
+								Weight:      100,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		err := config.ValidateConfig(cfg)
+		assert.NoError(t, err)
+	})
+}
+
 func TestFunctional_GraphQLConfig_RouteValidation(t *testing.T) {
 	t.Parallel()
 

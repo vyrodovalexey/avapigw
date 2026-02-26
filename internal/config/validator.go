@@ -147,6 +147,7 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	v.validateGRPCBackends(spec.GRPCBackends)
 	v.validateGraphQLRoutes(spec.GraphQLRoutes)
 	v.validateGraphQLBackends(spec.GraphQLBackends)
+	v.validateRouteGraphQLRouteIntersection(spec.Routes, spec.GraphQLRoutes)
 
 	if spec.RateLimit != nil {
 		v.validateRateLimit(spec.RateLimit, "spec.rateLimit")
@@ -1652,6 +1653,79 @@ func (v *Validator) validateGraphQLAllowedOperations(ops []string, path string) 
 				fmt.Sprintf("invalid operation type: %s (must be query, mutation, or subscription)", op))
 		}
 	}
+}
+
+// validateRouteGraphQLRouteIntersection checks for path overlaps between REST routes
+// and GraphQL routes. Overlapping paths would cause routing ambiguity at runtime.
+func (v *Validator) validateRouteGraphQLRouteIntersection(routes []Route, graphqlRoutes []GraphQLRoute) {
+	for i, route := range routes {
+		for j, gqlRoute := range graphqlRoutes {
+			if v.restAndGraphQLRoutePathsOverlap(&route, &gqlRoute) {
+				v.addError(
+					fmt.Sprintf("spec.routes[%d]/spec.graphqlRoutes[%d]", i, j),
+					fmt.Sprintf(
+						"REST route %q and GraphQL route %q have overlapping paths, "+
+							"which would cause routing ambiguity",
+						route.Name, gqlRoute.Name,
+					),
+				)
+			}
+		}
+	}
+}
+
+// restAndGraphQLRoutePathsOverlap checks if a REST route and a GraphQL route have overlapping paths.
+func (v *Validator) restAndGraphQLRoutePathsOverlap(route *Route, gqlRoute *GraphQLRoute) bool {
+	// An empty match list means "catch-all" — it matches everything.
+	if len(route.Match) == 0 || len(gqlRoute.Match) == 0 {
+		return true
+	}
+
+	for _, restMatch := range route.Match {
+		for _, gqlMatch := range gqlRoute.Match {
+			if v.restMatchAndGraphQLMatchPathsOverlap(&restMatch, &gqlMatch) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// restMatchAndGraphQLMatchPathsOverlap checks if a REST route match and a GraphQL route match
+// have overlapping paths.
+func (v *Validator) restMatchAndGraphQLMatchPathsOverlap(restMatch *RouteMatch, gqlMatch *GraphQLRouteMatch) bool {
+	// If the REST route has no URI match, it matches all paths
+	if restMatch.URI == nil {
+		return true
+	}
+
+	// If the GraphQL route has no path match, it matches all paths
+	if gqlMatch.Path == nil {
+		return true
+	}
+
+	// Check exact-exact overlap
+	if restMatch.URI.Exact != "" && gqlMatch.Path.Exact != "" {
+		return restMatch.URI.Exact == gqlMatch.Path.Exact
+	}
+
+	// Check prefix-prefix overlap
+	if restMatch.URI.Prefix != "" && gqlMatch.Path.Prefix != "" {
+		return strings.HasPrefix(restMatch.URI.Prefix, gqlMatch.Path.Prefix) ||
+			strings.HasPrefix(gqlMatch.Path.Prefix, restMatch.URI.Prefix)
+	}
+
+	// Check exact-prefix overlap (REST exact vs GraphQL prefix)
+	if restMatch.URI.Exact != "" && gqlMatch.Path.Prefix != "" {
+		return strings.HasPrefix(restMatch.URI.Exact, gqlMatch.Path.Prefix)
+	}
+
+	// Check prefix-exact overlap (REST prefix vs GraphQL exact)
+	if restMatch.URI.Prefix != "" && gqlMatch.Path.Exact != "" {
+		return strings.HasPrefix(gqlMatch.Path.Exact, restMatch.URI.Prefix)
+	}
+
+	return false
 }
 
 // validateGraphQLBackends validates GraphQL backend configurations.

@@ -8,6 +8,12 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
@@ -51,6 +57,11 @@ type HealthChecker struct {
 	backendName        string
 	onStatusChange     HealthStatusFunc
 	useTLS             bool
+	useGRPC            bool
+	grpcService        string
+	grpcConns          map[string]*grpc.ClientConn
+	grpcMu             sync.Mutex
+	grpcCreds          credentials.TransportCredentials
 }
 
 // HealthCheckOption is a functional option for configuring the health checker.
@@ -91,6 +102,24 @@ func WithHealthCheckTLS(useTLS bool) HealthCheckOption {
 	}
 }
 
+// WithGRPCHealthCheck enables native gRPC health checking.
+func WithGRPCHealthCheck(service string) HealthCheckOption {
+	return func(hc *HealthChecker) {
+		hc.useGRPC = true
+		hc.grpcService = service
+	}
+}
+
+// WithGRPCTransportCredentials sets TLS credentials
+// for gRPC health checks.
+func WithGRPCTransportCredentials(
+	creds credentials.TransportCredentials,
+) HealthCheckOption {
+	return func(hc *HealthChecker) {
+		hc.grpcCreds = creds
+	}
+}
+
 // NewHealthChecker creates a new health checker.
 func NewHealthChecker(hosts []*Host, cfg config.HealthCheck, opts ...HealthCheckOption) *HealthChecker {
 	timeout := cfg.Timeout.Duration()
@@ -111,6 +140,13 @@ func NewHealthChecker(hosts []*Host, cfg config.HealthCheck, opts ...HealthCheck
 		unhealthyThreshold: cfg.UnhealthyThreshold,
 		healthyCounts:      make(map[*Host]int),
 		unhealthyCounts:    make(map[*Host]int),
+		grpcConns:          make(map[string]*grpc.ClientConn),
+	}
+
+	// Apply UseGRPC from config
+	if cfg.UseGRPC {
+		hc.useGRPC = true
+		hc.grpcService = cfg.GRPCService
 	}
 
 	if hc.healthyThreshold == 0 {
@@ -152,6 +188,7 @@ func (hc *HealthChecker) Stop() {
 
 	close(hc.stopCh)
 	<-hc.stoppedCh
+	hc.closeAllGRPCConns()
 }
 
 // run is the main health check loop.
@@ -206,9 +243,33 @@ func (hc *HealthChecker) checkHost(ctx context.Context, host *Host) {
 		// Context is still valid, proceed with health check
 	}
 
-	url := host.URLWithScheme(hc.useTLS) + hc.config.Path
+	if hc.useGRPC {
+		hc.checkHostGRPC(ctx, host)
+		return
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	hc.checkHostHTTP(ctx, host)
+}
+
+// checkHostHTTP performs an HTTP health check on a single host.
+func (hc *HealthChecker) checkHostHTTP(
+	ctx context.Context, host *Host,
+) {
+	var url string
+	if hc.config.Port > 0 {
+		// Use override port (e.g. monitoring port for gRPC
+		// backends). Health check port always uses plain HTTP.
+		addr := net.JoinHostPort(
+			host.Address, strconv.Itoa(hc.config.Port),
+		)
+		url = "http://" + addr + hc.config.Path
+	} else {
+		url = host.URLWithScheme(hc.useTLS) + hc.config.Path
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, url, http.NoBody,
+	)
 	if err != nil {
 		hc.recordFailure(host, err)
 		return
@@ -222,20 +283,160 @@ func (hc *HealthChecker) checkHost(ctx context.Context, host *Host) {
 
 	if err != nil {
 		hc.recordFailure(host, err)
-		// Record backend-level health check failure
-		bm.RecordHealthCheck(hc.backendName, "failure", checkDuration)
+		bm.RecordHealthCheck(
+			hc.backendName, "failure", checkDuration,
+		)
 		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	if resp.StatusCode >= http.StatusOK &&
+		resp.StatusCode < http.StatusMultipleChoices {
 		hc.recordSuccess(host)
-		// Record backend-level health check success
-		bm.RecordHealthCheck(hc.backendName, "success", checkDuration)
+		bm.RecordHealthCheck(
+			hc.backendName, "success", checkDuration,
+		)
 	} else {
 		hc.recordFailure(host, nil)
-		// Record backend-level health check failure
-		bm.RecordHealthCheck(hc.backendName, "failure", checkDuration)
+		bm.RecordHealthCheck(
+			hc.backendName, "failure", checkDuration,
+		)
+	}
+}
+
+// checkHostGRPC performs a native gRPC health check on a host.
+func (hc *HealthChecker) checkHostGRPC(
+	ctx context.Context, host *Host,
+) {
+	addr := net.JoinHostPort(
+		host.Address, strconv.Itoa(host.Port),
+	)
+
+	conn, err := hc.getGRPCConn(addr)
+	if err != nil {
+		hc.recordFailure(host, err)
+		backendmetrics.GetBackendMetrics().RecordHealthCheck(
+			hc.backendName, "failure", 0,
+		)
+		return
+	}
+
+	client := healthpb.NewHealthClient(conn)
+
+	timeout := hc.config.Timeout.Duration()
+	if timeout == 0 {
+		timeout = DefaultHealthCheckTimeout
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	checkStart := time.Now()
+	resp, err := client.Check(
+		checkCtx,
+		&healthpb.HealthCheckRequest{
+			Service: hc.grpcService,
+		},
+	)
+	checkDuration := time.Since(checkStart)
+
+	bm := backendmetrics.GetBackendMetrics()
+
+	if err != nil {
+		hc.recordFailure(host, err)
+		bm.RecordHealthCheck(
+			hc.backendName, "failure", checkDuration,
+		)
+		// Close stale connection on error
+		hc.closeGRPCConn(addr)
+		return
+	}
+
+	serving := healthpb.HealthCheckResponse_SERVING
+	if resp.GetStatus() == serving {
+		hc.recordSuccess(host)
+		bm.RecordHealthCheck(
+			hc.backendName, "success", checkDuration,
+		)
+	} else {
+		hc.recordFailure(host, nil)
+		bm.RecordHealthCheck(
+			hc.backendName, "failure", checkDuration,
+		)
+	}
+}
+
+// getGRPCConn returns a pooled gRPC connection for the address.
+func (hc *HealthChecker) getGRPCConn(
+	addr string,
+) (*grpc.ClientConn, error) {
+	hc.grpcMu.Lock()
+	defer hc.grpcMu.Unlock()
+
+	if conn, ok := hc.grpcConns[addr]; ok {
+		state := conn.GetState()
+		if state != connectivity.Shutdown &&
+			state != connectivity.TransientFailure {
+			return conn, nil
+		}
+		// Close stale connection
+		if err := conn.Close(); err != nil {
+			hc.logger.Warn(
+				"failed to close stale gRPC connection",
+				observability.String("addr", addr),
+				observability.Error(err),
+			)
+		}
+		delete(hc.grpcConns, addr)
+	}
+
+	creds := hc.grpcCreds
+	if creds == nil {
+		creds = insecure.NewCredentials()
+	}
+
+	conn, err := grpc.NewClient(
+		addr,
+		grpc.WithTransportCredentials(creds),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	hc.grpcConns[addr] = conn
+	return conn, nil
+}
+
+// closeGRPCConn closes and removes a pooled gRPC connection.
+func (hc *HealthChecker) closeGRPCConn(addr string) {
+	hc.grpcMu.Lock()
+	defer hc.grpcMu.Unlock()
+
+	if conn, ok := hc.grpcConns[addr]; ok {
+		if err := conn.Close(); err != nil {
+			hc.logger.Warn(
+				"failed to close gRPC connection",
+				observability.String("addr", addr),
+				observability.Error(err),
+			)
+		}
+		delete(hc.grpcConns, addr)
+	}
+}
+
+// closeAllGRPCConns closes all pooled gRPC connections.
+func (hc *HealthChecker) closeAllGRPCConns() {
+	hc.grpcMu.Lock()
+	defer hc.grpcMu.Unlock()
+
+	for addr, conn := range hc.grpcConns {
+		if err := conn.Close(); err != nil {
+			hc.logger.Warn(
+				"failed to close gRPC connection",
+				observability.String("addr", addr),
+				observability.Error(err),
+			)
+		}
+		delete(hc.grpcConns, addr)
 	}
 }
 

@@ -3383,3 +3383,59 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   5. Verify error reporting and metrics
   6. Test recovery after failures
 - **Expected Results**: Hot-reload failures are handled gracefully
+
+## REST/GraphQL Cross-Route Intersection Prevention Tests
+
+### TC-CROSS-001: APIRoute prefix overlaps with GraphQLRoute exact path → rejected by webhook
+- **Description**: Test that creating an APIRoute whose prefix overlaps with an existing GraphQLRoute exact path is rejected
+- **Preconditions**: A GraphQLRoute with exact path `/graphql` exists in the cluster
+- **Steps**:
+  1. Create a GraphQLRoute with exact path `/graphql`
+  2. Create an APIRoute with prefix `/graphql`
+  3. Submit the APIRoute to the webhook validator
+- **Expected Results**: Webhook rejects the APIRoute with a path conflict error mentioning the GraphQLRoute
+
+### TC-CROSS-002: GraphQLRoute path overlaps with APIRoute prefix → rejected by webhook
+- **Description**: Test that creating a GraphQLRoute whose path overlaps with an existing APIRoute prefix is rejected
+- **Preconditions**: An APIRoute with prefix `/api` exists in the cluster
+- **Steps**:
+  1. Create an APIRoute with prefix `/api`
+  2. Create a GraphQLRoute with exact path `/api/graphql`
+  3. Submit the GraphQLRoute to the webhook validator
+- **Expected Results**: Webhook rejects the GraphQLRoute with a path conflict error mentioning the APIRoute
+
+### TC-CROSS-003: APIRoute and GraphQLRoute with non-overlapping paths → allowed
+- **Description**: Test that non-overlapping REST and GraphQL routes are allowed
+- **Preconditions**: None
+- **Steps**:
+  1. Create an APIRoute with prefix `/api/v1`
+  2. Create a GraphQLRoute with exact path `/graphql`
+  3. Submit both to the webhook validator
+- **Expected Results**: Both routes are accepted without errors
+
+### TC-CROSS-004: Cross-namespace conflict detection (cluster-scoped)
+- **Description**: Test that cross-CRD route conflicts are detected across namespaces when cluster-scoped
+- **Preconditions**: DuplicateChecker configured with cluster-wide scope
+- **Steps**:
+  1. Create a GraphQLRoute with exact path `/graphql` in namespace `ns-a`
+  2. Create an APIRoute with prefix `/graphql` in namespace `ns-b`
+  3. Submit the APIRoute to the webhook validator with cluster-scoped DuplicateChecker
+- **Expected Results**: Webhook rejects the APIRoute because the GraphQLRoute in a different namespace has a conflicting path
+
+### TC-CROSS-005: Config validation rejects overlapping REST/GraphQL routes
+- **Description**: Test that the config validator detects overlapping REST and GraphQL routes in a GatewayConfig
+- **Preconditions**: None
+- **Steps**:
+  1. Create a GatewayConfig with a REST route on prefix `/api` and a GraphQL route on exact path `/api/graphql`
+  2. Run ValidateConfig on the configuration
+- **Expected Results**: Validation returns an error about overlapping REST and GraphQL routes
+
+### TC-CROSS-006: Update operation that would create intersection → rejected
+- **Description**: Test that updating an APIRoute to create a path intersection with a GraphQLRoute is rejected
+- **Preconditions**: An APIRoute with prefix `/rest` and a GraphQLRoute with exact path `/graphql` exist
+- **Steps**:
+  1. Create an APIRoute with prefix `/rest` (no conflict)
+  2. Create a GraphQLRoute with exact path `/graphql`
+  3. Update the APIRoute to change its prefix to `/graphql`
+  4. Submit the update to the webhook validator
+- **Expected Results**: Webhook rejects the update with a path conflict error

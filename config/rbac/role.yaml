@@ -25,6 +25,8 @@ rules:
   resources:
   - apiroutes
   - backends
+  - graphqlbackends
+  - graphqlroutes
   - grpcbackends
   - grpcroutes
   verbs:
@@ -40,6 +42,8 @@ rules:
   resources:
   - apiroutes/finalizers
   - backends/finalizers
+  - graphqlbackends/finalizers
+  - graphqlroutes/finalizers
   - grpcbackends/finalizers
   - grpcroutes/finalizers
   verbs:
@@ -49,6 +53,8 @@ rules:
   resources:
   - apiroutes/status
   - backends/status
+  - graphqlbackends/status
+  - graphqlroutes/status
   - grpcbackends/status
   - grpcroutes/status
   verbs:

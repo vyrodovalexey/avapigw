@@ -1154,6 +1154,8 @@ func TestGRPCBackendToBackend_WithHealthCheckEnabled(t *testing.T) {
 	assert.Equal(t, Duration(5*time.Second), b.HealthCheck.Timeout)
 	assert.Equal(t, 2, b.HealthCheck.HealthyThreshold)
 	assert.Equal(t, 3, b.HealthCheck.UnhealthyThreshold)
+	assert.True(t, b.HealthCheck.UseGRPC)
+	assert.Empty(t, b.HealthCheck.GRPCService)
 }
 
 func TestGRPCBackendToBackend_WithHealthCheckNil(t *testing.T) {
@@ -1185,6 +1187,44 @@ func TestGRPCBackendToBackend_WithHealthCheckDisabled(t *testing.T) {
 
 	// When health check is not enabled, it should not be converted
 	assert.Nil(t, b.HealthCheck)
+}
+
+func TestGRPCBackendToBackend_WithHealthCheckGRPCFields(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	gb := GRPCBackend{
+		Name:  "svc",
+		Hosts: []BackendHost{{Address: "10.0.0.1", Port: 50051}},
+		HealthCheck: &GRPCHealthCheckConfig{
+			Enabled:            true,
+			Service:            "my.custom.Service",
+			Interval:           Duration(5 * time.Second),
+			Timeout:            Duration(2 * time.Second),
+			HealthyThreshold:   3,
+			UnhealthyThreshold: 5,
+		},
+	}
+
+	b := GRPCBackendToBackend(gb)
+
+	require.NotNil(t, b.HealthCheck)
+	assert.True(t, b.HealthCheck.UseGRPC)
+	assert.Equal(t, "my.custom.Service", b.HealthCheck.GRPCService)
+	assert.Equal(
+		t,
+		"/grpc.health.v1.Health/Check",
+		b.HealthCheck.Path,
+	)
+	assert.Equal(
+		t, Duration(5*time.Second), b.HealthCheck.Interval,
+	)
+	assert.Equal(
+		t, Duration(2*time.Second), b.HealthCheck.Timeout,
+	)
+	assert.Equal(t, 3, b.HealthCheck.HealthyThreshold)
+	assert.Equal(t, 5, b.HealthCheck.UnhealthyThreshold)
 }
 
 func TestGRPCBackendToBackend_WithTLSConfig(t *testing.T) {
@@ -1365,6 +1405,101 @@ func TestGRPCBackendToBackend_NilTLS(t *testing.T) {
 	b := GRPCBackendToBackend(gb)
 
 	assert.Nil(t, b.TLS)
+}
+
+// ============================================================================
+// GRPCBackendToBackend HTTP Health Check Tests
+// ============================================================================
+
+func TestGRPCBackendToBackend_WithHTTPHealthCheck(t *testing.T) {
+	t.Parallel()
+
+	gb := GRPCBackend{
+		Name:  "auth-svc",
+		Hosts: []BackendHost{{Address: "10.0.0.1", Port: 50051}},
+		HealthCheck: &GRPCHealthCheckConfig{
+			Enabled:            true,
+			UseHTTP:            true,
+			HTTPPath:           "/status",
+			HTTPPort:           8081,
+			Interval:           Duration(15 * time.Second),
+			Timeout:            Duration(3 * time.Second),
+			HealthyThreshold:   3,
+			UnhealthyThreshold: 5,
+		},
+	}
+
+	b := GRPCBackendToBackend(gb)
+
+	require.NotNil(t, b.HealthCheck)
+	assert.Equal(t, "/status", b.HealthCheck.Path)
+	assert.Equal(t, 8081, b.HealthCheck.Port)
+	assert.False(t, b.HealthCheck.UseGRPC)
+	assert.Empty(t, b.HealthCheck.GRPCService)
+	assert.Equal(t, Duration(15*time.Second), b.HealthCheck.Interval)
+	assert.Equal(t, Duration(3*time.Second), b.HealthCheck.Timeout)
+	assert.Equal(t, 3, b.HealthCheck.HealthyThreshold)
+	assert.Equal(t, 5, b.HealthCheck.UnhealthyThreshold)
+}
+
+func TestGRPCBackendToBackend_WithHTTPHealthCheck_DefaultPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	gb := GRPCBackend{
+		Name:  "auth-svc",
+		Hosts: []BackendHost{{Address: "10.0.0.1", Port: 50051}},
+		HealthCheck: &GRPCHealthCheckConfig{
+			Enabled:            true,
+			UseHTTP:            true,
+			HTTPPath:           "", // empty → should default to /healthz
+			HTTPPort:           9090,
+			Interval:           Duration(10 * time.Second),
+			Timeout:            Duration(5 * time.Second),
+			HealthyThreshold:   2,
+			UnhealthyThreshold: 3,
+		},
+	}
+
+	b := GRPCBackendToBackend(gb)
+
+	require.NotNil(t, b.HealthCheck)
+	assert.Equal(t, "/healthz", b.HealthCheck.Path)
+	assert.Equal(t, 9090, b.HealthCheck.Port)
+	assert.False(t, b.HealthCheck.UseGRPC)
+}
+
+func TestGRPCBackendToBackend_WithHTTPHealthCheck_NoPort(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	gb := GRPCBackend{
+		Name:  "auth-svc",
+		Hosts: []BackendHost{{Address: "10.0.0.1", Port: 50051}},
+		HealthCheck: &GRPCHealthCheckConfig{
+			Enabled:            true,
+			UseHTTP:            true,
+			HTTPPath:           "/ready",
+			HTTPPort:           0, // no override → Port should be 0
+			Interval:           Duration(10 * time.Second),
+			Timeout:            Duration(5 * time.Second),
+			HealthyThreshold:   2,
+			UnhealthyThreshold: 3,
+		},
+	}
+
+	b := GRPCBackendToBackend(gb)
+
+	require.NotNil(t, b.HealthCheck)
+	assert.Equal(t, "/ready", b.HealthCheck.Path)
+	assert.Equal(t, 0, b.HealthCheck.Port)
+	assert.False(t, b.HealthCheck.UseGRPC)
+	assert.Equal(t, Duration(10*time.Second), b.HealthCheck.Interval)
+	assert.Equal(t, Duration(5*time.Second), b.HealthCheck.Timeout)
+	assert.Equal(t, 2, b.HealthCheck.HealthyThreshold)
+	assert.Equal(t, 3, b.HealthCheck.UnhealthyThreshold)
 }
 
 // ============================================================================

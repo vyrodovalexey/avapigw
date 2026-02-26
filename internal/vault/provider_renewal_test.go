@@ -997,3 +997,53 @@ func TestVaultProvider_RenewalLoop_NilLeafCert(t *testing.T) {
 	cancel()
 	_ = provider.Close()
 }
+
+// ============================================================
+// Test: Close after Start failure does not deadlock
+// ============================================================
+
+func TestVaultProvider_Close_AfterStartFailure_NoDeadlock(t *testing.T) {
+	// Arrange: create a provider whose PKI client always fails
+	// on IssueCertificate so that Start() returns an error.
+	mockPKI := &mockPKIClientForRenewal{
+		issueErr: errors.New("vault unavailable"),
+	}
+
+	client := &mockVaultClientForRenewal{
+		enabled: true,
+		pki:     mockPKI,
+	}
+
+	provider, err := NewVaultProvider(client, &VaultProviderConfig{
+		PKIMount:   "pki",
+		Role:       "test-role",
+		CommonName: "test.example.com",
+	}, WithVaultProviderLogger(observability.NopLogger()))
+	require.NoError(t, err)
+
+	// Act: Start() must fail because issueCertificate returns an error.
+	err = provider.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vault unavailable")
+
+	// Assert: Close() must complete without deadlocking.
+	// Before the fix, Close() would block forever on <-p.stoppedCh
+	// because the renewal goroutine was never started while
+	// p.started was left as true.
+	done := make(chan struct{})
+	go func() {
+		_ = provider.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success – Close returned without deadlock.
+	case <-time.After(5 * time.Second):
+		t.Fatal(
+			"Close() did not return within 5 s; " +
+				"deadlock detected – started flag was not " +
+				"reset after Start() failure",
+		)
+	}
+}

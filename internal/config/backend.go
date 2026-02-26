@@ -224,6 +224,21 @@ type HealthCheck struct {
 	Timeout            Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	HealthyThreshold   int      `yaml:"healthyThreshold,omitempty" json:"healthyThreshold,omitempty"`
 	UnhealthyThreshold int      `yaml:"unhealthyThreshold,omitempty" json:"unhealthyThreshold,omitempty"`
+	// UseGRPC enables native gRPC health checking
+	// using grpc.health.v1.Health/Check.
+	// When true, the health checker uses gRPC protocol
+	// instead of HTTP GET.
+	UseGRPC bool `yaml:"useGRPC,omitempty" json:"useGRPC,omitempty"`
+	// GRPCService is the service name for gRPC health
+	// check requests. Empty string checks overall server
+	// health.
+	GRPCService string `yaml:"grpcService,omitempty" json:"grpcService,omitempty"`
+	// Port overrides the backend host port for health
+	// checks. When set, health checks use this port
+	// instead of the backend's main port. Useful for
+	// gRPC backends that expose a separate HTTP
+	// monitoring port.
+	Port int `yaml:"port,omitempty" json:"port,omitempty"`
 }
 
 // LoadBalancer represents load balancer configuration.

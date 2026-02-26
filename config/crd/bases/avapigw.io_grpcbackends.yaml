@@ -410,13 +410,26 @@ spec:
                       to mark healthy.
                     minimum: 1
                     type: integer
+                  httpPath:
+                    default: /healthz
+                    description: HTTPPath is the HTTP path for health checks when
+                      useHTTP is true.
+                    type: string
+                  httpPort:
+                    description: |-
+                      HTTPPort is the port for HTTP health checks when useHTTP is true.
+                      If not set, the backend's main port is used.
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
                   interval:
                     description: Interval is the health check interval.
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
                     type: string
                   service:
-                    description: Service is the service name to check. Empty string
-                      checks overall health.
+                    description: |-
+                      Service is the service name to check. Empty string checks overall health.
+                      Used only when useHTTP is false (default gRPC health check mode).
                     type: string
                   timeout:
                     description: Timeout is the health check timeout.
@@ -428,6 +441,14 @@ spec:
                       to mark unhealthy.
                     minimum: 1
                     type: integer
+                  useHTTP:
+                    description: |-
+                      UseHTTP switches health checking from gRPC protocol to HTTP GET.
+                      When true, the health checker sends HTTP GET requests to httpPath
+                      on httpPort instead of using grpc.health.v1.Health/Check.
+                      This is useful for backends that require authentication on gRPC
+                      but expose an unauthenticated HTTP health/monitoring endpoint.
+                    type: boolean
                 required:
                 - enabled
                 type: object

@@ -781,6 +781,62 @@ func TestValidateGRPCHealthCheck(t *testing.T) {
 			},
 			wantError: true,
 		},
+		{
+			name: "valid useHTTP with httpPath and httpPort",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  true,
+				HTTPPath: "/health",
+				HTTPPort: 8080,
+			},
+			wantError: false,
+		},
+		{
+			name: "valid useHTTP with defaults",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP: true,
+			},
+			wantError: false,
+		},
+		{
+			name: "invalid httpPort out of range when useHTTP is true",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  true,
+				HTTPPort: 70000,
+			},
+			wantError: true,
+		},
+		{
+			name: "invalid httpPort negative when useHTTP is true",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  true,
+				HTTPPort: -1,
+			},
+			wantError: true,
+		},
+		{
+			name: "httpPath not starting with slash when useHTTP is true",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  true,
+				HTTPPath: "healthz",
+			},
+			wantError: true,
+		},
+		{
+			name: "httpPath set when useHTTP is false",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  false,
+				HTTPPath: "/healthz",
+			},
+			wantError: true,
+		},
+		{
+			name: "httpPort set when useHTTP is false",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  false,
+				HTTPPort: 8080,
+			},
+			wantError: true,
+		},
 	}
 
 	for _, tt := range tests {
