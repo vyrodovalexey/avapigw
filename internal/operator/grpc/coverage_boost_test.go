@@ -206,10 +206,15 @@ func TestStreamConfiguration_MultipleConfigChanges(t *testing.T) {
 		return stream.updateCount() >= 1
 	}, 2*time.Second, 10*time.Millisecond)
 
-	// Send 3 config changes
+	// Send 3 config changes.
+	// After each update is confirmed, a brief sleep allows the stream goroutine
+	// to re-enter WaitForConfigChange() before the next NotifyConfigChanged(),
+	// preventing a lost-wakeup race on the broadcast channel.
 	for i := range 3 {
 		srv.mu.Lock()
-		srv.apiRoutes[fmt.Sprintf("default/route%d", i)] = []byte(fmt.Sprintf(`{"path":"/api/v%d"}`, i))
+		srv.apiRoutes[fmt.Sprintf("default/route%d", i)] = []byte(
+			fmt.Sprintf(`{"path":"/api/v%d"}`, i),
+		)
 		srv.mu.Unlock()
 
 		srv.NotifyConfigChanged()
@@ -218,6 +223,10 @@ func TestStreamConfiguration_MultipleConfigChanges(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return stream.updateCount() >= expectedCount
 		}, 2*time.Second, 10*time.Millisecond, "update %d should be sent", i+1)
+
+		// Allow the stream goroutine to loop back and register on the
+		// new configNotify channel before the next iteration fires.
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Verify we got 4 total updates (1 initial + 3 changes)
