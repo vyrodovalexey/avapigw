@@ -413,6 +413,16 @@ spec:
     {{- toYaml .Values.gateway.grpcBackends | nindent 4 }}
   {{- end }}
 
+  {{- if .Values.gateway.graphqlRoutes }}
+  graphqlRoutes:
+    {{- toYaml .Values.gateway.graphqlRoutes | nindent 4 }}
+  {{- end }}
+
+  {{- if .Values.gateway.graphqlBackends }}
+  graphqlBackends:
+    {{- toYaml .Values.gateway.graphqlBackends | nindent 4 }}
+  {{- end }}
+
   rateLimit:
     enabled: {{ .Values.gateway.rateLimit.enabled | default true }}
     requestsPerSecond: {{ .Values.gateway.rateLimit.requestsPerSecond | default 100 }}

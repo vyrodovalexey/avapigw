@@ -18,19 +18,21 @@ type Metadata struct {
 
 // GatewaySpec contains the main gateway specification.
 type GatewaySpec struct {
-	Listeners      []Listener            `yaml:"listeners" json:"listeners"`
-	Routes         []Route               `yaml:"routes,omitempty" json:"routes,omitempty"`
-	Backends       []Backend             `yaml:"backends,omitempty" json:"backends,omitempty"`
-	GRPCRoutes     []GRPCRoute           `yaml:"grpcRoutes,omitempty" json:"grpcRoutes,omitempty"`
-	GRPCBackends   []GRPCBackend         `yaml:"grpcBackends,omitempty" json:"grpcBackends,omitempty"`
-	RateLimit      *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
-	CircuitBreaker *CircuitBreakerConfig `yaml:"circuitBreaker,omitempty" json:"circuitBreaker,omitempty"`
-	CORS           *CORSConfig           `yaml:"cors,omitempty" json:"cors,omitempty"`
-	Observability  *ObservabilityConfig  `yaml:"observability,omitempty" json:"observability,omitempty"`
-	Authentication *AuthenticationConfig `yaml:"authentication,omitempty" json:"authentication,omitempty"`
-	Authorization  *AuthorizationConfig  `yaml:"authorization,omitempty" json:"authorization,omitempty"`
-	Security       *SecurityConfig       `yaml:"security,omitempty" json:"security,omitempty"`
-	Audit          *AuditConfig          `yaml:"audit,omitempty" json:"audit,omitempty"`
+	Listeners       []Listener            `yaml:"listeners" json:"listeners"`
+	Routes          []Route               `yaml:"routes,omitempty" json:"routes,omitempty"`
+	Backends        []Backend             `yaml:"backends,omitempty" json:"backends,omitempty"`
+	GRPCRoutes      []GRPCRoute           `yaml:"grpcRoutes,omitempty" json:"grpcRoutes,omitempty"`
+	GRPCBackends    []GRPCBackend         `yaml:"grpcBackends,omitempty" json:"grpcBackends,omitempty"`
+	GraphQLRoutes   []GraphQLRoute        `yaml:"graphqlRoutes,omitempty" json:"graphqlRoutes,omitempty"`
+	GraphQLBackends []GraphQLBackend      `yaml:"graphqlBackends,omitempty" json:"graphqlBackends,omitempty"`
+	RateLimit       *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
+	CircuitBreaker  *CircuitBreakerConfig `yaml:"circuitBreaker,omitempty" json:"circuitBreaker,omitempty"`
+	CORS            *CORSConfig           `yaml:"cors,omitempty" json:"cors,omitempty"`
+	Observability   *ObservabilityConfig  `yaml:"observability,omitempty" json:"observability,omitempty"`
+	Authentication  *AuthenticationConfig `yaml:"authentication,omitempty" json:"authentication,omitempty"`
+	Authorization   *AuthorizationConfig  `yaml:"authorization,omitempty" json:"authorization,omitempty"`
+	Security        *SecurityConfig       `yaml:"security,omitempty" json:"security,omitempty"`
+	Audit           *AuditConfig          `yaml:"audit,omitempty" json:"audit,omitempty"`
 	// RequestLimits configures request size limits.
 	RequestLimits *RequestLimitsConfig `yaml:"requestLimits,omitempty" json:"requestLimits,omitempty"`
 	// MaxSessions configures maximum concurrent sessions at the gateway level.

@@ -628,6 +628,43 @@ gateway:
   # gRPC backends configuration
   grpcBackends: []
 
+  # GraphQL routes configuration
+  # GraphQL routes are served through the HTTP listener
+  graphqlRoutes: []
+    # Example: GraphQL route with schema introspection
+    # - name: graphql-api
+    #   match:
+    #     - uri:
+    #         prefix: /graphql
+    #       methods:
+    #         - POST
+    #         - GET
+    #   route:
+    #     - destination:
+    #         host: graphql-backend
+    #         port: 8080
+    #   graphql:
+    #     introspection: true
+    #     playground: true
+    #     maxDepth: 10
+    #     maxComplexity: 100
+
+  # GraphQL backends configuration
+  graphqlBackends: []
+    # Example: GraphQL backend with schema validation
+    # - name: graphql-backend
+    #   hosts:
+    #     - address: graphql-service.default.svc.cluster.local
+    #       port: 8080
+    #       weight: 1
+    #   healthCheck:
+    #     path: /health
+    #     interval: 10s
+    #     timeout: 5s
+    #   graphql:
+    #     schemaValidation: true
+    #     introspectionEnabled: true
+
   # Custom gateway configuration
   # This will be merged with the generated configuration
   customConfig: {}

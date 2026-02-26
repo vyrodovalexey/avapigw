@@ -64,8 +64,29 @@ type GRPCHealthCheckConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// Service is the service name to check. Empty string checks overall health.
+	// Used only when useHTTP is false (default gRPC health check mode).
 	// +optional
 	Service string `json:"service,omitempty"`
+
+	// UseHTTP switches health checking from gRPC protocol to HTTP GET.
+	// When true, the health checker sends HTTP GET requests to httpPath
+	// on httpPort instead of using grpc.health.v1.Health/Check.
+	// This is useful for backends that require authentication on gRPC
+	// but expose an unauthenticated HTTP health/monitoring endpoint.
+	// +optional
+	UseHTTP bool `json:"useHTTP,omitempty"`
+
+	// HTTPPath is the HTTP path for health checks when useHTTP is true.
+	// +kubebuilder:default="/healthz"
+	// +optional
+	HTTPPath string `json:"httpPath,omitempty"`
+
+	// HTTPPort is the port for HTTP health checks when useHTTP is true.
+	// If not set, the backend's main port is used.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	HTTPPort int `json:"httpPort,omitempty"`
 
 	// Interval is the health check interval.
 	// +optional

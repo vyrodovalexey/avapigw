@@ -137,6 +137,11 @@ func (p *VaultProvider) Start(ctx context.Context) error {
 
 	// Issue initial certificate
 	if err := p.issueCertificate(ctx); err != nil {
+		// Reset started flag so Close() does not block waiting for
+		// the renewal goroutine that was never launched.
+		p.mu.Lock()
+		p.started = false
+		p.mu.Unlock()
 		return err
 	}
 

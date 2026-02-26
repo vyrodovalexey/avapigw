@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	"github.com/vyrodovalexey/avapigw/internal/backend/auth"
 	"github.com/vyrodovalexey/avapigw/internal/config"
@@ -586,6 +587,14 @@ func (b *ServiceBackend) Start(ctx context.Context) error {
 					},
 				}),
 				WithHealthCheckTLS(true),
+			)
+		}
+		// Use gRPC transport credentials for gRPC health checks
+		if b.config.HealthCheck.UseGRPC && b.tlsConfig != nil {
+			opts = append(opts,
+				WithGRPCTransportCredentials(
+					credentials.NewTLS(b.tlsConfig),
+				),
 			)
 		}
 		b.healthCheck = NewHealthChecker(

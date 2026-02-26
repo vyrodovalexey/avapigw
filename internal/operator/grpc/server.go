@@ -103,11 +103,13 @@ type Server struct {
 	metrics     *serverMetrics
 
 	// Configuration storage
-	mu           sync.RWMutex
-	apiRoutes    map[string][]byte
-	grpcRoutes   map[string][]byte
-	backends     map[string][]byte
-	grpcBackends map[string][]byte
+	mu              sync.RWMutex
+	apiRoutes       map[string][]byte
+	grpcRoutes      map[string][]byte
+	graphqlRoutes   map[string][]byte
+	backends        map[string][]byte
+	grpcBackends    map[string][]byte
+	graphqlBackends map[string][]byte
 
 	// Configuration change notification.
 	// configNotify is closed to broadcast a change to all waiting goroutines,
@@ -301,14 +303,16 @@ func newServerInternal(config *ServerConfig, metrics *serverMetrics) (*Server, e
 			MaxBackoff:     retryCfg.MaxBackoff,
 			JitterFactor:   retry.DefaultJitterFactor,
 		},
-		logger:       observability.GetGlobalLogger().With(observability.String("component", "grpc-server")),
-		metrics:      metrics,
-		apiRoutes:    make(map[string][]byte),
-		grpcRoutes:   make(map[string][]byte),
-		backends:     make(map[string][]byte),
-		grpcBackends: make(map[string][]byte),
-		configNotify: make(chan struct{}),
-		gateways:     make(map[string]*gatewayConnection),
+		logger:          observability.GetGlobalLogger().With(observability.String("component", "grpc-server")),
+		metrics:         metrics,
+		apiRoutes:       make(map[string][]byte),
+		grpcRoutes:      make(map[string][]byte),
+		graphqlRoutes:   make(map[string][]byte),
+		backends:        make(map[string][]byte),
+		grpcBackends:    make(map[string][]byte),
+		graphqlBackends: make(map[string][]byte),
+		configNotify:    make(chan struct{}),
+		gateways:        make(map[string]*gatewayConnection),
 	}
 
 	return s, nil
@@ -802,6 +806,178 @@ func (s *Server) deleteGRPCBackendInternal(ctx context.Context, name, namespace 
 	return nil
 }
 
+// ApplyGraphQLRoute applies a GraphQL route configuration.
+func (s *Server) ApplyGraphQLRoute(ctx context.Context, name, namespace string, config []byte) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "ApplyGraphQLRoute"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "apply", "graphqlroute", func() error {
+		return s.applyGraphQLRouteInternal(ctx, name, namespace, config)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("graphqlroute", "apply").Inc()
+	s.metrics.operationDuration.WithLabelValues("apply", "graphqlroute").Observe(time.Since(start).Seconds())
+	s.logger.Info("GraphQL route applied",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// applyGraphQLRouteInternal performs the actual GraphQL route application with mutex handling.
+func (s *Server) applyGraphQLRouteInternal(ctx context.Context, name, namespace string, config []byte) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.graphqlRoutes[key] = config
+
+	return nil
+}
+
+// DeleteGraphQLRoute deletes a GraphQL route configuration.
+func (s *Server) DeleteGraphQLRoute(ctx context.Context, name, namespace string) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "DeleteGraphQLRoute"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "delete", "graphqlroute", func() error {
+		return s.deleteGraphQLRouteInternal(ctx, name, namespace)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("graphqlroute", "delete").Inc()
+	s.metrics.operationDuration.WithLabelValues("delete", "graphqlroute").Observe(time.Since(start).Seconds())
+	s.logger.Info("GraphQL route deleted",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// deleteGraphQLRouteInternal performs the actual GraphQL route deletion with mutex handling.
+func (s *Server) deleteGraphQLRouteInternal(ctx context.Context, name, namespace string) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.graphqlRoutes, key)
+
+	return nil
+}
+
+// ApplyGraphQLBackend applies a GraphQL backend configuration.
+func (s *Server) ApplyGraphQLBackend(ctx context.Context, name, namespace string, config []byte) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "ApplyGraphQLBackend"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "apply", "graphqlbackend", func() error {
+		return s.applyGraphQLBackendInternal(ctx, name, namespace, config)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("graphqlbackend", "apply").Inc()
+	s.metrics.operationDuration.WithLabelValues("apply", "graphqlbackend").Observe(time.Since(start).Seconds())
+	s.logger.Info("GraphQL backend applied",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// applyGraphQLBackendInternal performs the actual GraphQL backend application with mutex handling.
+func (s *Server) applyGraphQLBackendInternal(ctx context.Context, name, namespace string, config []byte) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.graphqlBackends[key] = config
+
+	return nil
+}
+
+// DeleteGraphQLBackend deletes a GraphQL backend configuration.
+func (s *Server) DeleteGraphQLBackend(ctx context.Context, name, namespace string) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "DeleteGraphQLBackend"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "delete", "graphqlbackend", func() error {
+		return s.deleteGraphQLBackendInternal(ctx, name, namespace)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("graphqlbackend", "delete").Inc()
+	s.metrics.operationDuration.WithLabelValues("delete", "graphqlbackend").Observe(time.Since(start).Seconds())
+	s.logger.Info("GraphQL backend deleted",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// deleteGraphQLBackendInternal performs the actual GraphQL backend deletion with mutex handling.
+func (s *Server) deleteGraphQLBackendInternal(ctx context.Context, name, namespace string) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.graphqlBackends, key)
+
+	return nil
+}
+
 // HasAPIRoute checks if an API route exists in the in-memory configuration map.
 // This is used to detect cold start conditions where the resource is marked as Ready
 // in Kubernetes but has not been applied to the gRPC server's in-memory state.
@@ -846,16 +1022,40 @@ func (s *Server) HasGRPCBackend(name, namespace string) bool {
 	return exists
 }
 
+// HasGraphQLRoute checks if a GraphQL route exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasGraphQLRoute(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.graphqlRoutes[key]
+	return exists
+}
+
+// HasGraphQLBackend checks if a GraphQL backend exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasGraphQLBackend(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.graphqlBackends[key]
+	return exists
+}
+
 // GetAllConfigs returns all configurations as JSON.
 func (s *Server) GetAllConfigs() ([]byte, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	configs := map[string]interface{}{
-		"apiRoutes":    s.apiRoutes,
-		"grpcRoutes":   s.grpcRoutes,
-		"backends":     s.backends,
-		"grpcBackends": s.grpcBackends,
+		"apiRoutes":       s.apiRoutes,
+		"grpcRoutes":      s.grpcRoutes,
+		"graphqlRoutes":   s.graphqlRoutes,
+		"backends":        s.backends,
+		"grpcBackends":    s.grpcBackends,
+		"graphqlBackends": s.graphqlBackends,
 	}
 
 	return json.Marshal(configs)

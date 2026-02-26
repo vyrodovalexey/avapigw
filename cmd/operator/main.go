@@ -1017,6 +1017,30 @@ func setupControllers(mgr ctrl.Manager, grpcServer *operatorgrpc.Server, cfg *Co
 				}).SetupWithManager(mgr)
 			},
 		},
+		{
+			name: "GraphQLRoute",
+			setup: func() error {
+				return (&controller.GraphQLRouteReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("graphqlroute-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
+		{
+			name: "GraphQLBackend",
+			setup: func() error {
+				return (&controller.GraphQLBackendReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("graphqlbackend-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
 	}
 
 	for _, s := range setups {
@@ -1102,6 +1126,18 @@ func setupWebhooks(ctx context.Context, mgr ctrl.Manager, cfg *Config) error {
 			name: "GRPCBackend",
 			setup: func() error {
 				return operatorwebhook.SetupGRPCBackendWebhookWithChecker(mgr, sharedChecker)
+			},
+		},
+		{
+			name: "GraphQLRoute",
+			setup: func() error {
+				return operatorwebhook.SetupGraphQLRouteWebhookWithChecker(mgr, sharedChecker)
+			},
+		},
+		{
+			name: "GraphQLBackend",
+			setup: func() error {
+				return operatorwebhook.SetupGraphQLBackendWebhookWithChecker(mgr, sharedChecker)
 			},
 		},
 	}

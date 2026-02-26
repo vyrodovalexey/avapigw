@@ -5,14 +5,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/vyrodovalexey/avapigw/internal/auth"
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 func TestNew(t *testing.T) {
@@ -28,6 +32,39 @@ func TestNew(t *testing.T) {
 	assert.NotNil(t, p.connPool)
 	assert.NotNil(t, p.logger)
 	assert.Equal(t, 30*time.Second, p.defaultTimeout)
+}
+
+func TestNew_WithAllOptions(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	logger := observability.NopLogger()
+	director := NewRouterDirector(r, pool)
+	reg := prometheus.NewRegistry()
+	authMetrics := auth.NewMetricsWithRegisterer("test_new_all_opts", reg)
+	mockVC := &mockVaultClientForProxy{enabled: true}
+
+	p := New(r,
+		WithProxyLogger(logger),
+		WithConnectionPool(pool),
+		WithDirector(director),
+		WithDefaultTimeout(60*time.Second),
+		WithMetricsRegistry(reg),
+		WithAuthMetrics(authMetrics),
+		WithProxyVaultClient(mockVC),
+	)
+	defer p.Close()
+
+	assert.NotNil(t, p)
+	assert.Equal(t, pool, p.connPool)
+	assert.Equal(t, director, p.director)
+	assert.Equal(t, 60*time.Second, p.defaultTimeout)
+	assert.Equal(t, reg, p.metricsRegistry)
+	assert.Equal(t, authMetrics, p.authMetrics)
+	assert.Equal(t, mockVC, p.vaultClient)
 }
 
 func TestNew_WithOptions(t *testing.T) {
@@ -586,4 +623,275 @@ func TestProxy_CleanupStaleConnections_SomeStaleTargets(t *testing.T) {
 	for _, target := range remainingTargets {
 		assert.True(t, validTargets[target], "remaining target %s should be in valid targets", target)
 	}
+}
+
+// --- mockVaultClientForProxy implements vault.Client for proxy tests ---
+
+type mockVaultClientForProxy struct {
+	enabled bool
+}
+
+func (m *mockVaultClientForProxy) IsEnabled() bool                      { return m.enabled }
+func (m *mockVaultClientForProxy) Authenticate(_ context.Context) error { return nil }
+func (m *mockVaultClientForProxy) RenewToken(_ context.Context) error   { return nil }
+func (m *mockVaultClientForProxy) Health(_ context.Context) (*vault.HealthStatus, error) {
+	return nil, nil
+}
+func (m *mockVaultClientForProxy) PKI() vault.PKIClient         { return nil }
+func (m *mockVaultClientForProxy) KV() vault.KVClient           { return nil }
+func (m *mockVaultClientForProxy) Transit() vault.TransitClient { return nil }
+func (m *mockVaultClientForProxy) Close() error                 { return nil }
+
+// --- WithMetricsRegistry tests ---
+
+func TestWithMetricsRegistry(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	p := &Proxy{}
+
+	opt := WithMetricsRegistry(reg)
+	opt(p)
+
+	assert.Equal(t, reg, p.metricsRegistry)
+}
+
+func TestWithMetricsRegistry_Nil(t *testing.T) {
+	t.Parallel()
+
+	p := &Proxy{}
+
+	opt := WithMetricsRegistry(nil)
+	opt(p)
+
+	assert.Nil(t, p.metricsRegistry)
+}
+
+// --- WithAuthMetrics tests ---
+
+func TestWithAuthMetrics(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	metrics := auth.NewMetricsWithRegisterer("test_proxy_auth", reg)
+	p := &Proxy{}
+
+	opt := WithAuthMetrics(metrics)
+	opt(p)
+
+	assert.Equal(t, metrics, p.authMetrics)
+}
+
+func TestWithAuthMetrics_Nil(t *testing.T) {
+	t.Parallel()
+
+	p := &Proxy{}
+
+	opt := WithAuthMetrics(nil)
+	opt(p)
+
+	assert.Nil(t, p.authMetrics)
+}
+
+// --- WithProxyVaultClient tests ---
+
+func TestWithProxyVaultClient(t *testing.T) {
+	t.Parallel()
+
+	mockClient := &mockVaultClientForProxy{enabled: true}
+	p := &Proxy{}
+
+	opt := WithProxyVaultClient(mockClient)
+	opt(p)
+
+	assert.Equal(t, mockClient, p.vaultClient)
+}
+
+func TestWithProxyVaultClient_Nil(t *testing.T) {
+	t.Parallel()
+
+	p := &Proxy{}
+
+	opt := WithProxyVaultClient(nil)
+	opt(p)
+
+	assert.Nil(t, p.vaultClient)
+}
+
+// --- New with auth/vault/metrics options (director creation paths) ---
+
+func TestNew_WithAuthMetrics_PassesToDirector(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	reg := prometheus.NewRegistry()
+	metrics := auth.NewMetricsWithRegisterer("test_new_auth_metrics", reg)
+
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithAuthMetrics(metrics),
+	)
+	defer p.Close()
+
+	assert.NotNil(t, p)
+	assert.NotNil(t, p.director)
+	assert.Equal(t, metrics, p.authMetrics)
+}
+
+func TestNew_WithVaultClient_PassesToDirector(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	mockClient := &mockVaultClientForProxy{enabled: true}
+
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithProxyVaultClient(mockClient),
+	)
+	defer p.Close()
+
+	assert.NotNil(t, p)
+	assert.NotNil(t, p.director)
+	assert.Equal(t, mockClient, p.vaultClient)
+}
+
+func TestNew_WithAllDirectorOptions_NoExplicitDirector(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	logger := observability.NopLogger()
+	reg := prometheus.NewRegistry()
+	authMetrics := auth.NewMetricsWithRegisterer("test_new_all_dir_opts", reg)
+	mockVC := &mockVaultClientForProxy{enabled: true}
+	backendReg := backend.NewRegistry(logger)
+
+	// Create proxy without explicit director but with all director options
+	// This exercises the director creation path with all optional branches
+	p := New(r,
+		WithProxyLogger(logger),
+		WithAuthMetrics(authMetrics),
+		WithProxyVaultClient(mockVC),
+		WithBackendRegistry(backendReg),
+	)
+	defer p.Close()
+
+	assert.NotNil(t, p)
+	assert.NotNil(t, p.director)
+	assert.Equal(t, authMetrics, p.authMetrics)
+	assert.Equal(t, mockVC, p.vaultClient)
+	assert.Equal(t, backendReg, p.backendRegistry)
+}
+
+// --- StreamHandler inner function test ---
+
+func TestProxy_StreamHandler_InnerFunction_NoMethod(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	p := New(r)
+	defer p.Close()
+
+	handler := p.StreamHandler()
+	require.NotNil(t, handler)
+
+	// Call the inner function (the actual grpc.StreamHandler)
+	// with a context that has no method — should return error
+	ctx := context.Background()
+	stream := &proxyTestServerStream{ctx: ctx}
+
+	err := handler(nil, stream)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get method from context")
+}
+
+func TestProxy_StreamHandler_InnerFunction_NoRoute(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	p := New(r)
+	defer p.Close()
+
+	handler := p.StreamHandler()
+	require.NotNil(t, handler)
+
+	// Call with a method that has no matching route
+	ctx := grpc.NewContextWithServerTransportStream(
+		context.Background(),
+		&proxyTestServerTransportStream{method: "/nonexistent.Service/Method"},
+	)
+	stream := &proxyTestServerStream{ctx: ctx}
+
+	err := handler(nil, stream)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no route for method")
+}
+
+func TestProxy_StreamHandler_InnerFunction_WithRoute(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	err := r.AddRoute(config.GRPCRoute{
+		Name: "handler-test-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "handler."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "localhost", Port: 50051}},
+		},
+	})
+	require.NoError(t, err)
+
+	p := New(r)
+	defer p.Close()
+
+	handler := p.StreamHandler()
+	require.NotNil(t, handler)
+
+	// Call with a method that has a matching route
+	ctx := grpc.NewContextWithServerTransportStream(
+		context.Background(),
+		&proxyTestServerTransportStream{method: "/handler.Service/Method"},
+	)
+	stream := &proxyTestServerStream{ctx: ctx}
+
+	// Will fail at backend connection but exercises the inner function path
+	err = handler(nil, stream)
+	assert.Error(t, err)
+}
+
+// --- HandleStream with deadline exceeded ---
+
+func TestProxy_HandleStream_DeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	err := r.AddRoute(config.GRPCRoute{
+		Name: "deadline-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "deadline."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "localhost", Port: 50051}},
+		},
+		Timeout: config.Duration(1 * time.Millisecond),
+	})
+	require.NoError(t, err)
+
+	p := New(r, WithDefaultTimeout(1*time.Millisecond))
+	defer p.Close()
+
+	// Create a context that will expire immediately
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	defer cancel()
+	time.Sleep(2 * time.Millisecond) // Ensure deadline is exceeded
+
+	ctx = grpc.NewContextWithServerTransportStream(
+		ctx,
+		&proxyTestServerTransportStream{method: "/deadline.Service/Method"},
+	)
+	stream := &proxyTestServerStream{ctx: ctx}
+
+	err = p.handleStream(nil, stream)
+	// Error is expected — either deadline exceeded or connection error
+	assert.Error(t, err)
 }

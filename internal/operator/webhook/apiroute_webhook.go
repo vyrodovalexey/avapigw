@@ -111,6 +111,17 @@ func (v *APIRouteValidator) ValidateCreate(
 		}
 	}
 
+	// Check for cross-CRD path conflicts with GraphQLRoutes
+	if v.DuplicateChecker != nil {
+		if crossErr := v.DuplicateChecker.CheckAPIRouteCrossConflictsWithGraphQL(ctx, obj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation(
+				"APIRoute", "create", "rejected",
+				time.Since(start), len(warnings),
+			)
+			return warnings, crossErr
+		}
+	}
+
 	GetWebhookMetrics().RecordValidation(
 		"APIRoute", "create", "allowed",
 		time.Since(start), len(warnings),
@@ -152,6 +163,17 @@ func (v *APIRouteValidator) ValidateUpdate(
 				time.Since(start), len(warnings),
 			)
 			return warnings, dupErr
+		}
+	}
+
+	// Check for cross-CRD path conflicts with GraphQLRoutes
+	if v.DuplicateChecker != nil {
+		if crossErr := v.DuplicateChecker.CheckAPIRouteCrossConflictsWithGraphQL(ctx, newObj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation(
+				"APIRoute", "update", "rejected",
+				time.Since(start), len(warnings),
+			)
+			return warnings, crossErr
 		}
 	}
 

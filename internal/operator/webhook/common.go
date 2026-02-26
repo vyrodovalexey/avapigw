@@ -45,6 +45,9 @@ const (
 
 	// CacheTypeRedis is the Redis cache type.
 	CacheTypeRedis = "redis"
+
+	// TLSModeInsecure is the insecure TLS mode value.
+	TLSModeInsecure = "INSECURE"
 )
 
 // validateDuration validates a duration string using Go's time.ParseDuration.
@@ -331,6 +334,32 @@ func validateGRPCHealthCheck(hc *avapigwv1alpha1.GRPCHealthCheckConfig) error {
 
 	if hc.UnhealthyThreshold < 0 {
 		return fmt.Errorf("healthCheck.unhealthyThreshold must be non-negative")
+	}
+
+	if hc.UseHTTP {
+		if hc.HTTPPath != "" && !strings.HasPrefix(hc.HTTPPath, "/") {
+			return fmt.Errorf("healthCheck.httpPath must start with '/'")
+		}
+
+		if hc.HTTPPort != 0 &&
+			(hc.HTTPPort < MinPort || hc.HTTPPort > MaxPort) {
+			return fmt.Errorf(
+				"healthCheck.httpPort must be between %d and %d",
+				MinPort, MaxPort,
+			)
+		}
+	} else {
+		if hc.HTTPPath != "" {
+			return fmt.Errorf(
+				"healthCheck.httpPath must not be set when useHTTP is false",
+			)
+		}
+
+		if hc.HTTPPort != 0 {
+			return fmt.Errorf(
+				"healthCheck.httpPort must not be set when useHTTP is false",
+			)
+		}
 	}
 
 	return nil

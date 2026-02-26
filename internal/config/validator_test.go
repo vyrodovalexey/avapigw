@@ -2365,3 +2365,155 @@ func TestValidateGRPCRouteTLSConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestValidator_RouteGraphQLIntersection_NoOverlap(t *testing.T) {
+	t.Parallel()
+
+	cfg := &GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   Metadata{Name: "test"},
+		Spec: GatewaySpec{
+			Listeners: []Listener{
+				{Name: "http", Port: 8080, Protocol: "HTTP"},
+			},
+			Routes: []Route{
+				{
+					Name: "rest-route",
+					Match: []RouteMatch{
+						{
+							URI: &URIMatch{Prefix: "/api/v1"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+			GraphQLRoutes: []GraphQLRoute{
+				{
+					Name: "graphql-route",
+					Match: []GraphQLRouteMatch{
+						{
+							Path: &StringMatch{Exact: "/graphql"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "graphql-backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := ValidateConfig(cfg)
+	assert.NoError(t, err)
+}
+
+func TestValidator_RouteGraphQLIntersection_PrefixOverlap(t *testing.T) {
+	t.Parallel()
+
+	cfg := &GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   Metadata{Name: "test"},
+		Spec: GatewaySpec{
+			Listeners: []Listener{
+				{Name: "http", Port: 8080, Protocol: "HTTP"},
+			},
+			Routes: []Route{
+				{
+					Name: "rest-route",
+					Match: []RouteMatch{
+						{
+							URI: &URIMatch{Prefix: "/api"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+			GraphQLRoutes: []GraphQLRoute{
+				{
+					Name: "graphql-route",
+					Match: []GraphQLRouteMatch{
+						{
+							Path: &StringMatch{Exact: "/api/graphql"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "graphql-backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := ValidateConfig(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overlapping paths")
+}
+
+func TestValidator_RouteGraphQLIntersection_ExactOverlap(t *testing.T) {
+	t.Parallel()
+
+	cfg := &GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   Metadata{Name: "test"},
+		Spec: GatewaySpec{
+			Listeners: []Listener{
+				{Name: "http", Port: 8080, Protocol: "HTTP"},
+			},
+			Routes: []Route{
+				{
+					Name: "rest-route",
+					Match: []RouteMatch{
+						{
+							URI: &URIMatch{Exact: "/graphql"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+			GraphQLRoutes: []GraphQLRoute{
+				{
+					Name: "graphql-route",
+					Match: []GraphQLRouteMatch{
+						{
+							Path: &StringMatch{Exact: "/graphql"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "graphql-backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := ValidateConfig(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overlapping paths")
+}

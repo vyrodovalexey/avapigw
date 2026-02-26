@@ -1,0 +1,17 @@
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: basic-graphql-route
+  namespace: avapigw-test
+spec:
+  match:
+    - path:
+        exact: /graphql
+  route:
+    - destination:
+        host: basic-graphql-backend
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100

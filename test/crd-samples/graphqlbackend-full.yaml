@@ -1,0 +1,74 @@
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: full-graphql-backend
+  namespace: avapigw-test
+spec:
+  hosts:
+    # For local K8s testing, use host.docker.internal to reach
+    # REST API backends running in docker-compose (which also serve /graphql).
+    # In production, use the actual K8s service FQDN.
+    - address: host.docker.internal
+      port: 8801
+      weight: 60
+    - address: host.docker.internal
+      port: 8802
+      weight: 40
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: weighted
+  tls:
+    enabled: true
+    mode: MUTUAL
+    serverName: graphql-backend.internal
+    minVersion: TLS12
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: graphql-client
+      commonName: gateway-graphql-client
+      ttl: 24h
+  circuitBreaker:
+    enabled: true
+    threshold: 5
+    timeout: 30s
+    halfOpenRequests: 3
+  authentication:
+    type: jwt
+    jwt:
+      enabled: true
+      tokenSource: oidc
+      oidc:
+        issuerUrl: https://keycloak.example.com/realms/myrealm
+        clientId: graphql-client
+        clientSecretRef:
+          name: keycloak-secret
+          key: client-secret
+        scopes:
+          - openid
+        tokenCacheTTL: 5m
+      headerName: authorization
+      headerPrefix: Bearer
+  maxSessions:
+    enabled: true
+    maxConcurrent: 1000
+    queueSize: 100
+    queueTimeout: 15s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 500
+    burst: 1000
+  cache:
+    enabled: true
+    ttl: 10m
+    type: redis
+  encoding:
+    request:
+      contentType: application/json
+    response:
+      contentType: application/json

@@ -1054,3 +1054,148 @@ func TestRoute_GetEffectiveSNIHosts(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================
+// HealthCheck UseGRPC / GRPCService field tests
+// ============================================================
+
+func TestHealthCheck_UseGRPCField(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		hc       HealthCheck
+		wantJSON string
+		wantYAML string
+	}{
+		{
+			name: "UseGRPC true",
+			hc: HealthCheck{
+				Path:    "/grpc.health.v1.Health/Check",
+				UseGRPC: true,
+			},
+			wantJSON: `"useGRPC":true`,
+			wantYAML: "useGRPC: true",
+		},
+		{
+			name: "UseGRPC false omitted in JSON",
+			hc: HealthCheck{
+				Path: "/health",
+			},
+			wantJSON: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// JSON serialization
+			data, err := json.Marshal(tt.hc)
+			require.NoError(t, err)
+			jsonStr := string(data)
+
+			if tt.wantJSON != "" {
+				assert.Contains(t, jsonStr, tt.wantJSON)
+			} else {
+				assert.NotContains(t, jsonStr, "useGRPC")
+			}
+
+			// JSON round-trip
+			var restored HealthCheck
+			err = json.Unmarshal(data, &restored)
+			require.NoError(t, err)
+			assert.Equal(t, tt.hc.UseGRPC, restored.UseGRPC)
+
+			// YAML serialization
+			yamlData, err := yaml.Marshal(tt.hc)
+			require.NoError(t, err)
+
+			if tt.wantYAML != "" {
+				assert.Contains(
+					t, string(yamlData), tt.wantYAML,
+				)
+			}
+
+			// YAML round-trip
+			var yamlRestored HealthCheck
+			err = yaml.Unmarshal(yamlData, &yamlRestored)
+			require.NoError(t, err)
+			assert.Equal(
+				t, tt.hc.UseGRPC, yamlRestored.UseGRPC,
+			)
+		})
+	}
+}
+
+func TestHealthCheck_GRPCServiceField(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		hc       HealthCheck
+		wantJSON string
+		wantYAML string
+	}{
+		{
+			name: "GRPCService set",
+			hc: HealthCheck{
+				Path:        "/grpc.health.v1.Health/Check",
+				UseGRPC:     true,
+				GRPCService: "my.svc.v1",
+			},
+			wantJSON: `"grpcService":"my.svc.v1"`,
+			wantYAML: "grpcService: my.svc.v1",
+		},
+		{
+			name: "GRPCService empty omitted",
+			hc: HealthCheck{
+				Path:    "/health",
+				UseGRPC: true,
+			},
+			wantJSON: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// JSON serialization
+			data, err := json.Marshal(tt.hc)
+			require.NoError(t, err)
+			jsonStr := string(data)
+
+			if tt.wantJSON != "" {
+				assert.Contains(t, jsonStr, tt.wantJSON)
+			} else {
+				assert.NotContains(
+					t, jsonStr, "grpcService",
+				)
+			}
+
+			// JSON round-trip
+			var restored HealthCheck
+			err = json.Unmarshal(data, &restored)
+			require.NoError(t, err)
+			assert.Equal(
+				t,
+				tt.hc.GRPCService,
+				restored.GRPCService,
+			)
+
+			// YAML round-trip
+			yamlData, err := yaml.Marshal(tt.hc)
+			require.NoError(t, err)
+
+			var yamlRestored HealthCheck
+			err = yaml.Unmarshal(yamlData, &yamlRestored)
+			require.NoError(t, err)
+			assert.Equal(
+				t,
+				tt.hc.GRPCService,
+				yamlRestored.GRPCService,
+			)
+		})
+	}
+}

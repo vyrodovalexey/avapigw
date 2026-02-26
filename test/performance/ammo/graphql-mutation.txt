@@ -1,0 +1,8 @@
+162 /graphql
+{"query":"mutation { createItem(input: {name: \"Perf Item 1\", description: \"Performance test\", price: 99.99, quantity: 10, category: \"test\"}) { id name } }"}
+159 /graphql
+{"query":"mutation { createItem(input: {name: \"Perf Item 2\", description: \"Load test item\", price: 49.99, quantity: 5, category: \"load\"}) { id name } }"}
+164 /graphql
+{"query":"mutation { createItem(input: {name: \"Perf Item 3\", description: \"Stress test item\", price: 149.99, quantity: 3, category: \"stress\"}) { id name } }"}
+162 /graphql
+{"query":"mutation { createItem(input: {name: \"Perf Item 4\", description: \"Throughput test\", price: 29.99, quantity: 100, category: \"perf\"}) { id name } }"}

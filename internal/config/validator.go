@@ -145,6 +145,9 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	v.validateBackends(spec.Backends)
 	v.validateGRPCRoutes(spec.GRPCRoutes)
 	v.validateGRPCBackends(spec.GRPCBackends)
+	v.validateGraphQLRoutes(spec.GraphQLRoutes)
+	v.validateGraphQLBackends(spec.GraphQLBackends)
+	v.validateRouteGraphQLRouteIntersection(spec.Routes, spec.GraphQLRoutes)
 
 	if spec.RateLimit != nil {
 		v.validateRateLimit(spec.RateLimit, "spec.rateLimit")
@@ -219,16 +222,17 @@ func (v *Validator) validateListenerPort(listener *Listener, path string, ports 
 // validateListenerProtocol validates listener protocol.
 func (v *Validator) validateListenerProtocol(listener *Listener, path string) {
 	validProtocols := map[string]bool{
-		ProtocolHTTP:  true,
-		ProtocolHTTPS: true,
-		ProtocolHTTP2: true,
-		ProtocolGRPC:  true,
+		ProtocolHTTP:    true,
+		ProtocolHTTPS:   true,
+		ProtocolHTTP2:   true,
+		ProtocolGRPC:    true,
+		ProtocolGraphQL: true,
 	}
 	switch {
 	case listener.Protocol == "":
 		v.addError(path+".protocol", "protocol is required")
 	case !validProtocols[listener.Protocol]:
-		v.addError(path+".protocol", "protocol must be HTTP, HTTPS, HTTP2, or GRPC")
+		v.addError(path+".protocol", "protocol must be HTTP, HTTPS, HTTP2, GRPC, or GRAPHQL")
 	}
 
 	// Validate gRPC-specific configuration
@@ -1508,5 +1512,271 @@ func (v *Validator) validateRouteClientValidation(cfg *RouteClientValidationConf
 	// CA file is required for client validation
 	if cfg.CAFile == "" {
 		v.addError(path+".caFile", "caFile is required when client validation is enabled")
+	}
+}
+
+// validateGraphQLRoutes validates GraphQL route configurations.
+func (v *Validator) validateGraphQLRoutes(routes []GraphQLRoute) {
+	names := make(map[string]bool)
+
+	for i, route := range routes {
+		path := fmt.Sprintf("spec.graphqlRoutes[%d]", i)
+		v.validateSingleGraphQLRoute(&route, path, names)
+	}
+}
+
+// validateSingleGraphQLRoute validates a single GraphQL route configuration.
+func (v *Validator) validateSingleGraphQLRoute(route *GraphQLRoute, path string, names map[string]bool) {
+	// Validate route name
+	switch {
+	case route.Name == "":
+		v.addError(path+".name", "route name is required")
+	case names[route.Name]:
+		v.addError(path+".name", fmt.Sprintf("duplicate GraphQL route name: %s", route.Name))
+	default:
+		names[route.Name] = true
+	}
+
+	// Validate match conditions
+	for j, match := range route.Match {
+		matchPath := fmt.Sprintf("%s.match[%d]", path, j)
+		v.validateGraphQLRouteMatch(&match, matchPath)
+	}
+
+	// Validate destinations
+	if len(route.Route) == 0 {
+		v.addError(path+".route", "at least one destination is required")
+	}
+
+	totalWeight := 0
+	for j, dest := range route.Route {
+		destPath := fmt.Sprintf("%s.route[%d]", path, j)
+		totalWeight += v.validateRouteDestination(&dest, destPath)
+	}
+
+	if len(route.Route) > 1 && totalWeight > 0 && totalWeight != 100 {
+		v.addError(path+".route", fmt.Sprintf("route weights must sum to 100, got %d", totalWeight))
+	}
+
+	// Validate timeout
+	if route.Timeout.Duration() < 0 {
+		v.addError(path+".timeout", "timeout cannot be negative")
+	}
+
+	// Validate retry policy
+	if route.Retries != nil {
+		v.validateRetryPolicy(route.Retries, path+".retries")
+	}
+
+	// Validate rate limit
+	if route.RateLimit != nil {
+		v.validateRateLimit(route.RateLimit, path+".rateLimit")
+	}
+
+	// Validate route-level TLS
+	if route.TLS != nil {
+		v.validateRouteTLSConfig(route.TLS, path+".tls")
+	}
+
+	// Validate depth limit
+	if route.DepthLimit < 0 {
+		v.addError(path+".depthLimit", "depthLimit cannot be negative")
+	}
+
+	// Validate complexity limit
+	if route.ComplexityLimit < 0 {
+		v.addError(path+".complexityLimit", "complexityLimit cannot be negative")
+	}
+
+	// Validate allowed operations
+	v.validateGraphQLAllowedOperations(route.AllowedOperations, path)
+}
+
+// validateGraphQLRouteMatch validates a GraphQL route match configuration.
+func (v *Validator) validateGraphQLRouteMatch(match *GraphQLRouteMatch, path string) {
+	// Validate path match
+	if match.Path != nil {
+		v.validateStringMatch(match.Path, path+".path")
+	}
+
+	// Validate operation type
+	if match.OperationType != "" {
+		validOps := map[string]bool{
+			"query":        true,
+			"mutation":     true,
+			"subscription": true,
+		}
+		if !validOps[strings.ToLower(match.OperationType)] {
+			v.addError(
+				path+".operationType",
+				fmt.Sprintf("invalid operation type: %s (must be query, mutation, or subscription)",
+					match.OperationType),
+			)
+		}
+	}
+
+	// Validate operation name match
+	if match.OperationName != nil {
+		v.validateStringMatch(match.OperationName, path+".operationName")
+	}
+
+	// Validate header matches
+	for i, header := range match.Headers {
+		headerPath := fmt.Sprintf("%s.headers[%d]", path, i)
+		v.validateGraphQLHeaderMatch(&header, headerPath)
+	}
+}
+
+// validateGraphQLHeaderMatch validates a GraphQL header match configuration.
+func (v *Validator) validateGraphQLHeaderMatch(header *HeaderMatchConfig, path string) {
+	if header.Name == "" {
+		v.addError(path+".name", "header name is required")
+	}
+
+	if header.Regex != "" {
+		if err := util.ValidateRegex(header.Regex); err != nil {
+			v.addError(path+".regex", err.Error())
+		}
+	}
+}
+
+// validateGraphQLAllowedOperations validates the allowed operations list.
+func (v *Validator) validateGraphQLAllowedOperations(ops []string, path string) {
+	validOps := map[string]bool{
+		"query":        true,
+		"mutation":     true,
+		"subscription": true,
+	}
+	for i, op := range ops {
+		if !validOps[strings.ToLower(op)] {
+			v.addError(fmt.Sprintf("%s.allowedOperations[%d]", path, i),
+				fmt.Sprintf("invalid operation type: %s (must be query, mutation, or subscription)", op))
+		}
+	}
+}
+
+// validateRouteGraphQLRouteIntersection checks for path overlaps between REST routes
+// and GraphQL routes. Overlapping paths would cause routing ambiguity at runtime.
+func (v *Validator) validateRouteGraphQLRouteIntersection(routes []Route, graphqlRoutes []GraphQLRoute) {
+	for i, route := range routes {
+		for j, gqlRoute := range graphqlRoutes {
+			if v.restAndGraphQLRoutePathsOverlap(&route, &gqlRoute) {
+				v.addError(
+					fmt.Sprintf("spec.routes[%d]/spec.graphqlRoutes[%d]", i, j),
+					fmt.Sprintf(
+						"REST route %q and GraphQL route %q have overlapping paths, "+
+							"which would cause routing ambiguity",
+						route.Name, gqlRoute.Name,
+					),
+				)
+			}
+		}
+	}
+}
+
+// restAndGraphQLRoutePathsOverlap checks if a REST route and a GraphQL route have overlapping paths.
+func (v *Validator) restAndGraphQLRoutePathsOverlap(route *Route, gqlRoute *GraphQLRoute) bool {
+	// An empty match list means "catch-all" — it matches everything.
+	if len(route.Match) == 0 || len(gqlRoute.Match) == 0 {
+		return true
+	}
+
+	for _, restMatch := range route.Match {
+		for _, gqlMatch := range gqlRoute.Match {
+			if v.restMatchAndGraphQLMatchPathsOverlap(&restMatch, &gqlMatch) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// restMatchAndGraphQLMatchPathsOverlap checks if a REST route match and a GraphQL route match
+// have overlapping paths.
+func (v *Validator) restMatchAndGraphQLMatchPathsOverlap(restMatch *RouteMatch, gqlMatch *GraphQLRouteMatch) bool {
+	// If the REST route has no URI match, it matches all paths
+	if restMatch.URI == nil {
+		return true
+	}
+
+	// If the GraphQL route has no path match, it matches all paths
+	if gqlMatch.Path == nil {
+		return true
+	}
+
+	// Check exact-exact overlap
+	if restMatch.URI.Exact != "" && gqlMatch.Path.Exact != "" {
+		return restMatch.URI.Exact == gqlMatch.Path.Exact
+	}
+
+	// Check prefix-prefix overlap
+	if restMatch.URI.Prefix != "" && gqlMatch.Path.Prefix != "" {
+		return strings.HasPrefix(restMatch.URI.Prefix, gqlMatch.Path.Prefix) ||
+			strings.HasPrefix(gqlMatch.Path.Prefix, restMatch.URI.Prefix)
+	}
+
+	// Check exact-prefix overlap (REST exact vs GraphQL prefix)
+	if restMatch.URI.Exact != "" && gqlMatch.Path.Prefix != "" {
+		return strings.HasPrefix(restMatch.URI.Exact, gqlMatch.Path.Prefix)
+	}
+
+	// Check prefix-exact overlap (REST prefix vs GraphQL exact)
+	if restMatch.URI.Prefix != "" && gqlMatch.Path.Exact != "" {
+		return strings.HasPrefix(gqlMatch.Path.Exact, restMatch.URI.Prefix)
+	}
+
+	return false
+}
+
+// validateGraphQLBackends validates GraphQL backend configurations.
+func (v *Validator) validateGraphQLBackends(backends []GraphQLBackend) {
+	names := make(map[string]bool)
+
+	for i, backend := range backends {
+		path := fmt.Sprintf("spec.graphqlBackends[%d]", i)
+		v.validateSingleGraphQLBackend(&backend, path, names)
+	}
+}
+
+// validateSingleGraphQLBackend validates a single GraphQL backend configuration.
+func (v *Validator) validateSingleGraphQLBackend(backend *GraphQLBackend, path string, names map[string]bool) {
+	// Validate backend name
+	switch {
+	case backend.Name == "":
+		v.addError(path+".name", "backend name is required")
+	case names[backend.Name]:
+		v.addError(path+".name", fmt.Sprintf("duplicate GraphQL backend name: %s", backend.Name))
+	default:
+		names[backend.Name] = true
+	}
+
+	// Validate hosts
+	if len(backend.Hosts) == 0 {
+		v.addError(path+".hosts", "at least one host is required")
+	}
+
+	for j, host := range backend.Hosts {
+		hostPath := fmt.Sprintf("%s.hosts[%d]", path, j)
+		v.validateBackendHost(&host, hostPath)
+	}
+
+	// Validate health check
+	if backend.HealthCheck != nil {
+		v.validateHealthCheck(backend.HealthCheck, path+".healthCheck")
+	}
+
+	// Validate load balancer
+	if backend.LoadBalancer != nil {
+		v.validateLoadBalancer(backend.LoadBalancer, path+".loadBalancer")
+	}
+
+	// Validate TLS
+	if backend.TLS != nil {
+		v.validateBackendTLSConfig(backend.TLS, path+".tls")
+	}
+
+	// Validate circuit breaker
+	if backend.CircuitBreaker != nil {
+		v.validateCircuitBreaker(backend.CircuitBreaker, path+".circuitBreaker")
 	}
 }

@@ -8,7 +8,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 	"github.com/vyrodovalexey/avapigw/internal/operator/webhook"
@@ -270,6 +273,698 @@ func TestFunctional_Webhook_CrossFieldValidation(t *testing.T) {
 		_, err := validator.ValidateCreate(context.Background(), backend)
 		assert.Error(t, err)
 	})
+}
+
+// ============================================================================
+// REST/GraphQL Cross-Route Intersection Prevention (TC-CROSS-001..006)
+// ============================================================================
+
+// TestFunctional_Webhook_APIRouteGraphQLCrossConflict tests that creating an APIRoute
+// that conflicts with an existing GraphQLRoute is rejected (TC-CROSS-001).
+func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, avapigwv1alpha1.AddToScheme(scheme))
+
+	t.Run("APIRoute prefix overlaps GraphQLRoute exact path", func(t *testing.T) {
+		t.Parallel()
+
+		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingGraphQL).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		validator := &webhook.APIRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		conflictingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-conflict",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := validator.ValidateCreate(context.Background(), conflictingAPIRoute)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+		assert.Contains(t, err.Error(), "GraphQLRoute")
+	})
+
+	t.Run("APIRoute exact path matches GraphQLRoute exact path", func(t *testing.T) {
+		t.Parallel()
+
+		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-exact",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/api/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingGraphQL).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		validator := &webhook.APIRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		conflictingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-exact-conflict",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Exact: "/api/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := validator.ValidateCreate(context.Background(), conflictingAPIRoute)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+	})
+
+	t.Run("APIRoute prefix encompasses GraphQLRoute exact path", func(t *testing.T) {
+		t.Parallel()
+
+		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-under-prefix",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/api/v1/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingGraphQL).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		validator := &webhook.APIRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		conflictingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-broad-prefix",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/api/v1",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := validator.ValidateCreate(context.Background(), conflictingAPIRoute)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+	})
+}
+
+// TestFunctional_Webhook_GraphQLRouteAPIRouteCrossConflict tests that creating a GraphQLRoute
+// that conflicts with an existing APIRoute is rejected (TC-CROSS-002).
+func TestFunctional_Webhook_GraphQLRouteAPIRouteCrossConflict(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, avapigwv1alpha1.AddToScheme(scheme))
+
+	t.Run("GraphQLRoute exact path under APIRoute prefix", func(t *testing.T) {
+		t.Parallel()
+
+		existingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/api",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingAPIRoute).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		validator := &webhook.GraphQLRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		conflictingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-conflict",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/api/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := validator.ValidateCreate(context.Background(), conflictingGraphQL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+		assert.Contains(t, err.Error(), "APIRoute")
+	})
+
+	t.Run("GraphQLRoute prefix overlaps APIRoute prefix", func(t *testing.T) {
+		t.Parallel()
+
+		existingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-prefix",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/shared",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingAPIRoute).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		validator := &webhook.GraphQLRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		conflictingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-prefix-conflict",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Prefix: "/shared/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := validator.ValidateCreate(context.Background(), conflictingGraphQL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+	})
+
+	t.Run("GraphQLRoute update creates intersection", func(t *testing.T) {
+		t.Parallel()
+
+		existingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-for-update",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingAPIRoute).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		validator := &webhook.GraphQLRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		// Old object had a non-conflicting path
+		oldGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-updating",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/safe-path",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		// New object changes to a conflicting path
+		newGraphQL := oldGraphQL.DeepCopy()
+		newGraphQL.Spec.Match[0].Path = &avapigwv1alpha1.StringMatch{
+			Exact: "/graphql",
+		}
+
+		_, err := validator.ValidateUpdate(context.Background(), oldGraphQL, newGraphQL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+	})
+}
+
+// TestFunctional_Webhook_NoConflictDifferentPaths tests that non-overlapping
+// REST and GraphQL routes are allowed (TC-CROSS-003).
+func TestFunctional_Webhook_NoConflictDifferentPaths(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, avapigwv1alpha1.AddToScheme(scheme))
+
+	t.Run("APIRoute and GraphQLRoute on completely different paths", func(t *testing.T) {
+		t.Parallel()
+
+		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-safe",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingGraphQL).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		apiValidator := &webhook.APIRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		nonConflictingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-safe",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/api/v1",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := apiValidator.ValidateCreate(context.Background(), nonConflictingAPIRoute)
+		assert.NoError(t, err)
+	})
+
+	t.Run("GraphQLRoute and APIRoute on completely different paths", func(t *testing.T) {
+		t.Parallel()
+
+		existingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-safe",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/api/v1",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingAPIRoute).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		gqlValidator := &webhook.GraphQLRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		nonConflictingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-safe",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := gqlValidator.ValidateCreate(context.Background(), nonConflictingGraphQL)
+		assert.NoError(t, err)
+	})
+
+	t.Run("multiple non-overlapping routes coexist", func(t *testing.T) {
+		t.Parallel()
+
+		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-1",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		existingGraphQL2 := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-2",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/graphql-v2",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend-v2", Port: 8822},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingGraphQL, existingGraphQL2).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		apiValidator := &webhook.APIRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		apiRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-coexist",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/api/v1",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := apiValidator.ValidateCreate(context.Background(), apiRoute)
+		assert.NoError(t, err)
+	})
+}
+
+// TestFunctional_Webhook_CrossCRDUpdateConflict tests that updating an APIRoute
+// to create a path intersection with a GraphQLRoute is rejected (TC-CROSS-006).
+func TestFunctional_Webhook_CrossCRDUpdateConflict(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, avapigwv1alpha1.AddToScheme(scheme))
+
+	existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "graphql-route-existing",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{
+			Match: []avapigwv1alpha1.GraphQLRouteMatch{
+				{
+					Path: &avapigwv1alpha1.StringMatch{
+						Exact: "/graphql",
+					},
+				},
+			},
+			Route: []avapigwv1alpha1.RouteDestination{
+				{
+					Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+					Weight:      100,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingGraphQL).
+		Build()
+
+	dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+	validator := &webhook.APIRouteValidator{
+		DuplicateChecker: dc,
+	}
+
+	// Old APIRoute has a non-conflicting path
+	oldAPIRoute := &avapigwv1alpha1.APIRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "api-route-updating",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.APIRouteSpec{
+			Match: []avapigwv1alpha1.RouteMatch{
+				{
+					URI: &avapigwv1alpha1.URIMatch{
+						Prefix: "/rest",
+					},
+				},
+			},
+			Route: []avapigwv1alpha1.RouteDestination{
+				{
+					Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+					Weight:      100,
+				},
+			},
+		},
+	}
+
+	// New APIRoute changes to a conflicting path
+	newAPIRoute := oldAPIRoute.DeepCopy()
+	newAPIRoute.Spec.Match[0].URI = &avapigwv1alpha1.URIMatch{
+		Prefix: "/graphql",
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldAPIRoute, newAPIRoute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path conflict")
+	assert.Contains(t, err.Error(), "GraphQLRoute")
 }
 
 // TestFunctional_Webhook_EdgeCases tests edge cases in validation.

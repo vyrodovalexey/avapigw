@@ -1,0 +1,90 @@
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: full-graphql-route
+  namespace: avapigw-test
+spec:
+  match:
+    - path:
+        exact: /graphql
+      operationType: query
+      operationName:
+        prefix: Get
+      headers:
+        - name: x-tenant-id
+          exact: "tenant-1"
+        - name: x-api-version
+          prefix: "v1"
+  route:
+    - destination:
+        host: graphql-backend-primary
+        port: 8801
+      weight: 80
+    - destination:
+        host: graphql-backend-canary
+        port: 8802
+      weight: 20
+  timeout: 30s
+  retries:
+    attempts: 3
+    perTryTimeout: 10s
+    retryOn: "5xx,reset"
+  headers:
+    request:
+      set:
+        x-gateway: avapigw
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+  depthLimit: 15
+  complexityLimit: 200
+  introspectionEnabled: false
+  allowedOperations:
+    - query
+    - mutation
+  cors:
+    allowOrigins:
+      - "https://example.com"
+    allowMethods:
+      - POST
+    allowHeaders:
+      - Content-Type
+      - Authorization
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: https://auth.example.com
+      jwksUrl: https://auth.example.com/.well-known/jwks.json
+  authorization:
+    enabled: true
+    defaultPolicy: deny
+    rbac:
+      enabled: true
+      policies:
+        - name: graphql-policy
+          roles:
+            - graphql-user
+          resources:
+            - /graphql
+          actions:
+            - POST
+          effect: allow
+  maxSessions:
+    enabled: true
+    maxConcurrent: 500
+    queueSize: 50
+    queueTimeout: 10s
+  requestLimits:
+    maxBodySize: 1048576
+    maxHeaderSize: 65536
+  tls:
+    sniHosts:
+      - graphql.example.com
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: graphql-route
+      commonName: graphql.example.com
+      ttl: 24h

@@ -486,6 +486,16 @@ func TestWithTLSFromConfig(t *testing.T) {
 			expectTLS:  true,
 			minVersion: tls.VersionTLS12,
 		},
+		{
+			name: "with unknown TLS version (default case)",
+			cfg: &config.TLSConfig{
+				Enabled:    true,
+				MinVersion: "UNKNOWN_VERSION",
+			},
+			expectTLS:  true,
+			minVersion: tls.VersionTLS12, // defaults to TLS12
+			expectALPN: []string{"h2"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -519,4 +529,99 @@ func TestConnectionPool_BuildDialOptions_WithTLS(t *testing.T) {
 
 	opts := pool.buildDialOptions()
 	assert.NotEmpty(t, opts)
+}
+
+func TestConnectionPool_Get_ShutdownConnection(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Create a connection
+	conn1, err := pool.Get(ctx, "localhost:50099")
+	require.NoError(t, err)
+	require.NotNil(t, conn1)
+	assert.Equal(t, 1, pool.Size())
+
+	// Save the target for comparison (safe to read)
+	target1 := conn1.Target()
+
+	// Close the connection to put it in SHUTDOWN state
+	err = conn1.Close()
+	require.NoError(t, err)
+
+	// Get should detect the shutdown connection, remove it, and create a new one
+	conn2, err := pool.Get(ctx, "localhost:50099")
+	require.NoError(t, err)
+	require.NotNil(t, conn2)
+	assert.Equal(t, 1, pool.Size())
+
+	// The new connection should target the same address
+	assert.Equal(t, target1, conn2.Target())
+	// But it should be a different connection object (pointer comparison)
+	assert.True(t, conn1 != conn2, "should create a new connection after shutdown")
+}
+
+func TestConnectionPool_Get_ConcurrentNewTarget(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Concurrent gets to a new target - exercises the double-check path
+	// when multiple goroutines try to create a connection simultaneously
+	const goroutines = 50
+	done := make(chan *grpc.ClientConn, goroutines)
+	errs := make(chan error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			conn, err := pool.Get(ctx, "localhost:50096")
+			if err != nil {
+				errs <- err
+			} else {
+				done <- conn
+			}
+		}()
+	}
+
+	var conns []*grpc.ClientConn
+	for i := 0; i < goroutines; i++ {
+		select {
+		case conn := <-done:
+			conns = append(conns, conn)
+		case err := <-errs:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	// All goroutines should get the same connection
+	assert.Equal(t, 1, pool.Size())
+	for i := 1; i < len(conns); i++ {
+		assert.Equal(t, conns[0], conns[i])
+	}
+}
+
+func TestConnectionPool_Get_NilConnectionInMap(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// Manually insert a nil connection into the pool
+	pool.mu.Lock()
+	pool.conns["localhost:50097"] = nil
+	pool.mu.Unlock()
+
+	// Get should handle nil connection and create a new one
+	conn, err := pool.Get(ctx, "localhost:50097")
+	require.NoError(t, err)
+	require.NotNil(t, conn)
+	assert.Equal(t, 1, pool.Size())
 }

@@ -983,3 +983,149 @@ spec:
         x-source: gateway
       dynamic:
         x-request-id: "{{.RequestID}}"
+
+# =============================================================================
+# GraphQL Backends (GraphQLBackend CRDs)
+# =============================================================================
+
+---
+# perf-graphql-backend-1: Primary GraphQL backend (reuses REST API backend on port 8801)
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: perf-graphql-backend-1
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8801
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+---
+# perf-graphql-backend-2: Secondary GraphQL backend (reuses REST API backend on port 8802)
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: perf-graphql-backend-2
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8802
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+# =============================================================================
+# GraphQL Routes (GraphQLRoute CRDs)
+# =============================================================================
+
+---
+# perf-graphql-query-route: GraphQL query throughput
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-query-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: query
+spec:
+  match:
+    - path:
+        exact: /graphql
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  introspectionEnabled: true
+
+---
+# perf-graphql-ratelimit-route: GraphQL with rate limiting
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-ratelimit-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: ratelimit
+spec:
+  match:
+    - path:
+        exact: /graphql/ratelimit
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 50
+    burst: 100
+
+---
+# perf-graphql-maxsessions-route: GraphQL with max sessions
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-maxsessions-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: maxsessions
+spec:
+  match:
+    - path:
+        exact: /graphql/maxsessions
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  timeout: 30s
+  depthLimit: 15
+  complexityLimit: 200
+  maxSessions:
+    enabled: true
+    maxConcurrent: 100
+    queueSize: 50
+    queueTimeout: 10s

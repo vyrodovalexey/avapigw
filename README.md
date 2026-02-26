@@ -24,6 +24,9 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **gRPC TLS via Vault PKI** - Automated gRPC listener TLS certificates from Vault PKI with optional gRPC-specific overrides
 - **Streaming Support** - HTTP Flusher interface support for SSE, WebSocket, and streaming responses
 - **WebSocket Proxy** - Full WebSocket proxying with connection management, message routing, and load balancing
+- **GraphQL Proxy** - Full GraphQL proxying with query analysis, depth limiting, and complexity analysis
+- **GraphQL Routing** - Route by operation type (query/mutation/subscription), operation name, and headers
+- **GraphQL Subscriptions** - WebSocket-based GraphQL subscriptions with graphql-ws protocol support
 
 ### Security & TLS
 - **Comprehensive TLS Support** - TLS 1.2/1.3 with multiple modes (SIMPLE, MUTUAL, OPTIONAL_MUTUAL)
@@ -142,7 +145,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Docker Support** - Production-ready container images with security optimizations
 - **Kubernetes & Helm** - Production-ready Helm charts with local K8s deployment support via values-local.yaml
 - **Multi-platform Builds** - Support for Linux, macOS, and Windows
-- **AVAPIGW Operator** - Kubernetes-native configuration management with CRDs and admission webhooks
+- **AVAPIGW Operator** - Kubernetes-native configuration management with CRDs, admission webhooks, and cross-route intersection prevention
 - **Ingress Controller Mode** - Standard Kubernetes Ingress support with rich annotation processing
 - **Certificate Management** - Automated TLS certificate management with Vault PKI integration
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
@@ -150,41 +153,12 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Performance Validated** - Comprehensive performance testing across deployment scenarios
 - **Enterprise Monitoring** - 130+ metrics, 4 Grafana dashboards, and OTEL tracing integration
 
-### Recent Improvements (Latest Release)
-
-#### Critical Bug Fixes and Performance Improvements
-- **CRITICAL-1**: Fixed nil pointer dereference in Redis cache when URL has no userinfo
-- **CRITICAL-2/3/4**: Fixed broken `errors.Is()` semantics in auth, vault, and authz error types — now compare by Type/Operation/Err fields
-- **CRITICAL-5**: Fixed unbounded Prometheus metric cardinality in rate limiter — now uses route name from context instead of raw URL path
-- **MAJOR-2**: Fixed write lock held during Vault PKI network call in operator cert provider
-- **MAJOR-3**: Extracted duplicate `matchPath` to `internal/util/validation.go` as `util.MatchPath`
-- **MAJOR-4**: Extracted duplicate `claimsToIdentity`/`keyInfoToIdentity` to `internal/auth/identity_helpers.go`
-- **MAJOR-5**: Consolidated duplicate `isWebSocketUpgrade` functions in middleware package
-- **MAJOR-8**: Optimized authz cache eviction from O(n) single-entry to batch eviction (10% of capacity)
-- **MAJOR-10**: Added webhook validation warnings for plaintext secrets in CRD specs
-
-#### Metrics Fixes and Middleware Architecture Enhancements
-- **Issue 1**: Fixed config reload timestamp metrics - corrected Grafana dashboard query for millisecond compatibility
-- **Issue 2**: Integrated authentication metrics - wired auth middleware into global HTTP middleware chain with proper config conversion
-- **Issue 3**: Implemented cache metrics - added per-route cache middleware with 10MB body limit, GET-only caching, and Cache-Control support
-- **Issue 4**: Added transform/encoding metrics - implemented request/response transformation and content negotiation middleware
 
 #### Two-Tier Middleware Architecture
 - **Global Middleware Chain**: Recovery → RequestID → Logging → Tracing → Audit → Metrics → CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 - **Per-Route Middleware Chain**: Security Headers → CORS → Body Limit → Headers → Cache → Transform → Encoding → [proxy to backend]
 - **RouteMiddlewareApplier Interface**: Decoupled proxy from gateway package to avoid import cycles while enabling per-route middleware
 - **Thread-Safe Cache Factory**: Per-route cache instances with lazy initialization and double-check locking
-
-#### Core Reliability and Performance (DEV-001 to DEV-009)
-- **DEV-001**: Fixed reload metrics registry mismatch - reload metrics now use custom registry for consistency
-- **DEV-002**: Optimized config change detection with hash-based comparison for efficient hot-reload
-- **DEV-003**: Fixed gRPC proxy context timeout on unmatched routes to prevent resource leaks
-- **DEV-004**: Added security headers to metrics server endpoint for enhanced security posture
-- **DEV-005**: Added missing gRPC proxy metrics (request/response sizes, stream messages, backend selections, timeouts)
-- **DEV-006**: Added OTEL tracing spans for transform operations with comprehensive span attributes
-- **DEV-007**: Added OTEL tracing spans for auth/authz decisions with detailed context propagation
-- **DEV-008**: Added OTEL span events for circuit breaker state changes for better observability
-- **DEV-009**: Fixed audit metrics to use custom registry for consistent metric collection
 
 #### Comprehensive Test Coverage and Quality Assurance
 - **Unit Test Coverage**: 94.1% across all 41 packages (all packages ≥90% coverage)
@@ -224,6 +198,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [API Endpoints](#-api-endpoints)
 - [Routing](#-routing)
 - [gRPC Gateway](#-grpc-gateway)
+- [GraphQL Gateway](#-graphql-gateway)
 - [Traffic Management](#-traffic-management)
 - [Observability](#-observability)
 - [Middleware Architecture](#-middleware-architecture)
@@ -1607,6 +1582,99 @@ When the same option is configured at multiple levels, the more specific level t
 | `grpcBackends[].encoding.request.compression` | - | - | ✅ | ✅ | Request compression algorithm |
 | `grpcBackends[].encoding.response.contentType` | - | - | ✅ | ✅ | Response content type |
 | `grpcBackends[].encoding.response.compression` | - | - | ✅ | ✅ | Response compression algorithm |
+
+### GraphQL Routes Configuration
+
+| Option | Global | Route | Backend | CRD Route | Description |
+|--------|:------:|:-----:|:-------:|:---------:|-------------|
+| `graphqlRoutes[].name` | - | ✅ | - | ✅ | Unique GraphQL route name |
+| `graphqlRoutes[].match[].path.exact` | - | ✅ | - | ✅ | Exact path match |
+| `graphqlRoutes[].match[].path.prefix` | - | ✅ | - | ✅ | Path prefix match |
+| `graphqlRoutes[].match[].path.regex` | - | ✅ | - | ✅ | Path regex match |
+| `graphqlRoutes[].match[].operationType` | - | ✅ | - | ✅ | GraphQL operation type (query/mutation/subscription) |
+| `graphqlRoutes[].match[].operationName.exact` | - | ✅ | - | ✅ | Exact operation name match |
+| `graphqlRoutes[].match[].operationName.prefix` | - | ✅ | - | ✅ | Operation name prefix match |
+| `graphqlRoutes[].match[].operationName.regex` | - | ✅ | - | ✅ | Operation name regex match |
+| `graphqlRoutes[].match[].headers[].name` | - | ✅ | - | ✅ | Header name to match |
+| `graphqlRoutes[].match[].headers[].exact` | - | ✅ | - | ✅ | Exact header value match |
+| `graphqlRoutes[].match[].headers[].prefix` | - | ✅ | - | ✅ | Header value prefix match |
+| `graphqlRoutes[].match[].headers[].regex` | - | ✅ | - | ✅ | Header value regex match |
+| `graphqlRoutes[].route[].destination.host` | - | ✅ | - | ✅ | Backend host |
+| `graphqlRoutes[].route[].destination.port` | - | ✅ | - | ✅ | Backend port |
+| `graphqlRoutes[].route[].weight` | - | ✅ | - | ✅ | Traffic weight for load balancing |
+| `graphqlRoutes[].timeout` | ✅ | ✅ | - | ✅ | Request timeout |
+| `graphqlRoutes[].retries.attempts` | ✅ | ✅ | - | ✅ | Max retry attempts |
+| `graphqlRoutes[].retries.perTryTimeout` | ✅ | ✅ | - | ✅ | Timeout per retry attempt |
+| `graphqlRoutes[].retries.retryOn` | ✅ | ✅ | - | ✅ | Conditions to retry on |
+| `graphqlRoutes[].headers.request.set` | - | ✅ | - | ✅ | Set request headers |
+| `graphqlRoutes[].headers.request.add` | - | ✅ | - | ✅ | Add request headers |
+| `graphqlRoutes[].headers.request.remove` | - | ✅ | - | ✅ | Remove request headers |
+| `graphqlRoutes[].headers.response.set` | - | ✅ | - | ✅ | Set response headers |
+| `graphqlRoutes[].headers.response.add` | - | ✅ | - | ✅ | Add response headers |
+| `graphqlRoutes[].headers.response.remove` | - | ✅ | - | ✅ | Remove response headers |
+| `graphqlRoutes[].rateLimit.enabled` | ✅ | ✅ | - | ✅ | Enable route-level rate limiting |
+| `graphqlRoutes[].rateLimit.requestsPerSecond` | ✅ | ✅ | - | ✅ | Requests per second limit |
+| `graphqlRoutes[].rateLimit.burst` | ✅ | ✅ | - | ✅ | Burst size for rate limiting |
+| `graphqlRoutes[].rateLimit.perClient` | ✅ | ✅ | - | ✅ | Apply rate limit per client IP |
+| `graphqlRoutes[].cache.enabled` | - | ✅ | - | ✅ | Enable caching |
+| `graphqlRoutes[].cache.ttl` | - | ✅ | - | ✅ | Cache time-to-live |
+| `graphqlRoutes[].cors.allowOrigins` | ✅ | ✅ | - | ✅ | Allowed origins for CORS |
+| `graphqlRoutes[].cors.allowMethods` | ✅ | ✅ | - | ✅ | Allowed HTTP methods for CORS |
+| `graphqlRoutes[].cors.allowHeaders` | ✅ | ✅ | - | ✅ | Allowed request headers for CORS |
+| `graphqlRoutes[].security.enabled` | ✅ | ✅ | - | ✅ | Enable security headers |
+| `graphqlRoutes[].tls.certFile` | - | ✅ | - | ✅ | Route-specific certificate file |
+| `graphqlRoutes[].tls.keyFile` | - | ✅ | - | ✅ | Route-specific private key file |
+| `graphqlRoutes[].tls.sniHosts` | - | ✅ | - | ✅ | SNI hostnames for certificate |
+| `graphqlRoutes[].tls.vault.enabled` | - | ✅ | - | ✅ | Enable Vault certificate management |
+| `graphqlRoutes[].authentication.enabled` | ✅ | ✅ | - | ✅ | Enable route-level authentication |
+| `graphqlRoutes[].authorization.enabled` | ✅ | ✅ | - | ✅ | Enable route-level authorization |
+| `graphqlRoutes[].maxSessions.enabled` | ✅ | ✅ | - | ✅ | Enable max sessions limiting |
+| `graphqlRoutes[].maxSessions.maxConcurrent` | ✅ | ✅ | - | ✅ | Maximum concurrent sessions |
+| `graphqlRoutes[].requestLimits.maxBodySize` | ✅ | ✅ | - | ✅ | Maximum request body size in bytes |
+| `graphqlRoutes[].requestLimits.maxHeaderSize` | ✅ | ✅ | - | ✅ | Maximum total header size in bytes |
+| `graphqlRoutes[].depthLimit` | - | ✅ | - | ✅ | Maximum query depth allowed |
+| `graphqlRoutes[].complexityLimit` | - | ✅ | - | ✅ | Maximum query complexity allowed |
+| `graphqlRoutes[].introspectionEnabled` | - | ✅ | - | ✅ | Enable/disable introspection |
+| `graphqlRoutes[].allowedOperations` | - | ✅ | - | ✅ | Allowed operation types |
+
+### GraphQL Backends Configuration
+
+| Option | Global | Route | Backend | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:-----------:|-------------|
+| `graphqlBackends[].name` | - | - | ✅ | ✅ | Unique GraphQL backend name |
+| `graphqlBackends[].hosts[].address` | - | - | ✅ | ✅ | Backend host address |
+| `graphqlBackends[].hosts[].port` | - | - | ✅ | ✅ | Backend port |
+| `graphqlBackends[].hosts[].weight` | - | - | ✅ | ✅ | Host weight for load balancing |
+| `graphqlBackends[].healthCheck.path` | - | - | ✅ | ✅ | Health check endpoint path |
+| `graphqlBackends[].healthCheck.interval` | - | - | ✅ | ✅ | Health check interval |
+| `graphqlBackends[].healthCheck.timeout` | - | - | ✅ | ✅ | Health check timeout |
+| `graphqlBackends[].healthCheck.healthyThreshold` | - | - | ✅ | ✅ | Consecutive successes to mark healthy |
+| `graphqlBackends[].healthCheck.unhealthyThreshold` | - | - | ✅ | ✅ | Consecutive failures to mark unhealthy |
+| `graphqlBackends[].loadBalancer.algorithm` | - | - | ✅ | ✅ | Load balancing algorithm |
+| `graphqlBackends[].tls.enabled` | - | - | ✅ | ✅ | Enable TLS for backend connections |
+| `graphqlBackends[].tls.mode` | - | - | ✅ | ✅ | TLS mode (SIMPLE, MUTUAL, INSECURE) |
+| `graphqlBackends[].tls.caFile` | - | - | ✅ | ✅ | CA certificate for server verification |
+| `graphqlBackends[].tls.certFile` | - | - | ✅ | ✅ | Client certificate (for mTLS) |
+| `graphqlBackends[].tls.keyFile` | - | - | ✅ | ✅ | Client private key (for mTLS) |
+| `graphqlBackends[].tls.serverName` | - | - | ✅ | ✅ | Server name for TLS verification (SNI) |
+| `graphqlBackends[].tls.vault.enabled` | - | - | ✅ | ✅ | Enable Vault-based client certificate management |
+| `graphqlBackends[].circuitBreaker.enabled` | - | - | ✅ | ✅ | Enable circuit breaker for this backend |
+| `graphqlBackends[].circuitBreaker.threshold` | - | - | ✅ | ✅ | Failure threshold to open circuit |
+| `graphqlBackends[].circuitBreaker.timeout` | - | - | ✅ | ✅ | Time to wait before half-open |
+| `graphqlBackends[].circuitBreaker.halfOpenRequests` | - | - | ✅ | ✅ | Requests allowed in half-open state |
+| `graphqlBackends[].authentication.type` | - | - | ✅ | ✅ | Authentication type (jwt, basic, mtls) |
+| `graphqlBackends[].authentication.jwt.enabled` | - | - | ✅ | ✅ | Enable JWT authentication |
+| `graphqlBackends[].authentication.basic.enabled` | - | - | ✅ | ✅ | Enable Basic authentication |
+| `graphqlBackends[].authentication.mtls.enabled` | - | - | ✅ | ✅ | Enable mTLS authentication |
+| `graphqlBackends[].maxSessions.enabled` | - | - | ✅ | ✅ | Enable max sessions for backend hosts |
+| `graphqlBackends[].maxSessions.maxConcurrent` | - | - | ✅ | ✅ | Max concurrent connections per host |
+| `graphqlBackends[].rateLimit.enabled` | - | - | ✅ | ✅ | Enable rate limiting for backend hosts |
+| `graphqlBackends[].rateLimit.requestsPerSecond` | - | - | ✅ | ✅ | Requests per second limit per host |
+| `graphqlBackends[].rateLimit.burst` | - | - | ✅ | ✅ | Burst size per host |
+| `graphqlBackends[].cache.enabled` | - | - | ✅ | ✅ | Enable caching |
+| `graphqlBackends[].cache.ttl` | - | - | ✅ | ✅ | Cache time-to-live |
+| `graphqlBackends[].encoding.request.contentType` | - | - | ✅ | ✅ | Request content type |
+| `graphqlBackends[].encoding.response.contentType` | - | - | ✅ | ✅ | Response content type |
 
 ### Rate Limiting Configuration
 
@@ -4887,6 +4955,112 @@ spec:
         interval: 10s
 ```
 
+## 🔗 GraphQL Gateway
+
+The AV API Gateway provides comprehensive GraphQL proxy capabilities with advanced query analysis, routing, and subscription support. The GraphQL gateway enables sophisticated routing based on operation types, operation names, and headers while providing essential security features like depth limiting and complexity analysis.
+
+### GraphQL Route Configuration
+
+Configure GraphQL routes with operation-specific matching:
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: graphql-api
+      match:
+        - path:
+            exact: /graphql
+          operationType: query
+          operationName:
+            prefix: "getUser"
+          headers:
+            - name: Authorization
+              present: true
+      route:
+        - destination:
+            host: graphql-backend
+            port: 4000
+      depthLimit: 10
+      complexityLimit: 1000
+      introspectionEnabled: false
+      allowedOperations: ["query", "mutation"]
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "5xx,reset,connect-failure"
+```
+
+### GraphQL Backend Configuration
+
+Configure GraphQL backends with health checking and load balancing:
+
+```yaml
+spec:
+  graphqlBackends:
+    - name: graphql-backend
+      hosts:
+        - address: graphql-service.default.svc.cluster.local
+          port: 4000
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      tls:
+        enabled: true
+        mode: SIMPLE
+        serverName: graphql-service.example.com
+```
+
+### GraphQL-Specific Features
+
+#### Query Depth Limiting
+Prevent deeply nested queries that could cause performance issues:
+
+```yaml
+graphqlRoutes:
+  - name: protected-graphql
+    depthLimit: 15  # Maximum query depth
+```
+
+#### Query Complexity Analysis
+Limit query complexity to prevent resource exhaustion:
+
+```yaml
+graphqlRoutes:
+  - name: complex-graphql
+    complexityLimit: 1000  # Maximum query complexity score
+```
+
+#### Introspection Control
+Control GraphQL introspection for security:
+
+```yaml
+graphqlRoutes:
+  - name: production-graphql
+    introspectionEnabled: false  # Disable introspection in production
+```
+
+#### Operation Type Filtering
+Restrict allowed GraphQL operations:
+
+```yaml
+graphqlRoutes:
+  - name: read-only-graphql
+    allowedOperations: ["query"]  # Only allow queries, no mutations/subscriptions
+```
+
+### WebSocket Subscriptions
+
+GraphQL subscriptions are supported via WebSocket connections with the `graphql-ws` protocol. The gateway automatically handles WebSocket upgrades for GraphQL subscription operations.
+
+For detailed GraphQL configuration and advanced features, see the [GraphQL Documentation](docs/graphql.md).
+
 ## 🚦 Traffic Management
 
 ### Load Balancing
@@ -5780,14 +5954,16 @@ kubectl get backends hello-backend -o yaml
 
 ### Available CRDs
 
-The operator manages four types of Custom Resource Definitions:
+The operator manages six types of Custom Resource Definitions:
 
 | CRD | Kind | Description |
 |-----|------|-------------|
 | `apiroutes` | `APIRoute` | HTTP route configuration |
 | `grpcroutes` | `GRPCRoute` | gRPC route configuration |
+| `graphqlroutes` | `GraphQLRoute` | GraphQL route configuration |
 | `backends` | `Backend` | HTTP backend configuration |
 | `grpcbackends` | `GRPCBackend` | gRPC backend configuration |
+| `graphqlbackends` | `GraphQLBackend` | GraphQL backend configuration |
 
 ### RBAC Permissions
 
@@ -5906,8 +6082,12 @@ Complete examples are available in the [test/crd-samples/](test/crd-samples/) di
 - [Basic APIRoute](test/crd-samples/apiroute-basic.yaml)
 - [Advanced APIRoute with all features](test/crd-samples/apiroute-full.yaml)
 - [GRPCRoute example](test/crd-samples/grpcroute-basic.yaml)
+- [GraphQLRoute example](test/crd-samples/graphqlroute-basic.yaml)
+- [Advanced GraphQLRoute](test/crd-samples/graphqlroute-full.yaml)
 - [Backend with health checks](test/crd-samples/backend-basic.yaml)
 - [GRPCBackend example](test/crd-samples/grpcbackend-basic.yaml)
+- [GraphQLBackend example](test/crd-samples/graphqlbackend-basic.yaml)
+- [Advanced GraphQLBackend](test/crd-samples/graphqlbackend-full.yaml)
 
 ## 🌐 Ingress Controller
 
