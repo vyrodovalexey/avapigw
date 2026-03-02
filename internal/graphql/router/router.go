@@ -297,29 +297,56 @@ func compileMatchRegexes(cr *compiledRoute, match *config.GraphQLRouteMatch) err
 	return nil
 }
 
-// detectOperationType detects the GraphQL operation type from the query string.
+// detectOperationType detects the GraphQL operation type from the query string
+// using prefix matching with word boundary checks.
+//
+// Limitation: this is a lightweight heuristic, not a full GraphQL parser.
+// It handles the common cases (e.g., "mutation {", "subscription MyOp {")
+// but does not parse comments, string literals, or other edge cases.
 func detectOperationType(query string) string {
 	trimmed := strings.TrimSpace(query)
 
+	// Check for mutation with word boundary to avoid false positives
+	// like "mutationHelper" being classified as a mutation.
 	if strings.HasPrefix(trimmed, "mutation") {
-		return "mutation"
+		if len(trimmed) == len("mutation") || !isIdentifierChar(trimmed[len("mutation")]) {
+			return "mutation"
+		}
 	}
+	// Check for subscription with word boundary
 	if strings.HasPrefix(trimmed, "subscription") {
-		return "subscription"
+		if len(trimmed) == len("subscription") || !isIdentifierChar(trimmed[len("subscription")]) {
+			return "subscription"
+		}
 	}
 	// Default to query (including shorthand queries without the "query" keyword)
 	return "query"
 }
 
+// isIdentifierChar returns true if the byte is a valid GraphQL identifier character
+// (letter, digit, or underscore), used for word boundary detection.
+func isIdentifierChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '_'
+}
+
+// defaultMaxGraphQLBodySize is the default maximum GraphQL request body size (10MB).
+// Consistent with the gateway-level limit in handleGraphQL.
+const defaultMaxGraphQLBodySize = 10 * 1024 * 1024
+
 // ParseGraphQLRequest parses a GraphQL request from an HTTP request body.
+// The body is limited to defaultMaxGraphQLBodySize to prevent DoS via oversized payloads.
 func ParseGraphQLRequest(r *http.Request) (*GraphQLRequest, error) {
 	if r.Body == nil {
 		return nil, fmt.Errorf("request body is empty")
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, defaultMaxGraphQLBodySize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+	if int64(len(body)) > defaultMaxGraphQLBodySize {
+		return nil, fmt.Errorf("request body too large")
 	}
 
 	var gqlReq GraphQLRequest

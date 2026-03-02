@@ -1,0 +1,22 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-GraphQL-OIDC]
+[Content-Type: application/json]
+[Accept: application/json]
+[Connection: keep-alive]
+[Authorization: Bearer OIDC_TOKEN_PLACEHOLDER]
+69 /graphql
+{"query":"{ items { id name description price quantity category } }"}
+49 /graphql
+{"query":"{ item(id: \"1\") { id name price } }"}
+69 /graphql
+{"query":"{ items { id name description price quantity category } }"}
+49 /graphql
+{"query":"{ item(id: \"2\") { id name price } }"}
+69 /graphql
+{"query":"{ items { id name description price quantity category } }"}
+49 /graphql
+{"query":"{ item(id: \"3\") { id name price } }"}
+69 /graphql
+{"query":"{ items { id name description price quantity category } }"}
+49 /graphql
+{"query":"{ item(id: \"1\") { id name price } }"}

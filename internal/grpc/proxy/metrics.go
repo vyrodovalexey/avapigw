@@ -23,6 +23,17 @@ type grpcProxyMetrics struct {
 	streamMsgReceived  *prometheus.CounterVec
 	backendSelections  *prometheus.CounterVec
 	timeoutOccurrences *prometheus.CounterVec
+
+	// Per-route rate limiting metrics.
+	rateLimitAllowed  *prometheus.CounterVec
+	rateLimitRejected *prometheus.CounterVec
+
+	// Per-route transform metrics.
+	transformOperations *prometheus.CounterVec
+
+	// Backend auth injection metrics.
+	backendAuthSuccess *prometheus.CounterVec
+	backendAuthFailure *prometheus.CounterVec
 }
 
 var (
@@ -160,6 +171,51 @@ func InitGRPCProxyMetrics(registry *prometheus.Registry) {
 				},
 				[]string{"method"},
 			),
+			rateLimitAllowed: factory.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: "gateway",
+					Subsystem: "grpc_proxy",
+					Name:      "rate_limit_allowed_total",
+					Help:      "Total number of gRPC requests allowed by per-route rate limiting",
+				},
+				[]string{"route"},
+			),
+			rateLimitRejected: factory.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: "gateway",
+					Subsystem: "grpc_proxy",
+					Name:      "rate_limit_rejected_total",
+					Help:      "Total number of gRPC requests rejected by per-route rate limiting",
+				},
+				[]string{"route"},
+			),
+			transformOperations: factory.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: "gateway",
+					Subsystem: "grpc_proxy",
+					Name:      "transform_operations_total",
+					Help:      "Total number of gRPC proxy transform operations",
+				},
+				[]string{"route", "direction", "type"},
+			),
+			backendAuthSuccess: factory.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: "gateway",
+					Subsystem: "grpc_proxy",
+					Name:      "backend_auth_success_total",
+					Help:      "Total number of successful backend auth token injections",
+				},
+				[]string{"route", "auth_type"},
+			),
+			backendAuthFailure: factory.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: "gateway",
+					Subsystem: "grpc_proxy",
+					Name:      "backend_auth_failure_total",
+					Help:      "Total number of failed backend auth token injections",
+				},
+				[]string{"route", "auth_type"},
+			),
 		}
 	})
 }
@@ -182,6 +238,18 @@ func InitGRPCProxyVecMetrics() {
 
 	m.connectionClosed.WithLabelValues("default")
 	m.timeoutOccurrences.WithLabelValues("default")
+
+	// Pre-populate rate limit metrics
+	m.rateLimitAllowed.WithLabelValues("default")
+	m.rateLimitRejected.WithLabelValues("default")
+
+	// Pre-populate transform metrics
+	m.transformOperations.WithLabelValues("default", "request", "metadata")
+	m.transformOperations.WithLabelValues("default", "response", "trailer_metadata")
+
+	// Pre-populate backend auth metrics
+	m.backendAuthSuccess.WithLabelValues("default", "none")
+	m.backendAuthFailure.WithLabelValues("default", "none")
 }
 
 // getGRPCProxyMetrics returns the singleton gRPC proxy metrics instance.

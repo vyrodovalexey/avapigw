@@ -25,6 +25,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	avahttputil "github.com/vyrodovalexey/avapigw/internal/httputil"
 	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
 	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/metrics/streaming"
@@ -34,18 +35,8 @@ import (
 )
 
 // hopHeaders are headers that should not be forwarded.
-// Using a map for O(1) lookup instead of iterating a slice.
-var hopHeaders = map[string]struct{}{
-	"Connection":          {},
-	"Proxy-Connection":    {},
-	"Keep-Alive":          {},
-	"Proxy-Authenticate":  {},
-	"Proxy-Authorization": {},
-	"Te":                  {},
-	"Trailer":             {},
-	"Transfer-Encoding":   {},
-	"Upgrade":             {},
-}
+// Using the shared httputil package for a single source of truth (RFC 2616/7230).
+var hopHeaders = avahttputil.HopByHopHeaders
 
 // RouteMiddlewareApplier applies per-route middleware to a handler.
 // This interface decouples the proxy from the gateway package to avoid
@@ -221,9 +212,12 @@ const (
 	schemeHTTPS = "https"
 )
 
+// unknownValue is the generic fallback label value for unclassified items.
+const unknownValue = "unknown"
+
 // unknownRoute is the fallback label value used when the route name
 // is not available in the request context.
-const unknownRoute = "unknown"
+const unknownRoute = unknownValue
 
 // proxyRequest proxies the request to a backend.
 func (p *ReverseProxy) proxyRequest(
@@ -336,7 +330,10 @@ func (p *ReverseProxy) doProxy(
 		r = p.applyRewrite(r, route.Config.Rewrite)
 	}
 
-	// Create and execute reverse proxy with duration tracking
+	// Create and execute reverse proxy with duration tracking.
+	// Wrap the response writer to capture the actual backend status code.
+	recorder := util.NewStatusCapturingResponseWriter(w)
+
 	proxy := p.createReverseProxy(
 		target, r, dest.Destination.Host, serviceBackend,
 	)
@@ -344,23 +341,22 @@ func (p *ReverseProxy) doProxy(
 	defer cancel()
 
 	backendStart := time.Now()
-	p.executeProxy(w, r, proxy, dest.Destination.Host, target)
+	p.executeProxy(recorder, r, proxy, dest.Destination.Host, target)
 	duration := time.Since(backendStart)
 	getProxyMetrics().backendDuration.WithLabelValues(
 		targetLabel,
 	).Observe(duration.Seconds())
 
-	// Record route-level upstream duration using route.Name
-	// which is already available from the compiled route.
+	// Record route-level upstream duration using the actual backend status code.
 	routepkg.GetRouteMetrics().RecordUpstreamDuration(
-		route.Name, r.Method, http.StatusOK, duration,
+		route.Name, r.Method, recorder.StatusCode, duration,
 	)
 
 	// Record backend-level request metrics (new backend metrics package).
 	bm := backendmetrics.GetBackendMetrics()
 	bm.RecordRequest(
 		dest.Destination.Host, r.Method,
-		http.StatusOK, duration,
+		recorder.StatusCode, duration,
 	)
 
 	// Set span attributes for the response
@@ -429,7 +425,7 @@ func (p *ReverseProxy) createReverseProxy(
 						observability.Error(err),
 					)
 					// Record backend-level auth failure
-					authType := "unknown"
+					authType := unknownValue
 					if serviceBackend.AuthProvider() != nil {
 						authType = serviceBackend.AuthProvider().Type()
 					}
@@ -933,7 +929,7 @@ func (p *ReverseProxy) defaultErrorHandler(
 // for metrics recording.
 func classifyProxyError(err error) string {
 	if err == nil {
-		return "unknown"
+		return unknownValue
 	}
 
 	errStr := err.Error()
@@ -952,7 +948,7 @@ func classifyProxyError(err error) string {
 		strings.Contains(errStr, "lookup"):
 		return "dns_error"
 	default:
-		return "connection_refused"
+		return unknownValue
 	}
 }
 

@@ -1,0 +1,24 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-HTTPS-Cache]
+[Accept: application/json]
+[Connection: keep-alive]
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items
+/api/v1/cache/items

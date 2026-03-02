@@ -276,14 +276,14 @@ func TestMetrics_ConcurrentAccess(t *testing.T) {
 // This test exercises the singleton path. Because sync.Once is global, this test
 // must NOT be run in parallel with other tests that call InitMetrics/GetMetrics.
 func TestInitMetrics_WithNilRegisterer(t *testing.T) {
-	// Reset the singleton for this test
+	// Reset the singleton for this test.
+	// Use direct assignment to avoid copying sync.Once (which contains a lock).
 	oldMetrics := defaultMetrics
-	oldOnce := defaultMetricsOnce
 	defaultMetrics = nil
 	defaultMetricsOnce = sync.Once{}
 	defer func() {
 		defaultMetrics = oldMetrics
-		defaultMetricsOnce = oldOnce
+		defaultMetricsOnce = sync.Once{}
 	}()
 
 	// Use a custom registry to avoid polluting the default one
@@ -310,14 +310,14 @@ func TestInitMetrics_WithNilRegisterer(t *testing.T) {
 
 // TestGetMetrics_LazyInit tests that GetMetrics lazily initializes metrics.
 func TestGetMetrics_LazyInit(t *testing.T) {
-	// Reset the singleton for this test
+	// Reset the singleton for this test.
+	// Use direct assignment to avoid copying sync.Once (which contains a lock).
 	oldMetrics := defaultMetrics
-	oldOnce := defaultMetricsOnce
 	defaultMetrics = nil
 	defaultMetricsOnce = sync.Once{}
 	defer func() {
 		defaultMetrics = oldMetrics
-		defaultMetricsOnce = oldOnce
+		defaultMetricsOnce = sync.Once{}
 	}()
 
 	// GetMetrics should lazily initialize with nil (default registerer)
@@ -332,14 +332,14 @@ func TestGetMetrics_LazyInit(t *testing.T) {
 
 // TestInitVecMetrics tests that InitVecMetrics pre-populates vector metrics.
 func TestInitVecMetrics(t *testing.T) {
-	// Reset the singleton for this test
+	// Reset the singleton for this test.
+	// Use direct assignment to avoid copying sync.Once (which contains a lock).
 	oldMetrics := defaultMetrics
-	oldOnce := defaultMetricsOnce
 	defaultMetrics = nil
 	defaultMetricsOnce = sync.Once{}
 	defer func() {
 		defaultMetrics = oldMetrics
-		defaultMetricsOnce = oldOnce
+		defaultMetricsOnce = sync.Once{}
 	}()
 
 	reg := prometheus.NewRegistry()
@@ -376,14 +376,14 @@ func TestInitVecMetrics(t *testing.T) {
 
 // TestInitMetrics_NilRegistererUsesDefault tests the nil registerer path.
 func TestInitMetrics_NilRegistererUsesDefault(t *testing.T) {
-	// Reset the singleton for this test
+	// Reset the singleton for this test.
+	// Use direct assignment to avoid copying sync.Once (which contains a lock).
 	oldMetrics := defaultMetrics
-	oldOnce := defaultMetricsOnce
 	defaultMetrics = nil
 	defaultMetricsOnce = sync.Once{}
 	defer func() {
 		defaultMetrics = oldMetrics
-		defaultMetricsOnce = oldOnce
+		defaultMetricsOnce = sync.Once{}
 	}()
 
 	// Pass nil to exercise the nil-registerer branch

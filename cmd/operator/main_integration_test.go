@@ -328,8 +328,21 @@ func TestSetupHealthChecks_WithRealManager(t *testing.T) {
 // runWithConfig Tests - Cover the main orchestration function
 // ============================================================================
 
+// overrideSignalHandler replaces setupSignalHandlerFunc with a cancellable context
+// for the duration of the test, preventing the panic from calling ctrl.SetupSignalHandler
+// more than once. It returns a cancel function that the test can use to stop the manager.
+func overrideSignalHandler(t *testing.T) context.CancelFunc {
+	t.Helper()
+	origSignal := setupSignalHandlerFunc
+	ctx, cancel := context.WithCancel(context.Background())
+	setupSignalHandlerFunc = func() context.Context { return ctx }
+	t.Cleanup(func() { setupSignalHandlerFunc = origSignal })
+	return cancel
+}
+
 func TestRunWithConfig_FullFlow(t *testing.T) {
 	restCfg := newTestRESTConfig(t)
+	cancel := overrideSignalHandler(t)
 
 	// Use a context that we cancel immediately to stop the manager
 	cfg := &Config{
@@ -358,8 +371,7 @@ func TestRunWithConfig_FullFlow(t *testing.T) {
 		errCh <- runWithConfig(cfg, restCfg)
 	}()
 
-	// Give it a moment to start, then the context in runWithConfig will be
-	// cancelled by the signal handler or we just wait for the error
+	// Give it a moment to start, then cancel the context to stop the manager
 	select {
 	case err := <-errCh:
 		// The manager.Start will block until context is cancelled.
@@ -370,13 +382,14 @@ func TestRunWithConfig_FullFlow(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		// The manager is running - this is expected. The test verified the setup path.
-		// We can't easily stop it without sending a signal.
+		cancel()
 		t.Log("runWithConfig is running (setup succeeded)")
 	}
 }
 
 func TestRunWithConfig_TracingError(t *testing.T) {
 	restCfg := newTestRESTConfig(t)
+	overrideSignalHandler(t)
 
 	cfg := &Config{
 		MetricsAddr:      "0",
@@ -403,6 +416,8 @@ func TestRunWithConfig_TracingError(t *testing.T) {
 }
 
 func TestRunWithConfig_InvalidRESTConfig(t *testing.T) {
+	overrideSignalHandler(t)
+
 	cfg := &Config{
 		MetricsAddr:      "0",
 		ProbeAddr:        "0",
@@ -426,6 +441,7 @@ func TestRunWithConfig_InvalidRESTConfig(t *testing.T) {
 
 func TestRunWithConfig_CertManagerError(t *testing.T) {
 	restCfg := newTestRESTConfig(t)
+	overrideSignalHandler(t)
 
 	cfg := &Config{
 		MetricsAddr:      "0",
@@ -448,6 +464,7 @@ func TestRunWithConfig_CertManagerError(t *testing.T) {
 
 func TestRunWithConfig_WithTracingShutdown(t *testing.T) {
 	restCfg := newTestRESTConfig(t)
+	cancel := overrideSignalHandler(t)
 
 	cfg := &Config{
 		MetricsAddr:      "0",
@@ -481,6 +498,7 @@ func TestRunWithConfig_WithTracingShutdown(t *testing.T) {
 			t.Logf("runWithConfig returned error (may be expected): %v", err)
 		}
 	case <-time.After(2 * time.Second):
+		cancel()
 		t.Log("runWithConfig is running (setup succeeded)")
 	}
 

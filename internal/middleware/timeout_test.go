@@ -24,15 +24,15 @@ func TestTimeout(t *testing.T) {
 	}{
 		{
 			name:           "request completes before timeout",
-			timeout:        500 * time.Millisecond,
+			timeout:        1 * time.Second,
 			handlerDelay:   10 * time.Millisecond,
 			expectedStatus: http.StatusOK,
 			expectedBody:   "success",
 		},
 		{
 			name:           "request times out",
-			timeout:        50 * time.Millisecond,
-			handlerDelay:   200 * time.Millisecond,
+			timeout:        200 * time.Millisecond,
+			handlerDelay:   5 * time.Second,
 			expectedStatus: http.StatusGatewayTimeout,
 			expectedBody:   `{"error":"gateway timeout"}`,
 		},

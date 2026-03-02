@@ -1696,7 +1696,7 @@ func TestIngressReconciler_Reconcile_GRPCProtocol_Deletion(t *testing.T) {
 			DeletionTimestamp: &now,
 			Annotations: map[string]string{
 				AnnotationProtocol:      "grpc",
-				AnnotationAppliedRoutes: "routes:;backends:;grpcRoutes:ingress-grpc-default-grpc-ingress-delete-r0-p0;grpcBackends:ingress-grpc-default-grpc-ingress-delete-grpc-svc-50051",
+				AnnotationAppliedRoutes: "routes:;backends:;grpcRoutes:ingress-grpc-default-grpc-ingress-delete-r0-p0;grpcBackends:ingress-grpc::default::grpc-ingress-delete::grpc-svc::50051",
 			},
 		},
 		Spec: networkingv1.IngressSpec{

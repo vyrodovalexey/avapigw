@@ -447,6 +447,12 @@ spec:
     maxBodySize: {{ .Values.gateway.requestLimits.maxBodySize | default 10485760 | int }}
     maxHeaderSize: {{ .Values.gateway.requestLimits.maxHeaderSize | default 1048576 | int }}
 
+  {{- if .Values.gateway.graphql }}
+  graphql:
+    maxBodySize: {{ .Values.gateway.graphql.maxBodySize | default 10485760 | int }}
+    path: {{ .Values.gateway.graphql.path | default "/graphql" | quote }}
+  {{- end }}
+
   security:
     enabled: {{ .Values.gateway.security.enabled | default true }}
     headers:

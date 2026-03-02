@@ -495,7 +495,7 @@ func TestE2E_Ingress_AnnotationFeatures(t *testing.T) {
 	assert.Contains(t, apiRoutes, routeKey, "annotated route should exist")
 
 	backends := configs["backends"].(map[string]interface{})
-	backendKey := ingressE2ENamespace + "/ingress-" + ingressE2ENamespace + "-annotation-features-backend-svc-8080"
+	backendKey := ingressE2ENamespace + "/ingress::" + ingressE2ENamespace + "::annotation-features::backend-svc::8080"
 	assert.Contains(t, backends, backendKey, "annotated backend should exist")
 
 	// Verify Ingress has applied-routes annotation
@@ -756,7 +756,7 @@ func TestE2E_GRPCIngress_BasicRouting(t *testing.T) {
 	grpcBackends, ok := configs["grpcBackends"].(map[string]interface{})
 	require.True(t, ok, "grpcBackends should be a map")
 
-	backendKey := ingressE2ENamespace + "/ingress-grpc-" + ingressE2ENamespace + "-grpc-basic-routing-grpc-backend-50051"
+	backendKey := ingressE2ENamespace + "/ingress-grpc::" + ingressE2ENamespace + "::grpc-basic-routing::grpc-backend::50051"
 	assert.Contains(t, grpcBackends, backendKey, "gRPC backend should be pushed to gRPC server")
 
 	// Verify Ingress has finalizer
@@ -1043,7 +1043,7 @@ func TestE2E_GRPCIngress_AnnotationFeatures(t *testing.T) {
 	grpcBackends, ok := configs["grpcBackends"].(map[string]interface{})
 	require.True(t, ok, "grpcBackends should be a map")
 
-	backendKey := ingressE2ENamespace + "/ingress-grpc-" + ingressE2ENamespace + "-grpc-annotation-features-grpc-backend-50051"
+	backendKey := ingressE2ENamespace + "/ingress-grpc::" + ingressE2ENamespace + "::grpc-annotation-features::grpc-backend::50051"
 	assert.Contains(t, grpcBackends, backendKey, "annotated gRPC backend should exist")
 
 	// Verify Ingress has applied-routes annotation

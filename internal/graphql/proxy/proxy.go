@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -18,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	avahttputil "github.com/vyrodovalexey/avapigw/internal/httputil"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -39,7 +41,7 @@ type Proxy struct {
 type backendTarget struct {
 	name    string
 	hosts   []config.BackendHost
-	current int
+	current atomic.Int64 // Atomic counter for lock-free round-robin selection
 }
 
 // MetricsRecorder records proxy metrics.
@@ -235,12 +237,9 @@ func (p *Proxy) resolveBackend(name string) (*backendTarget, error) {
 }
 
 // buildTargetURL builds the target URL from the backend target using round-robin selection.
+// Uses atomic counter for lock-free concurrent access.
 func (p *Proxy) buildTargetURL(target *backendTarget) *url.URL {
-	p.mu.Lock()
-	idx := target.current % len(target.hosts)
-	target.current++
-	p.mu.Unlock()
-
+	idx := int(target.current.Add(1)-1) % len(target.hosts)
 	host := target.hosts[idx]
 	return &url.URL{
 		Scheme: "http",
@@ -296,22 +295,11 @@ func (p *Proxy) createProxyRequest(
 	return req, nil
 }
 
-// hopByHopHeaders are headers that should not be forwarded.
-var hopByHopHeaders = map[string]bool{
-	"Connection":          true,
-	"Keep-Alive":          true,
-	"Proxy-Authenticate":  true,
-	"Proxy-Authorization": true,
-	"Te":                  true,
-	"Trailers":            true,
-	"Transfer-Encoding":   true,
-	"Upgrade":             true,
-}
-
 // copyHeaders copies headers from src to dst, excluding hop-by-hop headers.
+// Uses the shared httputil package for a single source of truth (RFC 2616/7230).
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if hopByHopHeaders[key] {
+		if avahttputil.IsHopByHop(key) {
 			continue
 		}
 		// Skip WebSocket upgrade headers for regular proxy

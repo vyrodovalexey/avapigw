@@ -334,8 +334,27 @@ func (svc *configurationServiceImpl) buildSnapshot(
 		snapshot.GrpcBackends = append(snapshot.GrpcBackends, resource)
 	}
 
+	// Build GraphQL routes
+	for key, data := range svc.server.graphqlRoutes {
+		resource := buildConfigResource(
+			operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_ROUTE,
+			key, data,
+		)
+		snapshot.GraphqlRoutes = append(snapshot.GraphqlRoutes, resource)
+	}
+
+	// Build GraphQL backends
+	for key, data := range svc.server.graphqlBackends {
+		resource := buildConfigResource(
+			operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND,
+			key, data,
+		)
+		snapshot.GraphqlBackends = append(snapshot.GraphqlBackends, resource)
+	}
+
 	totalResources := len(snapshot.ApiRoutes) + len(snapshot.GrpcRoutes) +
-		len(snapshot.Backends) + len(snapshot.GrpcBackends)
+		len(snapshot.Backends) + len(snapshot.GrpcBackends) +
+		len(snapshot.GraphqlRoutes) + len(snapshot.GraphqlBackends)
 	snapshot.TotalResources = int32(totalResources) //nolint:gosec // resource count is bounded by cluster size
 
 	checksum, err := computeSnapshotChecksum(snapshot)
@@ -376,17 +395,20 @@ func computeSnapshotChecksum(snapshot *operatorv1alpha1.ConfigurationSnapshot) (
 		return fmt.Sprintf("%x", hash), nil
 	}
 
-	// Create a copy with the timestamp zeroed out so that identical configs
+	// Create a stable copy with only content fields so that identical configs
 	// always produce the same checksum regardless of when they were built.
+	// Version and Timestamp are excluded because they change per-build and
+	// would make the checksum non-deterministic for identical configurations.
+	// Checksum is intentionally excluded — it is the output of this function,
+	// not an input. Including it would make the hash depend on its own value.
 	stable := &operatorv1alpha1.ConfigurationSnapshot{
-		Version:        snapshot.Version,
-		ApiRoutes:      snapshot.ApiRoutes,
-		GrpcRoutes:     snapshot.GrpcRoutes,
-		Backends:       snapshot.Backends,
-		GrpcBackends:   snapshot.GrpcBackends,
-		TotalResources: snapshot.TotalResources,
-		Checksum:       snapshot.Checksum,
-		// Timestamp intentionally omitted to ensure deterministic checksums
+		ApiRoutes:       snapshot.ApiRoutes,
+		GrpcRoutes:      snapshot.GrpcRoutes,
+		Backends:        snapshot.Backends,
+		GrpcBackends:    snapshot.GrpcBackends,
+		GraphqlRoutes:   snapshot.GraphqlRoutes,
+		GraphqlBackends: snapshot.GraphqlBackends,
+		TotalResources:  snapshot.TotalResources,
 	}
 
 	data, err := json.Marshal(stable)

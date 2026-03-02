@@ -1,0 +1,14 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-HTTPS-RateLimit]
+[Accept: application/json]
+[Connection: keep-alive]
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items
+/api/v1/ratelimit/items

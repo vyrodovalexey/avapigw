@@ -18,12 +18,13 @@ import (
 
 // ConnectionPool manages gRPC client connections.
 type ConnectionPool struct {
-	conns     map[string]*grpc.ClientConn
-	mu        sync.RWMutex
-	dialOpts  []grpc.DialOption
-	logger    observability.Logger
-	timeout   time.Duration
-	tlsConfig *tls.Config
+	conns      map[string]*grpc.ClientConn
+	mu         sync.RWMutex
+	dialOpts   []grpc.DialOption
+	logger     observability.Logger
+	timeout    time.Duration
+	tlsConfig  *tls.Config
+	tlsConfigs map[string]*tls.Config // per-target TLS configs for mTLS backends
 }
 
 // PoolOption is a functional option for configuring the connection pool.
@@ -92,9 +93,10 @@ func WithTLSFromConfig(cfg *config.TLSConfig) PoolOption {
 // NewConnectionPool creates a new connection pool.
 func NewConnectionPool(opts ...PoolOption) *ConnectionPool {
 	p := &ConnectionPool{
-		conns:   make(map[string]*grpc.ClientConn),
-		logger:  observability.NopLogger(),
-		timeout: 10 * time.Second,
+		conns:      make(map[string]*grpc.ClientConn),
+		logger:     observability.NopLogger(),
+		timeout:    10 * time.Second,
+		tlsConfigs: make(map[string]*tls.Config),
 	}
 
 	for _, opt := range opts {
@@ -189,6 +191,82 @@ func (p *ConnectionPool) Get(ctx context.Context, target string) (*grpc.ClientCo
 	return conn, nil
 }
 
+// GetWithTLS returns a connection to the target using a specific TLS config.
+// If tlsConfig is nil, it delegates to the standard Get method.
+// If the target already has a connection with a different TLS config,
+// the old connection is closed and a new one is created.
+func (p *ConnectionPool) GetWithTLS(
+	ctx context.Context, target string, tlsConfig *tls.Config,
+) (*grpc.ClientConn, error) {
+	if tlsConfig == nil {
+		return p.Get(ctx, target)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Check if we already have a connection with the same TLS config
+	existingTLS, hasTLS := p.tlsConfigs[target]
+	conn, hasConn := p.conns[target]
+
+	if hasConn && conn != nil && hasTLS && existingTLS == tlsConfig {
+		state := conn.GetState()
+		if state != 4 { // 4 = SHUTDOWN
+			return conn, nil
+		}
+	}
+
+	// Close existing connection if TLS config changed
+	if hasConn && conn != nil {
+		_ = conn.Close()
+		delete(p.conns, target)
+		p.logger.Debug("closed existing connection for TLS config change",
+			observability.String("target", target),
+		)
+	}
+
+	// Build dial options with the specific TLS config
+	dialOpts := p.buildDialOptionsWithTLS(tlsConfig)
+
+	p.logger.Debug("creating new gRPC connection with per-backend TLS",
+		observability.String("target", target),
+	)
+
+	metrics := getGRPCProxyMetrics()
+
+	newConn, err := grpc.NewClient(target, dialOpts...)
+	if err != nil {
+		metrics.connectionErrors.WithLabelValues(target, "dial_tls").Inc()
+		return nil, fmt.Errorf("failed to create TLS client for %s: %w", target, err)
+	}
+
+	p.conns[target] = newConn
+	p.tlsConfigs[target] = tlsConfig
+	metrics.connectionCreated.WithLabelValues(target).Inc()
+	metrics.poolSize.Set(float64(len(p.conns)))
+
+	p.logger.Info("created gRPC connection with per-backend TLS",
+		observability.String("target", target),
+	)
+
+	return newConn, nil
+}
+
+// buildDialOptionsWithTLS builds dial options with a specific TLS config.
+func (p *ConnectionPool) buildDialOptionsWithTLS(tlsConfig *tls.Config) []grpc.DialOption {
+	return []grpc.DialOption{
+		grpc.WithDefaultCallOptions(
+			grpc.ForceCodec(&rawCodec{}),
+		),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+	}
+}
+
 // Close closes all connections in the pool.
 func (p *ConnectionPool) Close() error {
 	p.mu.Lock()
@@ -208,6 +286,7 @@ func (p *ConnectionPool) Close() error {
 	}
 
 	p.conns = make(map[string]*grpc.ClientConn)
+	p.tlsConfigs = make(map[string]*tls.Config)
 	metrics.poolSize.Set(0)
 	return lastErr
 }
@@ -223,6 +302,7 @@ func (p *ConnectionPool) CloseConn(target string) error {
 	}
 
 	delete(p.conns, target)
+	delete(p.tlsConfigs, target)
 	metrics := getGRPCProxyMetrics()
 	metrics.connectionClosed.WithLabelValues(target).Inc()
 	metrics.poolSize.Set(float64(len(p.conns)))

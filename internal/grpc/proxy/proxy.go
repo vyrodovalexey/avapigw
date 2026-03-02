@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/vyrodovalexey/avapigw/internal/auth"
@@ -18,16 +19,17 @@ import (
 
 // Proxy is the main gRPC reverse proxy.
 type Proxy struct {
-	router          *router.Router
-	director        Director
-	streamHandler   *StreamHandler
-	connPool        *ConnectionPool
-	logger          observability.Logger
-	defaultTimeout  time.Duration
-	metricsRegistry *prometheus.Registry
-	authMetrics     *auth.Metrics
-	vaultClient     vault.Client
-	backendRegistry *backend.Registry
+	router             *router.Router
+	director           Director
+	streamHandler      *StreamHandler
+	connPool           *ConnectionPool
+	logger             observability.Logger
+	defaultTimeout     time.Duration
+	metricsRegistry    *prometheus.Registry
+	authMetrics        *auth.Metrics
+	vaultClient        vault.Client
+	backendRegistry    *backend.Registry
+	rateLimiterManager *RouteRateLimiterManager
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -96,6 +98,15 @@ func WithProxyVaultClient(client vault.Client) ProxyOption {
 func WithBackendRegistry(registry *backend.Registry) ProxyOption {
 	return func(p *Proxy) {
 		p.backendRegistry = registry
+	}
+}
+
+// WithRouteRateLimiter sets the per-route rate limiter manager for the proxy.
+// When set, routes with RateLimit configuration will have rate limiting
+// enforced before forwarding requests to backends.
+func WithRouteRateLimiter(manager *RouteRateLimiterManager) ProxyOption {
+	return func(p *Proxy) {
+		p.rateLimiterManager = manager
 	}
 }
 
@@ -170,22 +181,35 @@ func (p *Proxy) handleStream(srv interface{}, stream grpc.ServerStream) error {
 	// Apply route-level timeout if configured.
 	// If the route does not match, return early with an Unimplemented
 	// error instead of creating a timeout context for an unmatched route.
-	ctx, cancel, matched := p.applyTimeout(ctx, fullMethod)
+	ctx, cancel, matchResult := p.applyTimeout(ctx, fullMethod)
 	if cancel != nil {
 		defer cancel()
 	}
-	if !matched {
+	if matchResult == nil {
 		p.logger.Warn("no matching route for gRPC request",
 			observability.String("method", fullMethod),
 		)
 		return status.Errorf(codes.Unimplemented, "no route for method %s", fullMethod)
 	}
 
+	// Apply per-route rate limiting if configured
+	if p.rateLimiterManager != nil && matchResult.Route.Config.RateLimit != nil {
+		routeName := matchResult.Route.Name
+		rateLimitCfg := matchResult.Route.Config.RateLimit
+		if err := p.rateLimiterManager.Check(ctx, routeName, rateLimitCfg); err != nil {
+			p.logger.Debug("per-route rate limit exceeded",
+				observability.String("method", fullMethod),
+				observability.String("route", routeName),
+			)
+			return err
+		}
+	}
+
 	// Wrap stream with new context
 	wrappedStream := WrapServerStream(stream, ctx)
 
-	// Handle the stream
-	err := p.streamHandler.HandleStream(srv, wrappedStream)
+	// Handle the stream with route config for transforms
+	err := p.streamHandler.HandleStream(srv, wrappedStream, &matchResult.Route.Config)
 	if err != nil {
 		p.logger.Debug("stream handling error",
 			observability.String("method", fullMethod),
@@ -202,38 +226,44 @@ func (p *Proxy) handleStream(srv interface{}, stream grpc.ServerStream) error {
 	return err
 }
 
-// applyTimeout applies route-level or default timeout.
+// applyTimeout applies route-level or default timeout and returns the match result.
 // It only creates a context with timeout when a route matches or the
 // context does not already carry a deadline. For unmatched routes the
 // caller should return an appropriate error instead of allocating a
 // timeout that will never be used.
-func (p *Proxy) applyTimeout(ctx context.Context, fullMethod string) (context.Context, context.CancelFunc, bool) {
-	// Check if context already has a deadline
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, nil, true
-	}
-
-	// Try to get route-specific timeout
-	timeout := p.defaultTimeout
+// Returns nil match result when no route matches.
+func (p *Proxy) applyTimeout(
+	ctx context.Context, fullMethod string,
+) (context.Context, context.CancelFunc, *router.MatchResult) {
+	// Extract incoming metadata for route matching so that metadata-based
+	// match conditions (e.g., x-test-scenario header) are evaluated correctly.
+	md, _ := metadata.FromIncomingContext(ctx)
 
 	// Get metadata for route matching — if the route does not match,
 	// return early so the caller can reject the request without
 	// creating a context with timeout for an unmatched route.
-	result, err := p.router.Match(fullMethod, nil)
+	result, err := p.router.Match(fullMethod, md)
 	if err != nil {
 		p.logger.Debug("no matching route for timeout lookup",
 			observability.String("method", fullMethod),
 			observability.Error(err),
 		)
-		return ctx, nil, false
+		return ctx, nil, nil
 	}
 
+	// Check if context already has a deadline
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, nil, result
+	}
+
+	// Try to get route-specific timeout
+	timeout := p.defaultTimeout
 	if result.Route.Config.Timeout.Duration() > 0 {
 		timeout = result.Route.Config.Timeout.Duration()
 	}
 
 	newCtx, cancel := context.WithTimeout(ctx, timeout)
-	return newCtx, cancel, true
+	return newCtx, cancel, result
 }
 
 // ClearAuthCache clears the gRPC director's authenticator cache.
@@ -249,8 +279,21 @@ func (p *Proxy) ClearAuthCache() {
 	}
 }
 
+// ClearRateLimitCache clears the per-route rate limiter cache.
+// This should be called when route rate limit configuration changes
+// so that the next request rebuilds rate limiters from the updated config.
+func (p *Proxy) ClearRateLimitCache() {
+	if p.rateLimiterManager != nil {
+		p.rateLimiterManager.Clear()
+	}
+}
+
 // Close closes the proxy and releases resources.
 func (p *Proxy) Close() error {
+	// Clean up rate limiter resources
+	if p.rateLimiterManager != nil {
+		p.rateLimiterManager.Clear()
+	}
 	if p.connPool != nil {
 		return p.connPool.Close()
 	}

@@ -32,6 +32,12 @@ type ConfigApplier interface {
 	// ApplyGRPCBackends applies gRPC backend configuration.
 	ApplyGRPCBackends(ctx context.Context, backends []config.GRPCBackend) error
 
+	// ApplyGraphQLRoutes applies GraphQL route configuration.
+	ApplyGraphQLRoutes(ctx context.Context, routes []config.GraphQLRoute) error
+
+	// ApplyGraphQLBackends applies GraphQL backend configuration.
+	ApplyGraphQLBackends(ctx context.Context, backends []config.GraphQLBackend) error
+
 	// ApplyFullConfig applies a complete configuration.
 	ApplyFullConfig(ctx context.Context, cfg *config.GatewayConfig) error
 }
@@ -44,11 +50,13 @@ type ConfigHandler struct {
 	cacheInvalidator CacheInvalidator
 
 	// Current state tracking
-	mu           sync.RWMutex
-	routes       map[string]*config.Route       // key: namespace/name
-	backends     map[string]*config.Backend     // key: namespace/name
-	grpcRoutes   map[string]*config.GRPCRoute   // key: namespace/name
-	grpcBackends map[string]*config.GRPCBackend // key: namespace/name
+	mu              sync.RWMutex
+	routes          map[string]*config.Route          // key: namespace/name
+	backends        map[string]*config.Backend        // key: namespace/name
+	grpcRoutes      map[string]*config.GRPCRoute      // key: namespace/name
+	grpcBackends    map[string]*config.GRPCBackend    // key: namespace/name
+	graphqlRoutes   map[string]*config.GraphQLRoute   // key: namespace/name
+	graphqlBackends map[string]*config.GraphQLBackend // key: namespace/name
 }
 
 // CacheInvalidator is called when configuration changes require cache invalidation.
@@ -83,13 +91,15 @@ func WithCacheInvalidator(invalidator CacheInvalidator) ConfigHandlerOption {
 // NewConfigHandler creates a new ConfigHandler.
 func NewConfigHandler(applier ConfigApplier, opts ...ConfigHandlerOption) *ConfigHandler {
 	h := &ConfigHandler{
-		applier:      applier,
-		logger:       observability.NopLogger(),
-		tracer:       otel.Tracer("config-handler"),
-		routes:       make(map[string]*config.Route),
-		backends:     make(map[string]*config.Backend),
-		grpcRoutes:   make(map[string]*config.GRPCRoute),
-		grpcBackends: make(map[string]*config.GRPCBackend),
+		applier:         applier,
+		logger:          observability.NopLogger(),
+		tracer:          otel.Tracer("config-handler"),
+		routes:          make(map[string]*config.Route),
+		backends:        make(map[string]*config.Backend),
+		grpcRoutes:      make(map[string]*config.GRPCRoute),
+		grpcBackends:    make(map[string]*config.GRPCBackend),
+		graphqlRoutes:   make(map[string]*config.GraphQLRoute),
+		graphqlBackends: make(map[string]*config.GraphQLBackend),
 	}
 
 	for _, opt := range opts {
@@ -155,6 +165,10 @@ func (h *ConfigHandler) handleAddOrModify(
 		return h.handleGRPCRouteUpdate(ctx, resource, key)
 	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRPC_BACKEND:
 		return h.handleGRPCBackendUpdate(ctx, resource, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_ROUTE:
+		return h.handleGraphQLRouteUpdate(ctx, resource, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND:
+		return h.handleGraphQLBackendUpdate(ctx, resource, key)
 	default:
 		h.logger.Warn("unknown resource type",
 			observability.String("type", resource.Type.String()),
@@ -176,6 +190,10 @@ func (h *ConfigHandler) handleDelete(
 		return h.handleGRPCRouteDelete(ctx, key)
 	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRPC_BACKEND:
 		return h.handleGRPCBackendDelete(ctx, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_ROUTE:
+		return h.handleGraphQLRouteDelete(ctx, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND:
+		return h.handleGraphQLBackendDelete(ctx, key)
 	default:
 		h.logger.Warn("unknown resource type for deletion",
 			observability.String("type", resource.Type.String()),
@@ -392,6 +410,110 @@ func (h *ConfigHandler) handleGRPCBackendDelete(ctx context.Context, key string)
 	return nil
 }
 
+// handleGraphQLRouteUpdate handles GraphQL route updates.
+func (h *ConfigHandler) handleGraphQLRouteUpdate(
+	ctx context.Context, resource *operatorv1alpha1.ConfigurationResource, key string,
+) error {
+	var route config.GraphQLRoute
+	if err := json.Unmarshal(resource.SpecJson, &route); err != nil {
+		return fmt.Errorf("failed to unmarshal GraphQL route spec: %w", err)
+	}
+
+	h.mu.Lock()
+	h.graphqlRoutes[key] = &route
+	routes := h.collectGraphQLRoutes()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyGraphQLRoutes(ctx, routes); err != nil {
+			return fmt.Errorf("failed to apply GraphQL routes: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("GraphQL route updated",
+		observability.String("name", route.Name),
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
+// handleGraphQLRouteDelete handles GraphQL route deletion.
+func (h *ConfigHandler) handleGraphQLRouteDelete(ctx context.Context, key string) error {
+	h.mu.Lock()
+	delete(h.graphqlRoutes, key)
+	routes := h.collectGraphQLRoutes()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyGraphQLRoutes(ctx, routes); err != nil {
+			return fmt.Errorf("failed to apply GraphQL routes after deletion: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("GraphQL route deleted",
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
+// handleGraphQLBackendUpdate handles GraphQL backend updates.
+func (h *ConfigHandler) handleGraphQLBackendUpdate(
+	ctx context.Context, resource *operatorv1alpha1.ConfigurationResource, key string,
+) error {
+	var backend config.GraphQLBackend
+	if err := json.Unmarshal(resource.SpecJson, &backend); err != nil {
+		return fmt.Errorf("failed to unmarshal GraphQL backend spec: %w", err)
+	}
+
+	h.mu.Lock()
+	h.graphqlBackends[key] = &backend
+	backends := h.collectGraphQLBackends()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyGraphQLBackends(ctx, backends); err != nil {
+			return fmt.Errorf("failed to apply GraphQL backends: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("GraphQL backend updated",
+		observability.String("name", backend.Name),
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
+// handleGraphQLBackendDelete handles GraphQL backend deletion.
+func (h *ConfigHandler) handleGraphQLBackendDelete(ctx context.Context, key string) error {
+	h.mu.Lock()
+	delete(h.graphqlBackends, key)
+	backends := h.collectGraphQLBackends()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyGraphQLBackends(ctx, backends); err != nil {
+			return fmt.Errorf("failed to apply GraphQL backends after deletion: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("GraphQL backend deleted",
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
 // HandleSnapshot applies a full configuration snapshot.
 func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1alpha1.ConfigurationSnapshot) error {
 	ctx, span := h.tracer.Start(ctx, "ConfigHandler.HandleSnapshot",
@@ -413,6 +535,8 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 	h.backends = make(map[string]*config.Backend)
 	h.grpcRoutes = make(map[string]*config.GRPCRoute)
 	h.grpcBackends = make(map[string]*config.GRPCBackend)
+	h.graphqlRoutes = make(map[string]*config.GraphQLRoute)
+	h.graphqlBackends = make(map[string]*config.GraphQLBackend)
 	h.mu.Unlock()
 
 	// Process API routes
@@ -426,6 +550,12 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 
 	// Process gRPC backends
 	grpcBackends := h.parseGRPCBackends(snapshot.GrpcBackends)
+
+	// Process GraphQL routes
+	graphqlRoutes := h.parseGraphQLRoutes(snapshot.GraphqlRoutes)
+
+	// Process GraphQL backends
+	graphqlBackends := h.parseGraphQLBackends(snapshot.GraphqlBackends)
 
 	// Store in state
 	h.mu.Lock()
@@ -449,16 +579,28 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 		key := resourceKey("", backend.Name)
 		h.grpcBackends[key] = &backend
 	}
+	for _, r := range graphqlRoutes {
+		route := r
+		key := resourceKey("", route.Name)
+		h.graphqlRoutes[key] = &route
+	}
+	for _, b := range graphqlBackends {
+		backend := b
+		key := resourceKey("", backend.Name)
+		h.graphqlBackends[key] = &backend
+	}
 	h.mu.Unlock()
 
 	// Apply full configuration if applier supports it
 	if h.applier != nil {
 		cfg := &config.GatewayConfig{
 			Spec: config.GatewaySpec{
-				Routes:       routes,
-				Backends:     backends,
-				GRPCRoutes:   grpcRoutes,
-				GRPCBackends: grpcBackends,
+				Routes:          routes,
+				Backends:        backends,
+				GRPCRoutes:      grpcRoutes,
+				GRPCBackends:    grpcBackends,
+				GraphQLRoutes:   graphqlRoutes,
+				GraphQLBackends: graphqlBackends,
 			},
 		}
 
@@ -475,6 +617,8 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 		observability.Int("backends", len(backends)),
 		observability.Int("grpc_routes", len(grpcRoutes)),
 		observability.Int("grpc_backends", len(grpcBackends)),
+		observability.Int("graphql_routes", len(graphqlRoutes)),
+		observability.Int("graphql_backends", len(graphqlBackends)),
 	)
 
 	return nil
@@ -592,6 +736,62 @@ func (h *ConfigHandler) collectGRPCBackends() []config.GRPCBackend {
 	return backends
 }
 
+// parseGraphQLRoutes parses configuration resources into GraphQL routes.
+func (h *ConfigHandler) parseGraphQLRoutes(
+	resources []*operatorv1alpha1.ConfigurationResource,
+) []config.GraphQLRoute {
+	routes := make([]config.GraphQLRoute, 0, len(resources))
+	for _, r := range resources {
+		var route config.GraphQLRoute
+		if err := json.Unmarshal(r.SpecJson, &route); err != nil {
+			h.logger.Error("failed to parse GraphQL route",
+				observability.String("name", r.Name),
+				observability.Error(err),
+			)
+			continue
+		}
+		routes = append(routes, route)
+	}
+	return routes
+}
+
+// parseGraphQLBackends parses configuration resources into GraphQL backends.
+func (h *ConfigHandler) parseGraphQLBackends(
+	resources []*operatorv1alpha1.ConfigurationResource,
+) []config.GraphQLBackend {
+	backends := make([]config.GraphQLBackend, 0, len(resources))
+	for _, r := range resources {
+		var backend config.GraphQLBackend
+		if err := json.Unmarshal(r.SpecJson, &backend); err != nil {
+			h.logger.Error("failed to parse GraphQL backend",
+				observability.String("name", r.Name),
+				observability.Error(err),
+			)
+			continue
+		}
+		backends = append(backends, backend)
+	}
+	return backends
+}
+
+// collectGraphQLRoutes collects all GraphQL routes from the state.
+func (h *ConfigHandler) collectGraphQLRoutes() []config.GraphQLRoute {
+	routes := make([]config.GraphQLRoute, 0, len(h.graphqlRoutes))
+	for _, r := range h.graphqlRoutes {
+		routes = append(routes, *r)
+	}
+	return routes
+}
+
+// collectGraphQLBackends collects all GraphQL backends from the state.
+func (h *ConfigHandler) collectGraphQLBackends() []config.GraphQLBackend {
+	backends := make([]config.GraphQLBackend, 0, len(h.graphqlBackends))
+	for _, b := range h.graphqlBackends {
+		backends = append(backends, *b)
+	}
+	return backends
+}
+
 // invalidateCache calls the cache invalidation callback if configured.
 // This should be called after any configuration change is applied.
 func (h *ConfigHandler) invalidateCache() {
@@ -610,14 +810,20 @@ func resourceKey(namespace, name string) string {
 }
 
 // GetCurrentState returns the current configuration state.
+//
+//nolint:gocritic // tooManyResultsChecker: extending existing 4-return pattern with GraphQL; struct refactor deferred
 func (h *ConfigHandler) GetCurrentState() (
 	routes []config.Route,
 	backends []config.Backend,
 	grpcRoutes []config.GRPCRoute,
 	grpcBackends []config.GRPCBackend,
+	graphqlRoutes []config.GraphQLRoute,
+	graphqlBackends []config.GraphQLBackend,
 ) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	return h.collectRoutes(), h.collectBackends(), h.collectGRPCRoutes(), h.collectGRPCBackends()
+	return h.collectRoutes(), h.collectBackends(),
+		h.collectGRPCRoutes(), h.collectGRPCBackends(),
+		h.collectGraphQLRoutes(), h.collectGraphQLBackends()
 }

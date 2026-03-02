@@ -1181,3 +1181,78 @@ spec:
         host: host.docker.internal
         port: 8811
   timeout: 30s
+
+---
+# =============================================================================
+# GRAPHQL BACKENDS
+# =============================================================================
+
+# GraphQLBackend 1 - REST backend on port 8801 (serves /graphql, no auth)
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: graphql-backend-noauth-1
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8801
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+---
+# GraphQLBackend 2 - REST backend on port 8802 (serves /graphql, no auth)
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: graphql-backend-noauth-2
+  namespace: avapigw-test
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8802
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+---
+# =============================================================================
+# GRAPHQL ROUTES
+# =============================================================================
+
+# GraphQLRoute 1: Basic GraphQL route with load balancing
+# Features: 50/50 load balancing across two backends, depth/complexity limits
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: graphql-basic
+  namespace: avapigw-test
+spec:
+  match:
+    - path:
+        exact: /graphql
+  route:
+    - destination:
+        host: graphql-backend-noauth-1
+        port: 8801
+      weight: 50
+    - destination:
+        host: graphql-backend-noauth-2
+        port: 8802
+      weight: 50
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100

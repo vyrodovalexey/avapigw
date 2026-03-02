@@ -83,11 +83,13 @@ func (HealthState) EnumDescriptor() ([]byte, []int) {
 type ResourceType int32
 
 const (
-	ResourceType_RESOURCE_TYPE_UNSPECIFIED  ResourceType = 0
-	ResourceType_RESOURCE_TYPE_API_ROUTE    ResourceType = 1
-	ResourceType_RESOURCE_TYPE_GRPC_ROUTE   ResourceType = 2
-	ResourceType_RESOURCE_TYPE_BACKEND      ResourceType = 3
-	ResourceType_RESOURCE_TYPE_GRPC_BACKEND ResourceType = 4
+	ResourceType_RESOURCE_TYPE_UNSPECIFIED     ResourceType = 0
+	ResourceType_RESOURCE_TYPE_API_ROUTE       ResourceType = 1
+	ResourceType_RESOURCE_TYPE_GRPC_ROUTE      ResourceType = 2
+	ResourceType_RESOURCE_TYPE_BACKEND         ResourceType = 3
+	ResourceType_RESOURCE_TYPE_GRPC_BACKEND    ResourceType = 4
+	ResourceType_RESOURCE_TYPE_GRAPHQL_ROUTE   ResourceType = 5
+	ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND ResourceType = 6
 )
 
 // Enum value maps for ResourceType.
@@ -98,13 +100,17 @@ var (
 		2: "RESOURCE_TYPE_GRPC_ROUTE",
 		3: "RESOURCE_TYPE_BACKEND",
 		4: "RESOURCE_TYPE_GRPC_BACKEND",
+		5: "RESOURCE_TYPE_GRAPHQL_ROUTE",
+		6: "RESOURCE_TYPE_GRAPHQL_BACKEND",
 	}
 	ResourceType_value = map[string]int32{
-		"RESOURCE_TYPE_UNSPECIFIED":  0,
-		"RESOURCE_TYPE_API_ROUTE":    1,
-		"RESOURCE_TYPE_GRPC_ROUTE":   2,
-		"RESOURCE_TYPE_BACKEND":      3,
-		"RESOURCE_TYPE_GRPC_BACKEND": 4,
+		"RESOURCE_TYPE_UNSPECIFIED":     0,
+		"RESOURCE_TYPE_API_ROUTE":       1,
+		"RESOURCE_TYPE_GRPC_ROUTE":      2,
+		"RESOURCE_TYPE_BACKEND":         3,
+		"RESOURCE_TYPE_GRPC_BACKEND":    4,
+		"RESOURCE_TYPE_GRAPHQL_ROUTE":   5,
+		"RESOURCE_TYPE_GRAPHQL_BACKEND": 6,
 	}
 )
 
@@ -1364,9 +1370,13 @@ type ConfigurationSnapshot struct {
 	// Total number of resources.
 	TotalResources int32 `protobuf:"varint,7,opt,name=total_resources,json=totalResources,proto3" json:"total_resources,omitempty"`
 	// Checksum of the configuration (for validation).
-	Checksum      string `protobuf:"bytes,8,opt,name=checksum,proto3" json:"checksum,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Checksum string `protobuf:"bytes,8,opt,name=checksum,proto3" json:"checksum,omitempty"`
+	// GraphQL routes.
+	GraphqlRoutes []*ConfigurationResource `protobuf:"bytes,9,rep,name=graphql_routes,json=graphqlRoutes,proto3" json:"graphql_routes,omitempty"`
+	// GraphQL backends.
+	GraphqlBackends []*ConfigurationResource `protobuf:"bytes,10,rep,name=graphql_backends,json=graphqlBackends,proto3" json:"graphql_backends,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ConfigurationSnapshot) Reset() {
@@ -1453,6 +1463,20 @@ func (x *ConfigurationSnapshot) GetChecksum() string {
 		return x.Checksum
 	}
 	return ""
+}
+
+func (x *ConfigurationSnapshot) GetGraphqlRoutes() []*ConfigurationResource {
+	if x != nil {
+		return x.GraphqlRoutes
+	}
+	return nil
+}
+
+func (x *ConfigurationSnapshot) GetGraphqlBackends() []*ConfigurationResource {
+	if x != nil {
+		return x.GraphqlBackends
+	}
+	return nil
 }
 
 var File_operator_v1alpha1_config_proto protoreflect.FileDescriptor
@@ -1576,7 +1600,7 @@ const file_operator_v1alpha1_config_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a>\n" +
 	"\x10AnnotationsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xf9\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xaf\x05\n" +
 	"\x15ConfigurationSnapshot\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12O\n" +
@@ -1587,18 +1611,23 @@ const file_operator_v1alpha1_config_proto_rawDesc = "" +
 	"\bbackends\x18\x05 \x03(\v20.avapigw.operator.v1alpha1.ConfigurationResourceR\bbackends\x12U\n" +
 	"\rgrpc_backends\x18\x06 \x03(\v20.avapigw.operator.v1alpha1.ConfigurationResourceR\fgrpcBackends\x12'\n" +
 	"\x0ftotal_resources\x18\a \x01(\x05R\x0etotalResources\x12\x1a\n" +
-	"\bchecksum\x18\b \x01(\tR\bchecksum*|\n" +
+	"\bchecksum\x18\b \x01(\tR\bchecksum\x12W\n" +
+	"\x0egraphql_routes\x18\t \x03(\v20.avapigw.operator.v1alpha1.ConfigurationResourceR\rgraphqlRoutes\x12[\n" +
+	"\x10graphql_backends\x18\n" +
+	" \x03(\v20.avapigw.operator.v1alpha1.ConfigurationResourceR\x0fgraphqlBackends*|\n" +
 	"\vHealthState\x12\x1c\n" +
 	"\x18HEALTH_STATE_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14HEALTH_STATE_HEALTHY\x10\x01\x12\x19\n" +
 	"\x15HEALTH_STATE_DEGRADED\x10\x02\x12\x1a\n" +
-	"\x16HEALTH_STATE_UNHEALTHY\x10\x03*\xa3\x01\n" +
+	"\x16HEALTH_STATE_UNHEALTHY\x10\x03*\xe7\x01\n" +
 	"\fResourceType\x12\x1d\n" +
 	"\x19RESOURCE_TYPE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17RESOURCE_TYPE_API_ROUTE\x10\x01\x12\x1c\n" +
 	"\x18RESOURCE_TYPE_GRPC_ROUTE\x10\x02\x12\x19\n" +
 	"\x15RESOURCE_TYPE_BACKEND\x10\x03\x12\x1e\n" +
-	"\x1aRESOURCE_TYPE_GRPC_BACKEND\x10\x04*\xa9\x01\n" +
+	"\x1aRESOURCE_TYPE_GRPC_BACKEND\x10\x04\x12\x1f\n" +
+	"\x1bRESOURCE_TYPE_GRAPHQL_ROUTE\x10\x05\x12!\n" +
+	"\x1dRESOURCE_TYPE_GRAPHQL_BACKEND\x10\x06*\xa9\x01\n" +
 	"\n" +
 	"UpdateType\x12\x1b\n" +
 	"\x17UPDATE_TYPE_UNSPECIFIED\x10\x00\x12\x15\n" +
@@ -1686,21 +1715,23 @@ var file_operator_v1alpha1_config_proto_depIdxs = []int32{
 	15, // 29: avapigw.operator.v1alpha1.ConfigurationSnapshot.grpc_routes:type_name -> avapigw.operator.v1alpha1.ConfigurationResource
 	15, // 30: avapigw.operator.v1alpha1.ConfigurationSnapshot.backends:type_name -> avapigw.operator.v1alpha1.ConfigurationResource
 	15, // 31: avapigw.operator.v1alpha1.ConfigurationSnapshot.grpc_backends:type_name -> avapigw.operator.v1alpha1.ConfigurationResource
-	3,  // 32: avapigw.operator.v1alpha1.ConfigurationService.RegisterGateway:input_type -> avapigw.operator.v1alpha1.RegisterGatewayRequest
-	5,  // 33: avapigw.operator.v1alpha1.ConfigurationService.StreamConfiguration:input_type -> avapigw.operator.v1alpha1.StreamConfigurationRequest
-	6,  // 34: avapigw.operator.v1alpha1.ConfigurationService.GetConfiguration:input_type -> avapigw.operator.v1alpha1.GetConfigurationRequest
-	7,  // 35: avapigw.operator.v1alpha1.ConfigurationService.Heartbeat:input_type -> avapigw.operator.v1alpha1.HeartbeatRequest
-	9,  // 36: avapigw.operator.v1alpha1.ConfigurationService.AcknowledgeConfiguration:input_type -> avapigw.operator.v1alpha1.AcknowledgeConfigurationRequest
-	4,  // 37: avapigw.operator.v1alpha1.ConfigurationService.RegisterGateway:output_type -> avapigw.operator.v1alpha1.RegisterGatewayResponse
-	14, // 38: avapigw.operator.v1alpha1.ConfigurationService.StreamConfiguration:output_type -> avapigw.operator.v1alpha1.ConfigurationUpdate
-	16, // 39: avapigw.operator.v1alpha1.ConfigurationService.GetConfiguration:output_type -> avapigw.operator.v1alpha1.ConfigurationSnapshot
-	8,  // 40: avapigw.operator.v1alpha1.ConfigurationService.Heartbeat:output_type -> avapigw.operator.v1alpha1.HeartbeatResponse
-	10, // 41: avapigw.operator.v1alpha1.ConfigurationService.AcknowledgeConfiguration:output_type -> avapigw.operator.v1alpha1.AcknowledgeConfigurationResponse
-	37, // [37:42] is the sub-list for method output_type
-	32, // [32:37] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	15, // 32: avapigw.operator.v1alpha1.ConfigurationSnapshot.graphql_routes:type_name -> avapigw.operator.v1alpha1.ConfigurationResource
+	15, // 33: avapigw.operator.v1alpha1.ConfigurationSnapshot.graphql_backends:type_name -> avapigw.operator.v1alpha1.ConfigurationResource
+	3,  // 34: avapigw.operator.v1alpha1.ConfigurationService.RegisterGateway:input_type -> avapigw.operator.v1alpha1.RegisterGatewayRequest
+	5,  // 35: avapigw.operator.v1alpha1.ConfigurationService.StreamConfiguration:input_type -> avapigw.operator.v1alpha1.StreamConfigurationRequest
+	6,  // 36: avapigw.operator.v1alpha1.ConfigurationService.GetConfiguration:input_type -> avapigw.operator.v1alpha1.GetConfigurationRequest
+	7,  // 37: avapigw.operator.v1alpha1.ConfigurationService.Heartbeat:input_type -> avapigw.operator.v1alpha1.HeartbeatRequest
+	9,  // 38: avapigw.operator.v1alpha1.ConfigurationService.AcknowledgeConfiguration:input_type -> avapigw.operator.v1alpha1.AcknowledgeConfigurationRequest
+	4,  // 39: avapigw.operator.v1alpha1.ConfigurationService.RegisterGateway:output_type -> avapigw.operator.v1alpha1.RegisterGatewayResponse
+	14, // 40: avapigw.operator.v1alpha1.ConfigurationService.StreamConfiguration:output_type -> avapigw.operator.v1alpha1.ConfigurationUpdate
+	16, // 41: avapigw.operator.v1alpha1.ConfigurationService.GetConfiguration:output_type -> avapigw.operator.v1alpha1.ConfigurationSnapshot
+	8,  // 42: avapigw.operator.v1alpha1.ConfigurationService.Heartbeat:output_type -> avapigw.operator.v1alpha1.HeartbeatResponse
+	10, // 43: avapigw.operator.v1alpha1.ConfigurationService.AcknowledgeConfiguration:output_type -> avapigw.operator.v1alpha1.AcknowledgeConfigurationResponse
+	39, // [39:44] is the sub-list for method output_type
+	34, // [34:39] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_operator_v1alpha1_config_proto_init() }

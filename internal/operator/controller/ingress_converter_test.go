@@ -808,7 +808,7 @@ func TestIngressBackendKey_WithService(t *testing.T) {
 	}
 
 	key := ingressBackendKey(ingress, backend)
-	expected := "ingress-prod-my-ingress-my-svc-8080"
+	expected := "ingress::prod::my-ingress::my-svc::8080"
 	if key != expected {
 		t.Errorf("ingressBackendKey() = %q, want %q", key, expected)
 	}
@@ -824,7 +824,7 @@ func TestIngressBackendKey_NoService(t *testing.T) {
 	backend := networkingv1.IngressBackend{}
 
 	key := ingressBackendKey(ingress, backend)
-	expected := "ingress-prod-my-ingress-unknown"
+	expected := "ingress::prod::my-ingress::unknown"
 	if key != expected {
 		t.Errorf("ingressBackendKey() = %q, want %q", key, expected)
 	}
@@ -3303,7 +3303,7 @@ func TestIngressGRPCBackendKey_WithService(t *testing.T) {
 	}
 
 	key := ingressGRPCBackendKey(ingress, backend)
-	expected := "ingress-grpc-prod-grpc-ingress-grpc-svc-50051"
+	expected := "ingress-grpc::prod::grpc-ingress::grpc-svc::50051"
 	if key != expected {
 		t.Errorf("ingressGRPCBackendKey() = %q, want %q", key, expected)
 	}
@@ -3319,7 +3319,7 @@ func TestIngressGRPCBackendKey_NoService(t *testing.T) {
 	backend := networkingv1.IngressBackend{}
 
 	key := ingressGRPCBackendKey(ingress, backend)
-	expected := "ingress-grpc-prod-grpc-ingress-unknown"
+	expected := "ingress-grpc::prod::grpc-ingress::unknown"
 	if key != expected {
 		t.Errorf("ingressGRPCBackendKey() = %q, want %q", key, expected)
 	}

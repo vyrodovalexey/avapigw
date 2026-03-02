@@ -207,6 +207,7 @@ methods with curl and gRPC examples.
   │   ├── security.go      # Security/Auth/Audit config types
   │   └── duration.go      # Duration type
   ├── grpc/          # gRPC server and handlers
+  ├── httputil/      # Shared HTTP utilities (hop-by-hop headers, etc.)
   ├── middleware/    # HTTP middleware
   ├── observability/ # Metrics, tracing, logging
   ├── proxy/         # HTTP proxy logic
@@ -239,6 +240,7 @@ cmd/gateway/
 - Use shared error types like `util.ServerError` for consistent circuit breaker tracking
 - Use `util.StatusCapturingResponseWriter` for middleware that needs to inspect response status codes
 - Use `ValidateConfigWithWarnings()` to provide helpful warnings for deprecated settings
+- Use shared utilities from `internal/httputil` for common HTTP operations (e.g., hop-by-hop header handling)
 
 Example:
 ```go
@@ -465,6 +467,125 @@ func startWorker(ctx context.Context) {
     }()
 }
 ```
+
+## Testing Requirements
+
+### Test Coverage Standards
+
+- **Minimum Coverage**: 90% per package (current: 94.4% overall)
+- **Critical Paths**: 95% coverage for security and authentication code
+- **New Code**: All new features must include comprehensive tests
+- **Regression Tests**: Add tests for any bug fixes
+- **Package Requirements**: All packages must maintain ≥90% coverage
+
+### Running Tests
+
+```bash
+# Run all unit tests
+make test-unit
+
+# Run tests with coverage
+make test-coverage
+
+# Run specific package tests
+go test ./internal/auth/...
+
+# Run tests with race detection
+go test -race ./...
+
+# Run integration tests
+make test-integration
+
+# Run end-to-end tests
+make test-e2e
+```
+
+### Test Types
+
+1. **Unit Tests**: Test individual functions and methods in isolation
+2. **Integration Tests**: Test component interactions
+3. **End-to-End Tests**: Test complete workflows
+4. **Performance Tests**: Validate performance characteristics
+5. **Security Tests**: Test authentication, authorization, and security features
+
+### Writing Good Tests
+
+- **Test Naming**: Use descriptive test names that explain what is being tested
+- **Test Structure**: Follow Arrange-Act-Assert pattern
+- **Test Data**: Use table-driven tests for multiple scenarios
+- **Mocking**: Use interfaces and dependency injection for testability
+- **Error Cases**: Test both success and failure scenarios
+
+Example:
+```go
+func TestJWTValidation(t *testing.T) {
+    tests := []struct {
+        name        string
+        token       string
+        expectValid bool
+        expectError bool
+    }{
+        {
+            name:        "valid token",
+            token:       "valid.jwt.token",
+            expectValid: true,
+            expectError: false,
+        },
+        {
+            name:        "expired token",
+            token:       "expired.jwt.token",
+            expectValid: false,
+            expectError: true,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            // Arrange
+            validator := NewJWTValidator(config)
+            
+            // Act
+            valid, err := validator.Validate(tt.token)
+            
+            // Assert
+            assert.Equal(t, tt.expectValid, valid)
+            if tt.expectError {
+                assert.Error(t, err)
+            } else {
+                assert.NoError(t, err)
+            }
+        })
+    }
+}
+```
+
+## Pull Request Process
+
+### Before Submitting
+
+1. **Run Tests**: Ensure all tests pass locally
+   ```bash
+   make test-all
+   make lint
+   ```
+
+2. **Check Coverage**: Verify test coverage meets requirements
+   ```bash
+   make test-coverage
+   ```
+
+3. **Update Documentation**: Update relevant documentation
+4. **Add Tests**: Include tests for new functionality
+5. **Follow Conventions**: Ensure code follows project conventions
+
+### PR Requirements
+
+- [ ] All tests pass
+- [ ] Test coverage ≥90% for new code
+- [ ] Documentation updated
+- [ ] Commit messages follow conventional format
+- [ ] No breaking changes (or clearly documented)
+- [ ] Performance impact assessed
 
 ## Helm Chart Contributions
 

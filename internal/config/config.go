@@ -42,6 +42,18 @@ type GatewaySpec struct {
 	// X-Forwarded-For headers trusted for client IP extraction.
 	// When empty, only RemoteAddr is used (secure default).
 	TrustedProxies []string `yaml:"trustedProxies,omitempty" json:"trustedProxies,omitempty"`
+	// GraphQL configures GraphQL-specific settings such as body size limits and endpoint path.
+	GraphQL *GraphQLConfig `yaml:"graphql,omitempty" json:"graphql,omitempty"`
+}
+
+// GraphQLConfig contains GraphQL-specific gateway configuration.
+type GraphQLConfig struct {
+	// MaxBodySize is the maximum allowed GraphQL request body size in bytes.
+	// Default: 10MB (10 * 1024 * 1024).
+	MaxBodySize int64 `yaml:"maxBodySize,omitempty" json:"maxBodySize,omitempty"`
+	// Path is the endpoint path for GraphQL requests.
+	// Default: /graphql.
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults.

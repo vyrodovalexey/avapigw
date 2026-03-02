@@ -2,7 +2,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: APIRoute
 metadata:
   name: hello-world
-  namespace: default
+  namespace: avapigw-test
   labels:
     app: hello-app
     version: v1

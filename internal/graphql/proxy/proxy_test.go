@@ -263,7 +263,6 @@ func TestProxy_BuildTargetURL_RoundRobin(t *testing.T) {
 			{Address: "10.0.0.2", Port: 4001},
 			{Address: "10.0.0.3", Port: 4002},
 		},
-		current: 0,
 	}
 
 	// First call should use host 0
@@ -633,14 +632,14 @@ func TestCopyHeaders(t *testing.T) {
 			unexpectedKeys: []string{"Proxy-Authorization"},
 		},
 		{
-			name: "skips Te and Trailers",
+			name: "skips Te and Trailer",
 			srcHeaders: http.Header{
 				"Content-Type": {"application/json"},
 				"Te":           {"trailers"},
-				"Trailers":     {"Expires"},
+				"Trailer":      {"Expires"},
 			},
 			expectedKeys:   []string{"Content-Type"},
-			unexpectedKeys: []string{"Te", "Trailers"},
+			unexpectedKeys: []string{"Te", "Trailer"},
 		},
 	}
 
@@ -890,4 +889,46 @@ func TestWithOptions(t *testing.T) {
 	assert.Equal(t, int64(999), p.maxBodySize)
 	assert.Same(t, transport, p.transport)
 	assert.Same(t, metrics, p.metrics)
+}
+
+// ============================================================================
+// Concurrent Round-Robin Atomicity Tests
+// ============================================================================
+
+func TestProxy_BuildTargetURL_ConcurrentRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	p := New()
+	target := &backendTarget{
+		name: "test",
+		hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 4000},
+			{Address: "10.0.0.2", Port: 4001},
+			{Address: "10.0.0.3", Port: 4002},
+		},
+	}
+
+	const numGoroutines = 150
+	results := make(chan string, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			u := p.buildTargetURL(target)
+			results <- u.Host
+		}()
+	}
+
+	hostCounts := make(map[string]int)
+	for i := 0; i < numGoroutines; i++ {
+		host := <-results
+		hostCounts[host]++
+	}
+
+	// All 3 hosts should be used
+	assert.Len(t, hostCounts, 3, "all 3 hosts should be used in round-robin")
+
+	// Each host should be used exactly 50 times (150/3)
+	for host, count := range hostCounts {
+		assert.Equal(t, 50, count, "host %s should be used exactly 50 times, got %d", host, count)
+	}
 }

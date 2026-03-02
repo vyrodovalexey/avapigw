@@ -425,41 +425,53 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // Stop stops the gRPC server with graceful shutdown timeout.
+// It delegates to StopWithContext using a timeout derived from the server configuration.
 func (s *Server) Stop() {
+	timeout := s.config.GracefulShutdownTimeout
+	if timeout == 0 {
+		timeout = DefaultGracefulShutdownTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_ = s.StopWithContext(ctx)
+}
+
+// StopWithContext stops the gRPC server with context-based cancellation.
+// It attempts a graceful shutdown and falls back to a forced stop if the
+// context is canceled or its deadline is exceeded.
+func (s *Server) StopWithContext(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.closed {
-		return
+		return nil
 	}
 	s.closed = true
 
-	if s.grpcServer != nil {
-		timeout := s.config.GracefulShutdownTimeout
-		if timeout == 0 {
-			timeout = DefaultGracefulShutdownTimeout
-		}
-
-		// Use a channel to signal graceful shutdown completion
-		done := make(chan struct{})
-		go func() {
-			s.grpcServer.GracefulStop()
-			close(done)
-		}()
-
-		// Wait for graceful shutdown or timeout
-		select {
-		case <-done:
-			s.logger.Info("gRPC server gracefully stopped")
-		case <-time.After(timeout):
-			s.logger.Warn("graceful shutdown timeout exceeded, forcing stop",
-				observability.Duration("timeout", timeout),
-			)
-			s.grpcServer.Stop() // Force stop
-		}
+	if s.grpcServer == nil {
+		s.logger.Info("gRPC server stopped")
+		return nil
 	}
 
-	s.logger.Info("gRPC server stopped")
+	// Use a channel to signal graceful shutdown completion
+	done := make(chan struct{})
+	go func() {
+		s.grpcServer.GracefulStop()
+		close(done)
+	}()
+
+	// Wait for graceful shutdown or context cancellation
+	select {
+	case <-done:
+		s.logger.Info("gRPC server gracefully stopped")
+		return nil
+	case <-ctx.Done():
+		s.logger.Warn("shutdown canceled, forcing stop",
+			observability.Error(ctx.Err()),
+		)
+		s.grpcServer.Stop() // Force stop
+		return ctx.Err()
+	}
 }
 
 // ApplyAPIRoute applies an API route configuration.

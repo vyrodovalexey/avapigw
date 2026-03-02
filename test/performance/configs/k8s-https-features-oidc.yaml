@@ -1,0 +1,38 @@
+# Yandex Tank: K8s HTTPS OIDC Auth (3 minutes)
+# Purpose: HTTPS with JWT/OIDC authentication via Keycloak
+# Note: ammo file must be generated with JWT token before running
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:30205
+  load_profile:
+    load_type: rps
+    schedule: line(5, 200, 30s) const(200, 2m) line(200, 5, 30s)
+  ammofile: /var/loadtest/ammo/k8s-https-oidc.txt
+  ammo_type: uri
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 15s
+  instances: 200
+  threads: 4
+  header_http: "1.1"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    - http(5xx,15%,15s)
+    - http(401,10%,15s)
+    - http(403,10%,15s)
+    - time(5000,50%,15s)
+    - http(net,10%,15s)

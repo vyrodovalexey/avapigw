@@ -117,7 +117,7 @@ func TestFunctional_IngressConverter_BasicIngress(t *testing.T) {
 	assert.Equal(t, 100, route.Route[0].Weight)
 
 	// Verify backend
-	expectedBackendKey := "ingress-avapigw-test-basic-ingress-backend-svc-8080"
+	expectedBackendKey := "ingress::avapigw-test::basic-ingress::backend-svc::8080"
 	backendJSON, ok := result.Backends[expectedBackendKey]
 	require.True(t, ok, "expected backend key %q", expectedBackendKey)
 
@@ -716,7 +716,7 @@ func TestFunctional_IngressConverter_GRPCBasicIngress(t *testing.T) {
 	assert.Equal(t, 100, route.Route[0].Weight)
 
 	// Verify gRPC backend
-	expectedBackendKey := "ingress-grpc-avapigw-test-basic-grpc-ingress-grpc-backend-50051"
+	expectedBackendKey := "ingress-grpc::avapigw-test::basic-grpc-ingress::grpc-backend::50051"
 	backendJSON, ok := result.GRPCBackends[expectedBackendKey]
 	require.True(t, ok, "expected gRPC backend key %q", expectedBackendKey)
 

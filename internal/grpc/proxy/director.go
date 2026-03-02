@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -167,8 +169,12 @@ func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context
 		dest.Destination.Host, selectionStrategy,
 	)
 
-	// Get connection from pool
-	conn, err := d.connPool.Get(ctx, target)
+	// Get connection from pool — use per-backend TLS if available (Feature 3)
+	var backendTLS *tls.Config
+	if serviceBackend != nil {
+		backendTLS = serviceBackend.TLSConfig()
+	}
+	conn, err := d.connPool.GetWithTLS(ctx, target, backendTLS)
 	if err != nil {
 		d.logger.Error("failed to get connection",
 			observability.String("target", target),
@@ -183,8 +189,24 @@ func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context
 		return ctx, nil, fmt.Errorf("failed to connect to %s: %w", target, err)
 	}
 
-	// Create outgoing context with metadata
-	outCtx := d.createOutgoingContext(ctx, md, result.Route.Name)
+	// Create outgoing context with metadata and apply request transforms
+	outCtx := d.createOutgoingContext(ctx, md, result.Route.Name, &result.Route.Config)
+
+	// Inject backend auth token if the backend has an auth provider (Feature 4)
+	if serviceBackend != nil {
+		var authErr error
+		outCtx, authErr = d.injectBackendAuth(outCtx, serviceBackend, result.Route.Name)
+		if authErr != nil {
+			d.logger.Error("failed to inject backend auth",
+				observability.String("route", result.Route.Name),
+				observability.String("target", target),
+				observability.Error(authErr),
+			)
+			metrics.directRequests.WithLabelValues(fullMethod, "backend_auth_error").Inc()
+			metrics.directDuration.WithLabelValues(fullMethod).Observe(time.Since(start).Seconds())
+			return ctx, nil, status.Errorf(codes.Internal, "backend auth injection failed: %v", authErr)
+		}
+	}
 
 	metrics.directRequests.WithLabelValues(fullMethod, "success").Inc()
 	metrics.directDuration.WithLabelValues(fullMethod).Observe(time.Since(start).Seconds())
@@ -363,8 +385,9 @@ func (d *RouterDirector) selectDestination(destinations []config.RouteDestinatio
 }
 
 // createOutgoingContext creates the outgoing context with forwarded metadata.
+// When routeCfg is provided, request metadata transforms are applied.
 func (d *RouterDirector) createOutgoingContext(
-	ctx context.Context, inMD metadata.MD, routeName string,
+	ctx context.Context, inMD metadata.MD, routeName string, routeCfg *config.GRPCRoute,
 ) context.Context {
 	// Copy incoming metadata to outgoing
 	outMD := metadata.MD{}
@@ -378,7 +401,110 @@ func (d *RouterDirector) createOutgoingContext(
 	// Add gateway-specific headers
 	outMD.Set("x-gateway-route", routeName)
 
+	// Apply request metadata transforms from route config (Feature 2)
+	if routeCfg != nil && routeCfg.Transform != nil && routeCfg.Transform.Request != nil {
+		outMD = d.applyRequestMetadataTransforms(outMD, routeCfg.Transform.Request, routeName)
+
+		// Apply authority override
+		if routeCfg.Transform.Request.AuthorityOverride != "" {
+			outMD.Set(":authority", routeCfg.Transform.Request.AuthorityOverride)
+			d.logger.Debug("applied authority override",
+				observability.String("route", routeName),
+				observability.String("authority", routeCfg.Transform.Request.AuthorityOverride),
+			)
+		}
+	}
+
 	return metadata.NewOutgoingContext(ctx, outMD)
+}
+
+// applyRequestMetadataTransforms applies request metadata transforms from the route config.
+// It adds static metadata and removes specified metadata keys.
+func (d *RouterDirector) applyRequestMetadataTransforms(
+	outMD metadata.MD, reqCfg *config.GRPCRequestTransformConfig, routeName string,
+) metadata.MD {
+	metrics := getGRPCProxyMetrics()
+	transformCount := 0
+
+	// Add static metadata
+	if len(reqCfg.StaticMetadata) > 0 {
+		for k, v := range reqCfg.StaticMetadata {
+			outMD.Set(k, v)
+		}
+		transformCount += len(reqCfg.StaticMetadata)
+		d.logger.Debug("applied static metadata transforms",
+			observability.String("route", routeName),
+			observability.Int("count", len(reqCfg.StaticMetadata)),
+		)
+	}
+
+	// Remove specified metadata keys
+	if len(reqCfg.RemoveFields) > 0 {
+		for _, key := range reqCfg.RemoveFields {
+			delete(outMD, key)
+		}
+		transformCount += len(reqCfg.RemoveFields)
+		d.logger.Debug("removed metadata keys",
+			observability.String("route", routeName),
+			observability.Int("count", len(reqCfg.RemoveFields)),
+		)
+	}
+
+	if transformCount > 0 {
+		metrics.transformOperations.WithLabelValues(
+			routeName, "request", "metadata",
+		).Inc()
+	}
+
+	return outMD
+}
+
+// injectBackendAuth injects backend authentication tokens into the outgoing context.
+// It uses the backend's auth provider to get credentials and merges them into
+// the outgoing gRPC metadata. This reuses the existing ApplyHTTP mechanism
+// which handles token caching, refresh, etc.
+func (d *RouterDirector) injectBackendAuth(
+	ctx context.Context, sb *backend.ServiceBackend, routeName string,
+) (context.Context, error) {
+	provider := sb.AuthProvider()
+	if provider == nil || provider.Type() == "none" {
+		return ctx, nil
+	}
+
+	metrics := getGRPCProxyMetrics()
+
+	// Use ApplyHTTP to get the auth header, then inject as gRPC metadata.
+	// This reuses the existing token caching and refresh logic.
+	fakeReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://backend-auth", nil)
+	if err != nil {
+		metrics.backendAuthFailure.WithLabelValues(routeName, provider.Type()).Inc()
+		return ctx, fmt.Errorf("failed to create auth request: %w", err)
+	}
+
+	if applyErr := provider.ApplyHTTP(ctx, fakeReq); applyErr != nil {
+		metrics.backendAuthFailure.WithLabelValues(routeName, provider.Type()).Inc()
+		return ctx, fmt.Errorf("backend auth failed: %w", applyErr)
+	}
+
+	// Extract auth header and inject as gRPC metadata
+	authHeader := fakeReq.Header.Get("Authorization")
+	if authHeader == "" {
+		// No auth header produced — provider may be a no-op type
+		return ctx, nil
+	}
+
+	md, _ := metadata.FromOutgoingContext(ctx)
+	md = md.Copy()
+	md.Set("authorization", authHeader)
+
+	metrics.backendAuthSuccess.WithLabelValues(routeName, provider.Type()).Inc()
+
+	d.logger.Debug("injected backend auth token",
+		observability.String("route", routeName),
+		observability.String("auth_type", provider.Type()),
+	)
+
+	return metadata.NewOutgoingContext(ctx, md), nil
 }
 
 // shouldForwardMetadata returns true if the metadata key should be forwarded.

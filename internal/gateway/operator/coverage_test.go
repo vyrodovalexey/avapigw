@@ -109,7 +109,7 @@ func TestConfigHandler_handleDelete_GRPCRoute(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify state
-	_, _, grpcRoutes, _ := handler.GetCurrentState()
+	_, _, grpcRoutes, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcRoutes, 0)
 }
 
@@ -147,7 +147,7 @@ func TestConfigHandler_handleDelete_GRPCBackend(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify state
-	_, _, _, grpcBackends := handler.GetCurrentState()
+	_, _, _, grpcBackends, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcBackends, 0)
 }
 
@@ -745,7 +745,7 @@ func TestConfigHandler_HandleSnapshot_InvalidBackendJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	// State should be empty since the backend was invalid
-	_, backends, _, _ := handler.GetCurrentState()
+	_, backends, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, backends, 0)
 }
 
@@ -773,7 +773,7 @@ func TestConfigHandler_HandleSnapshot_InvalidGRPCRouteJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	// State should be empty since the gRPC route was invalid
-	_, _, grpcRoutes, _ := handler.GetCurrentState()
+	_, _, grpcRoutes, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcRoutes, 0)
 }
 
@@ -801,7 +801,7 @@ func TestConfigHandler_HandleSnapshot_InvalidGRPCBackendJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	// State should be empty since the gRPC backend was invalid
-	_, _, _, grpcBackends := handler.GetCurrentState()
+	_, _, _, grpcBackends, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcBackends, 0)
 }
 

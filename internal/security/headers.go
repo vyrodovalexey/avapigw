@@ -1,7 +1,9 @@
 package security
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 
@@ -324,6 +326,21 @@ func (w *headerRemovingResponseWriter) Write(b []byte) (int, error) {
 // Unwrap returns the underlying ResponseWriter.
 func (w *headerRemovingResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// Hijack implements http.Hijacker to support WebSocket upgrades.
+func (w *headerRemovingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
+}
+
+// Flush implements http.Flusher to support streaming responses.
+func (w *headerRemovingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // SecurityHeadersFromConfig creates security headers middleware from SecurityConfig.

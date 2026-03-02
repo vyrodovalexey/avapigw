@@ -89,7 +89,6 @@ func TestSubscriptionProxy_BuildWebSocketURL(t *testing.T) {
 			{Address: "10.0.0.1", Port: 4000},
 			{Address: "10.0.0.2", Port: 4001},
 		},
-		current: 0,
 	}
 
 	// First call should use host 0
@@ -432,6 +431,186 @@ func TestSubscriptionConn_Fields(t *testing.T) {
 
 	assert.Equal(t, "test-backend", conn.backendName)
 	assert.Equal(t, now, conn.createdAt)
+}
+
+// ============================================================================
+// WithAllowedOrigins Tests
+// ============================================================================
+
+func TestWithAllowedOrigins_SetsOrigins(t *testing.T) {
+	t.Parallel()
+
+	p := New(WithLogger(observability.NopLogger()))
+	origins := []string{"https://example.com", "https://app.example.com"}
+	sp := NewSubscriptionProxy(p, WithAllowedOrigins(origins))
+
+	assert.Equal(t, origins, sp.allowedOrigins)
+}
+
+func TestWithAllowedOrigins_CheckOrigin_AllowedOrigin(t *testing.T) {
+	t.Parallel()
+
+	p := New(WithLogger(observability.NopLogger()))
+	sp := NewSubscriptionProxy(p, WithAllowedOrigins([]string{"https://example.com", "https://app.example.com"}))
+
+	req := httptest.NewRequest(http.MethodGet, "/graphql", nil)
+	req.Header.Set("Origin", "https://example.com")
+
+	result := sp.upgrader.CheckOrigin(req)
+	assert.True(t, result, "allowed origin should return true")
+}
+
+func TestWithAllowedOrigins_CheckOrigin_DisallowedOrigin(t *testing.T) {
+	t.Parallel()
+
+	p := New(WithLogger(observability.NopLogger()))
+	sp := NewSubscriptionProxy(p, WithAllowedOrigins([]string{"https://example.com"}))
+
+	req := httptest.NewRequest(http.MethodGet, "/graphql", nil)
+	req.Header.Set("Origin", "https://evil.com")
+
+	result := sp.upgrader.CheckOrigin(req)
+	assert.False(t, result, "disallowed origin should return false")
+}
+
+func TestWithAllowedOrigins_CheckOrigin_Wildcard(t *testing.T) {
+	t.Parallel()
+
+	p := New(WithLogger(observability.NopLogger()))
+	sp := NewSubscriptionProxy(p, WithAllowedOrigins([]string{"*"}))
+
+	req := httptest.NewRequest(http.MethodGet, "/graphql", nil)
+	req.Header.Set("Origin", "https://any-origin.com")
+
+	result := sp.upgrader.CheckOrigin(req)
+	assert.True(t, result, "wildcard should allow any origin")
+}
+
+func TestWithAllowedOrigins_CheckOrigin_EmptyAllowedOrigins(t *testing.T) {
+	t.Parallel()
+
+	p := New(WithLogger(observability.NopLogger()))
+	sp := NewSubscriptionProxy(p) // No WithAllowedOrigins - empty by default
+
+	req := httptest.NewRequest(http.MethodGet, "/graphql", nil)
+	req.Header.Set("Origin", "https://any-origin.com")
+
+	result := sp.upgrader.CheckOrigin(req)
+	assert.True(t, result, "empty allowedOrigins should allow all origins (backward compat)")
+}
+
+func TestWithAllowedOrigins_CheckOrigin_EmptySlice(t *testing.T) {
+	t.Parallel()
+
+	p := New(WithLogger(observability.NopLogger()))
+	sp := NewSubscriptionProxy(p, WithAllowedOrigins([]string{}))
+
+	req := httptest.NewRequest(http.MethodGet, "/graphql", nil)
+	req.Header.Set("Origin", "https://any-origin.com")
+
+	result := sp.upgrader.CheckOrigin(req)
+	assert.True(t, result, "empty slice should allow all origins (backward compat)")
+}
+
+func TestWithAllowedOrigins_CheckOrigin_MultipleOrigins(t *testing.T) {
+	t.Parallel()
+
+	p := New(WithLogger(observability.NopLogger()))
+	origins := []string{"https://a.com", "https://b.com", "https://c.com"}
+	sp := NewSubscriptionProxy(p, WithAllowedOrigins(origins))
+
+	tests := []struct {
+		name     string
+		origin   string
+		expected bool
+	}{
+		{name: "first origin", origin: "https://a.com", expected: true},
+		{name: "second origin", origin: "https://b.com", expected: true},
+		{name: "third origin", origin: "https://c.com", expected: true},
+		{name: "unlisted origin", origin: "https://d.com", expected: false},
+		{name: "empty origin", origin: "", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/graphql", nil)
+			req.Header.Set("Origin", tt.origin)
+			result := sp.upgrader.CheckOrigin(req)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// ============================================================================
+// Concurrent Connection ID Uniqueness Tests
+// ============================================================================
+
+func TestConnectionCounter_ConcurrentUniqueness(t *testing.T) {
+	t.Parallel()
+
+	const numGoroutines = 200
+	results := make(chan int64, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			id := connectionCounter.Add(1)
+			results <- id
+		}()
+	}
+
+	seen := make(map[int64]bool, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		id := <-results
+		assert.False(t, seen[id], "duplicate connection ID: %d", id)
+		seen[id] = true
+	}
+
+	assert.Len(t, seen, numGoroutines, "expected %d unique IDs", numGoroutines)
+}
+
+// ============================================================================
+// Concurrent WebSocket URL Round-Robin Tests
+// ============================================================================
+
+func TestSubscriptionProxy_BuildWebSocketURL_ConcurrentRoundRobin(t *testing.T) {
+	t.Parallel()
+
+	p := New()
+	sp := NewSubscriptionProxy(p)
+
+	target := &backendTarget{
+		name: "test",
+		hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 4000},
+			{Address: "10.0.0.2", Port: 4001},
+			{Address: "10.0.0.3", Port: 4002},
+		},
+	}
+
+	const numGoroutines = 150
+	results := make(chan string, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			u := sp.buildWebSocketURL(target)
+			results <- u.Host
+		}()
+	}
+
+	hostCounts := make(map[string]int)
+	for i := 0; i < numGoroutines; i++ {
+		host := <-results
+		hostCounts[host]++
+	}
+
+	// All 3 hosts should be used
+	assert.Len(t, hostCounts, 3, "all 3 hosts should be used")
+
+	// Each host should be used roughly equally (150/3 = 50 each)
+	for host, count := range hostCounts {
+		assert.Greater(t, count, 0, "host %s should be used at least once", host)
+	}
 }
 
 // fakeResponseWriter is a minimal http.ResponseWriter for testing.

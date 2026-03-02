@@ -31,10 +31,13 @@ message StreamResponse {
 }
 
 message BidirectionalRequest {
-  string message = 1;
+  int64 value = 1;
+  string operation = 2;
 }
 
 message BidirectionalResponse {
-  string message = 1;
-  int64 timestamp = 2;
+  int64 original_value = 1;
+  int64 transformed_value = 2;
+  string operation = 3;
+  int64 timestamp = 4;
 }

@@ -6,12 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -59,6 +57,16 @@ var (
 const defaultWebhookConfigName = "avapigw-operator-validating-webhook-configuration"
 
 var setupTracingFunc = defaultSetupTracing
+
+// setupSignalHandlerFunc is the function used to create the signal-handling context.
+// It defaults to ctrl.SetupSignalHandler and can be overridden in tests to avoid
+// the panic that occurs when ctrl.SetupSignalHandler is called more than once.
+var setupSignalHandlerFunc = defaultSetupSignalHandler
+
+// defaultSetupSignalHandler delegates to controller-runtime's signal handler.
+func defaultSetupSignalHandler() context.Context {
+	return ctrl.SetupSignalHandler()
+}
 
 var (
 	scheme   = runtime.NewScheme()
@@ -245,12 +253,9 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	logger := setupLogger(cfg.LogLevel, cfg.LogFormat)
 	ctrl.SetLogger(logger)
 
-	// Create context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle shutdown signals
-	setupSignalHandler(cancel)
+	// Use controller-runtime's signal handler as the base context.
+	// It handles SIGINT/SIGTERM and cancels the context on the first signal.
+	ctx := setupSignalHandlerFunc()
 
 	// Setup tracing if enabled
 	tracerShutdown, err := setupTracingIfEnabled(cfg)
@@ -774,23 +779,6 @@ func setupLogger(level, format string) logr.Logger {
 		})),
 	}
 	return ctrlzap.New(opts...)
-}
-
-func setupSignalHandler(cancel context.CancelFunc) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		sig := <-sigCh
-		setupLog.Info("received signal, shutting down", "signal", sig.String())
-		cancel()
-
-		// Wait for a second signal to force shutdown; context cancellation
-		// drives graceful shutdown so no fixed sleep is needed.
-		sig = <-sigCh
-		setupLog.Info("received second signal, forcing shutdown", "signal", sig.String())
-		os.Exit(1)
-	}()
 }
 
 // defaultSetupTracing is the default implementation of setupTracingFunc.

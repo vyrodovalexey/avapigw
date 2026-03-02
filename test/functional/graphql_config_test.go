@@ -716,9 +716,17 @@ func TestFunctional_GraphQLConfig_RouteIntersectionValidation(t *testing.T) {
 			},
 		}
 
+		// Root catch-all REST routes produce a warning, not an error,
+		// because gin's NoRoute handler has lower priority than explicitly
+		// registered routes like the GraphQL handler.
 		err := config.ValidateConfig(cfg)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "overlapping")
+		require.NoError(t, err)
+
+		// Verify the warning is emitted
+		warnings, err := config.ValidateConfigWithWarnings(cfg)
+		require.NoError(t, err)
+		require.NotEmpty(t, warnings)
+		assert.Contains(t, warnings[0].Message, "overlapping")
 	})
 
 	t.Run("catch-all GraphQL route conflicts with any REST route", func(t *testing.T) {

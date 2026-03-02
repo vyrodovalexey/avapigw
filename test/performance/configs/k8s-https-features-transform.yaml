@@ -1,0 +1,35 @@
+# Yandex Tank: K8s HTTPS Transform (3 minutes)
+# Purpose: HTTPS with request/response header transforms and response field filtering
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:30205
+  load_profile:
+    load_type: rps
+    schedule: line(10, 300, 30s) const(300, 2m) line(300, 10, 30s)
+  ammofile: /var/loadtest/ammo/k8s-https-transform.txt
+  ammo_type: uri
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 15s
+  instances: 200
+  threads: 4
+  header_http: "1.1"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    - http(5xx,15%,15s)
+    - time(5000,50%,15s)
+    - http(net,10%,15s)

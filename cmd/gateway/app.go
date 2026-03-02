@@ -19,6 +19,9 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/encoding"
 	"github.com/vyrodovalexey/avapigw/internal/gateway"
+	graphqlmetrics "github.com/vyrodovalexey/avapigw/internal/graphql/metrics"
+	graphqlproxy "github.com/vyrodovalexey/avapigw/internal/graphql/proxy"
+	graphqlrouter "github.com/vyrodovalexey/avapigw/internal/graphql/router"
 	"github.com/vyrodovalexey/avapigw/internal/health"
 	backendmetricspkg "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
 	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
@@ -53,6 +56,8 @@ type application struct {
 	authMetrics         *auth.Metrics
 	cacheFactory        *gateway.CacheFactory
 	routeMiddlewareMgr  *gateway.RouteMiddlewareManager
+	graphqlRouter       *graphqlrouter.Router
+	graphqlProxy        *graphqlproxy.Proxy
 }
 
 // initApplication initializes all application components.
@@ -101,6 +106,8 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	if grpcBackendRegistry == nil {
 		return nil
 	}
+
+	gqlRouter, gqlProxy := initGraphQLComponents(cfg, logger)
 
 	r := router.New()
 	if err := r.LoadRoutes(cfg.Spec.Routes); err != nil {
@@ -172,6 +179,12 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	if grpcBackendRegistry != nil {
 		gwOpts = append(gwOpts, gateway.WithGatewayGRPCBackendRegistry(grpcBackendRegistry))
 	}
+	if gqlRouter != nil {
+		gwOpts = append(gwOpts, gateway.WithGraphQLRouter(gqlRouter))
+	}
+	if gqlProxy != nil {
+		gwOpts = append(gwOpts, gateway.WithGraphQLProxy(gqlProxy))
+	}
 
 	gw, err := gateway.New(cfg, gwOpts...)
 	if err != nil {
@@ -197,6 +210,8 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		authMetrics:         authMetrics,
 		cacheFactory:        cacheFactory,
 		routeMiddlewareMgr:  routeMiddlewareMgr,
+		graphqlRouter:       gqlRouter,
+		graphqlProxy:        gqlProxy,
 	}
 }
 
@@ -324,16 +339,50 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 	gsm.MustRegister(registry)
 	gsm.Init()
 
+	// GraphQL metrics singleton. Register with the gateway's custom
+	// registry so GraphQL metrics (requests, errors, depth, complexity,
+	// subscriptions) appear on the /metrics endpoint.
+	graphqlmetrics.InitMetrics(registry)
+	graphqlmetrics.InitVecMetrics()
+
 	subsystems := []string{
 		"cache", "encoding", "transform", "vault", "backend_auth",
 		"middleware", "security", "health", "router",
 		"apikey", "jwt", "oidc", "mtls",
 		"rbac", "abac", "external_authz",
-		"route", "backend", "ws_streaming", "grpc_streaming",
+		"route", "backend", "ws_streaming", "grpc_streaming", "graphql",
 	}
 	logger.Info("subsystem metrics registered with gateway registry",
 		observability.Int("subsystem_count", len(subsystems)),
 	)
+}
+
+// initGraphQLComponents creates and initializes the GraphQL router and proxy.
+// The router matches incoming GraphQL requests to configured routes, and the
+// proxy forwards matched requests to the appropriate backend.
+func initGraphQLComponents(
+	cfg *config.GatewayConfig,
+	logger observability.Logger,
+) (*graphqlrouter.Router, *graphqlproxy.Proxy) {
+	gqlRouter := graphqlrouter.New(
+		graphqlrouter.WithRouterLogger(logger),
+	)
+	if err := gqlRouter.LoadRoutes(cfg.Spec.GraphQLRoutes); err != nil {
+		fatalWithSync(logger, "failed to load GraphQL routes", observability.Error(err))
+		return nil, nil
+	}
+
+	gqlProxy := graphqlproxy.New(
+		graphqlproxy.WithLogger(logger),
+	)
+	gqlProxy.UpdateBackends(cfg.Spec.GraphQLBackends)
+
+	logger.Info("GraphQL components initialized",
+		observability.Int("routes", len(cfg.Spec.GraphQLRoutes)),
+		observability.Int("backends", len(cfg.Spec.GraphQLBackends)),
+	)
+
+	return gqlRouter, gqlProxy
 }
 
 // initBackendRegistry creates and loads the HTTP backend registry.

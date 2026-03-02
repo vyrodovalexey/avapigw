@@ -1997,31 +1997,6 @@ func TestStartGRPCServerBackground_NilServerSafe(t *testing.T) {
 }
 
 // ============================================================================
-// setupSignalHandler Tests
-// ============================================================================
-
-func TestSetupSignalHandler_CancelFunction(t *testing.T) {
-	_, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Create a flag to track if cancel was called
-	cancelCalled := false
-	testCancel := func() {
-		cancelCalled = true
-		cancel()
-	}
-
-	// Setup signal handler
-	setupSignalHandler(testCancel)
-
-	// We can't easily test signal handling in unit tests,
-	// but we can verify the function doesn't panic
-	if cancelCalled {
-		t.Error("Cancel should not be called immediately")
-	}
-}
-
-// ============================================================================
 // setupTracing Tests
 // ============================================================================
 

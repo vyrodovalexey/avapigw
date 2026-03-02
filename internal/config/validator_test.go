@@ -2517,3 +2517,113 @@ func TestValidator_RouteGraphQLIntersection_ExactOverlap(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "overlapping paths")
 }
+
+func TestValidator_RouteGraphQLIntersection_RootCatchAllWarning(t *testing.T) {
+	t.Parallel()
+
+	cfg := &GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   Metadata{Name: "test"},
+		Spec: GatewaySpec{
+			Listeners: []Listener{
+				{Name: "http", Port: 8080, Protocol: "HTTP"},
+			},
+			Routes: []Route{
+				{
+					Name: "catch-all",
+					Match: []RouteMatch{
+						{
+							URI: &URIMatch{Prefix: "/"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+			GraphQLRoutes: []GraphQLRoute{
+				{
+					Name: "graphql-route",
+					Match: []GraphQLRouteMatch{
+						{
+							Path: &StringMatch{Exact: "/graphql"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "graphql-backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Should NOT return an error - root catch-all overlap is a warning, not an error
+	err := ValidateConfig(cfg)
+	assert.NoError(t, err)
+
+	// Should return warnings about the overlap
+	warnings, err := ValidateConfigWithWarnings(cfg)
+	assert.NoError(t, err)
+	require.NotEmpty(t, warnings)
+	assert.Contains(t, warnings[0].Message, "overlapping paths")
+}
+
+func TestValidator_RouteGraphQLIntersection_EmptyMatchCatchAllWarning(t *testing.T) {
+	t.Parallel()
+
+	cfg := &GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   Metadata{Name: "test"},
+		Spec: GatewaySpec{
+			Listeners: []Listener{
+				{Name: "http", Port: 8080, Protocol: "HTTP"},
+			},
+			Routes: []Route{
+				{
+					Name:  "catch-all",
+					Match: []RouteMatch{},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+			GraphQLRoutes: []GraphQLRoute{
+				{
+					Name: "graphql-route",
+					Match: []GraphQLRouteMatch{
+						{
+							Path: &StringMatch{Exact: "/graphql"},
+						},
+					},
+					Route: []RouteDestination{
+						{
+							Destination: Destination{Host: "graphql-backend", Port: 8080},
+							Weight:      100,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Should NOT return an error - empty match catch-all overlap is a warning
+	err := ValidateConfig(cfg)
+	assert.NoError(t, err)
+
+	// Should return warnings about the overlap
+	warnings, err := ValidateConfigWithWarnings(cfg)
+	assert.NoError(t, err)
+	require.NotEmpty(t, warnings)
+	assert.Contains(t, warnings[0].Message, "overlapping paths")
+}
