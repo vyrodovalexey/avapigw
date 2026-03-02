@@ -466,7 +466,7 @@ func (s *Server) StopWithContext(ctx context.Context) error {
 		s.logger.Info("gRPC server gracefully stopped")
 		return nil
 	case <-ctx.Done():
-		s.logger.Warn("shutdown cancelled, forcing stop",
+		s.logger.Warn("shutdown canceled, forcing stop",
 			observability.Error(ctx.Err()),
 		)
 		s.grpcServer.Stop() // Force stop

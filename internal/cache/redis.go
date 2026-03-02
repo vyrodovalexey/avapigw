@@ -725,9 +725,19 @@ func (c *redisCache) SetNX(ctx context.Context, key string, value []byte, ttl ti
 	var result bool
 
 	err := retry.Do(ctx, redisRetryConfig(), func() error {
-		var setErr error
-		result, setErr = c.client.SetNX(ctx, fullKey, value, ttl).Result()
-		return setErr
+		setErr := c.client.SetArgs(ctx, fullKey, value, redis.SetArgs{
+			Mode: "NX",
+			TTL:  ttl,
+		}).Err()
+		if errors.Is(setErr, redis.Nil) {
+			result = false
+			return nil
+		}
+		if setErr != nil {
+			return setErr
+		}
+		result = true
+		return nil
 	}, &retry.Options{
 		ShouldRetry: isRetryableRedisError,
 		OnRetry: func(attempt int, err error, backoff time.Duration) {

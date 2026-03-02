@@ -6,29 +6,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"google.golang.org/grpc"
 )
+
+// newIsolatedTestServer creates an isolated Server instance using NewServerWithRegistry
+// with a fresh Prometheus registry. This avoids shared singleton metrics state across
+// tests and ensures all fields (including retryConfig) are properly initialized.
+func newIsolatedTestServer(t *testing.T) *Server {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	s, err := NewServerWithRegistry(&ServerConfig{}, reg)
+	require.NoError(t, err)
+	return s
+}
 
 // ============================================================================
 // StopWithContext Tests - Forced Stop Path
 // ============================================================================
 
 func TestServer_StopWithContext_AlreadyClosed(t *testing.T) {
-	server := getTestServer(t)
-
-	// Mark as closed
-	server.mu.Lock()
-	originalClosed := server.closed
+	server := newIsolatedTestServer(t)
 	server.closed = true
-	server.mu.Unlock()
-
-	defer func() {
-		server.mu.Lock()
-		server.closed = originalClosed
-		server.mu.Unlock()
-	}()
 
 	ctx := context.Background()
 	err := server.StopWithContext(ctx)
@@ -36,22 +38,8 @@ func TestServer_StopWithContext_AlreadyClosed(t *testing.T) {
 }
 
 func TestServer_StopWithContext_NilGRPCServer(t *testing.T) {
-	server := getTestServer(t)
-
-	// Reset state
-	server.mu.Lock()
-	originalClosed := server.closed
-	originalGRPC := server.grpcServer
-	server.closed = false
+	server := newIsolatedTestServer(t)
 	server.grpcServer = nil
-	server.mu.Unlock()
-
-	defer func() {
-		server.mu.Lock()
-		server.closed = originalClosed
-		server.grpcServer = originalGRPC
-		server.mu.Unlock()
-	}()
 
 	ctx := context.Background()
 	err := server.StopWithContext(ctx)
@@ -65,26 +53,8 @@ func TestServer_StopWithContext_NilGRPCServer(t *testing.T) {
 }
 
 func TestServer_StopWithContext_ExpiredContext_ForcedStop(t *testing.T) {
-	server := getTestServer(t)
-
-	// Create a real gRPC server that hasn't started serving
-	// (GracefulStop will block until Serve is called, so the context will expire)
-	grpcSrv := grpc.NewServer()
-
-	// Reset state
-	server.mu.Lock()
-	originalClosed := server.closed
-	originalGRPC := server.grpcServer
-	server.closed = false
-	server.grpcServer = grpcSrv
-	server.mu.Unlock()
-
-	defer func() {
-		server.mu.Lock()
-		server.closed = originalClosed
-		server.grpcServer = originalGRPC
-		server.mu.Unlock()
-	}()
+	server := newIsolatedTestServer(t)
+	server.grpcServer = grpc.NewServer()
 
 	// Use an already-expired context to force the stop path
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
@@ -103,22 +73,8 @@ func TestServer_StopWithContext_ExpiredContext_ForcedStop(t *testing.T) {
 }
 
 func TestServer_StopWithContext_GracefulShutdown(t *testing.T) {
-	server := getTestServer(t)
-
-	// Reset state
-	server.mu.Lock()
-	originalClosed := server.closed
-	originalGRPC := server.grpcServer
-	server.closed = false
+	server := newIsolatedTestServer(t)
 	server.grpcServer = nil // nil grpcServer takes the early return path
-	server.mu.Unlock()
-
-	defer func() {
-		server.mu.Lock()
-		server.closed = originalClosed
-		server.grpcServer = originalGRPC
-		server.mu.Unlock()
-	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
