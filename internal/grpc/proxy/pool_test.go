@@ -625,3 +625,264 @@ func TestConnectionPool_Get_NilConnectionInMap(t *testing.T) {
 	require.NotNil(t, conn)
 	assert.Equal(t, 1, pool.Size())
 }
+
+// --- GetWithTLS tests ---
+
+func TestConnectionPool_GetWithTLS_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	// GetWithTLS with nil TLS config should fall back to standard Get()
+	conn, err := pool.GetWithTLS(ctx, "localhost:50060", nil)
+	require.NoError(t, err)
+	assert.NotNil(t, conn)
+	assert.Equal(t, 1, pool.Size())
+}
+
+func TestConnectionPool_GetWithTLS_WithConfig(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	// GetWithTLS with a TLS config should create a connection with TLS
+	conn, err := pool.GetWithTLS(ctx, "localhost:50061", tlsConfig)
+	require.NoError(t, err)
+	assert.NotNil(t, conn)
+	assert.Equal(t, 1, pool.Size())
+
+	// Verify the TLS config was stored
+	pool.mu.RLock()
+	storedTLS, ok := pool.tlsConfigs["localhost:50061"]
+	pool.mu.RUnlock()
+	assert.True(t, ok)
+	assert.Same(t, tlsConfig, storedTLS)
+}
+
+func TestConnectionPool_GetWithTLS_CachedConnection(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	// First call creates the connection
+	conn1, err := pool.GetWithTLS(ctx, "localhost:50062", tlsConfig)
+	require.NoError(t, err)
+	assert.NotNil(t, conn1)
+
+	// Second call with same TLS config should return cached connection
+	conn2, err := pool.GetWithTLS(ctx, "localhost:50062", tlsConfig)
+	require.NoError(t, err)
+	assert.NotNil(t, conn2)
+
+	// Should be the same connection
+	assert.Equal(t, conn1, conn2)
+	assert.Equal(t, 1, pool.Size())
+}
+
+func TestConnectionPool_GetWithTLS_TLSConfigChange(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	tlsConfig1 := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	tlsConfig2 := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	// Create connection with first TLS config
+	conn1, err := pool.GetWithTLS(ctx, "localhost:50063", tlsConfig1)
+	require.NoError(t, err)
+	assert.NotNil(t, conn1)
+
+	// Change TLS config — should close old connection and create new one
+	conn2, err := pool.GetWithTLS(ctx, "localhost:50063", tlsConfig2)
+	require.NoError(t, err)
+	assert.NotNil(t, conn2)
+
+	// Should still have 1 connection (old one closed, new one created)
+	assert.Equal(t, 1, pool.Size())
+
+	// Verify the new TLS config was stored
+	pool.mu.RLock()
+	storedTLS := pool.tlsConfigs["localhost:50063"]
+	pool.mu.RUnlock()
+	assert.Same(t, tlsConfig2, storedTLS)
+}
+
+func TestConnectionPool_GetWithTLS_ShutdownConnection(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	// Create connection
+	conn1, err := pool.GetWithTLS(ctx, "localhost:50064", tlsConfig)
+	require.NoError(t, err)
+	require.NotNil(t, conn1)
+
+	// Close the connection to put it in SHUTDOWN state
+	_ = conn1.Close()
+
+	// GetWithTLS should detect shutdown and create a new connection
+	conn2, err := pool.GetWithTLS(ctx, "localhost:50064", tlsConfig)
+	require.NoError(t, err)
+	require.NotNil(t, conn2)
+	assert.Equal(t, 1, pool.Size())
+}
+
+func TestConnectionPool_GetWithTLS_Concurrent(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	const goroutines = 50
+	done := make(chan *grpc.ClientConn, goroutines)
+	errs := make(chan error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			conn, err := pool.GetWithTLS(ctx, "localhost:50065", tlsConfig)
+			if err != nil {
+				errs <- err
+			} else {
+				done <- conn
+			}
+		}()
+	}
+
+	var conns []*grpc.ClientConn
+	for i := 0; i < goroutines; i++ {
+		select {
+		case conn := <-done:
+			conns = append(conns, conn)
+		case err := <-errs:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	// Should only have one connection
+	assert.Equal(t, 1, pool.Size())
+}
+
+func TestConnectionPool_BuildDialOptionsWithTLS(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	opts := pool.buildDialOptionsWithTLS(tlsConfig)
+	assert.NotEmpty(t, opts)
+	// Should have codec, keepalive, and TLS credentials
+	assert.Len(t, opts, 3)
+}
+
+func TestConnectionPool_Close_ClearsTLSConfigs(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+
+	ctx := context.Background()
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	// Create a TLS connection
+	_, err := pool.GetWithTLS(ctx, "localhost:50066", tlsConfig)
+	require.NoError(t, err)
+
+	// Verify TLS config is stored
+	pool.mu.RLock()
+	assert.Len(t, pool.tlsConfigs, 1)
+	pool.mu.RUnlock()
+
+	// Close pool
+	err = pool.Close()
+	require.NoError(t, err)
+
+	// TLS configs should be cleared
+	pool.mu.RLock()
+	assert.Len(t, pool.tlsConfigs, 0)
+	pool.mu.RUnlock()
+}
+
+func TestConnectionPool_CloseConn_ClearsTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // test only
+	}
+
+	// Create a TLS connection
+	_, err := pool.GetWithTLS(ctx, "localhost:50067", tlsConfig)
+	require.NoError(t, err)
+
+	// Verify TLS config is stored
+	pool.mu.RLock()
+	_, hasTLS := pool.tlsConfigs["localhost:50067"]
+	pool.mu.RUnlock()
+	assert.True(t, hasTLS)
+
+	// Close specific connection
+	err = pool.CloseConn("localhost:50067")
+	require.NoError(t, err)
+
+	// TLS config for that target should be cleared
+	pool.mu.RLock()
+	_, hasTLS = pool.tlsConfigs["localhost:50067"]
+	pool.mu.RUnlock()
+	assert.False(t, hasTLS)
+}

@@ -1,0 +1,42 @@
+# Yandex Tank: K8s GraphQL OIDC Auth (3 minutes)
+# Purpose: GraphQL POST with JWT/OIDC Bearer token header
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:30205
+  load_profile:
+    load_type: rps
+    schedule: line(10, 300, 30s) const(300, 2m) line(300, 10, 30s)
+  ammofile: /var/loadtest/ammo/k8s-graphql-oidc.txt
+  ammo_type: uripost
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 15s
+  instances: 200
+  threads: 4
+  header_http: "1.1"
+  headers:
+    - "[Host: avapigw.local]"
+    - "[User-Agent: YandexTank/K8s-GraphQL-OIDC]"
+    - "[Content-Type: application/json]"
+    - "[Accept: application/json]"
+    - "[Connection: keep-alive]"
+    - "[Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJQRzJJcHpXZnB5S2FwZ2ptYXJuSTZCSEE5dHBDS2dicHdObnhxcnVzUTVjIn0.eyJleHAiOjE3NzI0MzU0MzQsImlhdCI6MTc3MjQzNTEzNCwianRpIjoib25ydHJvOmFjMzQxMDg3LWJkNWYtMmJhZC1kMjRmLTc4NzBlYjg4ZTEwYiIsImlzcyI6Imh0dHA6Ly9sb2NhbGhvc3Q6ODA5MC9yZWFsbXMvZ2F0ZXdheS10ZXN0IiwiYXVkIjoiYWNjb3VudCIsInN1YiI6IjY4YjMxZjRlLTIyMmQtNDZlNC04ZmU2LWNjNTJlOGI2N2ViOSIsInR5cCI6IkJlYXJlciIsImF6cCI6ImdhdGV3YXkiLCJzaWQiOiJBUmFfdXR4Mk5wZWNtSEhiMThmMFk5b0UiLCJhY3IiOiIxIiwicmVhbG1fYWNjZXNzIjp7InJvbGVzIjpbIm9mZmxpbmVfYWNjZXNzIiwidW1hX2F1dGhvcml6YXRpb24iLCJkZWZhdWx0LXJvbGVzLWdhdGV3YXktdGVzdCJdfSwicmVzb3VyY2VfYWNjZXNzIjp7ImFjY291bnQiOnsicm9sZXMiOlsibWFuYWdlLWFjY291bnQiLCJtYW5hZ2UtYWNjb3VudC1saW5rcyIsInZpZXctcHJvZmlsZSJdfX0sInNjb3BlIjoiZW1haWwgcHJvZmlsZSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJuYW1lIjoidGVzdHVzZXIgVGVzdFVzZXIiLCJwcmVmZXJyZWRfdXNlcm5hbWUiOiJ0ZXN0dXNlciIsImdpdmVuX25hbWUiOiJ0ZXN0dXNlciIsImZhbWlseV9uYW1lIjoiVGVzdFVzZXIiLCJlbWFpbCI6InRlc3R1c2VyQHRlc3QubG9jYWwifQ.Wb6E4Zdxr9XIUqIhhvQ2IWsxzyxnxuU3hgCF4InfYPZn-fcCVwe9NTzvAe_3GayZsSuCLeK-dG9zXwFUOQM_v6zN8zCZGyMyOBFR3Xjn14sFyXdJERe2UloHUuuaU1hxATpilCaj6Lj7D7Fpc8pAgipQO0v3dzzfUlZr9J0EjOIQNFffPlDs39kvPyK8HR4avH6Hx95Qs6XVQKfJjWoynZrTKe8HTg7jJ3WMwqdqejysg1ZtV2Qpd2UWqAjK7acw2BekfXjX4Qu0eAhr6fAWJP0hhaA-h4sgEaXTpZwAIPijuh0yjJMPvtYjuTpsMYLgG6BxWAmA_o18ESwr1SQmNQ]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    - http(5xx,15%,15s)
+    - time(5000,50%,15s)
+    - http(net,10%,15s)

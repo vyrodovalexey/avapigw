@@ -1,0 +1,300 @@
+# GraphQL Performance Test CRD Manifests
+# ========================================
+#
+# IMPORTANT: This file documents the GraphQL CRD architecture for performance testing.
+#
+# ARCHITECTURE NOTES:
+# -------------------
+# The GraphQL handler in the gateway is registered ONLY for the exact path `/graphql`.
+# Routes with paths like `/graphql/perf/basic` will NOT be handled by the GraphQL handler -
+# they'll go through the NoRoute handler (regular HTTP proxy).
+#
+# Therefore, ALL GraphQL performance tests use the existing `/graphql` path.
+# Different test variants are differentiated by:
+# 1. Different ammo files with different headers (auth headers, custom headers)
+# 2. Different load profiles in Yandex Tank configs
+#
+# EXISTING GRAPHQL ROUTES IN K8S:
+# -------------------------------
+# - graphql-basic: path exact /graphql, backends noauth-1 + noauth-2 (no auth)
+# - basic-graphql-route: path exact /graphql, backend basic-graphql-backend
+# - full-graphql-route: path exact /graphql, with JWT auth, RBAC, headers, etc.
+#
+# The `graphql-basic` route handles all `/graphql` requests without authentication.
+# Per-route auth is NOT enforced by the GraphQL handler code - only global middleware applies.
+#
+# EXPECTED BEHAVIOR:
+# ------------------
+# 1. Backend returns 404 because it doesn't have a `/graphql` endpoint - this is EXPECTED
+# 2. Global rate limiter (100 req/s burst 200) may return 429 - this is EXPECTED
+# 3. Auth headers in ammo files are passed through but NOT validated at route level
+#    (only global middleware applies)
+#
+# PERFORMANCE TEST SCENARIOS:
+# ---------------------------
+# 1. k8s-graphql-basic: Baseline GraphQL throughput (no auth headers)
+# 2. k8s-graphql-oidc: GraphQL with OIDC Bearer token header
+# 3. k8s-graphql-apikey: GraphQL with X-API-Key header
+# 4. k8s-graphql-basicauth: GraphQL with Basic auth header
+# 5. k8s-graphql-ratelimit: GraphQL rate limiting test (higher load profile)
+# 6. k8s-graphql-transform: GraphQL with custom headers
+#
+# NO NEW CRDs NEEDED:
+# -------------------
+# All tests use the existing `graphql-basic` route at `/graphql`.
+# The ammo files and Yandex Tank configs differentiate the test scenarios.
+#
+# Apply with: kubectl apply -f test/performance/operator/crds-graphql-perftest.yaml -n avapigw-test
+
+# =============================================================================
+# Reference: Existing GraphQL Backend CRDs (already in K8s)
+# =============================================================================
+
+# These backends are already deployed and referenced by existing routes:
+#
+# apiVersion: avapigw.io/v1alpha1
+# kind: GraphQLBackend
+# metadata:
+#   name: graphql-backend-noauth-1
+#   namespace: avapigw-test
+# spec:
+#   hosts:
+#     - address: host.docker.internal
+#       port: 8801
+#       weight: 1
+#
+# apiVersion: avapigw.io/v1alpha1
+# kind: GraphQLBackend
+# metadata:
+#   name: graphql-backend-noauth-2
+#   namespace: avapigw-test
+# spec:
+#   hosts:
+#     - address: host.docker.internal
+#       port: 8802
+#       weight: 1
+
+# =============================================================================
+# Reference: Existing GraphQL Route CRD (already in K8s)
+# =============================================================================
+
+# This route handles all /graphql requests for performance testing:
+#
+# apiVersion: avapigw.io/v1alpha1
+# kind: GraphQLRoute
+# metadata:
+#   name: graphql-basic
+#   namespace: avapigw-test
+# spec:
+#   match:
+#     - path:
+#         exact: /graphql
+#   route:
+#     - destination:
+#         host: host.docker.internal
+#         port: 8801
+#       weight: 50
+#     - destination:
+#         host: host.docker.internal
+#         port: 8802
+#       weight: 50
+#   timeout: 30s
+#   depthLimit: 10
+#   complexityLimit: 100
+#   introspectionEnabled: true
+
+# =============================================================================
+# Performance Test GraphQL Backends (for reference/documentation)
+# =============================================================================
+
+---
+# perf-graphql-backend: Load-balanced GraphQL backend for performance testing
+# This backend is already defined in crds-perftest.yaml as perf-graphql-backend-1 and perf-graphql-backend-2
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: perf-graphql-backend
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-backend
+    purpose: performance-testing
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8901
+      weight: 50
+    - address: host.docker.internal
+      port: 8902
+      weight: 50
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+# =============================================================================
+# Performance Test GraphQL Routes
+# =============================================================================
+# NOTE: These routes are for documentation purposes. The actual GraphQL handler
+# only matches exact /graphql path. Routes with different paths would be handled
+# as regular HTTP routes, not GraphQL routes.
+
+---
+# perf-graphql-basic-route: Basic GraphQL route (no auth, no features)
+# This is the primary route used for all GraphQL performance tests
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-basic-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: basic
+spec:
+  match:
+    - path:
+        exact: /graphql
+  route:
+    - destination:
+        host: perf-graphql-backend
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  introspectionEnabled: true
+
+---
+# perf-graphql-oidc-route: GraphQL with OIDC authentication
+# NOTE: Per-route auth is NOT enforced by GraphQL handler - only global middleware applies
+# This route documents the intended auth configuration for reference
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-oidc-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: oidc-auth
+spec:
+  match:
+    - path:
+        exact: /graphql
+      # Match when Authorization header has Bearer prefix (OIDC token)
+      headers:
+        - name: Authorization
+          prefix: "Bearer "
+  route:
+    - destination:
+        host: perf-graphql-backend
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+---
+# perf-graphql-apikey-route: GraphQL with API key authentication
+# NOTE: Per-route auth is NOT enforced by GraphQL handler - only global middleware applies
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-apikey-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: apikey-auth
+spec:
+  match:
+    - path:
+        exact: /graphql
+      # Match when X-API-Key header has pk_ prefix
+      headers:
+        - name: X-API-Key
+          prefix: "pk_"
+  route:
+    - destination:
+        host: perf-graphql-backend
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      vaultPath: secret/data/perftest/apikeys
+
+---
+# perf-graphql-ratelimit-route: GraphQL with per-route rate limiting
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-ratelimit-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: ratelimit
+spec:
+  match:
+    - path:
+        exact: /graphql
+  route:
+    - destination:
+        host: perf-graphql-backend
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 50
+    burst: 100
+
+---
+# perf-graphql-transform-route: GraphQL with header manipulation
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-graphql-transform-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: graphql-route
+    feature: transform
+spec:
+  match:
+    - path:
+        exact: /graphql
+  route:
+    - destination:
+        host: perf-graphql-backend
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  headers:
+    request:
+      set:
+        x-gateway: avapigw
+        x-perf-test: graphql-transform

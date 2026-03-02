@@ -1661,17 +1661,44 @@ func (v *Validator) validateRouteGraphQLRouteIntersection(routes []Route, graphq
 	for i, route := range routes {
 		for j, gqlRoute := range graphqlRoutes {
 			if v.restAndGraphQLRoutePathsOverlap(&route, &gqlRoute) {
-				v.addError(
-					fmt.Sprintf("spec.routes[%d]/spec.graphqlRoutes[%d]", i, j),
-					fmt.Sprintf(
-						"REST route %q and GraphQL route %q have overlapping paths, "+
-							"which would cause routing ambiguity",
-						route.Name, gqlRoute.Name,
-					),
+				msg := fmt.Sprintf(
+					"REST route %q and GraphQL route %q have overlapping paths, "+
+						"which would cause routing ambiguity",
+					route.Name, gqlRoute.Name,
 				)
+				path := fmt.Sprintf("spec.routes[%d]/spec.graphqlRoutes[%d]", i, j)
+
+				// Root catch-all routes (prefix "/" or empty match list) do not
+				// actually conflict with GraphQL routes because the GraphQL
+				// handler is registered as a specific gin route before the
+				// NoRoute catch-all. Emit a warning instead of an error.
+				if v.isRootCatchAllRoute(&route) {
+					v.addWarning(path, msg)
+				} else {
+					v.addError(path, msg)
+				}
 			}
 		}
 	}
+}
+
+// isRootCatchAllRoute returns true if the route is a root catch-all route,
+// meaning it has an empty match list or all matches use URI prefix "/".
+// Such routes are handled by gin's NoRoute handler, which has lower priority
+// than explicitly registered routes like the GraphQL handler.
+func (v *Validator) isRootCatchAllRoute(route *Route) bool {
+	if len(route.Match) == 0 {
+		return true
+	}
+	for _, m := range route.Match {
+		if m.URI == nil {
+			return true
+		}
+		if m.URI.Prefix == "/" {
+			return true
+		}
+	}
+	return false
 }
 
 // restAndGraphQLRoutePathsOverlap checks if a REST route and a GraphQL route have overlapping paths.

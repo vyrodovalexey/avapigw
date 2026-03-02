@@ -45,6 +45,40 @@ The AV API Gateway provides comprehensive GraphQL support with advanced features
 
 ## Configuration Guide
 
+### Global GraphQL Configuration
+
+The gateway supports global GraphQL configuration options that apply to all GraphQL routes:
+
+```yaml
+spec:
+  graphql:
+    # Maximum request body size for GraphQL requests
+    # Default: 10485760 (10MB)
+    # Returns HTTP 413 if exceeded
+    maxBodySize: 10485760
+    
+    # GraphQL endpoint path
+    # Default: "/graphql"
+    # Configurable to support custom GraphQL endpoints
+    path: "/graphql"
+```
+
+#### GraphQL Body Size Limit
+
+The `maxBodySize` setting controls the maximum size of GraphQL request bodies. This helps prevent:
+- Memory exhaustion from large queries
+- Denial of service attacks
+- Resource abuse
+
+When a request exceeds the limit, the gateway returns HTTP 413 (Payload Too Large).
+
+#### Configurable GraphQL Endpoint Path
+
+The `path` setting allows you to customize the GraphQL endpoint path. This is useful for:
+- Supporting legacy GraphQL endpoints
+- Multi-tenant deployments with different paths
+- API versioning strategies
+
 ### Basic GraphQL Configuration
 
 ```yaml
@@ -57,6 +91,13 @@ spec:
     - name: http
       port: 8080
       protocol: HTTP
+  
+  # Global GraphQL configuration
+  graphql:
+    # Maximum request body size for GraphQL requests (default: 10MB)
+    maxBodySize: 10485760  # 10MB
+    # GraphQL endpoint path (default: /graphql)
+    path: "/graphql"
   
   graphqlRoutes:
     - name: main-graphql
@@ -383,6 +424,7 @@ spec:
 - **Protocol**: `graphql-ws` (GraphQL over WebSocket Protocol)
 - **Subprotocol**: `graphql-ws` in WebSocket handshake
 - **Connection Lifecycle**: Automatic connection management and cleanup
+- **Origin Checking**: Configurable allowed origins for WebSocket connections
 - **Message Types**: Support for all `graphql-ws` message types:
   - `connection_init` - Initialize connection
   - `connection_ack` - Acknowledge connection
@@ -392,6 +434,32 @@ spec:
   - `complete` - Subscription complete
   - `stop` - Stop subscription
   - `connection_terminate` - Terminate connection
+
+### WebSocket Security Configuration
+
+For enhanced security, you can configure allowed origins for GraphQL WebSocket subscriptions:
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: subscription-route
+      match:
+        - path:
+            exact: "/graphql"
+          operationType: subscription
+      route:
+        - destination:
+            host: subscription-backend
+            port: 4000
+      # Configure allowed origins for WebSocket connections
+      websocket:
+        allowedOrigins:
+          - "https://app.example.com"
+          - "https://admin.example.com"
+          - "https://*.trusted-domain.com"
+```
+
+This prevents unauthorized domains from establishing WebSocket connections to your GraphQL subscriptions.
 
 ### Subscription Example
 

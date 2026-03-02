@@ -247,6 +247,8 @@ enum ResourceType {
   RESOURCE_TYPE_GRPC_ROUTE = 2;
   RESOURCE_TYPE_BACKEND = 3;
   RESOURCE_TYPE_GRPC_BACKEND = 4;
+  RESOURCE_TYPE_GRAPHQL_ROUTE = 5;
+  RESOURCE_TYPE_GRAPHQL_BACKEND = 6;
 }
 
 // ConfigurationUpdate contains a configuration change notification.
@@ -354,4 +356,10 @@ message ConfigurationSnapshot {
   
   // Checksum of the configuration (for validation).
   string checksum = 8;
+
+  // GraphQL routes.
+  repeated ConfigurationResource graphql_routes = 9;
+
+  // GraphQL backends.
+  repeated ConfigurationResource graphql_backends = 10;
 }

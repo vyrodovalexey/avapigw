@@ -117,6 +117,8 @@ func (rm *reloadMetrics) Init() {
 		"audit",
 		"grpc_routes",
 		"grpc_backends",
+		"graphql_routes",
+		"graphql_backends",
 	}
 	for _, c := range components {
 		for _, r := range results {

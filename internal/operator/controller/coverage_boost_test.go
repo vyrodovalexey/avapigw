@@ -3,7 +3,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -15,105 +14,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
-	operatorgrpc "github.com/vyrodovalexey/avapigw/internal/operator/grpc"
 )
 
 // ============================================================================
-// Mock gRPC Server for Error Testing
+// gRPC Server Error Testing Strategy
 // ============================================================================
-
-// mockGRPCServer wraps a real server but can return errors for specific operations.
-type mockGRPCServer struct {
-	*operatorgrpc.Server
-	applyAPIRouteErr     error
-	deleteAPIRouteErr    error
-	applyGRPCRouteErr    error
-	deleteGRPCRouteErr   error
-	applyBackendErr      error
-	deleteBackendErr     error
-	applyGRPCBackendErr  error
-	deleteGRPCBackendErr error
-}
-
-func (m *mockGRPCServer) ApplyAPIRoute(ctx context.Context, name, namespace string, config []byte) error {
-	if m.applyAPIRouteErr != nil {
-		return m.applyAPIRouteErr
-	}
-	if m.Server != nil {
-		return m.Server.ApplyAPIRoute(ctx, name, namespace, config)
-	}
-	return nil
-}
-
-func (m *mockGRPCServer) DeleteAPIRoute(ctx context.Context, name, namespace string) error {
-	if m.deleteAPIRouteErr != nil {
-		return m.deleteAPIRouteErr
-	}
-	if m.Server != nil {
-		return m.Server.DeleteAPIRoute(ctx, name, namespace)
-	}
-	return nil
-}
-
-func (m *mockGRPCServer) ApplyGRPCRoute(ctx context.Context, name, namespace string, config []byte) error {
-	if m.applyGRPCRouteErr != nil {
-		return m.applyGRPCRouteErr
-	}
-	if m.Server != nil {
-		return m.Server.ApplyGRPCRoute(ctx, name, namespace, config)
-	}
-	return nil
-}
-
-func (m *mockGRPCServer) DeleteGRPCRoute(ctx context.Context, name, namespace string) error {
-	if m.deleteGRPCRouteErr != nil {
-		return m.deleteGRPCRouteErr
-	}
-	if m.Server != nil {
-		return m.Server.DeleteGRPCRoute(ctx, name, namespace)
-	}
-	return nil
-}
-
-func (m *mockGRPCServer) ApplyBackend(ctx context.Context, name, namespace string, config []byte) error {
-	if m.applyBackendErr != nil {
-		return m.applyBackendErr
-	}
-	if m.Server != nil {
-		return m.Server.ApplyBackend(ctx, name, namespace, config)
-	}
-	return nil
-}
-
-func (m *mockGRPCServer) DeleteBackend(ctx context.Context, name, namespace string) error {
-	if m.deleteBackendErr != nil {
-		return m.deleteBackendErr
-	}
-	if m.Server != nil {
-		return m.Server.DeleteBackend(ctx, name, namespace)
-	}
-	return nil
-}
-
-func (m *mockGRPCServer) ApplyGRPCBackend(ctx context.Context, name, namespace string, config []byte) error {
-	if m.applyGRPCBackendErr != nil {
-		return m.applyGRPCBackendErr
-	}
-	if m.Server != nil {
-		return m.Server.ApplyGRPCBackend(ctx, name, namespace, config)
-	}
-	return nil
-}
-
-func (m *mockGRPCServer) DeleteGRPCBackend(ctx context.Context, name, namespace string) error {
-	if m.deleteGRPCBackendErr != nil {
-		return m.deleteGRPCBackendErr
-	}
-	if m.Server != nil {
-		return m.Server.DeleteGRPCBackend(ctx, name, namespace)
-	}
-	return nil
-}
+//
+// The reconcilers use *operatorgrpc.Server (a concrete type), so we cannot inject
+// mock implementations. Instead, we force errors by using canceled/deadline-exceeded
+// contexts, which cause the real gRPC server's context-cancellation checks to fail.
 
 // ============================================================================
 // APIRoute Controller - gRPC Server Error Tests
@@ -143,11 +52,15 @@ func TestAPIRouteReconciler_ReconcileAPIRoute_GRPCServerError(t *testing.T) {
 
 	reconciler := newAPIRouteReconciler(t, fakeClient, scheme, newFakeRecorder())
 
-	// Test the reconcileAPIRoute method directly
-	err := reconciler.reconcileAPIRoute(context.Background(), apiRoute)
-	// This should succeed since we're using the real server
-	if err != nil {
-		t.Logf("reconcileAPIRoute() error = %v (expected for mock)", err)
+	// Use a canceled context to force the gRPC server to return an error.
+	// The gRPC server's ApplyAPIRoute checks context cancellation at the start
+	// and returns an error when the context is canceled.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := reconciler.reconcileAPIRoute(ctx, apiRoute)
+	if err == nil {
+		t.Errorf("reconcileAPIRoute() with canceled context should return error, got nil")
 	}
 }
 
@@ -383,41 +296,6 @@ func TestGRPCBackendReconciler_CleanupGRPCBackend_GRPCServerError(t *testing.T) 
 // ============================================================================
 // handleDeletion Tests - Cleanup Failure Path
 // ============================================================================
-
-// errorGRPCServer is a mock that always returns errors
-type errorGRPCServer struct{}
-
-func (e *errorGRPCServer) ApplyAPIRoute(ctx context.Context, name, namespace string, config []byte) error {
-	return fmt.Errorf("mock apply error")
-}
-
-func (e *errorGRPCServer) DeleteAPIRoute(ctx context.Context, name, namespace string) error {
-	return fmt.Errorf("mock delete error")
-}
-
-func (e *errorGRPCServer) ApplyGRPCRoute(ctx context.Context, name, namespace string, config []byte) error {
-	return fmt.Errorf("mock apply error")
-}
-
-func (e *errorGRPCServer) DeleteGRPCRoute(ctx context.Context, name, namespace string) error {
-	return fmt.Errorf("mock delete error")
-}
-
-func (e *errorGRPCServer) ApplyBackend(ctx context.Context, name, namespace string, config []byte) error {
-	return fmt.Errorf("mock apply error")
-}
-
-func (e *errorGRPCServer) DeleteBackend(ctx context.Context, name, namespace string) error {
-	return fmt.Errorf("mock delete error")
-}
-
-func (e *errorGRPCServer) ApplyGRPCBackend(ctx context.Context, name, namespace string, config []byte) error {
-	return fmt.Errorf("mock apply error")
-}
-
-func (e *errorGRPCServer) DeleteGRPCBackend(ctx context.Context, name, namespace string) error {
-	return fmt.Errorf("mock delete error")
-}
 
 // ============================================================================
 // Reconcile Failure Tests - Status Update After Failure

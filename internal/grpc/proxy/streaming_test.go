@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -195,7 +196,7 @@ func TestStreamHandler_HandleStream_NoMethodInContext(t *testing.T) {
 	ctx := context.Background()
 	stream := newMockServerStream(ctx)
 
-	err := handler.HandleStream(nil, stream)
+	err := handler.HandleStream(nil, stream, nil)
 	require.Error(t, err)
 
 	st, ok := status.FromError(err)
@@ -220,7 +221,7 @@ func TestStreamHandler_HandleStream_DirectorError(t *testing.T) {
 	)
 	stream := newMockServerStream(ctx)
 
-	err := handler.HandleStream(nil, stream)
+	err := handler.HandleStream(nil, stream, nil)
 	require.Error(t, err)
 
 	st, ok := status.FromError(err)
@@ -437,7 +438,7 @@ func TestStreamHandler_ProxyStreams_Success(t *testing.T) {
 	clientStream.headerMD = metadata.MD{"x-backend": []string{"value"}}
 	clientStream.trailerMD = metadata.MD{"x-trailer": []string{"value"}}
 
-	err := handler.proxyStreams(serverStream, clientStream)
+	err := handler.proxyStreams(serverStream, clientStream, nil)
 	assert.NoError(t, err)
 
 	// Verify header was forwarded
@@ -464,7 +465,7 @@ func TestStreamHandler_ProxyStreams_ServerToClientError(t *testing.T) {
 		NewFrame([]byte("response1")),
 	}
 
-	err := handler.proxyStreams(serverStream, clientStream)
+	err := handler.proxyStreams(serverStream, clientStream, nil)
 	assert.Error(t, err)
 }
 
@@ -486,7 +487,7 @@ func TestStreamHandler_ProxyStreams_ClientToServerError(t *testing.T) {
 	clientStream.recvErr = status.Error(codes.Internal, "backend error")
 	clientStream.trailerMD = metadata.MD{"x-error": []string{"true"}}
 
-	err := handler.proxyStreams(serverStream, clientStream)
+	err := handler.proxyStreams(serverStream, clientStream, nil)
 	assert.Error(t, err)
 }
 
@@ -511,7 +512,7 @@ func TestStreamHandler_ProxyStreams_HeaderError(t *testing.T) {
 	}
 
 	// Should still work, header error is logged but not fatal
-	err := handler.proxyStreams(serverStream, clientStream)
+	err := handler.proxyStreams(serverStream, clientStream, nil)
 	assert.NoError(t, err)
 }
 
@@ -686,4 +687,217 @@ func BenchmarkWrapServerStream(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = WrapServerStream(innerStream, ctx)
 	}
+}
+
+// --- Response trailer transforms tests ---
+
+func TestApplyResponseTrailerTransforms_NilRouteCfg(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	trailers := metadata.MD{
+		"x-existing": []string{"value"},
+	}
+
+	result := handler.applyResponseTrailerTransforms(context.Background(), trailers, nil)
+
+	// Should return trailers unchanged
+	assert.Equal(t, trailers, result)
+}
+
+func TestApplyResponseTrailerTransforms_NilTransform(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	trailers := metadata.MD{
+		"x-existing": []string{"value"},
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name:      "test-route",
+		Transform: nil,
+	}
+
+	result := handler.applyResponseTrailerTransforms(context.Background(), trailers, routeCfg)
+
+	// Should return trailers unchanged
+	assert.Equal(t, trailers, result)
+}
+
+func TestApplyResponseTrailerTransforms_NilResponse(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	trailers := metadata.MD{
+		"x-existing": []string{"value"},
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name: "test-route",
+		Transform: &config.GRPCTransformConfig{
+			Response: nil,
+		},
+	}
+
+	result := handler.applyResponseTrailerTransforms(context.Background(), trailers, routeCfg)
+
+	// Should return trailers unchanged
+	assert.Equal(t, trailers, result)
+}
+
+func TestApplyResponseTrailerTransforms_EmptyTrailerMetadata(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	trailers := metadata.MD{
+		"x-existing": []string{"value"},
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name: "test-route",
+		Transform: &config.GRPCTransformConfig{
+			Response: &config.GRPCResponseTransformConfig{
+				TrailerMetadata: map[string]string{},
+			},
+		},
+	}
+
+	result := handler.applyResponseTrailerTransforms(context.Background(), trailers, routeCfg)
+
+	// Should return trailers unchanged (empty trailer metadata config)
+	assert.Equal(t, trailers, result)
+}
+
+func TestApplyResponseTrailerTransforms_WithTrailerMetadata(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	trailers := metadata.MD{
+		"x-existing": []string{"value"},
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name: "test-route",
+		Transform: &config.GRPCTransformConfig{
+			Response: &config.GRPCResponseTransformConfig{
+				TrailerMetadata: map[string]string{
+					"x-custom-trailer": "custom-value",
+					"x-env":            "production",
+				},
+			},
+		},
+	}
+
+	result := handler.applyResponseTrailerTransforms(context.Background(), trailers, routeCfg)
+
+	// Verify trailer metadata was added
+	assert.Equal(t, []string{"custom-value"}, result.Get("x-custom-trailer"))
+	assert.Equal(t, []string{"production"}, result.Get("x-env"))
+	// Existing trailers should still be present
+	assert.Equal(t, []string{"value"}, result.Get("x-existing"))
+}
+
+func TestStreamHandler_ProxyStreams_WithRouteConfig(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	director := &mockDirector{}
+	handler := NewStreamHandler(director, logger)
+
+	// Setup server stream (incoming requests)
+	serverStream := newMockServerStream(context.Background())
+	serverStream.recvMsgs = []interface{}{
+		NewFrame([]byte("request1")),
+	}
+
+	// Setup client stream (backend responses)
+	clientStream := newMockClientStream(context.Background())
+	clientStream.recvMsgs = []interface{}{
+		NewFrame([]byte("response1")),
+	}
+	clientStream.headerMD = metadata.MD{"x-backend": []string{"value"}}
+	clientStream.trailerMD = metadata.MD{"x-trailer": []string{"value"}}
+
+	routeCfg := &config.GRPCRoute{
+		Name: "proxy-route",
+		Transform: &config.GRPCTransformConfig{
+			Response: &config.GRPCResponseTransformConfig{
+				TrailerMetadata: map[string]string{
+					"x-added-trailer": "added-value",
+				},
+			},
+		},
+	}
+
+	err := handler.proxyStreams(serverStream, clientStream, routeCfg)
+	assert.NoError(t, err)
+
+	// Verify trailer was set with transforms applied
+	assert.NotNil(t, serverStream.sentTrailer)
+	assert.Equal(t, []string{"added-value"}, serverStream.sentTrailer.Get("x-added-trailer"))
+	// Original trailer should also be present
+	assert.Equal(t, []string{"value"}, serverStream.sentTrailer.Get("x-trailer"))
+}
+
+func TestStreamHandler_HandleStream_WithRouteConfig(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+
+	// Create a mock director that returns a valid connection
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	ctx := context.Background()
+	conn, err := pool.Get(ctx, "localhost:50051")
+	require.NoError(t, err)
+
+	outCtx := metadata.NewOutgoingContext(context.Background(), metadata.MD{})
+	director := &mockDirector{
+		outCtx: outCtx,
+		conn:   conn,
+	}
+	handler := NewStreamHandler(director, logger)
+
+	// Context with method
+	streamCtx := grpc.NewContextWithServerTransportStream(
+		context.Background(),
+		&mockServerTransportStream{method: "/test.Service/Method"},
+	)
+	stream := newMockServerStream(streamCtx)
+	stream.recvMsgs = []interface{}{
+		NewFrame([]byte("request")),
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name: "handle-stream-route",
+		Transform: &config.GRPCTransformConfig{
+			Response: &config.GRPCResponseTransformConfig{
+				TrailerMetadata: map[string]string{
+					"x-test-trailer": "test-value",
+				},
+			},
+		},
+	}
+
+	// HandleStream will fail at creating client stream (no real backend)
+	// but it tests that routeCfg is passed through
+	err = handler.HandleStream(nil, stream, routeCfg)
+	// Error is expected since we can't create a real client stream
+	assert.Error(t, err)
 }

@@ -42,6 +42,16 @@ func (m *MockConfigApplier) ApplyGRPCBackends(ctx context.Context, backends []co
 	return args.Error(0)
 }
 
+func (m *MockConfigApplier) ApplyGraphQLRoutes(ctx context.Context, routes []config.GraphQLRoute) error {
+	args := m.Called(ctx, routes)
+	return args.Error(0)
+}
+
+func (m *MockConfigApplier) ApplyGraphQLBackends(ctx context.Context, backends []config.GraphQLBackend) error {
+	args := m.Called(ctx, backends)
+	return args.Error(0)
+}
+
 func (m *MockConfigApplier) ApplyFullConfig(ctx context.Context, cfg *config.GatewayConfig) error {
 	args := m.Called(ctx, cfg)
 	return args.Error(0)
@@ -116,7 +126,7 @@ func TestConfigHandler_HandleUpdate_Added_Route(t *testing.T) {
 	applier.AssertExpectations(t)
 
 	// Verify state
-	routes, _, _, _ := handler.GetCurrentState()
+	routes, _, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, routes, 1)
 	assert.Equal(t, "test-route", routes[0].Name)
 }
@@ -193,7 +203,7 @@ func TestConfigHandler_HandleUpdate_Deleted_Route(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify state
-	routes, _, _, _ := handler.GetCurrentState()
+	routes, _, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, routes, 0)
 }
 
@@ -230,7 +240,7 @@ func TestConfigHandler_HandleUpdate_Backend(t *testing.T) {
 	applier.AssertExpectations(t)
 
 	// Verify state
-	_, backends, _, _ := handler.GetCurrentState()
+	_, backends, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, backends, 1)
 	assert.Equal(t, "test-backend", backends[0].Name)
 }
@@ -274,7 +284,7 @@ func TestConfigHandler_HandleUpdate_Deleted_Backend(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify state
-	_, backends, _, _ := handler.GetCurrentState()
+	_, backends, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, backends, 0)
 }
 
@@ -311,7 +321,7 @@ func TestConfigHandler_HandleUpdate_GRPCRoute(t *testing.T) {
 	applier.AssertExpectations(t)
 
 	// Verify state
-	_, _, grpcRoutes, _ := handler.GetCurrentState()
+	_, _, grpcRoutes, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcRoutes, 1)
 	assert.Equal(t, "test-grpc-route", grpcRoutes[0].Name)
 }
@@ -355,7 +365,7 @@ func TestConfigHandler_HandleUpdate_Deleted_GRPCRoute(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify state
-	_, _, grpcRoutes, _ := handler.GetCurrentState()
+	_, _, grpcRoutes, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcRoutes, 0)
 }
 
@@ -392,7 +402,7 @@ func TestConfigHandler_HandleUpdate_GRPCBackend(t *testing.T) {
 	applier.AssertExpectations(t)
 
 	// Verify state
-	_, _, _, grpcBackends := handler.GetCurrentState()
+	_, _, _, grpcBackends, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcBackends, 1)
 	assert.Equal(t, "test-grpc-backend", grpcBackends[0].Name)
 }
@@ -436,7 +446,7 @@ func TestConfigHandler_HandleUpdate_Deleted_GRPCBackend(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify state
-	_, _, _, grpcBackends := handler.GetCurrentState()
+	_, _, _, grpcBackends, _, _ := handler.GetCurrentState()
 	assert.Len(t, grpcBackends, 0)
 }
 
@@ -542,7 +552,7 @@ func TestConfigHandler_HandleSnapshot(t *testing.T) {
 	applier.AssertExpectations(t)
 
 	// Verify state
-	routes, backends, grpcRoutes, grpcBackends := handler.GetCurrentState()
+	routes, backends, grpcRoutes, grpcBackends, _, _ := handler.GetCurrentState()
 	assert.Len(t, routes, 1)
 	assert.Len(t, backends, 1)
 	assert.Len(t, grpcRoutes, 1)
@@ -564,7 +574,7 @@ func TestConfigHandler_HandleSnapshot_Empty(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify state is empty
-	routes, backends, grpcRoutes, grpcBackends := handler.GetCurrentState()
+	routes, backends, grpcRoutes, grpcBackends, _, _ := handler.GetCurrentState()
 	assert.Len(t, routes, 0)
 	assert.Len(t, backends, 0)
 	assert.Len(t, grpcRoutes, 0)
@@ -596,7 +606,7 @@ func TestConfigHandler_HandleSnapshot_ClearsExistingState(t *testing.T) {
 	_ = handler.HandleUpdate(context.Background(), addUpdate)
 
 	// Verify old route exists
-	routes, _, _, _ := handler.GetCurrentState()
+	routes, _, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, routes, 1)
 
 	// Now apply a snapshot with different routes
@@ -620,7 +630,7 @@ func TestConfigHandler_HandleSnapshot_ClearsExistingState(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify old route is gone and new route exists
-	routes, _, _, _ = handler.GetCurrentState()
+	routes, _, _, _, _, _ = handler.GetCurrentState()
 	assert.Len(t, routes, 1)
 	assert.Equal(t, "new-route", routes[0].Name)
 }
@@ -760,7 +770,7 @@ func TestConfigHandler_HandleUpdate_NilApplier(t *testing.T) {
 	require.NoError(t, err)
 
 	// State should still be updated
-	routes, _, _, _ := handler.GetCurrentState()
+	routes, _, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, routes, 1)
 }
 
@@ -831,7 +841,7 @@ func TestConfigHandler_GetCurrentState(t *testing.T) {
 	})
 
 	// Get current state
-	routes, backends, grpcRoutes, grpcBackends := handler.GetCurrentState()
+	routes, backends, grpcRoutes, grpcBackends, _, _ := handler.GetCurrentState()
 
 	assert.Len(t, routes, 1)
 	assert.Len(t, backends, 1)
@@ -897,6 +907,6 @@ func TestConfigHandler_HandleSnapshot_InvalidJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	// State should be empty since the route was invalid
-	routes, _, _, _ := handler.GetCurrentState()
+	routes, _, _, _, _, _ := handler.GetCurrentState()
 	assert.Len(t, routes, 0)
 }

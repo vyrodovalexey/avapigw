@@ -151,4 +151,51 @@ func TestGRPCProxyMetrics_AllFieldsInitialized(t *testing.T) {
 	assert.NotNil(t, m.streamMsgReceived)
 	assert.NotNil(t, m.backendSelections)
 	assert.NotNil(t, m.timeoutOccurrences)
+	// New metrics for features 1-4
+	assert.NotNil(t, m.rateLimitAllowed)
+	assert.NotNil(t, m.rateLimitRejected)
+	assert.NotNil(t, m.transformOperations)
+	assert.NotNil(t, m.backendAuthSuccess)
+	assert.NotNil(t, m.backendAuthFailure)
+}
+
+func TestGRPCProxyMetrics_RecordRateLimitAllowed(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.rateLimitAllowed.WithLabelValues("test-route").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_RecordRateLimitRejected(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.rateLimitRejected.WithLabelValues("test-route").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_RecordTransformOperations(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.transformOperations.WithLabelValues("test-route", "request", "metadata").Inc()
+		m.transformOperations.WithLabelValues("test-route", "response", "trailer_metadata").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_RecordBackendAuthSuccess(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.backendAuthSuccess.WithLabelValues("test-route", "jwt").Inc()
+	})
+}
+
+func TestGRPCProxyMetrics_RecordBackendAuthFailure(t *testing.T) {
+	m := getGRPCProxyMetrics()
+
+	assert.NotPanics(t, func() {
+		m.backendAuthFailure.WithLabelValues("test-route", "jwt").Inc()
+	})
 }

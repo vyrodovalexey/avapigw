@@ -1,6 +1,6 @@
 # Yandex Tank Configuration: K8s Auth Throughput Test
 # Purpose: Measure throughput for authenticated requests using JWT tokens in K8s
-# Duration: 30 seconds total (ramp from 1 to 50 RPS)
+# Duration: 3 minutes total (30s warmup + 2m sustain + 30s cooldown)
 # Target: Conservative load for local K8s (Docker Desktop) with TLS and auth
 #
 # Note: The address port is dynamically replaced by run-k8s-test.sh
@@ -17,9 +17,11 @@ phantom:
   address: host.docker.internal:32300
   load_profile:
     load_type: rps
-    # Conservative ramp for local K8s with TLS + auth:
-    # Ramp from 1 to 50 RPS over 30 seconds (auth is heavier)
-    schedule: line(1, 50, 30s)
+    # 3-minute test for local K8s with TLS + auth:
+    # Warmup: 30s ramp from 5 to 100 RPS
+    # Sustain: 2m at 100 RPS
+    # Cooldown: 30s ramp down
+    schedule: line(5, 100, 30s) const(100, 2m) line(100, 5, 30s)
 
   # Use uri-style ammo with Authorization header embedded in the file
   ammofile: /var/loadtest/ammo/http-auth.txt

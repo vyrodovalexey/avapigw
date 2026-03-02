@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,6 +20,11 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// connectionCounter is a package-level atomic counter for generating unique connection IDs.
+// Using an atomic counter instead of time.Now().UnixNano() prevents ID collisions
+// on fast hardware or VMs with coarse time resolution.
+var connectionCounter atomic.Int64
+
 // subscriptionTracerName is the OpenTelemetry tracer name for subscription operations.
 const subscriptionTracerName = "avapigw/graphql-subscription"
 
@@ -28,6 +34,11 @@ type SubscriptionProxy struct {
 	upgrader websocket.Upgrader
 	logger   observability.Logger
 	metrics  MetricsRecorder
+
+	// allowedOrigins restricts WebSocket connections to specific origins.
+	// When empty, all origins are allowed (backward compatible).
+	// Use "*" to explicitly allow all origins.
+	allowedOrigins []string
 
 	// Active connections tracking
 	connMu      sync.Mutex
@@ -60,24 +71,48 @@ func WithSubscriptionMetrics(metrics MetricsRecorder) SubscriptionOption {
 	}
 }
 
+// WithAllowedOrigins sets the allowed origins for WebSocket connections.
+// When empty, all origins are allowed (backward compatible).
+// Use "*" to explicitly allow all origins.
+//
+// Security note: leaving this unconfigured allows connections from any origin.
+// In production, configure specific allowed origins to prevent cross-site
+// WebSocket hijacking attacks.
+func WithAllowedOrigins(origins []string) SubscriptionOption {
+	return func(sp *SubscriptionProxy) {
+		sp.allowedOrigins = origins
+	}
+}
+
 // NewSubscriptionProxy creates a new subscription proxy.
 func NewSubscriptionProxy(proxy *Proxy, opts ...SubscriptionOption) *SubscriptionProxy {
 	sp := &SubscriptionProxy{
-		proxy: proxy,
-		upgrader: websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-			CheckOrigin: func(_ *http.Request) bool {
-				// Origin checking should be done at the middleware level
-				return true
-			},
-		},
+		proxy:       proxy,
 		logger:      observability.NopLogger(),
 		connections: make(map[string]*subscriptionConn),
 	}
 
+	// Apply options first so allowedOrigins is set before building the upgrader.
 	for _, opt := range opts {
 		opt(sp)
+	}
+
+	sp.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			// When no origins are configured, allow all (backward compatible).
+			if len(sp.allowedOrigins) == 0 {
+				return true
+			}
+			origin := r.Header.Get("Origin")
+			for _, allowed := range sp.allowedOrigins {
+				if allowed == "*" || allowed == origin {
+					return true
+				}
+			}
+			return false
+		},
 	}
 
 	return sp
@@ -141,7 +176,7 @@ func (sp *SubscriptionProxy) HandleSubscription(
 	// when the HTTP handler returns, but the WebSocket relay must continue running.
 	subCtx, cancel := context.WithCancel(context.Background())
 
-	connID := fmt.Sprintf("%s-%d", backendName, time.Now().UnixNano())
+	connID := fmt.Sprintf("%s-%d", backendName, connectionCounter.Add(1))
 	conn := &subscriptionConn{
 		clientConn:  clientConn,
 		backendConn: backendConn,
@@ -256,12 +291,9 @@ func (sp *SubscriptionProxy) cleanupConnection(connID string, conn *subscription
 }
 
 // buildWebSocketURL builds a WebSocket URL from the backend target.
+// Uses atomic counter for lock-free concurrent access.
 func (sp *SubscriptionProxy) buildWebSocketURL(target *backendTarget) *url.URL {
-	sp.proxy.mu.Lock()
-	idx := target.current % len(target.hosts)
-	target.current++
-	sp.proxy.mu.Unlock()
-
+	idx := int(target.current.Add(1)-1) % len(target.hosts)
 	host := target.hosts[idx]
 	return &url.URL{
 		Scheme: "ws",

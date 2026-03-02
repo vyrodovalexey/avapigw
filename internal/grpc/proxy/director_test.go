@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 
@@ -1497,4 +1498,518 @@ func TestRouterDirector_ClearAuthCache_ConcurrentSafety(t *testing.T) {
 	director.authCacheMu.RLock()
 	assert.NotNil(t, director.authCache)
 	director.authCacheMu.RUnlock()
+}
+
+// --- Per-route request metadata transforms tests ---
+
+func TestRouterDirector_ApplyRequestMetadataTransforms_StaticMetadata(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	outMD := metadata.MD{
+		"existing-key": []string{"existing-value"},
+	}
+
+	reqCfg := &config.GRPCRequestTransformConfig{
+		StaticMetadata: map[string]string{
+			"x-custom-header": "custom-value",
+			"x-env":           "production",
+		},
+	}
+
+	result := director.applyRequestMetadataTransforms(outMD, reqCfg, "test-route")
+
+	// Verify static metadata was added
+	assert.Equal(t, []string{"custom-value"}, result.Get("x-custom-header"))
+	assert.Equal(t, []string{"production"}, result.Get("x-env"))
+	// Existing metadata should still be present
+	assert.Equal(t, []string{"existing-value"}, result.Get("existing-key"))
+}
+
+func TestRouterDirector_ApplyRequestMetadataTransforms_Remove(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	outMD := metadata.MD{
+		"keep-this":   []string{"value"},
+		"remove-this": []string{"value"},
+		"also-remove": []string{"value"},
+	}
+
+	reqCfg := &config.GRPCRequestTransformConfig{
+		RemoveFields: []string{"remove-this", "also-remove"},
+	}
+
+	result := director.applyRequestMetadataTransforms(outMD, reqCfg, "test-route")
+
+	// Verify removed keys are gone
+	assert.Empty(t, result.Get("remove-this"))
+	assert.Empty(t, result.Get("also-remove"))
+	// Kept key should still be present
+	assert.Equal(t, []string{"value"}, result.Get("keep-this"))
+}
+
+func TestRouterDirector_ApplyRequestMetadataTransforms_StaticAndRemove(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	outMD := metadata.MD{
+		"existing":  []string{"value"},
+		"to-remove": []string{"old-value"},
+	}
+
+	reqCfg := &config.GRPCRequestTransformConfig{
+		StaticMetadata: map[string]string{
+			"x-added": "new-value",
+		},
+		RemoveFields: []string{"to-remove"},
+	}
+
+	result := director.applyRequestMetadataTransforms(outMD, reqCfg, "test-route")
+
+	assert.Equal(t, []string{"new-value"}, result.Get("x-added"))
+	assert.Empty(t, result.Get("to-remove"))
+	assert.Equal(t, []string{"value"}, result.Get("existing"))
+}
+
+func TestRouterDirector_ApplyRequestMetadataTransforms_EmptyConfig(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	outMD := metadata.MD{
+		"existing": []string{"value"},
+	}
+
+	reqCfg := &config.GRPCRequestTransformConfig{}
+
+	result := director.applyRequestMetadataTransforms(outMD, reqCfg, "test-route")
+
+	// No transforms applied, metadata should be unchanged
+	assert.Equal(t, []string{"value"}, result.Get("existing"))
+}
+
+func TestRouterDirector_ApplyRequestMetadataTransforms_Authority(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	// Add route with authority override
+	err := r.AddRoute(config.GRPCRoute{
+		Name: "authority-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "authority."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "localhost", Port: 50051}},
+		},
+		Transform: &config.GRPCTransformConfig{
+			Request: &config.GRPCRequestTransformConfig{
+				AuthorityOverride: "custom-authority.example.com",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	ctx := context.Background()
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{
+		"x-custom": []string{"value"},
+	})
+
+	outCtx, _, err := director.Direct(ctx, "/authority.Service/Method")
+	require.NoError(t, err)
+
+	// Check that authority override was applied
+	outMD, ok := metadata.FromOutgoingContext(outCtx)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"custom-authority.example.com"}, outMD.Get(":authority"))
+}
+
+func TestRouterDirector_CreateOutgoingContext_WithTransforms(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	inMD := metadata.MD{
+		"x-custom": []string{"value"},
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name: "transform-route",
+		Transform: &config.GRPCTransformConfig{
+			Request: &config.GRPCRequestTransformConfig{
+				StaticMetadata: map[string]string{
+					"x-injected": "injected-value",
+				},
+				RemoveFields:      []string{"x-custom"},
+				AuthorityOverride: "override.example.com",
+			},
+		},
+	}
+
+	outCtx := director.createOutgoingContext(context.Background(), inMD, "transform-route", routeCfg)
+
+	outMD, ok := metadata.FromOutgoingContext(outCtx)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"injected-value"}, outMD.Get("x-injected"))
+	assert.Empty(t, outMD.Get("x-custom"))
+	assert.Equal(t, []string{"override.example.com"}, outMD.Get(":authority"))
+	assert.Equal(t, []string{"transform-route"}, outMD.Get("x-gateway-route"))
+}
+
+func TestRouterDirector_CreateOutgoingContext_NilTransform(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	inMD := metadata.MD{
+		"x-custom": []string{"value"},
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name:      "no-transform-route",
+		Transform: nil,
+	}
+
+	outCtx := director.createOutgoingContext(context.Background(), inMD, "no-transform-route", routeCfg)
+
+	outMD, ok := metadata.FromOutgoingContext(outCtx)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"value"}, outMD.Get("x-custom"))
+	assert.Equal(t, []string{"no-transform-route"}, outMD.Get("x-gateway-route"))
+}
+
+func TestRouterDirector_CreateOutgoingContext_NilRequestTransform(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	inMD := metadata.MD{
+		"x-custom": []string{"value"},
+	}
+
+	routeCfg := &config.GRPCRoute{
+		Name: "nil-request-transform-route",
+		Transform: &config.GRPCTransformConfig{
+			Request: nil, // Request transform is nil
+		},
+	}
+
+	outCtx := director.createOutgoingContext(context.Background(), inMD, "nil-request-transform-route", routeCfg)
+
+	outMD, ok := metadata.FromOutgoingContext(outCtx)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"value"}, outMD.Get("x-custom"))
+}
+
+// --- Backend auth injection tests ---
+
+// mockBackendAuthProvider implements backend/auth.Provider for testing.
+type mockBackendAuthProvider struct {
+	name      string
+	authType  string
+	applyErr  error
+	authToken string
+}
+
+func (m *mockBackendAuthProvider) Name() string { return m.name }
+func (m *mockBackendAuthProvider) Type() string { return m.authType }
+func (m *mockBackendAuthProvider) ApplyHTTP(_ context.Context, req *http.Request) error {
+	if m.applyErr != nil {
+		return m.applyErr
+	}
+	if m.authToken != "" {
+		req.Header.Set("Authorization", m.authToken)
+	}
+	return nil
+}
+func (m *mockBackendAuthProvider) ApplyGRPC(_ context.Context) ([]grpc.DialOption, error) {
+	return nil, nil
+}
+func (m *mockBackendAuthProvider) Refresh(_ context.Context) error { return nil }
+func (m *mockBackendAuthProvider) Close() error                    { return nil }
+
+// mockServiceBackendForAuth wraps a real ServiceBackend but allows injecting a mock auth provider.
+// Since we can't easily set the authProvider field on ServiceBackend directly,
+// we test injectBackendAuth through the director's Direct method with a real backend.
+
+func TestRouterDirector_InjectBackendAuth_NoProvider(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	// Create a backend without auth provider
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	backendCfg := config.Backend{
+		Name: "no-auth-backend",
+		Hosts: []config.BackendHost{
+			{Address: "localhost", Port: 50051, Weight: 1},
+		},
+		// No Auth config
+	}
+	b, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+	err = registry.Register(b)
+	require.NoError(t, err)
+	err = b.Start(t.Context())
+	require.NoError(t, err)
+
+	director.backendRegistry = registry
+
+	// Add route pointing to the backend
+	err = r.AddRoute(config.GRPCRoute{
+		Name: "no-auth-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "noauth."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "no-auth-backend", Port: 50051}},
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{})
+
+	// Direct should succeed without auth injection
+	outCtx, conn, err := director.Direct(ctx, "/noauth.Service/Method")
+	require.NoError(t, err)
+	assert.NotNil(t, outCtx)
+	assert.NotNil(t, conn)
+
+	// Verify no authorization header was injected
+	outMD, _ := metadata.FromOutgoingContext(outCtx)
+	assert.Empty(t, outMD.Get("authorization"))
+}
+
+func TestRouterDirector_InjectBackendAuth_NopProvider(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	// Test the injectBackendAuth method directly with a mock ServiceBackend
+	// that has a NopProvider (type "none")
+	// Since we can't easily create a ServiceBackend with a specific auth provider,
+	// we test the nil/none path through the Direct flow
+
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	// Create backend with no auth config (will have nil auth provider)
+	backendCfg := config.Backend{
+		Name: "nop-auth-backend",
+		Hosts: []config.BackendHost{
+			{Address: "localhost", Port: 50051, Weight: 1},
+		},
+	}
+	b, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+	err = registry.Register(b)
+	require.NoError(t, err)
+	err = b.Start(t.Context())
+	require.NoError(t, err)
+
+	director.backendRegistry = registry
+
+	err = r.AddRoute(config.GRPCRoute{
+		Name: "nop-auth-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "nopauth."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "nop-auth-backend", Port: 50051}},
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{})
+
+	outCtx, conn, err := director.Direct(ctx, "/nopauth.Service/Method")
+	require.NoError(t, err)
+	assert.NotNil(t, outCtx)
+	assert.NotNil(t, conn)
+}
+
+func TestRouterDirector_InjectBackendAuth_DirectMethod(t *testing.T) {
+	t.Parallel()
+
+	// Test the injectBackendAuth method directly using a mock backend
+	// that has a JWT auth provider configured
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	logger := observability.NopLogger()
+	registry := backend.NewRegistry(logger)
+
+	// Create backend with JWT auth config
+	backendCfg := config.Backend{
+		Name: "jwt-auth-backend",
+		Hosts: []config.BackendHost{
+			{Address: "localhost", Port: 50051, Weight: 1},
+		},
+		Authentication: &config.BackendAuthConfig{
+			Type: "jwt",
+			JWT: &config.BackendJWTAuthConfig{
+				Enabled:     true,
+				TokenSource: "static",
+				StaticToken: "test-jwt-token-value",
+			},
+		},
+	}
+	b, err := backend.NewBackend(backendCfg, backend.WithBackendLogger(logger))
+	require.NoError(t, err)
+	err = registry.Register(b)
+	require.NoError(t, err)
+	err = b.Start(t.Context())
+	require.NoError(t, err)
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(logger),
+		WithDirectorBackendRegistry(registry),
+	)
+
+	err = r.AddRoute(config.GRPCRoute{
+		Name: "jwt-auth-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "jwtauth."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "jwt-auth-backend", Port: 50051}},
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{})
+
+	outCtx, conn, err := director.Direct(ctx, "/jwtauth.Service/Method")
+	require.NoError(t, err)
+	assert.NotNil(t, outCtx)
+	assert.NotNil(t, conn)
+
+	// Verify authorization header was injected
+	outMD, ok := metadata.FromOutgoingContext(outCtx)
+	assert.True(t, ok)
+	authValues := outMD.Get("authorization")
+	assert.NotEmpty(t, authValues, "authorization metadata should be set")
+	if len(authValues) > 0 {
+		assert.Contains(t, authValues[0], "Bearer")
+	}
+}
+
+// --- Direct with transforms end-to-end ---
+
+func TestRouterDirector_Direct_WithTransforms(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	pool := NewConnectionPool()
+	defer pool.Close()
+
+	err := r.AddRoute(config.GRPCRoute{
+		Name: "transform-e2e-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "transforme2e."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "localhost", Port: 50051}},
+		},
+		Transform: &config.GRPCTransformConfig{
+			Request: &config.GRPCRequestTransformConfig{
+				StaticMetadata: map[string]string{
+					"x-injected-header": "injected-value",
+				},
+				RemoveFields: []string{"x-remove-me"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	director := NewRouterDirector(r, pool,
+		WithDirectorLogger(observability.NopLogger()),
+	)
+
+	ctx := context.Background()
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{
+		"x-custom":    []string{"keep-this"},
+		"x-remove-me": []string{"should-be-removed"},
+	})
+
+	outCtx, conn, err := director.Direct(ctx, "/transforme2e.Service/Method")
+	require.NoError(t, err)
+	assert.NotNil(t, outCtx)
+	assert.NotNil(t, conn)
+
+	outMD, ok := metadata.FromOutgoingContext(outCtx)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"injected-value"}, outMD.Get("x-injected-header"))
+	assert.Empty(t, outMD.Get("x-remove-me"))
+	assert.Equal(t, []string{"keep-this"}, outMD.Get("x-custom"))
 }

@@ -252,6 +252,14 @@ func (c *IngressConverter) buildRoute(
 		match.URI = uriMatch
 	}
 
+	// Add host header match so the route only applies to the specified host
+	if host != "" {
+		match.Headers = append(match.Headers, config.HeaderMatch{
+			Name:  "Host",
+			Exact: host,
+		})
+	}
+
 	route.Match = []config.RouteMatch{match}
 
 	// Build route destination from backend
@@ -645,17 +653,19 @@ func ingressRouteKey(
 }
 
 // ingressBackendKey generates a deterministic key for an Ingress backend.
+// Uses "::" as separator between components because colons cannot appear in
+// Kubernetes resource names, preventing key collisions when names contain hyphens.
 func ingressBackendKey(
 	ingress *networkingv1.Ingress,
 	backend networkingv1.IngressBackend,
 ) string {
 	if backend.Service != nil {
 		port := resolveServicePort(backend.Service.Port)
-		return fmt.Sprintf("ingress-%s-%s-%s-%d",
+		return fmt.Sprintf("ingress::%s::%s::%s::%d",
 			ingress.Namespace, ingress.Name,
 			backend.Service.Name, port)
 	}
-	return fmt.Sprintf("ingress-%s-%s-unknown",
+	return fmt.Sprintf("ingress::%s::%s::unknown",
 		ingress.Namespace, ingress.Name)
 }
 
@@ -1084,17 +1094,19 @@ func ingressGRPCRouteKey(
 }
 
 // ingressGRPCBackendKey generates a deterministic key for an Ingress gRPC backend.
+// Uses "::" as separator between components because colons cannot appear in
+// Kubernetes resource names, preventing key collisions when names contain hyphens.
 func ingressGRPCBackendKey(
 	ingress *networkingv1.Ingress,
 	backend networkingv1.IngressBackend,
 ) string {
 	if backend.Service != nil {
 		port := resolveServicePort(backend.Service.Port)
-		return fmt.Sprintf("ingress-grpc-%s-%s-%s-%d",
+		return fmt.Sprintf("ingress-grpc::%s::%s::%s::%d",
 			ingress.Namespace, ingress.Name,
 			backend.Service.Name, port)
 	}
-	return fmt.Sprintf("ingress-grpc-%s-%s-unknown",
+	return fmt.Sprintf("ingress-grpc::%s::%s::unknown",
 		ingress.Namespace, ingress.Name)
 }
 

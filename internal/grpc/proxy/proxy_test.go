@@ -9,7 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
@@ -217,9 +219,9 @@ func TestProxy_ApplyTimeout_NoDeadline(t *testing.T) {
 	defer p.Close()
 
 	ctx := context.Background()
-	newCtx, cancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
-	// No route configured, so matched should be false
-	assert.False(t, matched)
+	newCtx, cancel, matchResult := p.applyTimeout(ctx, "/test.Service/Method")
+	// No route configured, so matchResult should be nil
+	assert.Nil(t, matchResult)
 	assert.Nil(t, cancel)
 	// Context should be unchanged when route is not matched
 	_, hasDeadline := newCtx.Deadline()
@@ -236,8 +238,10 @@ func TestProxy_ApplyTimeout_ExistingDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	newCtx, newCancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
-	assert.True(t, matched)
+	newCtx, newCancel, matchResult := p.applyTimeout(ctx, "/test.Service/Method")
+	// No route configured, so matchResult should be nil (no route to match)
+	// but context already has a deadline so it returns early
+	assert.Nil(t, matchResult)
 	assert.Nil(t, newCancel)
 	assert.Equal(t, ctx, newCtx)
 }
@@ -262,8 +266,8 @@ func TestProxy_ApplyTimeout_RouteTimeout(t *testing.T) {
 	defer p.Close()
 
 	ctx := context.Background()
-	newCtx, cancel, matched := p.applyTimeout(ctx, "/test.Service/Method")
-	assert.True(t, matched)
+	newCtx, cancel, matchResult := p.applyTimeout(ctx, "/test.Service/Method")
+	assert.NotNil(t, matchResult)
 	require.NotNil(t, cancel)
 	defer cancel()
 
@@ -894,4 +898,228 @@ func TestProxy_HandleStream_DeadlineExceeded(t *testing.T) {
 	err = p.handleStream(nil, stream)
 	// Error is expected — either deadline exceeded or connection error
 	assert.Error(t, err)
+}
+
+// --- WithRouteRateLimiter tests ---
+
+func TestWithRouteRateLimiter(t *testing.T) {
+	t.Parallel()
+
+	manager := NewRouteRateLimiterManager()
+	p := &Proxy{}
+
+	opt := WithRouteRateLimiter(manager)
+	opt(p)
+
+	assert.Equal(t, manager, p.rateLimiterManager)
+}
+
+func TestWithRouteRateLimiter_Nil(t *testing.T) {
+	t.Parallel()
+
+	p := &Proxy{}
+
+	opt := WithRouteRateLimiter(nil)
+	opt(p)
+
+	assert.Nil(t, p.rateLimiterManager)
+}
+
+// --- ClearRateLimitCache tests ---
+
+func TestProxy_ClearRateLimitCache_WithManager(t *testing.T) {
+	t.Parallel()
+
+	manager := NewRouteRateLimiterManager(
+		WithRateLimiterManagerLogger(observability.NopLogger()),
+	)
+
+	r := router.New()
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithRouteRateLimiter(manager),
+	)
+	defer p.Close()
+
+	// Create some limiters
+	cfg := &config.RateLimitConfig{
+		Enabled:           true,
+		RequestsPerSecond: 100,
+		Burst:             100,
+	}
+	_ = manager.Check(context.Background(), "route-1", cfg)
+	_ = manager.Check(context.Background(), "route-2", cfg)
+	assert.Equal(t, 2, manager.LimiterCount())
+
+	// Clear rate limit cache
+	p.ClearRateLimitCache()
+
+	assert.Equal(t, 0, manager.LimiterCount())
+}
+
+func TestProxy_ClearRateLimitCache_NilManager(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+	)
+	defer p.Close()
+
+	// ClearRateLimitCache with nil manager should not panic
+	assert.NotPanics(t, func() {
+		p.ClearRateLimitCache()
+	})
+}
+
+// --- HandleStream with rate limiting ---
+
+func TestProxy_HandleStream_WithRateLimiting(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	err := r.AddRoute(config.GRPCRoute{
+		Name: "rate-limited-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "ratelimited."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "localhost", Port: 50051}},
+		},
+		RateLimit: &config.RateLimitConfig{
+			Enabled:           true,
+			RequestsPerSecond: 1,
+			Burst:             1,
+		},
+	})
+	require.NoError(t, err)
+
+	manager := NewRouteRateLimiterManager(
+		WithRateLimiterManagerLogger(observability.NopLogger()),
+	)
+
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithRouteRateLimiter(manager),
+		WithDefaultTimeout(500*time.Millisecond), // Short timeout so first request fails quickly
+	)
+	defer p.Close()
+
+	// First request should pass rate limiting (but fail at backend connection)
+	ctx := grpc.NewContextWithServerTransportStream(
+		context.Background(),
+		&proxyTestServerTransportStream{method: "/ratelimited.Service/Method"},
+	)
+	stream := &proxyTestServerStream{ctx: ctx}
+
+	err = p.handleStream(nil, stream)
+	// Error is expected (backend connection fails), but it should NOT be ResourceExhausted
+	assert.Error(t, err)
+	if st, ok := status.FromError(err); ok {
+		assert.NotEqual(t, codes.ResourceExhausted, st.Code(),
+			"first request should not be rate limited")
+	}
+
+	// Second request should be rate limited (sent immediately after first)
+	ctx2 := grpc.NewContextWithServerTransportStream(
+		context.Background(),
+		&proxyTestServerTransportStream{method: "/ratelimited.Service/Method"},
+	)
+	stream2 := &proxyTestServerStream{ctx: ctx2}
+
+	err = p.handleStream(nil, stream2)
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.ResourceExhausted, st.Code(),
+		"second request should be rate limited")
+}
+
+func TestProxy_HandleStream_WithRateLimiting_NoRateLimitConfig(t *testing.T) {
+	t.Parallel()
+
+	r := router.New()
+	err := r.AddRoute(config.GRPCRoute{
+		Name: "no-ratelimit-route",
+		Match: []config.GRPCRouteMatch{
+			{Service: &config.StringMatch{Prefix: "noratelimit."}},
+		},
+		Route: []config.RouteDestination{
+			{Destination: config.Destination{Host: "localhost", Port: 50051}},
+		},
+		// No RateLimit config
+	})
+	require.NoError(t, err)
+
+	manager := NewRouteRateLimiterManager(
+		WithRateLimiterManagerLogger(observability.NopLogger()),
+	)
+
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithRouteRateLimiter(manager),
+	)
+	defer p.Close()
+
+	// Request should not be rate limited (no rate limit config on route)
+	ctx := grpc.NewContextWithServerTransportStream(
+		context.Background(),
+		&proxyTestServerTransportStream{method: "/noratelimit.Service/Method"},
+	)
+	stream := &proxyTestServerStream{ctx: ctx}
+
+	err = p.handleStream(nil, stream)
+	// Error is expected (backend connection fails), but NOT ResourceExhausted
+	assert.Error(t, err)
+	if st, ok := status.FromError(err); ok {
+		assert.NotEqual(t, codes.ResourceExhausted, st.Code())
+	}
+}
+
+// --- Close with rate limiter ---
+
+func TestProxy_Close_WithRateLimiter(t *testing.T) {
+	t.Parallel()
+
+	manager := NewRouteRateLimiterManager(
+		WithRateLimiterManagerLogger(observability.NopLogger()),
+	)
+
+	r := router.New()
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithRouteRateLimiter(manager),
+	)
+
+	// Create some limiters
+	cfg := &config.RateLimitConfig{
+		Enabled:           true,
+		RequestsPerSecond: 100,
+		Burst:             100,
+	}
+	_ = manager.Check(context.Background(), "close-route", cfg)
+	assert.Equal(t, 1, manager.LimiterCount())
+
+	// Close should clear rate limiters
+	err := p.Close()
+	assert.NoError(t, err)
+	assert.Equal(t, 0, manager.LimiterCount())
+}
+
+// --- New with rate limiter ---
+
+func TestNew_WithRouteRateLimiter(t *testing.T) {
+	t.Parallel()
+
+	manager := NewRouteRateLimiterManager()
+
+	r := router.New()
+	p := New(r,
+		WithProxyLogger(observability.NopLogger()),
+		WithRouteRateLimiter(manager),
+	)
+	defer p.Close()
+
+	assert.NotNil(t, p)
+	assert.Equal(t, manager, p.rateLimiterManager)
 }

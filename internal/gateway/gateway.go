@@ -2,8 +2,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -16,6 +19,8 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	graphqlproxy "github.com/vyrodovalexey/avapigw/internal/graphql/proxy"
+	graphqlrouter "github.com/vyrodovalexey/avapigw/internal/graphql/router"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
@@ -91,6 +96,10 @@ type Gateway struct {
 	authMetrics         *auth.Metrics
 	vaultClient         vault.Client
 	grpcBackendRegistry *backend.Registry
+
+	// GraphQL components
+	graphqlRouter *graphqlrouter.Router
+	graphqlProxy  *graphqlproxy.Proxy
 }
 
 // Option is a functional option for configuring the gateway.
@@ -177,6 +186,20 @@ func WithGatewayVaultClient(client vault.Client) Option {
 func WithGatewayGRPCBackendRegistry(registry *backend.Registry) Option {
 	return func(g *Gateway) {
 		g.grpcBackendRegistry = registry
+	}
+}
+
+// WithGraphQLRouter sets the GraphQL router for the gateway.
+func WithGraphQLRouter(router *graphqlrouter.Router) Option {
+	return func(g *Gateway) {
+		g.graphqlRouter = router
+	}
+}
+
+// WithGraphQLProxy sets the GraphQL proxy for the gateway.
+func WithGraphQLProxy(proxy *graphqlproxy.Proxy) Option {
+	return func(g *Gateway) {
+		g.graphqlProxy = proxy
 	}
 }
 
@@ -344,14 +367,126 @@ func (g *Gateway) Engine() *gin.Engine {
 	return g.engine
 }
 
+// defaultGraphQLPath is the default endpoint path for GraphQL requests.
+const defaultGraphQLPath = "/graphql"
+
+// defaultGraphQLMaxBodySize is the default maximum GraphQL request body size (10MB).
+const defaultGraphQLMaxBodySize = 10 * 1024 * 1024
+
 // setupRoutes sets up the gin routes.
 func (g *Gateway) setupRoutes() {
-	// Add recovery middleware
 	g.engine.Use(gin.Recovery())
 
-	// If a custom route handler is set, use it for all routes
+	// Register GraphQL handler if router and proxy are configured.
+	// This must be registered BEFORE the NoRoute catch-all so that
+	// /graphql requests are handled by the GraphQL handler, not the
+	// HTTP reverse proxy.
+	if g.graphqlRouter != nil && g.graphqlProxy != nil {
+		path := g.getGraphQLPath()
+		g.engine.POST(path, g.handleGraphQL)
+		g.engine.GET(path, g.handleGraphQL)
+		g.logger.Info("GraphQL handler registered",
+			observability.String("path", path),
+		)
+	}
+
 	if g.routeHandler != nil {
 		g.engine.NoRoute(gin.WrapH(g.routeHandler))
+	}
+}
+
+// getGraphQLPath returns the configured GraphQL endpoint path or the default "/graphql".
+func (g *Gateway) getGraphQLPath() string {
+	cfg := g.config.Load()
+	if cfg.Spec.GraphQL != nil && cfg.Spec.GraphQL.Path != "" {
+		return cfg.Spec.GraphQL.Path
+	}
+	return defaultGraphQLPath
+}
+
+// getGraphQLMaxBodySize returns the configured maximum GraphQL body size or the default (10MB).
+func (g *Gateway) getGraphQLMaxBodySize() int64 {
+	cfg := g.config.Load()
+	if cfg.Spec.GraphQL != nil && cfg.Spec.GraphQL.MaxBodySize > 0 {
+		return cfg.Spec.GraphQL.MaxBodySize
+	}
+	return defaultGraphQLMaxBodySize
+}
+
+// handleGraphQL handles GraphQL requests by parsing the GraphQL body,
+// matching against configured routes, and forwarding to the appropriate backend.
+func (g *Gateway) handleGraphQL(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	// Read body with size limit to prevent DoS via oversized payloads.
+	maxSize := g.getGraphQLMaxBodySize()
+	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, maxSize+1))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"errors": []gin.H{{"message": "failed to read request body"}},
+		})
+		return
+	}
+	if int64(len(bodyBytes)) > maxSize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"errors": []gin.H{{"message": "request body too large"}},
+		})
+		return
+	}
+
+	// Parse GraphQL request
+	var gqlReq graphqlrouter.GraphQLRequest
+	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"errors": []gin.H{{"message": fmt.Sprintf("invalid GraphQL request: %s", err.Error())}},
+		})
+		return
+	}
+	if gqlReq.Query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"errors": []gin.H{{"message": "GraphQL query is empty"}},
+		})
+		return
+	}
+
+	// Restore body for proxy forwarding (single restore, after parsing)
+	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	// Match route
+	match := g.graphqlRouter.Match(c.Request, &gqlReq)
+	if match == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"errors": []gin.H{{"message": "no matching GraphQL route"}},
+		})
+		return
+	}
+
+	// Forward to backend
+	resp, err := g.graphqlProxy.Forward(ctx, match.BackendName, c.Request)
+	if err != nil {
+		g.logger.Error("GraphQL proxy error",
+			observability.String("backend", match.BackendName),
+			observability.Error(err),
+		)
+		c.JSON(http.StatusBadGateway, gin.H{
+			"errors": []gin.H{{"message": fmt.Sprintf("backend error: %s", err.Error())}},
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers using Add to preserve multi-value headers (e.g., Set-Cookie).
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+	c.Status(resp.StatusCode)
+	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
+		g.logger.Debug("failed to copy response body",
+			observability.Error(err),
+			observability.String("backend", match.BackendName),
+		)
 	}
 }
 

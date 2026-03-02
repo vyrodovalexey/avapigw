@@ -1,6 +1,6 @@
 # Yandex Tank Configuration: K8s HTTPS GET Throughput Test
 # Purpose: Measure HTTPS throughput for gateway deployed in local Kubernetes with Vault PKI TLS
-# Duration: 30 seconds total (ramp from 1 to 100 RPS)
+# Duration: 3 minutes total (30s warmup + 2m sustain + 30s cooldown)
 # Target: Conservative load for local K8s (Docker Desktop) with TLS
 #
 # Note: The address port is dynamically replaced by run-k8s-test.sh
@@ -12,9 +12,11 @@ phantom:
   address: host.docker.internal:32300
   load_profile:
     load_type: rps
-    # Conservative ramp for local K8s with TLS:
-    # Ramp from 1 to 100 RPS over 30 seconds
-    schedule: line(1, 100, 30s)
+    # 3-minute test for local K8s with TLS:
+    # Warmup: 30s ramp from 10 to 200 RPS
+    # Sustain: 2m at 200 RPS
+    # Cooldown: 30s ramp down
+    schedule: line(10, 200, 30s) const(200, 2m) line(200, 10, 30s)
 
   ammofile: /var/loadtest/ammo/http-get.txt
   ammo_type: uri

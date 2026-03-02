@@ -948,9 +948,116 @@ func TestParseGraphQLRequest_ReadError(t *testing.T) {
 	req.Body.Close()
 
 	_, err := ParseGraphQLRequest(req)
-	// After closing, reading may or may not error depending on implementation
-	// but the function should handle it gracefully
-	if err != nil {
-		assert.Error(t, err)
+	// After closing, the function should return an error (either read error or parse error)
+	assert.Error(t, err)
+}
+
+func TestParseGraphQLRequest_BodyTooLarge(t *testing.T) {
+	t.Parallel()
+
+	// Create a body larger than defaultMaxGraphQLBodySize (10MB)
+	largeBody := strings.Repeat("a", defaultMaxGraphQLBodySize+1)
+	req := httptest.NewRequest(http.MethodPost, "/graphql", strings.NewReader(largeBody))
+
+	_, err := ParseGraphQLRequest(req)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "request body too large")
+}
+
+func TestDetectOperationType_WordBoundary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		query    string
+		expected string
+	}{
+		{
+			name:     "mutationHelper should be query (false positive prevention)",
+			query:    "mutationHelper { doSomething }",
+			expected: "query",
+		},
+		{
+			name:     "subscriptionManager should be query (false positive prevention)",
+			query:    "subscriptionManager { getStatus }",
+			expected: "query",
+		},
+		{
+			name:     "mutation_helper with underscore should be query",
+			query:    "mutation_helper { doSomething }",
+			expected: "query",
+		},
+		{
+			name:     "mutationX with letter should be query",
+			query:    "mutationX { doSomething }",
+			expected: "query",
+		},
+		{
+			name:     "subscription123 with digit should be query",
+			query:    "subscription123 { doSomething }",
+			expected: "query",
+		},
+		{
+			name:     "mutation with space is valid mutation",
+			query:    "mutation { createUser { id } }",
+			expected: "mutation",
+		},
+		{
+			name:     "mutation with brace is valid mutation",
+			query:    "mutation{ createUser { id } }",
+			expected: "mutation",
+		},
+		{
+			name:     "subscription with space is valid subscription",
+			query:    "subscription { onEvent { id } }",
+			expected: "subscription",
+		},
+		{
+			name:     "mutation alone (exact length)",
+			query:    "mutation",
+			expected: "mutation",
+		},
+		{
+			name:     "subscription alone (exact length)",
+			query:    "subscription",
+			expected: "subscription",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := detectOperationType(tt.query)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestIsIdentifierChar(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		char     byte
+		expected bool
+	}{
+		{name: "lowercase letter", char: 'a', expected: true},
+		{name: "uppercase letter", char: 'Z', expected: true},
+		{name: "digit", char: '5', expected: true},
+		{name: "underscore", char: '_', expected: true},
+		{name: "space", char: ' ', expected: false},
+		{name: "brace", char: '{', expected: false},
+		{name: "paren", char: '(', expected: false},
+		{name: "newline", char: '\n', expected: false},
+		{name: "tab", char: '\t', expected: false},
+		{name: "hyphen", char: '-', expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := isIdentifierChar(tt.char)
+			assert.Equal(t, tt.expected, result)
+		})
 	}
 }

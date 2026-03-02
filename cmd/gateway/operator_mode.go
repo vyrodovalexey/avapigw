@@ -140,6 +140,8 @@ func loadOperatorInitialConfig(flags cliFlags, logger observability.Logger) *con
 	cfg.Spec.Backends = nil
 	cfg.Spec.GRPCRoutes = nil
 	cfg.Spec.GRPCBackends = nil
+	cfg.Spec.GraphQLRoutes = nil
+	cfg.Spec.GraphQLBackends = nil
 
 	// Override gateway name if provided via flags
 	if flags.gatewayName != "" {
@@ -299,6 +301,42 @@ func (a *gatewayConfigApplier) ApplyGRPCBackends(ctx context.Context, backends [
 	return nil
 }
 
+// ApplyGraphQLRoutes applies GraphQL route configuration.
+func (a *gatewayConfigApplier) ApplyGraphQLRoutes(_ context.Context, routes []config.GraphQLRoute) error {
+	a.logger.Info("applying GraphQL routes from operator",
+		observability.Int("count", len(routes)),
+	)
+
+	rm := ensureReloadMetrics(a.app.application)
+
+	if a.app.graphqlRouter != nil {
+		if err := a.app.graphqlRouter.LoadRoutes(routes); err != nil {
+			a.logger.Error("failed to reload GraphQL routes",
+				observability.Error(err),
+			)
+			rm.configReloadComponentTotal.WithLabelValues("graphql_routes", "error").Inc()
+			return err
+		}
+		rm.configReloadComponentTotal.WithLabelValues("graphql_routes", "success").Inc()
+	}
+	return nil
+}
+
+// ApplyGraphQLBackends applies GraphQL backend configuration.
+func (a *gatewayConfigApplier) ApplyGraphQLBackends(_ context.Context, backends []config.GraphQLBackend) error {
+	a.logger.Info("applying GraphQL backends from operator",
+		observability.Int("count", len(backends)),
+	)
+
+	rm := ensureReloadMetrics(a.app.application)
+
+	if a.app.graphqlProxy != nil {
+		a.app.graphqlProxy.UpdateBackends(backends)
+		rm.configReloadComponentTotal.WithLabelValues("graphql_backends", "success").Inc()
+	}
+	return nil
+}
+
 // mergeOperatorConfig merges operator-provided resources into the existing
 // gateway config to preserve required fields (APIVersion, Kind, Metadata,
 // Listeners) that were initialized from the config file or createMinimalConfig().
@@ -313,22 +351,24 @@ func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *c
 		Kind:       existing.Kind,
 		Metadata:   existing.Metadata,
 		Spec: config.GatewaySpec{
-			Listeners:      existing.Spec.Listeners,
-			Routes:         cfg.Spec.Routes,
-			Backends:       cfg.Spec.Backends,
-			GRPCRoutes:     cfg.Spec.GRPCRoutes,
-			GRPCBackends:   cfg.Spec.GRPCBackends,
-			RateLimit:      cfg.Spec.RateLimit,
-			CircuitBreaker: existing.Spec.CircuitBreaker,
-			CORS:           existing.Spec.CORS,
-			Observability:  existing.Spec.Observability,
-			Authentication: existing.Spec.Authentication,
-			Authorization:  existing.Spec.Authorization,
-			Security:       existing.Spec.Security,
-			Audit:          mergeAuditConfig(existing.Spec.Audit, cfg.Spec.Audit),
-			RequestLimits:  existing.Spec.RequestLimits,
-			MaxSessions:    cfg.Spec.MaxSessions,
-			TrustedProxies: existing.Spec.TrustedProxies,
+			Listeners:       existing.Spec.Listeners,
+			Routes:          cfg.Spec.Routes,
+			Backends:        cfg.Spec.Backends,
+			GRPCRoutes:      cfg.Spec.GRPCRoutes,
+			GRPCBackends:    cfg.Spec.GRPCBackends,
+			GraphQLRoutes:   cfg.Spec.GraphQLRoutes,
+			GraphQLBackends: cfg.Spec.GraphQLBackends,
+			RateLimit:       cfg.Spec.RateLimit,
+			CircuitBreaker:  existing.Spec.CircuitBreaker,
+			CORS:            existing.Spec.CORS,
+			Observability:   existing.Spec.Observability,
+			Authentication:  existing.Spec.Authentication,
+			Authorization:   existing.Spec.Authorization,
+			Security:        existing.Spec.Security,
+			Audit:           mergeAuditConfig(existing.Spec.Audit, cfg.Spec.Audit),
+			RequestLimits:   existing.Spec.RequestLimits,
+			MaxSessions:     cfg.Spec.MaxSessions,
+			TrustedProxies:  existing.Spec.TrustedProxies,
 		},
 	}
 }
@@ -363,6 +403,10 @@ func (a *gatewayConfigApplier) applyMergedComponents(
 	}
 
 	if err := a.applyMergedGRPCComponents(ctx, merged); err != nil {
+		return err
+	}
+
+	if err := a.applyMergedGraphQLComponents(ctx, merged); err != nil {
 		return err
 	}
 
@@ -413,6 +457,26 @@ func (a *gatewayConfigApplier) applyMergedGRPCComponents(
 	return nil
 }
 
+// applyMergedGraphQLComponents applies GraphQL routes and backends from the merged configuration.
+func (a *gatewayConfigApplier) applyMergedGraphQLComponents(
+	_ context.Context, merged *config.GatewayConfig,
+) error {
+	if len(merged.Spec.GraphQLRoutes) > 0 && a.app.graphqlRouter != nil {
+		if err := a.app.graphqlRouter.LoadRoutes(merged.Spec.GraphQLRoutes); err != nil {
+			a.logger.Error("failed to reload GraphQL routes",
+				observability.Error(err),
+			)
+			return err
+		}
+	}
+
+	if len(merged.Spec.GraphQLBackends) > 0 && a.app.graphqlProxy != nil {
+		a.app.graphqlProxy.UpdateBackends(merged.Spec.GraphQLBackends)
+	}
+
+	return nil
+}
+
 // ApplyFullConfig applies a complete configuration.
 // It merges operator-provided resources (routes, backends, etc.) into the existing
 // gateway config to preserve required fields (APIVersion, Kind, Metadata, Listeners)
@@ -426,6 +490,8 @@ func (a *gatewayConfigApplier) ApplyFullConfig(ctx context.Context, cfg *config.
 		observability.Int("backends", len(cfg.Spec.Backends)),
 		observability.Int("grpc_routes", len(cfg.Spec.GRPCRoutes)),
 		observability.Int("grpc_backends", len(cfg.Spec.GRPCBackends)),
+		observability.Int("graphql_routes", len(cfg.Spec.GraphQLRoutes)),
+		observability.Int("graphql_backends", len(cfg.Spec.GraphQLBackends)),
 	)
 
 	merged := a.mergeOperatorConfig(cfg)

@@ -151,10 +151,13 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 func InitControllerVecMetrics() {
 	m := GetControllerMetrics()
 
-	controllers := []string{"apiroute", "grpcroute", "backend", "grpcbackend", "ingress"}
+	controllers := []string{
+		"apiroute", "grpcroute", "backend", "grpcbackend",
+		"graphqlroute", "graphqlbackend", "ingress",
+	}
 	results := []string{ResultSuccess, ResultError, ResultRequeue}
 	operations := []string{OperationAdd, OperationRemove}
-	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend"}
+	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend", "GraphQLRoute", "GraphQLBackend"}
 
 	for _, c := range controllers {
 		// reconcileTotal: controller × result
@@ -190,7 +193,7 @@ func InitControllerVecMetrics() {
 func InitStatusUpdateVecMetrics() {
 	m := GetStatusUpdateMetrics()
 
-	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend"}
+	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend", "GraphQLRoute", "GraphQLBackend"}
 	results := []string{ResultSuccess, ResultError}
 
 	for _, k := range kinds {

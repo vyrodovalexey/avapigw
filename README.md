@@ -909,21 +909,27 @@ The AV API Gateway supports comprehensive hot configuration reload through two d
 
 ### What IS Hot-Reloaded
 
-✅ **HTTP Routes & Backends** - Route definitions, backend configurations, health checks (both modes)
-✅ **gRPC Backends** - Backend host addresses, ports, weights, health checks (both modes)  
-✅ **gRPC Routes** - Service and method routing (operator mode only)
-✅ **Rate Limiter** - Global, route-level, and backend-level rate limiting (both modes)
-✅ **Max Sessions** - Concurrent connection limiting configuration (both modes)
-✅ **Audit Logger** - Logger configuration with AtomicAuditLogger for lock-free updates (both modes)
+| Component | File-Based Mode | Operator/CRD Mode | Notes |
+|---|---|---|---|
+| HTTP routes | ✅ Reloaded | ✅ Reloaded | `router.LoadRoutes()` |
+| HTTP backends | ✅ Reloaded | ✅ Reloaded | `backendRegistry.ReloadFromConfig()` |
+| gRPC routes | ❌ Not reloaded | ✅ Reloaded | **Key difference between modes** |
+| gRPC backends | ✅ Reloaded | ✅ Reloaded | `backendRegistry.ReloadFromConfig()` with copy-on-write |
+| GraphQL routes | ✅ Reloaded | ✅ Reloaded | Reuses HTTP route infrastructure |
+| GraphQL backends | ✅ Reloaded | ✅ Reloaded | `GraphQLBackendsToBackends()` conversion |
+| Rate limiter | ✅ Reloaded | ✅ Reloaded | `rateLimiter.UpdateConfig()` |
+| Max sessions | ✅ Reloaded | ✅ Reloaded | `maxSessionsLimiter.UpdateConfig()` |
+| Audit logger | ✅ Reloaded | ✅ Reloaded | `AtomicAuditLogger` atomic swap |
+| HTTP middleware cache | ✅ Cleared | ✅ Cleared | `routeMiddlewareMgr.ClearCache()` |
+| gRPC auth cache | ❌ Not cleared | ✅ Cleared | `gateway.ClearAllAuthCaches()` |
+| CORS middleware | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
+| Security headers | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
+| Circuit breaker | ❌ Restart required | ❌ Preserved from initial config | sony/gobreaker limitation |
+| Listener config (ports, TLS) | ❌ Restart required | ❌ Preserved from initial config | Bound at startup |
+| Observability (tracing, metrics) | ❌ Restart required | ❌ Preserved from initial config | Initialized once |
+| Global auth middleware | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
+| Trusted proxies | ❌ Restart required | ❌ Preserved from initial config | `initClientIPExtractor()` once |
 
-### What Requires Restart
-
-❌ **CORS Middleware** - Global and route-level CORS settings
-❌ **Security Headers** - Global and route-level security headers  
-❌ **Circuit Breaker** - Circuit breaker configuration (sony/gobreaker limitation)
-❌ **Listeners** - HTTP/HTTPS/gRPC listener ports, addresses, TLS settings
-❌ **Observability** - Tracing, metrics, logging configuration
-❌ **Global Auth/Authz** - Global authentication and authorization middleware
 
 ### Key Differences Between Modes
 
@@ -2077,6 +2083,11 @@ spec:
   requestLimits:
     maxBodySize: 10485760    # 10MB
     maxHeaderSize: 1048576   # 1MB
+  
+  # Global GraphQL configuration
+  graphql:
+    maxBodySize: 10485760    # 10MB - Maximum GraphQL request body size
+    path: "/graphql"         # GraphQL endpoint path
   
   # Global CORS configuration
   cors:
@@ -4959,12 +4970,19 @@ spec:
 
 The AV API Gateway provides comprehensive GraphQL proxy capabilities with advanced query analysis, routing, and subscription support. The GraphQL gateway enables sophisticated routing based on operation types, operation names, and headers while providing essential security features like depth limiting and complexity analysis.
 
-### GraphQL Route Configuration
+### GraphQL Configuration
 
-Configure GraphQL routes with operation-specific matching:
+Configure global GraphQL settings and routes with operation-specific matching:
 
 ```yaml
 spec:
+  # Global GraphQL configuration
+  graphql:
+    # Maximum request body size for GraphQL requests (default: 10MB)
+    maxBodySize: 10485760  # 10MB
+    # GraphQL endpoint path (default: /graphql)
+    path: "/graphql"
+
   graphqlRoutes:
     - name: graphql-api
       match:

@@ -236,14 +236,72 @@ setup_kv() {
     # Store test API keys
     log_info "Storing test API keys..."
     
-    # API key for performance testing
-    vault_api POST "secret/data/perftest/apikeys" '{
+    # API keys for performance testing
+    # VaultStore.Get() hashes the submitted key with SHA-256 and looks up: <path>/<keyHash>
+    # Each key must be stored as a separate secret at its hash path with structured metadata.
+    
+    # Key: pk_perftest_1234567890abcdef -> SHA-256: ec328e875f4b3ca382d13e95f0bd3822d212f6fa69a17bd039d970aa5c614423
+    vault_api POST "secret/data/perftest/apikeys/ec328e875f4b3ca382d13e95f0bd3822d212f6fa69a17bd039d970aa5c614423" '{
         "data": {
-            "perftest-key-1": "pk_perftest_1234567890abcdef",
-            "perftest-key-2": "pk_perftest_abcdef1234567890",
-            "perftest-key-3": "pk_perftest_fedcba0987654321",
-            "admin-key": "pk_admin_supersecretkey12345",
-            "readonly-key": "pk_readonly_viewonlykey67890"
+            "id": "perftest-key-1",
+            "name": "Performance Test Key 1",
+            "hash": "ec328e875f4b3ca382d13e95f0bd3822d212f6fa69a17bd039d970aa5c614423",
+            "key": "pk_perftest_1234567890abcdef",
+            "scopes": ["read", "write"],
+            "roles": ["user"],
+            "enabled": true
+        }
+    }'
+    
+    # Key: pk_perftest_abcdef1234567890 -> SHA-256: bd465c6d1f328a21e047de096b7ab235dcaa05af5de99bed19aa11579c4ccad6
+    vault_api POST "secret/data/perftest/apikeys/bd465c6d1f328a21e047de096b7ab235dcaa05af5de99bed19aa11579c4ccad6" '{
+        "data": {
+            "id": "perftest-key-2",
+            "name": "Performance Test Key 2",
+            "hash": "bd465c6d1f328a21e047de096b7ab235dcaa05af5de99bed19aa11579c4ccad6",
+            "key": "pk_perftest_abcdef1234567890",
+            "scopes": ["read", "write"],
+            "roles": ["user"],
+            "enabled": true
+        }
+    }'
+    
+    # Key: pk_perftest_fedcba0987654321 -> SHA-256: e042f1aa9259fb2639f610e8e611d86c9e27eb72a562e38463654d8c028dbe7e
+    vault_api POST "secret/data/perftest/apikeys/e042f1aa9259fb2639f610e8e611d86c9e27eb72a562e38463654d8c028dbe7e" '{
+        "data": {
+            "id": "perftest-key-3",
+            "name": "Performance Test Key 3",
+            "hash": "e042f1aa9259fb2639f610e8e611d86c9e27eb72a562e38463654d8c028dbe7e",
+            "key": "pk_perftest_fedcba0987654321",
+            "scopes": ["read", "write"],
+            "roles": ["user"],
+            "enabled": true
+        }
+    }'
+    
+    # Key: pk_admin_supersecretkey12345 -> SHA-256: 4ee22d44ffb0ed2718d0e8ce9863530505d35194c31223fdf99ef16107ce8971
+    vault_api POST "secret/data/perftest/apikeys/4ee22d44ffb0ed2718d0e8ce9863530505d35194c31223fdf99ef16107ce8971" '{
+        "data": {
+            "id": "admin-key",
+            "name": "Admin Key",
+            "hash": "4ee22d44ffb0ed2718d0e8ce9863530505d35194c31223fdf99ef16107ce8971",
+            "key": "pk_admin_supersecretkey12345",
+            "scopes": ["read", "write", "admin"],
+            "roles": ["admin"],
+            "enabled": true
+        }
+    }'
+    
+    # Key: pk_readonly_viewonlykey67890 -> SHA-256: d30897ef970c84977d89fb798d80c1ab1f8e131fd2f2ce33d95a0fb8a840cab2
+    vault_api POST "secret/data/perftest/apikeys/d30897ef970c84977d89fb798d80c1ab1f8e131fd2f2ce33d95a0fb8a840cab2" '{
+        "data": {
+            "id": "readonly-key",
+            "name": "Read-Only Key",
+            "hash": "d30897ef970c84977d89fb798d80c1ab1f8e131fd2f2ce33d95a0fb8a840cab2",
+            "key": "pk_readonly_viewonlykey67890",
+            "scopes": ["read"],
+            "roles": ["viewer"],
+            "enabled": true
         }
     }'
     
@@ -358,12 +416,12 @@ verify_setup() {
         ((errors++))
     fi
     
-    # Check KV secrets
+    # Check KV secrets (verify first API key stored at its SHA-256 hash path)
     log_info "Checking KV secrets..."
     local kv_check
-    kv_check=$(vault_api GET "secret/data/perftest/apikeys")
+    kv_check=$(vault_api GET "secret/data/perftest/apikeys/ec328e875f4b3ca382d13e95f0bd3822d212f6fa69a17bd039d970aa5c614423")
     if echo "$kv_check" | grep -q "perftest-key-1"; then
-        log_success "API keys stored in KV"
+        log_success "API keys stored in KV (hash-based paths)"
     else
         log_error "API keys not found in KV"
         ((errors++))
@@ -405,8 +463,12 @@ verify_setup() {
 clean_setup() {
     log_info "Cleaning up Vault test configuration..."
     
-    # Delete secrets
-    vault_api DELETE "secret/data/perftest/apikeys" 2>/dev/null || true
+    # Delete secrets (API keys stored at hash-based paths)
+    vault_api DELETE "secret/data/perftest/apikeys/ec328e875f4b3ca382d13e95f0bd3822d212f6fa69a17bd039d970aa5c614423" 2>/dev/null || true
+    vault_api DELETE "secret/data/perftest/apikeys/bd465c6d1f328a21e047de096b7ab235dcaa05af5de99bed19aa11579c4ccad6" 2>/dev/null || true
+    vault_api DELETE "secret/data/perftest/apikeys/e042f1aa9259fb2639f610e8e611d86c9e27eb72a562e38463654d8c028dbe7e" 2>/dev/null || true
+    vault_api DELETE "secret/data/perftest/apikeys/4ee22d44ffb0ed2718d0e8ce9863530505d35194c31223fdf99ef16107ce8971" 2>/dev/null || true
+    vault_api DELETE "secret/data/perftest/apikeys/d30897ef970c84977d89fb798d80c1ab1f8e131fd2f2ce33d95a0fb8a840cab2" 2>/dev/null || true
     vault_api DELETE "secret/data/perftest/gateway" 2>/dev/null || true
     
     # Delete transit keys

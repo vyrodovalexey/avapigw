@@ -1,0 +1,176 @@
+# WebSocket Performance Test CRD Manifests
+# This file contains APIRoute CRDs for WebSocket performance testing.
+#
+# Apply with: kubectl apply -f test/performance/operator/crds-ws-perftest.yaml -n avapigw-test
+#
+# NOTE: WebSocket routes use APIRoute CRDs with timeout: 0s.
+# Auth is applied on the HTTP Upgrade request before the connection is upgraded.
+# The backend at /ws sends random_value messages (not echo).
+
+---
+# perf-ws-basicauth-route: WebSocket with Basic auth header
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-ws-basicauth-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: ws-route
+    feature: ws-basicauth
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-basicauth
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  maxSessions:
+    enabled: true
+    maxConcurrent: 200
+    queueSize: 50
+    queueTimeout: 30s
+
+---
+# perf-ws-apikey-route: WebSocket with API key authentication
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-ws-apikey-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: ws-route
+    feature: ws-apikey
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-apikey
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      vaultPath: secret/data/perftest/apikeys
+  maxSessions:
+    enabled: true
+    maxConcurrent: 200
+    queueSize: 50
+    queueTimeout: 30s
+
+---
+# perf-ws-oidc-route: WebSocket with OIDC JWT authentication
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-ws-oidc-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: ws-route
+    feature: ws-oidc
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-oidc
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://127.0.0.1:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+  maxSessions:
+    enabled: true
+    maxConcurrent: 200
+    queueSize: 50
+    queueTimeout: 30s
+
+---
+# perf-ws-ratelimit-route: WebSocket with per-route rate limiting
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-ws-ratelimit-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: ws-route
+    feature: ws-ratelimit
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-ratelimit
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 20
+    burst: 40
+  maxSessions:
+    enabled: true
+    maxConcurrent: 200
+    queueSize: 50
+    queueTimeout: 30s
+
+---
+# perf-ws-transform-route: WebSocket with header transformation
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-ws-transform-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: ws-route
+    feature: ws-transform
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-transform
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  headers:
+    request:
+      set:
+        x-gateway: avapigw
+        x-perf-test: ws-transform
+  maxSessions:
+    enabled: true
+    maxConcurrent: 200
+    queueSize: 50
+    queueTimeout: 30s

@@ -8,8 +8,11 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/vyrodovalexey/avapigw/internal/config"
+	"github.com/vyrodovalexey/avapigw/internal/grpc/transform"
 	"github.com/vyrodovalexey/avapigw/internal/metrics/streaming"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -29,7 +32,11 @@ func NewStreamHandler(director Director, logger observability.Logger) *StreamHan
 }
 
 // HandleStream handles all types of gRPC streams (unary, server, client, bidi).
-func (h *StreamHandler) HandleStream(srv interface{}, serverStream grpc.ServerStream) error {
+// The optional routeCfg parameter provides the matched route configuration
+// for applying per-route transforms. When nil, no transforms are applied.
+func (h *StreamHandler) HandleStream(
+	srv interface{}, serverStream grpc.ServerStream, routeCfg *config.GRPCRoute,
+) error {
 	ctx := serverStream.Context()
 
 	// Get full method from context
@@ -69,8 +76,8 @@ func (h *StreamHandler) HandleStream(srv interface{}, serverStream grpc.ServerSt
 		return err
 	}
 
-	// Proxy the streams bidirectionally
-	return h.proxyStreams(serverStream, clientStream)
+	// Proxy the streams bidirectionally with optional route transforms
+	return h.proxyStreams(serverStream, clientStream, routeCfg)
 }
 
 // createClientStream creates a client stream to the backend.
@@ -88,7 +95,10 @@ func (h *StreamHandler) createClientStream(
 }
 
 // proxyStreams proxies data between server and client streams.
-func (h *StreamHandler) proxyStreams(serverStream grpc.ServerStream, clientStream grpc.ClientStream) error {
+// The optional routeCfg provides route configuration for applying response transforms.
+func (h *StreamHandler) proxyStreams(
+	serverStream grpc.ServerStream, clientStream grpc.ClientStream, routeCfg *config.GRPCRoute,
+) error {
 	// NOTE: We do NOT call clientStream.Header() here because it blocks until
 	// the backend sends headers. For unary calls, the backend only sends headers
 	// after receiving the request, which would cause a deadlock.
@@ -119,8 +129,12 @@ func (h *StreamHandler) proxyStreams(serverStream grpc.ServerStream, clientStrea
 				return err
 			}
 		case err := <-clientToServerErr:
-			// Set trailer metadata
-			serverStream.SetTrailer(clientStream.Trailer())
+			// Apply response trailer transforms before setting trailers
+			trailers := clientStream.Trailer()
+			trailers = h.applyResponseTrailerTransforms(
+				serverStream.Context(), trailers, routeCfg,
+			)
+			serverStream.SetTrailer(trailers)
 			if err != nil {
 				return err
 			}
@@ -162,7 +176,9 @@ func (h *StreamHandler) forwardServerToClient(serverStream grpc.ServerStream, cl
 }
 
 // forwardClientToServer forwards messages from client stream to server stream.
-func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, serverStream grpc.ServerStream) error {
+func (h *StreamHandler) forwardClientToServer(
+	clientStream grpc.ClientStream, serverStream grpc.ServerStream,
+) error {
 	metrics := getGRPCProxyMetrics()
 	grpcStreamMetrics := streaming.GetGRPCStreamMetrics()
 	fullMethod, _ := grpc.Method(serverStream.Context())
@@ -189,10 +205,10 @@ func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, se
 		// Forward headers before the first message (non-blocking after first RecvMsg)
 		if !headerSent {
 			headerSent = true
-			if md, err := clientStream.Header(); err == nil && md != nil {
-				if err := serverStream.SendHeader(md); err != nil {
+			if md, headerErr := clientStream.Header(); headerErr == nil && md != nil {
+				if sendErr := serverStream.SendHeader(md); sendErr != nil {
 					h.logger.Debug("failed to send header",
-						observability.Error(err),
+						observability.Error(sendErr),
 					)
 				}
 			}
@@ -202,6 +218,45 @@ func (h *StreamHandler) forwardClientToServer(clientStream grpc.ClientStream, se
 			return err
 		}
 	}
+}
+
+// applyResponseTrailerTransforms applies response trailer metadata transforms
+// from the route configuration. It adds trailer metadata from the route's
+// Transform.Response.TrailerMetadata config.
+func (h *StreamHandler) applyResponseTrailerTransforms(
+	ctx context.Context, trailers metadata.MD, routeCfg *config.GRPCRoute,
+) metadata.MD {
+	if routeCfg == nil || routeCfg.Transform == nil || routeCfg.Transform.Response == nil {
+		return trailers
+	}
+
+	responseCfg := routeCfg.Transform.Response
+	if len(responseCfg.TrailerMetadata) == 0 {
+		return trailers
+	}
+
+	metrics := getGRPCProxyMetrics()
+	transformer := transform.NewMetadataTransformer(h.logger)
+
+	transformed, err := transformer.TransformTrailerMetadata(ctx, trailers, responseCfg)
+	if err != nil {
+		h.logger.Warn("failed to apply response trailer transforms",
+			observability.String("route", routeCfg.Name),
+			observability.Error(err),
+		)
+		return trailers
+	}
+
+	metrics.transformOperations.WithLabelValues(
+		routeCfg.Name, "response", "trailer_metadata",
+	).Inc()
+
+	h.logger.Debug("applied response trailer transforms",
+		observability.String("route", routeCfg.Name),
+		observability.Int("trailer_count", len(responseCfg.TrailerMetadata)),
+	)
+
+	return transformed
 }
 
 // wrappedServerStream wraps a grpc.ServerStream to allow context modification.

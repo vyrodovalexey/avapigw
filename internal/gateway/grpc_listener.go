@@ -179,10 +179,17 @@ func NewGRPCListener(
 		l.router = grpcrouter.New()
 	}
 
+	// Create per-route rate limiter manager for the proxy.
+	// This is always created; it is a no-op when routes don't have rate limit config.
+	rateLimiterManager := grpcproxy.NewRouteRateLimiterManager(
+		grpcproxy.WithRateLimiterManagerLogger(l.logger),
+	)
+
 	// Create proxy with metrics registry so gRPC proxy metrics
 	// appear on the gateway's /metrics endpoint.
 	proxyOpts := []grpcproxy.ProxyOption{
 		grpcproxy.WithProxyLogger(l.logger),
+		grpcproxy.WithRouteRateLimiter(rateLimiterManager),
 	}
 	if l.metricsRegistry != nil {
 		proxyOpts = append(proxyOpts, grpcproxy.WithMetricsRegistry(l.metricsRegistry))

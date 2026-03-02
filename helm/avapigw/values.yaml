@@ -345,6 +345,13 @@ gateway:
     # -- Maximum header size in bytes (default: 1MB)
     maxHeaderSize: 1048576
 
+  # GraphQL-specific configuration
+  graphql:
+    # -- Maximum allowed GraphQL request body size in bytes (default: 10MB)
+    maxBodySize: 10485760
+    # -- Endpoint path for GraphQL requests (default: /graphql)
+    path: "/graphql"
+
   # Security headers configuration
   security:
     # -- Enable security features
