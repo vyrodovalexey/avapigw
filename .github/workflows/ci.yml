@@ -1272,7 +1272,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@c1824fd6edce30d7ab345a9989de00bbd46ef284 # v0.31.0
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.31.0
         with:
           image-ref: '${{ env.DOCKER_IMAGE }}:${{ needs.docker-build-push.outputs.image-tag }}'
           format: 'sarif'
@@ -1281,12 +1281,12 @@ jobs:
           vuln-type: 'os,library'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@9e907b5e64f6b83e7804b09294d44122997950d6 # v4.32.2
+        uses: github/codeql-action/upload-sarif@45cbd0c69e560cd9e7cd7f8c32362050c9b7ded2 # v4.32.2
         with:
           sarif_file: 'trivy-results.sarif'
 
       - name: Run Trivy vulnerability scanner (table output)
-        uses: aquasecurity/trivy-action@c1824fd6edce30d7ab345a9989de00bbd46ef284 # v0.31.0
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.31.0
         with:
           image-ref: '${{ env.DOCKER_IMAGE }}:${{ needs.docker-build-push.outputs.image-tag }}'
           format: 'table'
@@ -1323,7 +1323,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@c1824fd6edce30d7ab345a9989de00bbd46ef284 # v0.31.0
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.31.0
         with:
           image-ref: '${{ env.DOCKER_IMAGE_OPERATOR }}:${{ needs.docker-build-push-operator.outputs.image-tag }}'
           format: 'sarif'
@@ -1332,7 +1332,7 @@ jobs:
           vuln-type: 'os,library'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@9e907b5e64f6b83e7804b09294d44122997950d6 # v4.32.2
+        uses: github/codeql-action/upload-sarif@45cbd0c69e560cd9e7cd7f8c32362050c9b7ded2 # v4.32.2
         with:
           sarif_file: 'trivy-operator-results.sarif'
 

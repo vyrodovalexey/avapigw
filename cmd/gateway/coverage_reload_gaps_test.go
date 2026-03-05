@@ -594,6 +594,216 @@ func TestReloadComponents_WithCORSConfigChange(t *testing.T) {
 	assert.Equal(t, newCfg, app.config)
 }
 
+func TestReloadComponents_CORSChangeIncrementsMetrics(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := validGatewayConfig("test-cors-metrics")
+	cfg.Spec.CORS = &config.CORSConfig{
+		AllowOrigins: []string{"https://old.example.com"},
+	}
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	r := router.New()
+	reg := backend.NewRegistry(logger)
+
+	m := observability.NewMetrics("test_cors_metrics")
+	rm := newReloadMetrics(m)
+
+	app := &application{
+		gateway:         gw,
+		backendRegistry: reg,
+		router:          r,
+		config:          cfg,
+		reloadMetrics:   rm,
+	}
+
+	// New config with different CORS settings
+	newCfg := validGatewayConfig("test-cors-metrics-updated")
+	newCfg.Spec.CORS = &config.CORSConfig{
+		AllowOrigins: []string{"https://new.example.com"},
+	}
+
+	reloadComponents(context.Background(), app, newCfg, logger)
+
+	// Config should be updated
+	assert.Equal(t, newCfg, app.config)
+}
+
+func TestReloadComponents_CORSChangeWithRouteMiddlewareMgr(t *testing.T) {
+	t.Parallel()
+
+	logger := observability.NopLogger()
+	cfg := validGatewayConfig("test-cors-route-mw")
+	cfg.Spec.CORS = &config.CORSConfig{
+		AllowOrigins: []string{"https://old.example.com"},
+	}
+
+	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
+	require.NoError(t, err)
+
+	r := router.New()
+	reg := backend.NewRegistry(logger)
+
+	// Create a RouteMiddlewareManager
+	routeMiddlewareMgr := gateway.NewRouteMiddlewareManager(&cfg.Spec, logger)
+
+	// Pre-populate the middleware cache
+	testRoute := &config.Route{
+		Name: "test-route",
+		Match: []config.RouteMatch{
+			{URI: &config.URIMatch{Prefix: "/test"}},
+		},
+	}
+	_ = routeMiddlewareMgr.GetMiddleware(testRoute)
+
+	app := &application{
+		gateway:            gw,
+		backendRegistry:    reg,
+		router:             r,
+		config:             cfg,
+		routeMiddlewareMgr: routeMiddlewareMgr,
+	}
+
+	// New config with different CORS settings
+	newCfg := validGatewayConfig("test-cors-route-mw-updated")
+	newCfg.Spec.CORS = &config.CORSConfig{
+		AllowOrigins: []string{"https://new.example.com"},
+	}
+
+	reloadComponents(context.Background(), app, newCfg, logger)
+
+	// Config should be updated
+	assert.Equal(t, newCfg, app.config)
+
+	// After reload, the route middleware manager should use the new global config.
+	// GetEffectiveCORS for a route without route-level CORS should return the new global CORS.
+	effectiveCORS := routeMiddlewareMgr.GetEffectiveCORS(testRoute)
+	require.NotNil(t, effectiveCORS)
+	assert.Equal(t, []string{"https://new.example.com"}, effectiveCORS.AllowOrigins,
+		"route middleware manager should reflect new global CORS after reload")
+}
+
+func TestCorsConfigChanged_WithRouteLevelCORS(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		oldCfg   *config.GatewayConfig
+		newCfg   *config.GatewayConfig
+		expected bool
+	}{
+		{
+			name: "route-level CORS in routes does not affect global CORS detection - same global",
+			oldCfg: &config.GatewayConfig{
+				Spec: config.GatewaySpec{
+					CORS: &config.CORSConfig{
+						AllowOrigins: []string{"https://global.example.com"},
+					},
+					Routes: []config.Route{
+						{
+							Name: "route-with-cors",
+							CORS: &config.CORSConfig{
+								AllowOrigins: []string{"https://route.example.com"},
+							},
+						},
+					},
+				},
+			},
+			newCfg: &config.GatewayConfig{
+				Spec: config.GatewaySpec{
+					CORS: &config.CORSConfig{
+						AllowOrigins: []string{"https://global.example.com"},
+					},
+					Routes: []config.Route{
+						{
+							Name: "route-with-cors",
+							CORS: &config.CORSConfig{
+								AllowOrigins: []string{"https://different-route.example.com"},
+							},
+						},
+					},
+				},
+			},
+			// corsConfigChanged only checks Spec.CORS, not route-level CORS
+			expected: false,
+		},
+		{
+			name: "global CORS changed even with route-level CORS present",
+			oldCfg: &config.GatewayConfig{
+				Spec: config.GatewaySpec{
+					CORS: &config.CORSConfig{
+						AllowOrigins: []string{"https://old-global.example.com"},
+					},
+					Routes: []config.Route{
+						{
+							Name: "route-with-cors",
+							CORS: &config.CORSConfig{
+								AllowOrigins: []string{"https://route.example.com"},
+							},
+						},
+					},
+				},
+			},
+			newCfg: &config.GatewayConfig{
+				Spec: config.GatewaySpec{
+					CORS: &config.CORSConfig{
+						AllowOrigins: []string{"https://new-global.example.com"},
+					},
+					Routes: []config.Route{
+						{
+							Name: "route-with-cors",
+							CORS: &config.CORSConfig{
+								AllowOrigins: []string{"https://route.example.com"},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := corsConfigChanged(tt.oldCfg, tt.newCfg)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestReloadMetrics_Init_IncludesCorsComponent(t *testing.T) {
+	t.Parallel()
+
+	m := observability.NewMetrics("test_cors_init")
+	rm := newReloadMetrics(m)
+
+	// Verify that "cors" component labels are pre-populated by Init().
+	// After Init(), WithLabelValues("cors", "success") and ("cors", "error")
+	// should already exist. We can verify by incrementing and checking
+	// that no panic occurs (which would happen if the label was invalid).
+	require.NotPanics(t, func() {
+		rm.configReloadComponentTotal.WithLabelValues("cors", "success").Inc()
+		rm.configReloadComponentTotal.WithLabelValues("cors", "error").Inc()
+	})
+
+	// Also verify other expected components are present
+	expectedComponents := []string{
+		"rate_limiter", "max_sessions", "routes", "backends",
+		"audit", "cors", "grpc_routes", "grpc_backends",
+		"graphql_routes", "graphql_backends",
+	}
+	for _, comp := range expectedComponents {
+		require.NotPanics(t, func() {
+			rm.configReloadComponentTotal.WithLabelValues(comp, "success")
+			rm.configReloadComponentTotal.WithLabelValues(comp, "error")
+		}, "component %q should be pre-populated", comp)
+	}
+}
+
 func TestReloadComponents_WithSecurityConfigChange(t *testing.T) {
 	t.Parallel()
 

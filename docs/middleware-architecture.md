@@ -38,7 +38,7 @@ This pattern enables:
 
 ### 3. Thread-Safe Middleware Caching
 
-The `RouteMiddlewareManager` implements thread-safe middleware chain caching using double-check locking:
+The `RouteMiddlewareManager` implements thread-safe middleware chain caching using double-check locking. The `UpdateGlobalConfig()` method enables hot-reload of route-level CORS configuration:
 
 ```go
 // Check cache first (read lock)
@@ -238,7 +238,7 @@ func (f *CacheFactory) GetOrCreate(routeName string, cfg *config.CacheConfig) (c
 
 ### Route vs Global Configuration
 
-When the same configuration option is available at both route and global levels, the route-level configuration takes precedence:
+When the same configuration option is available at both route and global levels, the route-level configuration takes precedence. Route-level CORS is now hot-reloadable:
 
 ```yaml
 # Global CORS configuration
@@ -249,7 +249,7 @@ spec:
 
   routes:
     - name: restricted-route
-      # Route-level CORS overrides global
+      # Route-level CORS overrides global (hot-reloadable)
       cors:
         allowOrigins: ["https://trusted.example.com"]
         allowMethods: ["GET"]  # More restrictive than global

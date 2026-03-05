@@ -24,9 +24,10 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 | Rate limiter | ✅ Reloaded | ✅ Reloaded | `rateLimiter.UpdateConfig()` |
 | Max sessions | ✅ Reloaded | ✅ Reloaded | `maxSessionsLimiter.UpdateConfig()` |
 | Audit logger | ✅ Reloaded | ✅ Reloaded | `AtomicAuditLogger` atomic swap |
-| HTTP middleware cache | ✅ Cleared | ✅ Cleared | `routeMiddlewareMgr.ClearCache()` |
+| HTTP middleware cache | ✅ Cleared | ✅ Cleared | `routeMiddlewareMgr.UpdateGlobalConfig()` |
 | gRPC auth cache | ❌ Not cleared | ✅ Cleared | `gateway.ClearAllAuthCaches()` |
-| CORS middleware | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
+| Route-level CORS | ✅ Reloaded | ✅ Reloaded | Route middleware chain |
+| Global CORS (static chain) | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
 | Security headers | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
 | Circuit breaker | ❌ Restart required | ❌ Preserved from initial config | sony/gobreaker limitation |
 | Listener config (ports, TLS) | ❌ Restart required | ❌ Preserved from initial config | Bound at startup |
@@ -74,8 +75,8 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 - Converted via `GraphQLBackendsToBackends()` and reloaded via `backendRegistry.ReloadFromConfig()`
 
 ✅ **HTTP Route Middleware Cache**
-- Cache cleared so next request rebuilds middleware chain (reload.go:239-242)
-- Enables route-level auth/authz policy changes
+- `UpdateGlobalConfig()` updates global config reference and clears cache (reload.go:241)
+- Enables route-level auth/authz policy changes and route-level CORS hot-reload
 
 ✅ **Rate Limiter**
 - Global, route-level, and backend-level rate limiting
@@ -99,8 +100,12 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 ❌ **gRPC Routes**
 - Warning logged: "gRPC routes have changed but gRPC routes are NOT hot-reloaded in file-based mode; restart the gateway or use operator mode to apply gRPC route changes" (reload.go:324-328)
 
-❌ **CORS Middleware**
-- Warning logged: "CORS configuration has changed but CORS middleware is NOT hot-reloaded" (reload.go:266-269)
+✅ **Route-Level CORS Configuration**
+- Info logged: "route-level CORS configuration hot-reloaded successfully" (reload.go:265-275)
+- Route-level CORS overrides and routes falling back to global CORS both get updated config
+
+❌ **Global CORS (Static Handler Chain)**
+- Warning logged: "global CORS middleware in the static handler chain is NOT hot-reloaded; restart the gateway to apply global-level CORS changes to the static chain" (reload.go:265-275)
 
 ❌ **Security Headers Middleware**
 - Warning logged: "security configuration has changed but security middleware is NOT hot-reloaded" (reload.go:273-276)
@@ -190,11 +195,18 @@ The following configuration changes require a full gateway restart in both modes
 **Technical Implementation**: gRPC backends are converted to the shared `Backend` format and reloaded via the `backend.Registry` infrastructure, enabling safe hot-reload without disrupting active connections.
 
 ### CORS Middleware
-❌ **Always Requires Restart**
-- Global CORS settings, allowed origins, methods, headers
-- Route-level CORS configuration overrides
+✅ **Route-Level CORS: Hot-Reloadable**
+- Route-level CORS configuration overrides (`routes[].cors`)
+- Routes falling back to global CORS (`spec.cors`) via route middleware
 
-**Technical Reason**: CORS middleware is part of the static handler chain established during gateway initialization.
+❌ **Global CORS (Static Chain): Requires Restart**
+- Global CORS middleware in the static handler chain
+
+**Technical Reason**: The gateway has two CORS middleware layers:
+1. **Route middleware CORS** (per-route, hot-reloadable via `UpdateGlobalConfig()`)
+2. **Static handler chain CORS** (global, requires restart)
+
+Route-level CORS is now hot-reloaded because `UpdateGlobalConfig()` updates the global config reference that route middleware uses for fallback.
 
 ### Security Headers Middleware
 ❌ **Always Requires Restart**
@@ -322,7 +334,7 @@ The gateway exposes these hot-reload metrics:
 - `gateway_config_reload_last_success_timestamp` (gauge)
 - `gateway_config_watcher_running` (gauge, 1=running, 0=stopped)
 - `gateway_config_reload_component_total` with labels `component` and `result`
-  - Components: "rate_limiter", "max_sessions", "routes", "backends", "audit", "grpc_routes", "grpc_backends"
+  - Components: "rate_limiter", "max_sessions", "routes", "backends", "audit", "grpc_routes", "grpc_backends", "cors"
 
 ### Grafana Dashboard Queries
 
@@ -459,13 +471,14 @@ WARN gRPC routes have changed but gRPC routes are NOT hot-reloaded in file-based
 
 **Symptoms:**
 ```
-WARN CORS configuration has changed but CORS middleware is NOT hot-reloaded
+WARN global CORS middleware in the static handler chain is NOT hot-reloaded; restart the gateway to apply global-level CORS changes to the static chain
 WARN security configuration has changed but security middleware is NOT hot-reloaded
 ```
 
 **Solutions:**
-- Expected behavior for non-reloadable components
-- Plan restart for CORS and security header changes
+- Expected behavior for static handler chain components
+- Route-level CORS IS hot-reloaded (no restart needed for route-level CORS changes)
+- Plan restart only for global static chain CORS and security header changes
 - Check component reload metrics for specific failures
 
 #### 3. High Reload Latency
@@ -533,7 +546,8 @@ INFO  Configuration validation successful
 INFO  Configuration reload completed in 45ms
 ERROR Configuration reload failed: validation error
 WARN  gRPC routes have changed but gRPC routes are NOT hot-reloaded in file-based mode
-WARN  CORS configuration has changed but CORS middleware is NOT hot-reloaded
+INFO  route-level CORS configuration hot-reloaded successfully
+WARN  global CORS middleware in the static handler chain is NOT hot-reloaded; restart the gateway to apply global-level CORS changes to the static chain
 ```
 
 **Operator Mode:**

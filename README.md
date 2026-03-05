@@ -140,6 +140,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ### Operations
 - **Hot Configuration Reload** - Update configuration without restart with atomic config updates and hash-based change detection
   - **gRPC Backend Hot-Reload** - gRPC backends support hot-reload in both file-based and operator modes
+  - **Route-Level CORS Hot-Reload** - Route-level CORS configuration hot-reloaded via UpdateGlobalConfig()
   - **Audit Logger Hot-Reload** - AtomicAuditLogger enables lock-free audit configuration updates in operator mode
 - **Graceful Shutdown** - Clean shutdown with connection draining and configurable timeouts
 - **Docker Support** - Production-ready container images with security optimizations
@@ -920,9 +921,10 @@ The AV API Gateway supports comprehensive hot configuration reload through two d
 | Rate limiter | ✅ Reloaded | ✅ Reloaded | `rateLimiter.UpdateConfig()` |
 | Max sessions | ✅ Reloaded | ✅ Reloaded | `maxSessionsLimiter.UpdateConfig()` |
 | Audit logger | ✅ Reloaded | ✅ Reloaded | `AtomicAuditLogger` atomic swap |
-| HTTP middleware cache | ✅ Cleared | ✅ Cleared | `routeMiddlewareMgr.ClearCache()` |
+| HTTP middleware cache | ✅ Cleared | ✅ Cleared | `routeMiddlewareMgr.UpdateGlobalConfig()` |
 | gRPC auth cache | ❌ Not cleared | ✅ Cleared | `gateway.ClearAllAuthCaches()` |
-| CORS middleware | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
+| Route-level CORS | ✅ Reloaded | ✅ Reloaded | Route middleware chain |
+| Global CORS (static chain) | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
 | Security headers | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
 | Circuit breaker | ❌ Restart required | ❌ Preserved from initial config | sony/gobreaker limitation |
 | Listener config (ports, TLS) | ❌ Restart required | ❌ Preserved from initial config | Bound at startup |
@@ -962,7 +964,7 @@ The AV API Gateway delivers high performance across multiple deployment scenario
 
 ### Performance Test Results
 
-The gateway has been extensively validated across multiple deployment scenarios with comprehensive performance testing:
+The gateway has been extensively validated across multiple deployment scenarios with comprehensive performance testing. Latest results from March 2026 scenario-based testing show excellent performance across 6 scenarios with 13.5M total requests processed:
 
 #### Local Gateway Performance
 **Configuration:** Gateway with static YAML configuration

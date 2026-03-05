@@ -1,0 +1,205 @@
+# Scenario 5 & 6: GraphQL & WS with features
+# Features: JWT/OIDC auth, rate limiting, transform, CORS
+# Using HTTP routes to proxy to GraphQL backend
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-scenario5-graphql
+  labels:
+    app: avapigw
+    environment: perftest
+    scenario: graphql-features
+spec:
+  listeners:
+    # HTTP listener
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+    # HTTPS listener with TLS
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        certFile: /tmp/gateway-certs/server.crt
+        keyFile: /tmp/gateway-certs/server.key
+        minVersion: TLS12
+        maxVersion: TLS13
+
+  # Authentication configuration
+  authentication:
+    jwt:
+      enabled: true
+      issuer: http://127.0.0.1:8090/realms/gateway-test
+      jwksUri: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - gateway
+      jwksCacheDuration: 5m
+      clockSkew: 30s
+      headerName: Authorization
+      headerPrefix: Bearer
+      requiredClaims:
+        - iss
+        - sub
+        - exp
+
+  routes:
+    # Health check endpoint
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"scenario5-graphql"}'
+        headers:
+          Content-Type: application/json
+
+    # GraphQL endpoint - proxied to GraphQL mock backend
+    - name: graphql-route
+      match:
+        - uri:
+            exact: /api/graphql
+          methods:
+            - POST
+            - OPTIONS
+      authentication:
+        required: true
+        jwt:
+          enabled: true
+      rewrite:
+        uri: /graphql
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8901
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8902
+          weight: 50
+      timeout: 30s
+      cors:
+        allowOrigins:
+          - "https://example.com"
+          - "https://app.example.com"
+        allowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        allowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Request-ID
+          - Origin
+        exposeHeaders:
+          - X-Request-ID
+          - X-Response-Time
+        maxAge: 3600
+        allowCredentials: false
+      transform:
+        request:
+          headers:
+            add:
+              X-Gateway-Route: "graphql-main"
+              X-Perf-Test: "scenario5"
+        response:
+          headers:
+            add:
+              X-Served-By: "avapigw-graphql"
+
+  backends:
+    - name: graphql-backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8901
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+    - name: graphql-backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8902
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+  # Rate limiting
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5000
+    burst: 10000
+    perClient: true
+
+  # Circuit breaker
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+    timeout: 30s
+    halfOpenRequests: 5
+
+  # Global CORS
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - Origin
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: false
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: warn
+      format: json

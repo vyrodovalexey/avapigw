@@ -29,8 +29,8 @@ spec:
       bind: 0.0.0.0
       tls:
         mode: SIMPLE
-        certFile: /etc/gateway/certs/server.crt
-        keyFile: /etc/gateway/certs/server.key
+        certFile: /tmp/gateway-certs/server.crt
+        keyFile: /tmp/gateway-certs/server.key
         minVersion: TLS12
         maxVersion: TLS13
         cipherSuites:
@@ -69,8 +69,8 @@ spec:
       bind: 0.0.0.0
       tls:
         mode: SIMPLE
-        certFile: /etc/gateway/certs/server.crt
-        keyFile: /etc/gateway/certs/server.key
+        certFile: /tmp/gateway-certs/server.crt
+        keyFile: /tmp/gateway-certs/server.key
         minVersion: TLS12
         maxVersion: TLS13
       grpc:
@@ -94,7 +94,8 @@ spec:
       enabled: true
       issuer: http://127.0.0.1:8090/realms/gateway-test
       jwksUri: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
-      audience: gateway
+      audience:
+        - gateway
       # Cache JWKS for performance
       jwksCacheDuration: 5m
       # Allow clock skew

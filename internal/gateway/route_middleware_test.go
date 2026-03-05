@@ -393,6 +393,244 @@ func TestRouteMiddlewareManager_UpdateGlobalConfig(t *testing.T) {
 
 		assert.Equal(t, 0, cacheLen)
 	})
+
+	t.Run("updates CORS for routes falling back to global", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: create manager with old global CORS config
+		oldConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://old.example.com"},
+			},
+		}
+
+		route := &config.Route{
+			Name: "no-cors-route",
+			// No route-level CORS — falls back to global
+		}
+
+		manager := NewRouteMiddlewareManager(oldConfig, nil)
+
+		// Act: verify old global CORS is returned
+		result := manager.GetEffectiveCORS(route)
+		require.NotNil(t, result)
+		assert.Equal(t, []string{"https://old.example.com"}, result.AllowOrigins)
+
+		// Act: update global config with new CORS
+		newConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://new.example.com"},
+			},
+		}
+		manager.UpdateGlobalConfig(newConfig)
+
+		// Assert: new global CORS is returned
+		result = manager.GetEffectiveCORS(route)
+		require.NotNil(t, result)
+		assert.Equal(t, []string{"https://new.example.com"}, result.AllowOrigins)
+	})
+
+	t.Run("preserves route-level CORS override after update", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: create manager with global CORS config
+		globalConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://global.example.com"},
+			},
+		}
+
+		route := &config.Route{
+			Name: "cors-override-route",
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://route.example.com"},
+			},
+		}
+
+		manager := NewRouteMiddlewareManager(globalConfig, nil)
+
+		// Act: update global config with new CORS
+		newConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://new-global.example.com"},
+			},
+		}
+		manager.UpdateGlobalConfig(newConfig)
+
+		// Assert: route-level CORS still takes precedence
+		result := manager.GetEffectiveCORS(route)
+		require.NotNil(t, result)
+		assert.Equal(t, []string{"https://route.example.com"}, result.AllowOrigins)
+	})
+
+	t.Run("clears middleware cache and rebuilds with new CORS", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: create manager with old global CORS
+		oldConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://old.example.com"},
+			},
+		}
+
+		route := &config.Route{
+			Name: "cache-rebuild-route",
+		}
+
+		manager := NewRouteMiddlewareManager(oldConfig, nil)
+
+		// Act: populate cache by calling GetMiddleware
+		middlewares1 := manager.GetMiddleware(route)
+		require.NotEmpty(t, middlewares1)
+
+		// Verify cache is populated
+		manager.mu.RLock()
+		cacheLenBefore := len(manager.middlewareCache)
+		manager.mu.RUnlock()
+		assert.Greater(t, cacheLenBefore, 0)
+
+		// Act: update global config with new CORS
+		newConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://new.example.com"},
+			},
+		}
+		manager.UpdateGlobalConfig(newConfig)
+
+		// Assert: cache is cleared
+		manager.mu.RLock()
+		cacheLenAfter := len(manager.middlewareCache)
+		manager.mu.RUnlock()
+		assert.Equal(t, 0, cacheLenAfter)
+
+		// Act: call GetMiddleware again — should rebuild with new CORS
+		middlewares2 := manager.GetMiddleware(route)
+		require.NotEmpty(t, middlewares2)
+
+		// Assert: apply middleware and verify new CORS headers in response
+		handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		wrapped := manager.ApplyMiddleware(handler, route)
+
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set("Origin", "https://new.example.com")
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+
+		assert.Equal(t, "https://new.example.com", rec.Header().Get("Access-Control-Allow-Origin"))
+	})
+
+	t.Run("CORS middleware applied correctly after hot reload", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: create manager with old global CORS
+		oldConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://old.example.com"},
+			},
+		}
+
+		route := &config.Route{
+			Name: "hot-reload-cors-route",
+		}
+
+		manager := NewRouteMiddlewareManager(oldConfig, nil)
+
+		handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		// Act: apply middleware and send request with old origin — should get CORS headers
+		wrapped := manager.ApplyMiddleware(handler, route)
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set("Origin", "https://old.example.com")
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+
+		assert.Equal(t, "https://old.example.com", rec.Header().Get("Access-Control-Allow-Origin"),
+			"old origin should be allowed before hot reload")
+
+		// Act: hot reload with new CORS config
+		newConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://new.example.com"},
+			},
+		}
+		manager.UpdateGlobalConfig(newConfig)
+
+		// Act: apply middleware again and send request with new origin — should get CORS headers
+		wrapped = manager.ApplyMiddleware(handler, route)
+		req = httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set("Origin", "https://new.example.com")
+		rec = httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+
+		assert.Equal(t, "https://new.example.com", rec.Header().Get("Access-Control-Allow-Origin"),
+			"new origin should be allowed after hot reload")
+
+		// Act: send request with old origin — should NOT get CORS headers
+		req = httptest.NewRequest(http.MethodGet, "/test", nil)
+		req.Header.Set("Origin", "https://old.example.com")
+		rec = httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+
+		assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"),
+			"old origin should NOT be allowed after hot reload")
+	})
+
+	t.Run("route-level CORS takes precedence after multiple UpdateGlobalConfig calls", func(t *testing.T) {
+		t.Parallel()
+
+		// Arrange: create manager with global CORS
+		globalConfig := &config.GatewaySpec{
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://global-v1.example.com"},
+			},
+		}
+
+		route := &config.Route{
+			Name: "multi-update-route",
+			CORS: &config.CORSConfig{
+				AllowOrigins: []string{"https://route.example.com"},
+			},
+		}
+
+		manager := NewRouteMiddlewareManager(globalConfig, nil)
+
+		// Act & Assert: call UpdateGlobalConfig multiple times and verify route-level CORS
+		for i, origin := range []string{
+			"https://global-v2.example.com",
+			"https://global-v3.example.com",
+			"https://global-v4.example.com",
+		} {
+			newConfig := &config.GatewaySpec{
+				CORS: &config.CORSConfig{
+					AllowOrigins: []string{origin},
+				},
+			}
+			manager.UpdateGlobalConfig(newConfig)
+
+			result := manager.GetEffectiveCORS(route)
+			require.NotNil(t, result, "iteration %d: effective CORS should not be nil", i)
+			assert.Equal(t, []string{"https://route.example.com"}, result.AllowOrigins,
+				"iteration %d: route-level CORS should take precedence", i)
+
+			// Also verify via middleware that route-level CORS is applied
+			handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+			wrapped := manager.ApplyMiddleware(handler, route)
+
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			req.Header.Set("Origin", "https://route.example.com")
+			rec := httptest.NewRecorder()
+			wrapped.ServeHTTP(rec, req)
+
+			assert.Equal(t, "https://route.example.com", rec.Header().Get("Access-Control-Allow-Origin"),
+				"iteration %d: route-level origin should be allowed", i)
+		}
+	})
 }
 
 func TestRouteMiddlewareManager_SecurityMiddleware(t *testing.T) {

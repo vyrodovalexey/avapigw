@@ -26,7 +26,7 @@ The gateway exposes **130+ Prometheus metrics** across all components:
 - **Proxy**: Backend communication, errors, duration
 - **WebSocket**: Connections, messages, errors
 - **gRPC**: Requests, streaming, method-level tracking
-- **Config Reload**: Hot reload operations with fixed timestamp metrics
+- **Config Reload**: Hot reload operations with fixed timestamp metrics, including CORS component
 - **Health Check**: Backend health monitoring
 - **Transform**: Request/response transformation metrics
 - **Encoding**: Content negotiation and encoding metrics
