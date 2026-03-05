@@ -1159,6 +1159,45 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   5. Verify new configurations are applied without restart
 - **Expected Results**: New features support hot reload correctly
 
+### TestReloadComponents_CORSChangeWithRouteMiddlewareMgr
+- **Description**: Test that route-level CORS is hot-reloaded via UpdateGlobalConfig during config reload
+- **Preconditions**: Gateway running with route middleware manager and global CORS config
+- **Steps**:
+  1. Create application with RouteMiddlewareManager and initial global CORS config
+  2. Pre-populate middleware cache with a test route
+  3. Trigger reloadComponents with new CORS config (different AllowOrigins)
+  4. Verify route middleware manager reflects new global CORS via GetEffectiveCORS
+  5. Verify middleware cache was cleared and rebuilt with new config
+- **Expected Results**: Route middleware manager uses new global CORS after reload; cache is cleared
+
+### TestCorsConfigChanged_WithRouteLevelCORS
+- **Description**: Test that corsConfigChanged only detects global CORS changes, not route-level CORS changes
+- **Preconditions**: None
+- **Steps**:
+  1. Test with same global CORS but different route-level CORS — should report no change
+  2. Test with different global CORS and same route-level CORS — should report change
+  3. Verify corsConfigChanged only compares Spec.CORS, not route-level CORS
+- **Expected Results**: corsConfigChanged detects global CORS changes only
+
+### TestReloadMetrics_Init_IncludesCorsComponent
+- **Description**: Test that reload metrics Init() pre-populates "cors" component labels
+- **Preconditions**: None
+- **Steps**:
+  1. Create new reload metrics
+  2. Verify "cors" component labels are pre-populated with "success" and "error" results
+  3. Verify incrementing cors metrics does not panic
+  4. Verify all expected components are present (rate_limiter, max_sessions, routes, backends, audit, cors, grpc_routes, grpc_backends, graphql_routes, graphql_backends)
+- **Expected Results**: "cors" component is included in pre-populated metrics labels
+
+### TestReloadComponents_CORSChangeIncrementsMetrics
+- **Description**: Test that CORS config change increments the cors component reload metric
+- **Preconditions**: None
+- **Steps**:
+  1. Create application with initial CORS config and reload metrics
+  2. Trigger reloadComponents with different CORS config
+  3. Verify cors component success metric is incremented
+- **Expected Results**: CORS reload success metric is incremented on CORS config change
+
 ## Vault PKI Integration Tests
 
 ### TestFunctional_VaultPKI_ListenerTLS

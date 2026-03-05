@@ -1,0 +1,163 @@
+# Scenario 2: TLS gRPC & streaming (mTLS, OIDC) - 3 min
+# gRPC-TLS listener on port 9443 with JWT/OIDC auth
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-scenario2-grpc-tls
+  labels:
+    app: avapigw
+    environment: perftest
+    scenario: grpc-tls-oidc
+spec:
+  listeners:
+    # HTTP listener for health check
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+    # gRPC-TLS listener
+    - name: grpc-tls
+      port: 9443
+      protocol: GRPC
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        certFile: /tmp/gateway-certs/server.crt
+        keyFile: /tmp/gateway-certs/server.key
+        minVersion: TLS12
+        maxVersion: TLS13
+      grpc:
+        maxConcurrentStreams: 1000
+        maxRecvMsgSize: 4194304
+        maxSendMsgSize: 4194304
+        reflection: true
+        healthCheck: true
+        keepalive:
+          time: 30s
+          timeout: 10s
+          maxConnectionIdle: 5m
+          maxConnectionAge: 30m
+          maxConnectionAgeGrace: 10s
+          permitWithoutStream: true
+
+  # Authentication configuration
+  authentication:
+    jwt:
+      enabled: true
+      issuer: http://127.0.0.1:8090/realms/gateway-test
+      jwksUri: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - gateway
+      jwksCacheDuration: 5m
+      clockSkew: 30s
+      headerName: Authorization
+      headerPrefix: Bearer
+      requiredClaims:
+        - iss
+        - sub
+        - exp
+
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"scenario2-grpc-tls"}'
+        headers:
+          Content-Type: application/json
+
+  grpcRoutes:
+    # gRPC route with JWT auth
+    - name: test-service-route
+      match:
+        - service:
+            exact: api.v1.TestService
+      authentication:
+        required: true
+        jwt:
+          enabled: true
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8811
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8812
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "unavailable,resource-exhausted"
+
+    - name: catch-all-grpc
+      match:
+        - service:
+            prefix: "/"
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8811
+
+  grpcBackends:
+    - name: grpc-backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8811
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+    - name: grpc-backend-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8812
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 5s
+        timeout: 3s
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5000
+    burst: 10000
+    perClient: true
+
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+    timeout: 30s
+    halfOpenRequests: 5
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: warn
+      format: json

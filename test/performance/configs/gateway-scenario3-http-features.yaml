@@ -1,0 +1,291 @@
+# Scenario 3 & 4: HTTP/HTTPS with all features
+# Features: JWT/OIDC auth, rate limiting, transform, encoding, cache, CORS, WebSocket
+
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: perftest-scenario3-http-features
+  labels:
+    app: avapigw
+    environment: perftest
+    scenario: http-all-features
+spec:
+  listeners:
+    # HTTP listener
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+    # HTTPS listener with TLS
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        certFile: /tmp/gateway-certs/server.crt
+        keyFile: /tmp/gateway-certs/server.key
+        minVersion: TLS12
+        maxVersion: TLS13
+        cipherSuites:
+          - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+          - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+          - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+          - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+
+  # Authentication configuration
+  authentication:
+    jwt:
+      enabled: true
+      issuer: http://127.0.0.1:8090/realms/gateway-test
+      jwksUri: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - gateway
+      jwksCacheDuration: 5m
+      clockSkew: 30s
+      headerName: Authorization
+      headerPrefix: Bearer
+      requiredClaims:
+        - iss
+        - sub
+        - exp
+
+  routes:
+    # Health check endpoint
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"scenario3-http-features"}'
+        headers:
+          Content-Type: application/json
+
+    # Main items API with ALL features enabled
+    - name: items-api-full-features
+      match:
+        - uri:
+            prefix: /api/v1/items
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+            - OPTIONS
+      authentication:
+        required: true
+        jwt:
+          enabled: true
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+          weight: 50
+        - destination:
+            host: 127.0.0.1
+            port: 8802
+          weight: 50
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "5xx,reset,connect-failure"
+      # Route-level CORS
+      cors:
+        allowOrigins:
+          - "https://example.com"
+          - "https://app.example.com"
+        allowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        allowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Request-ID
+          - Origin
+        exposeHeaders:
+          - X-Request-ID
+          - X-Response-Time
+          - X-Cache-Status
+        maxAge: 3600
+        allowCredentials: false
+      # Route-level transform (header injection)
+      transform:
+        request:
+          headers:
+            add:
+              X-Gateway-Route: "items-api"
+              X-Perf-Test: "scenario3"
+        response:
+          headers:
+            add:
+              X-Served-By: "avapigw"
+      # Route-level cache
+      cache:
+        enabled: true
+        type: redis
+        ttl: 1m
+        redis:
+          keyPrefix: "perftest:scenario3:"
+          poolSize: 20
+          connectTimeout: 5s
+          readTimeout: 3s
+          writeTimeout: 3s
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs:
+              - 127.0.0.1:26379
+              - 127.0.0.1:26380
+              - 127.0.0.1:26381
+            password: password
+        keyConfig:
+          includeMethod: true
+          includePath: true
+        honorCacheControl: false
+
+    # WebSocket endpoint
+    - name: websocket-route
+      match:
+        - uri:
+            prefix: /ws
+          methods:
+            - GET
+      websocket:
+        enabled: true
+        pingInterval: 30s
+        pongTimeout: 10s
+        maxMessageSize: 65536
+        readBufferSize: 4096
+        writeBufferSize: 4096
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 0s
+
+    # Catch-all route
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+
+  backends:
+    - name: backend-service-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+    - name: backend-service-2
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 1000
+        maxPendingRequests: 1000
+        maxRequestsPerConnection: 0
+        connectTimeout: 5s
+
+  # Rate limiting via Redis Sentinel
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5000
+    burst: 10000
+    perClient: true
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - 127.0.0.1:26379
+          - 127.0.0.1:26380
+          - 127.0.0.1:26381
+        password: password
+
+  # Circuit breaker
+  circuitBreaker:
+    enabled: true
+    threshold: 10
+    timeout: 30s
+    halfOpenRequests: 5
+
+  # Global CORS
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - PATCH
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+      - Origin
+    exposeHeaders:
+      - X-Request-ID
+      - X-Response-Time
+    maxAge: 86400
+    allowCredentials: false
+
+  # Encoding (gzip)
+  encoding:
+    enabled: true
+    gzip:
+      enabled: true
+      level: 5
+      minSize: 1024
+      types:
+        - application/json
+        - text/plain
+        - text/html
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: warn
+      format: json

@@ -115,6 +115,7 @@ func (rm *reloadMetrics) Init() {
 		"routes",
 		"backends",
 		"audit",
+		"cors",
 		"grpc_routes",
 		"grpc_backends",
 		"graphql_routes",
@@ -232,11 +233,13 @@ func reloadComponents(
 		}
 	}
 
-	// Clear HTTP route middleware cache so the next request rebuilds
-	// middleware chains from the updated route configuration.
+	// Update the route middleware manager with the new global config.
+	// UpdateGlobalConfig both stores the new config reference AND clears
+	// the middleware cache, so the next request rebuilds middleware chains
+	// (including route-level CORS) from the updated configuration.
 	if app.routeMiddlewareMgr != nil {
-		app.routeMiddlewareMgr.ClearCache()
-		logger.Debug("HTTP route middleware cache cleared after config reload")
+		app.routeMiddlewareMgr.UpdateGlobalConfig(&newCfg.Spec)
+		logger.Debug("route middleware manager updated with new global config (cache cleared)")
 	}
 
 	// Reload HTTP backends (gRPC backends are NOT reloaded — see function comment)
@@ -259,11 +262,16 @@ func reloadComponents(
 	// Reload audit logger if audit configuration changed
 	reloadAuditLogger(app, newCfg, logger)
 
-	// Warn if CORS configuration has changed — CORS middleware is part of the
-	// static handler chain and cannot be hot-reloaded without a restart.
+	// Handle CORS configuration changes.
+	// Route-level CORS is hot-reloaded via the route middleware manager
+	// (UpdateGlobalConfig clears the middleware cache, so the next request
+	// rebuilds CORS middleware from the updated route/global config).
+	// Global CORS in the static handler chain is NOT hot-reloaded.
 	if corsConfigChanged(app.config, newCfg) {
-		logger.Warn("CORS configuration has changed but CORS middleware is NOT hot-reloaded; " +
-			"restart the gateway to apply CORS changes")
+		rm.configReloadComponentTotal.WithLabelValues("cors", "success").Inc()
+		logger.Info("route-level CORS configuration hot-reloaded successfully")
+		logger.Warn("global CORS middleware in the static handler chain is NOT hot-reloaded; " +
+			"restart the gateway to apply global-level CORS changes to the static chain")
 	}
 
 	// Warn if security headers configuration has changed — security headers
