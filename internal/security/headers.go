@@ -147,7 +147,7 @@ func (m *HeadersMiddleware) addHSTSHeader(w http.ResponseWriter) {
 	hsts := m.config.HSTS
 
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("max-age=%d", hsts.MaxAge))
+	fmt.Fprintf(&builder, "max-age=%d", hsts.MaxAge)
 
 	if hsts.IncludeSubDomains {
 		builder.WriteString("; includeSubDomains")

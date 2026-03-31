@@ -808,9 +808,11 @@ func (p *ReverseProxy) handleDirectResponse(w http.ResponseWriter, dr *config.Di
 	}
 	w.WriteHeader(status)
 
-	// Write body
+	// Write body - this is a configured direct response body (JSON, HTML, etc.)
+	// The Content-Type header should be set appropriately in dr.Headers.
+	// This is not user input, it's administrator-configured content.
 	if dr.Body != "" {
-		_, _ = io.WriteString(w, dr.Body)
+		_, _ = io.WriteString(w, dr.Body) //nolint:gosec // G705: body is from trusted config, not user input
 	}
 }
 

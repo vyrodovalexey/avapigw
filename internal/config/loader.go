@@ -323,8 +323,10 @@ func ResolveConfigPath(path string) (string, error) {
 	}
 
 	for _, p := range commonPaths {
-		if _, err := os.Stat(p); err == nil {
-			return filepath.Abs(p)
+		// Clean the path to prevent path traversal attacks (G703)
+		cleanPath := filepath.Clean(p)
+		if _, err := os.Stat(cleanPath); err == nil {
+			return filepath.Abs(cleanPath)
 		}
 	}
 

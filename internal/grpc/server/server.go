@@ -641,6 +641,9 @@ func (s *Server) applyTLSConfigFromGRPCConfig(tlsConfig *tls.Config, cfg *config
 
 	// Add client certificate validation if AllowedCNs or AllowedSANs are specified
 	if len(cfg.AllowedCNs) > 0 || len(cfg.AllowedSANs) > 0 {
+		// Disable session tickets to ensure VerifyPeerCertificate is called on every connection.
+		// This prevents resumed sessions from bypassing custom certificate validation (G123).
+		tlsConfig.SessionTicketsDisabled = true
 		tlsConfig.VerifyPeerCertificate = s.createClientCertValidator(cfg)
 	}
 }
