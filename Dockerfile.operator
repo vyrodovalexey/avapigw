@@ -13,6 +13,9 @@ RUN apk add --no-cache \
     git \
     tzdata
 
+# Upgrade to fix CVE
+RUN apk upgrade --no-cache
+
 # Set working directory
 WORKDIR /workspace
 
@@ -58,6 +61,10 @@ LABEL org.opencontainers.image.title="avapigw-operator" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.created="${BUILD_TIME}" \
       org.opencontainers.image.base.name="alpine:3.23"
+
+
+# Upgrade to fix CVE
+RUN apk upgrade --no-cache
 
 # Install runtime dependencies (sorted alphanumerically)
 # ca-certificates: for TLS connections

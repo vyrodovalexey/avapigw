@@ -13,6 +13,9 @@ RUN apk add --no-cache \
     git \
     tzdata
 
+# Upgrade to fix CVE
+RUN apk upgrade --no-cache
+
 # Set working directory
 WORKDIR /build
 
@@ -63,6 +66,10 @@ RUN apk add --no-cache \
     ca-certificates \
     curl \
     tzdata
+
+# Upgrade to fix CVE
+RUN apk upgrade --no-cache
+
 
 # Create non-root user and group
 RUN addgroup -g 1000 -S gateway && \
