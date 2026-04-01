@@ -1149,7 +1149,7 @@ jobs:
           cosign sign --yes ${images}
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
         with:
           image: ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.version }}
           artifact-name: sbom-${{ steps.meta.outputs.version }}.spdx.json
@@ -1237,7 +1237,7 @@ jobs:
           cosign sign --yes ${images}
 
       - name: Generate SBOM for operator
-        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
         with:
           image: ${{ env.DOCKER_IMAGE_OPERATOR }}:${{ steps.meta.outputs.version }}
           artifact-name: sbom-operator-${{ steps.meta.outputs.version }}.spdx.json
