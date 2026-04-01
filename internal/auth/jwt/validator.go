@@ -424,12 +424,14 @@ func convertToASN1(sig []byte, keySize int) []byte {
 
 	// Build ASN.1 DER encoding
 	// INTEGER tag = 0x02
+	// Note: len(r) and len(s) are bounded by keySize (max 66 for P-521) + 1 byte padding,
+	// so they will always fit in a byte (max 67 < 255)
 	rEncoded := make([]byte, 0, 2+len(r))
-	rEncoded = append(rEncoded, 0x02, byte(len(r)))
+	rEncoded = append(rEncoded, 0x02, uint8(len(r))) //nolint:gosec // len(r) bounded by keySize+1 (max 67)
 	rEncoded = append(rEncoded, r...)
 
 	sEncoded := make([]byte, 0, 2+len(s))
-	sEncoded = append(sEncoded, 0x02, byte(len(s)))
+	sEncoded = append(sEncoded, 0x02, uint8(len(s))) //nolint:gosec // len(s) bounded by keySize+1 (max 67)
 	sEncoded = append(sEncoded, s...)
 
 	// SEQUENCE tag = 0x30
@@ -437,8 +439,9 @@ func convertToASN1(sig []byte, keySize int) []byte {
 	content = append(content, rEncoded...)
 	content = append(content, sEncoded...)
 
+	// Note: len(content) is bounded by 2*(2+keySize+1) = max 138 for P-521, fits in byte
 	result := make([]byte, 0, 2+len(content))
-	result = append(result, 0x30, byte(len(content)))
+	result = append(result, 0x30, uint8(len(content))) //nolint:gosec // len(content) bounded (max 138)
 	result = append(result, content...)
 	return result
 }

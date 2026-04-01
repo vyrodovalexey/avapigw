@@ -174,6 +174,8 @@ func (sp *SubscriptionProxy) HandleSubscription(
 	// Use context.Background() because the subscription lifecycle extends beyond
 	// the HTTP request that initiated it. The request context (ctx) is canceled
 	// when the HTTP handler returns, but the WebSocket relay must continue running.
+	// The cancel function is stored in subscriptionConn.cancel and called in closeConnection().
+	//nolint:gosec // G118: cancel stored in conn.cancel, called in closeConnection
 	subCtx, cancel := context.WithCancel(context.Background())
 
 	connID := fmt.Sprintf("%s-%d", backendName, connectionCounter.Add(1))

@@ -264,6 +264,9 @@ func (m *Manager) configureClientAuth(tlsConfig *tls.Config) error {
 		if err := m.loadClientCA(tlsConfig); err != nil {
 			return err
 		}
+		// Disable session tickets to ensure VerifyPeerCertificate is called on every connection.
+		// This prevents resumed sessions from bypassing custom certificate validation (G123).
+		tlsConfig.SessionTicketsDisabled = true
 		tlsConfig.VerifyPeerCertificate = m.verifyClientCertificate
 
 	case TLSModeOptionalMutual:
@@ -271,6 +274,9 @@ func (m *Manager) configureClientAuth(tlsConfig *tls.Config) error {
 		if err := m.loadClientCA(tlsConfig); err != nil {
 			return err
 		}
+		// Disable session tickets to ensure VerifyPeerCertificate is called on every connection.
+		// This prevents resumed sessions from bypassing custom certificate validation (G123).
+		tlsConfig.SessionTicketsDisabled = true
 		tlsConfig.VerifyPeerCertificate = m.verifyClientCertificate
 	}
 

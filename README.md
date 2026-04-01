@@ -3,7 +3,7 @@
 [![CI](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vyrodovalexey/avapigw)](https://goreportcard.com/report/github.com/vyrodovalexey/avapigw)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/go-1.25-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26-blue.svg)](https://golang.org/dl/)
 
 A high-performance, production-ready API Gateway built with Go and gin-gonic. Designed for cloud-native environments with comprehensive traffic management, observability, and reliability features.
 
@@ -218,7 +218,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.25.7 (for building from source)
+- Go 1.26.1 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)

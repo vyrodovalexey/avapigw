@@ -24,12 +24,12 @@ type ValidationError struct {
 // Error implements the error interface.
 func (e *ValidationError) Error() string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("field %q: %s", e.Field, e.Message))
+	fmt.Fprintf(&sb, "field %q: %s", e.Field, e.Message)
 	if e.Value != nil {
-		sb.WriteString(fmt.Sprintf(" (got: %v)", e.Value))
+		fmt.Fprintf(&sb, " (got: %v)", e.Value)
 	}
 	if e.Suggestion != "" {
-		sb.WriteString(fmt.Sprintf(". %s", e.Suggestion))
+		fmt.Fprintf(&sb, ". %s", e.Suggestion)
 	}
 	return sb.String()
 }
@@ -113,9 +113,9 @@ func (v *ValidationErrors) Error() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("validation failed with %d errors:\n", len(v.errors)))
+	fmt.Fprintf(&sb, "validation failed with %d errors:\n", len(v.errors))
 	for i, err := range v.errors {
-		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, err.Error()))
+		fmt.Fprintf(&sb, "  %d. %s\n", i+1, err.Error())
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }
