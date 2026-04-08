@@ -453,6 +453,32 @@ spec:
     path: {{ .Values.gateway.graphql.path | default "/graphql" | quote }}
   {{- end }}
 
+  {{- if and .Values.gateway.openAPIValidation .Values.gateway.openAPIValidation.enabled }}
+  openAPIValidation:
+    enabled: true
+    {{- if .Values.gateway.openAPIValidation.specFile }}
+    specFile: {{ .Values.gateway.openAPIValidation.specFile | quote }}
+    {{- end }}
+    {{- if .Values.gateway.openAPIValidation.specURL }}
+    specURL: {{ .Values.gateway.openAPIValidation.specURL | quote }}
+    {{- end }}
+    {{- if .Values.gateway.openAPIValidation.failOnError | kindIs "bool" }}
+    failOnError: {{ .Values.gateway.openAPIValidation.failOnError }}
+    {{- end }}
+    {{- if .Values.gateway.openAPIValidation.validateRequestBody | kindIs "bool" }}
+    validateRequestBody: {{ .Values.gateway.openAPIValidation.validateRequestBody }}
+    {{- end }}
+    {{- if .Values.gateway.openAPIValidation.validateRequestParams | kindIs "bool" }}
+    validateRequestParams: {{ .Values.gateway.openAPIValidation.validateRequestParams }}
+    {{- end }}
+    {{- if .Values.gateway.openAPIValidation.validateRequestHeaders | kindIs "bool" }}
+    validateRequestHeaders: {{ .Values.gateway.openAPIValidation.validateRequestHeaders }}
+    {{- end }}
+    {{- if .Values.gateway.openAPIValidation.validateSecurity | kindIs "bool" }}
+    validateSecurity: {{ .Values.gateway.openAPIValidation.validateSecurity }}
+    {{- end }}
+  {{- end }}
+
   security:
     enabled: {{ .Values.gateway.security.enabled | default true }}
     headers:

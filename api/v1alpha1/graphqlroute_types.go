@@ -80,6 +80,10 @@ type GraphQLRouteSpec struct {
 	// AllowedOperations restricts which operation types are allowed (query, mutation, subscription).
 	// +optional
 	AllowedOperations []string `json:"allowedOperations,omitempty"`
+
+	// SchemaValidation configures GraphQL schema validation for this route.
+	// +optional
+	SchemaValidation *GraphQLSchemaValidationConfig `json:"schemaValidation,omitempty"`
 }
 
 // GraphQLRouteMatch represents matching conditions for a GraphQL route.

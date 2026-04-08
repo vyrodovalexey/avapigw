@@ -1,0 +1,226 @@
+# Performance Test CRD Manifests for OpenAPI Validation
+# This file contains CRD manifests for performance testing of OpenAPI
+# request validation feature.
+#
+# Prerequisites:
+#   - Create ConfigMap with OpenAPI spec:
+#     kubectl create configmap items-openapi-spec \
+#       --from-file=openapi.yaml=test/performance/operator/openapi-spec.yaml \
+#       -n avapigw-test
+#
+# Apply with: kubectl apply -f test/performance/operator/crds-openapi-perftest.yaml -n avapigw-test
+
+# =============================================================================
+# HTTP Backends
+# =============================================================================
+
+---
+# perf-openapi-backend-1: Primary HTTP backend for OpenAPI validation tests
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: perf-openapi-backend-1
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: openapi-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8801
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+---
+# perf-openapi-backend-2: Secondary HTTP backend for OpenAPI validation tests
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: perf-openapi-backend-2
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: openapi-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8802
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+# =============================================================================
+# HTTP API Routes with OpenAPI Validation
+# =============================================================================
+
+---
+# Health check route (no validation)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-openapi-health
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: openapi-route
+spec:
+  match:
+    - uri:
+        exact: /health
+      methods:
+        - GET
+  directResponse:
+    status: 200
+    body: '{"status":"healthy"}'
+    headers:
+      Content-Type: application/json
+
+---
+# Items API with OpenAPI validation enabled
+# This route validates all requests against the OpenAPI specification
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-openapi-items-validated
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: openapi-route
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: openapi.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+    validateRequestHeaders: false
+    validateSecurity: false
+
+---
+# Items API without validation (baseline comparison)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-openapi-items-baseline
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: openapi-route
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/baseline/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+
+---
+# Items API with validation but failOnError=false (log-only mode)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-openapi-items-logonly
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: openapi-route
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/logonly/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: openapi.yaml
+    failOnError: false
+    validateRequestBody: true
+    validateRequestParams: true
+    validateRequestHeaders: false
+    validateSecurity: false
+
+---
+# Catch-all route
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-openapi-catch-all
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: openapi-route
+spec:
+  match:
+    - uri:
+        prefix: /
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  timeout: 30s

@@ -3478,3 +3478,511 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   3. Update the APIRoute to change its prefix to `/graphql`
   4. Submit the update to the webhook validator
 - **Expected Results**: Webhook rejects the update with a path conflict error
+
+## OpenAPI Request Validation Tests
+
+### Functional Tests
+
+#### TestFunctional_OpenAPIValidation_ConfigParsing
+- **Description**: Test OpenAPI validation configuration parsing from YAML
+- **Preconditions**: None
+- **Steps**:
+  1. Parse YAML with global OpenAPI validation (specFile, all boolean options)
+  2. Parse YAML with specURL instead of specFile
+  3. Parse YAML with disabled OpenAPI validation
+  4. Parse YAML without OpenAPI validation section
+- **Expected Results**: All config variants parse correctly with expected values
+
+#### TestFunctional_OpenAPIValidation_GlobalAndRouteLevel
+- **Description**: Test global and route-level OpenAPI validation configuration
+- **Preconditions**: None
+- **Steps**:
+  1. Parse YAML with both global and route-level OpenAPI validation
+  2. Verify global config has global spec file
+  3. Verify route-level config has route-specific spec file
+  4. Verify route-level failOnError overrides global
+- **Expected Results**: Both levels parse independently, route overrides global
+
+#### TestFunctional_OpenAPIValidation_ConfigValidation
+- **Description**: Test validation of OpenAPI validation configuration
+- **Preconditions**: None
+- **Steps**:
+  1. Validate disabled config (should pass)
+  2. Validate enabled config with specFile (should pass)
+  3. Validate enabled config without specFile or specURL (should fail)
+  4. Validate enabled config with both specFile and specURL (should fail - mutually exclusive)
+  5. Validate enabled config with invalid specURL (should fail)
+  6. Validate route-level enabled config without spec (should fail)
+- **Expected Results**: Invalid configs are rejected with clear error messages
+
+#### TestFunctional_OpenAPIValidation_EffectiveDefaults
+- **Description**: Test effective default values for OpenAPI validation config
+- **Preconditions**: None
+- **Steps**:
+  1. Verify failOnError defaults to true
+  2. Verify validateRequestBody defaults to true
+  3. Verify validateRequestParams defaults to true
+  4. Verify validateRequestHeaders defaults to false
+  5. Verify validateSecurity defaults to false
+  6. Verify nil config returns safe defaults
+- **Expected Results**: All defaults match documented behavior
+
+#### TestFunctional_OpenAPIValidation_MiddlewareChainPosition
+- **Description**: Test validation middleware position in chain
+- **Preconditions**: None
+- **Steps**:
+  1. Verify validation middleware executes before proxy handler
+  2. Verify failOnError=true rejects invalid requests with 400
+  3. Verify failOnError=false logs but passes invalid requests
+- **Expected Results**: Middleware chain order and behavior are correct
+
+#### TestFunctional_ProtoValidation_ConfigParsing
+- **Description**: Test ProtoValidation configuration parsing
+- **Preconditions**: None
+- **Steps**:
+  1. Parse YAML with gRPC route ProtoValidation config
+  2. Verify effective defaults (failOnError=true, validateRequestMessage=true)
+  3. Verify nil config returns safe defaults
+  4. Validate enabled config without descriptorFile (should fail)
+- **Expected Results**: ProtoValidation config parses and validates correctly
+
+#### TestFunctional_GraphQLSchemaValidation_ConfigParsing
+- **Description**: Test GraphQLSchemaValidation configuration parsing
+- **Preconditions**: None
+- **Steps**:
+  1. Parse YAML with GraphQL route SchemaValidation config
+  2. Verify effective defaults (failOnError=true, validateVariables=true)
+  3. Verify nil config returns safe defaults
+  4. Validate enabled config without schemaFile (should fail)
+- **Expected Results**: GraphQLSchemaValidation config parses and validates correctly
+
+#### TestFunctional_OpenAPIValidation_TestDataSpecs
+- **Description**: Test that OpenAPI spec test data files are loadable
+- **Preconditions**: Test data files exist in test/testdata/openapi/
+- **Steps**:
+  1. Verify items-api.yaml can be referenced in config
+  2. Verify minimal.yaml can be referenced in config
+  3. Verify invalid.yaml exists (for negative testing)
+- **Expected Results**: All test data spec files are accessible
+
+### Functional Operator Tests
+
+#### TestFunctional_APIRoute_OpenAPIValidation
+- **Description**: Test CRD APIRoute with OpenAPIValidation field
+- **Preconditions**: None
+- **Steps**:
+  1. Create APIRoute with OpenAPIValidation specFile
+  2. Create APIRoute with OpenAPIValidation specURL
+  3. Create APIRoute with OpenAPIValidation specConfigMapRef
+  4. Create APIRoute with all OpenAPIValidation options
+  5. Create APIRoute with disabled OpenAPIValidation
+  6. Create APIRoute without OpenAPIValidation (nil)
+  7. Update APIRoute adding OpenAPIValidation
+  8. Create full APIRoute with OpenAPIValidation and other features
+- **Expected Results**: All CRD variants validate successfully
+
+#### TestFunctional_GRPCRoute_ProtoValidation
+- **Description**: Test CRD GRPCRoute with ProtoValidation field
+- **Preconditions**: None
+- **Steps**:
+  1. Create GRPCRoute with ProtoValidation descriptorFile
+  2. Create GRPCRoute with ProtoValidation all options
+  3. Create GRPCRoute with ProtoValidation configMapRef
+  4. Create GRPCRoute with disabled ProtoValidation
+  5. Update GRPCRoute adding ProtoValidation
+- **Expected Results**: All CRD variants validate successfully
+
+#### TestFunctional_GraphQLRoute_SchemaValidation
+- **Description**: Test CRD GraphQLRoute with SchemaValidation field
+- **Preconditions**: None
+- **Steps**:
+  1. Create GraphQLRoute with SchemaValidation schemaFile
+  2. Create GraphQLRoute with SchemaValidation all options
+  3. Create GraphQLRoute with SchemaValidation configMapRef
+  4. Create GraphQLRoute with disabled SchemaValidation
+  5. Update GraphQLRoute adding SchemaValidation
+- **Expected Results**: All CRD variants validate successfully
+
+#### TestFunctional_CRD_ValidationConfigPreservation
+- **Description**: Test CRD deep copy preserves validation settings
+- **Preconditions**: None
+- **Steps**:
+  1. Deep copy APIRoute with OpenAPIValidation, verify fields preserved
+  2. Deep copy GRPCRoute with ProtoValidation, verify fields preserved
+  3. Deep copy GraphQLRoute with SchemaValidation, verify fields preserved
+  4. Verify deep copy independence (modifying copy doesn't affect original)
+- **Expected Results**: Deep copy preserves all validation config fields
+
+### Integration Tests
+
+#### TestIntegration_OpenAPIValidation_ValidRequestProxy
+- **Description**: Test gateway with OpenAPI validation proxies valid requests
+- **Preconditions**: Backend service running on port 8801
+- **Steps**:
+  1. Send valid GET request through validation middleware to backend
+  2. Send valid POST request with JSON body through validation middleware
+- **Expected Results**: Valid requests pass validation and reach backend
+
+#### TestIntegration_OpenAPIValidation_RejectInvalidBody
+- **Description**: Test gateway rejects invalid request body
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Send POST without Content-Type header
+  2. Verify 400 response with validation error message
+- **Expected Results**: Invalid body is rejected with 400
+
+#### TestIntegration_OpenAPIValidation_RejectInvalidParams
+- **Description**: Test gateway rejects invalid query parameters
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Send GET with non-numeric limit parameter
+  2. Verify 400 response
+  3. Send GET with valid numeric limit parameter
+  4. Verify 200 response
+- **Expected Results**: Invalid params rejected, valid params accepted
+
+#### TestIntegration_OpenAPIValidation_LogOnlyMode
+- **Description**: Test log-only mode passes invalid requests
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Configure validation with failOnError=false
+  2. Send invalid request (missing Content-Type)
+  3. Verify request passes through to backend (not 400)
+- **Expected Results**: Invalid requests pass in log-only mode
+
+#### TestIntegration_OpenAPIValidation_WithRateLimiting
+- **Description**: Test validation and rate limiting both active
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Chain rate limit and validation middlewares
+  2. Send valid request
+  3. Verify request passes both middlewares
+- **Expected Results**: Both middlewares work together
+
+#### TestIntegration_OpenAPIValidation_WithTransform
+- **Description**: Test validation and header transform both active
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Chain header transform and validation middlewares
+  2. Send valid request
+  3. Verify response has transformed headers
+- **Expected Results**: Both middlewares work together
+
+#### TestIntegration_OpenAPIValidation_WithAuthentication
+- **Description**: Test validation runs after auth middleware
+- **Preconditions**: None
+- **Steps**:
+  1. Chain auth, validation, and proxy middlewares
+  2. Send request
+  3. Verify execution order: auth → validation → proxy
+- **Expected Results**: Middleware chain order is correct
+
+#### TestIntegration_OpenAPIValidation_WithCircuitBreaker
+- **Description**: Test validation and circuit breaker both active
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Chain circuit breaker and validation middlewares
+  2. Send valid request
+  3. Verify request passes both middlewares
+- **Expected Results**: Both middlewares work together
+
+### E2E Tests
+
+#### TestE2E_OpenAPIValidation_GatewayStartup
+- **Description**: Test gateway starts with OpenAPI validation enabled
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Start gateway with OpenAPI validation middleware
+  2. Verify gateway is running
+  3. Verify health endpoint responds
+- **Expected Results**: Gateway starts cleanly with validation enabled
+
+#### TestE2E_OpenAPIValidation_ValidPost
+- **Description**: Test valid POST request passes validation end-to-end
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send POST with valid JSON body containing "name" field
+  2. Verify 200 or 201 response from backend
+- **Expected Results**: Valid POST passes validation and reaches backend
+
+#### TestE2E_OpenAPIValidation_InvalidPost
+- **Description**: Test invalid POST requests return 400
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send POST without Content-Type header → 400
+  2. Send POST with missing required "name" field → 400
+  3. Send POST with invalid JSON → 400
+- **Expected Results**: All invalid POST variants return 400
+
+#### TestE2E_OpenAPIValidation_ValidQueryParams
+- **Description**: Test valid query parameters pass validation
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send GET with valid limit and offset params
+  2. Send GET without query params
+  3. Verify both return 200
+- **Expected Results**: Valid query params pass validation
+
+#### TestE2E_OpenAPIValidation_InvalidQueryParams
+- **Description**: Test invalid query parameter types return 400
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send GET with non-integer limit → 400
+  2. Send GET with non-integer offset → 400
+- **Expected Results**: Invalid query param types return 400
+
+#### TestE2E_OpenAPIValidation_WithCORS
+- **Description**: Test OpenAPI validation with CORS headers
+- **Preconditions**: Backend service running, gateway started with CORS
+- **Steps**:
+  1. Send CORS preflight request
+  2. Verify CORS headers in response
+  3. Send actual CORS request with validation
+  4. Verify both CORS headers and validation work
+- **Expected Results**: CORS and validation work together
+
+#### TestE2E_OpenAPIValidation_WithRateLimiting
+- **Description**: Test OpenAPI validation with rate limiting
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send valid request → passes both rate limit and validation
+  2. Send invalid request → rejected by validation
+- **Expected Results**: Both features work together
+
+#### TestE2E_OpenAPIValidation_WithBasicAuth
+- **Description**: Test OpenAPI validation with basic auth
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send authenticated valid request → 200
+  2. Send unauthenticated request → 401 (rejected by auth before validation)
+- **Expected Results**: Auth runs before validation
+
+#### TestE2E_OpenAPIValidation_WithAPIKeyAuth
+- **Description**: Test OpenAPI validation with API key auth
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send request with valid API key → 200
+  2. Send request without API key → 401
+- **Expected Results**: API key auth and validation work together
+
+#### TestE2E_OpenAPIValidation_WithOIDCAuth
+- **Description**: Test OpenAPI validation with OIDC auth (simulated)
+- **Preconditions**: Backend service running, gateway started
+- **Steps**:
+  1. Send request with Bearer token → 200
+  2. Send request without token → 401
+- **Expected Results**: OIDC auth and validation work together
+
+#### TestE2E_OpenAPIValidation_Metrics
+- **Description**: Test OpenAPI validation metrics available
+- **Preconditions**: Backend service running, gateway started with metrics
+- **Steps**:
+  1. Start gateway with metrics and OpenAPI validation config
+  2. Make request to generate metrics
+  3. Verify gateway is running
+- **Expected Results**: Gateway with validation and metrics runs correctly
+
+#### TestE2E_OpenAPIValidation_HotReload
+- **Description**: Test hot-reload changes OpenAPI spec without restart
+- **Preconditions**: Backend service running
+- **Steps**:
+  1. Start config watcher with initial OpenAPI validation config
+  2. Update config file with different spec file and failOnError
+  3. Verify watcher detects change
+  4. Verify new config has updated spec file and failOnError value
+- **Expected Results**: Config changes are detected and applied
+
+#### TestE2E_OpenAPIValidation_WithCacheConfig
+- **Description**: Test OpenAPI validation with cache configuration
+- **Preconditions**: None
+- **Steps**:
+  1. Create config with both cache and OpenAPI validation on same route
+  2. Validate config
+- **Expected Results**: Both features can be configured together
+
+## OpenAPI Validation Performance Test Cases
+
+Performance test cases for routes with OpenAPI validation enabled, deployed in K8s
+(namespace: avapigw-test). Each scenario measures the overhead of OpenAPI validation
+combined with other gateway features under sustained load.
+
+**Common Setup**: Gateway accessible via HTTPS at NodePort 30150. CRDs defined in
+`test/performance/operator/crds-validation-perftest.yaml`. Load profile: 3 min
+(30s warmup → 2m sustain → 30s cooldown). Configs in `test/performance/configs/`.
+Runner script: `test/performance/scripts/run-validation-perftest.sh`.
+
+### TestPerf_Validated_HTTP_Basic
+- **Description**: Baseline HTTP throughput with OpenAPI validation only (no extra features)
+- **Route Path**: `/api/v1/validated/basic/items`
+- **Route Name**: `perf-validated-http-basic`
+- **Config**: `k8s-validated-http-basic.yaml`
+- **Expected Behavior**: All valid GET requests pass OpenAPI validation and are proxied to backend. Invalid requests (wrong params, missing body on POST) are rejected with 400.
+- **Success Criteria**:
+  - P99 latency < 500ms at 200 RPS sustained
+  - Error rate (5xx) < 1%
+  - Validation rejection rate (4xx) < 5% for valid traffic
+  - Throughput ≥ 180 RPS sustained
+
+### TestPerf_Validated_HTTP_RateLimit
+- **Description**: OpenAPI validation combined with rate limiting (100 RPS, burst 200)
+- **Route Path**: `/api/v1/validated/ratelimit/items`
+- **Route Name**: `perf-validated-http-ratelimit`
+- **Config**: `k8s-validated-http-ratelimit.yaml`
+- **Expected Behavior**: Requests first pass OpenAPI validation, then rate limiting. When rate limit is exceeded, 429 responses are returned. Valid requests within limit return 200.
+- **Success Criteria**:
+  - P99 latency < 500ms for accepted requests
+  - 429 responses appear when exceeding 100 RPS
+  - No 5xx errors from validation + rate limit interaction
+  - Rate limit correctly enforced after validation passes
+
+### TestPerf_Validated_HTTP_Cache
+- **Description**: OpenAPI validation combined with Redis Sentinel caching (TTL 5m)
+- **Route Path**: `/api/v1/validated/cache/items`
+- **Route Name**: `perf-validated-http-cache`
+- **Config**: `k8s-validated-http-cache.yaml`
+- **Expected Behavior**: First request validates and fetches from backend (cache miss). Subsequent identical requests validate and serve from Redis cache (cache hit). Cache hits should have lower latency.
+- **Success Criteria**:
+  - P99 latency < 300ms at 200 RPS (cache hits dominate)
+  - Cache hit ratio > 80% after warmup
+  - Error rate (5xx) < 1%
+  - Throughput ≥ 190 RPS sustained
+
+### TestPerf_Validated_HTTP_Transform
+- **Description**: OpenAPI validation combined with request/response transformation
+- **Route Path**: `/api/v1/validated/transform/items`
+- **Route Name**: `perf-validated-http-transform`
+- **Config**: `k8s-validated-http-transform.yaml`
+- **Expected Behavior**: Requests are validated against OpenAPI spec, then request body is wrapped and response fields are filtered (allow: id, name; deny: password, secret).
+- **Success Criteria**:
+  - P99 latency < 600ms at 200 RPS (transform adds overhead)
+  - Error rate (5xx) < 1%
+  - Response bodies do not contain denied fields (password, secret)
+  - Throughput ≥ 170 RPS sustained
+
+### TestPerf_Validated_HTTP_Encoding
+- **Description**: OpenAPI validation combined with response encoding (gzip/deflate)
+- **Route Path**: `/api/v1/validated/encoding/items`
+- **Route Name**: `perf-validated-http-encoding`
+- **Config**: `k8s-validated-http-encoding.yaml`
+- **Expected Behavior**: Requests are validated, then responses are compressed using gzip or deflate based on Accept-Encoding header. Compressed responses should be smaller.
+- **Success Criteria**:
+  - P99 latency < 500ms at 200 RPS
+  - Content-Encoding header present in responses
+  - Error rate (5xx) < 1%
+  - Throughput ≥ 180 RPS sustained
+
+### TestPerf_Validated_HTTP_CORS
+- **Description**: OpenAPI validation combined with CORS middleware
+- **Route Path**: `/api/v1/validated/cors/items`
+- **Route Name**: `perf-validated-http-cors`
+- **Config**: `k8s-validated-http-cors.yaml`
+- **Expected Behavior**: Requests with Origin header receive CORS response headers. Preflight OPTIONS requests are handled by CORS middleware before validation. Actual requests pass both CORS and validation.
+- **Success Criteria**:
+  - P99 latency < 500ms at 200 RPS
+  - Access-Control-Allow-Origin header present in responses
+  - Error rate (5xx) < 1%
+  - Throughput ≥ 180 RPS sustained
+
+### TestPerf_Validated_HTTP_OIDC
+- **Description**: OpenAPI validation combined with OIDC/JWT authentication
+- **Route Path**: `/api/v1/validated/oidc/items`
+- **Route Name**: `perf-validated-http-oidc`
+- **Config**: `k8s-validated-http-oidc.yaml`
+- **Expected Behavior**: Unauthenticated requests are rejected with 401 before validation runs. Authenticated requests (valid JWT Bearer token) pass auth, then OpenAPI validation, then proxy.
+- **Success Criteria**:
+  - Unauthenticated: 100% 401 responses, P99 < 100ms
+  - Authenticated: P99 latency < 600ms at 150 RPS
+  - No 5xx errors
+  - Auth middleware runs before validation middleware
+
+### TestPerf_Validated_HTTP_APIKey
+- **Description**: OpenAPI validation combined with API key authentication
+- **Route Path**: `/api/v1/validated/apikey/items`
+- **Route Name**: `perf-validated-http-apikey`
+- **Config**: `k8s-validated-http-apikey.yaml`
+- **Expected Behavior**: Requests without X-API-Key header are rejected with 401. Requests with valid API key pass auth, then OpenAPI validation, then proxy.
+- **Success Criteria**:
+  - Unauthenticated: 100% 401 responses, P99 < 100ms
+  - Authenticated: P99 latency < 500ms at 200 RPS
+  - No 5xx errors
+  - API key validation runs before OpenAPI validation
+
+### TestPerf_Validated_HTTP_LogOnly
+- **Description**: OpenAPI validation in log-only mode (failOnError=false)
+- **Route Path**: `/api/v1/validated/logonly/items`
+- **Route Name**: `perf-validated-http-logonly`
+- **Config**: `k8s-validated-http-logonly.yaml`
+- **Expected Behavior**: All requests pass through to backend regardless of validation result. Validation errors are logged but do not reject requests. This measures pure validation overhead without rejection.
+- **Success Criteria**:
+  - P99 latency < 500ms at 200 RPS
+  - 0% rejection rate (all requests pass through)
+  - Error rate (5xx) < 1%
+  - Throughput ≥ 190 RPS sustained
+  - Validation metrics show logged violations
+
+### TestPerf_Validated_HTTPS
+- **Description**: HTTPS TLS termination combined with OpenAPI validation
+- **Route Path**: `/api/v1/validated/https/items`
+- **Route Name**: `perf-validated-https`
+- **Config**: `k8s-validated-https.yaml`
+- **Expected Behavior**: TLS handshake at gateway, then OpenAPI validation, then proxy to backend. Measures combined TLS + validation overhead.
+- **Success Criteria**:
+  - P99 latency < 600ms at 200 RPS (TLS adds overhead)
+  - Error rate (5xx) < 1%
+  - TLS handshake successful with Vault PKI certificates
+  - Throughput ≥ 170 RPS sustained
+
+### TestPerf_Validated_GRPC_Basic
+- **Description**: gRPC throughput with protobuf descriptor-based request validation
+- **Route Path**: gRPC service `api.v1.TestService/Unary`
+- **Route Name**: `perf-validated-grpc-basic`
+- **Config**: `k8s-validated-grpc-basic.yaml`
+- **Expected Behavior**: gRPC requests are validated against proto descriptors before forwarding. Invalid messages are rejected with gRPC INVALID_ARGUMENT status.
+- **Success Criteria**:
+  - P99 latency < 50ms for unary calls
+  - Error rate < 1%
+  - Throughput ≥ 500 RPS for unary calls
+  - Proto validation does not significantly degrade gRPC performance
+
+### TestPerf_Validated_GraphQL_Basic
+- **Description**: GraphQL throughput with schema-based query/mutation validation
+- **Route Path**: `/graphql/validated/basic`
+- **Route Name**: `perf-validated-graphql-basic`
+- **Config**: `k8s-validated-graphql-basic.yaml`
+- **Expected Behavior**: GraphQL queries and mutations are validated against the schema before execution. Invalid queries are rejected with validation error response.
+- **Success Criteria**:
+  - P99 latency < 500ms at 150 RPS
+  - Error rate (5xx) < 1%
+  - Schema validation errors return proper GraphQL error format
+  - Throughput ≥ 130 RPS sustained
+
+### TestPerf_Validated_Comparison_BaselineVsValidation
+- **Description**: Compare baseline (no validation) vs validation-enabled route performance
+- **Route Paths**: Baseline route vs `/api/v1/validated/basic/items`
+- **Expected Behavior**: Validation adds measurable but acceptable overhead compared to baseline. The overhead should be consistent and predictable.
+- **Success Criteria**:
+  - Validation overhead < 20% additional latency vs baseline
+  - Validation overhead < 15% throughput reduction vs baseline
+  - P99 latency delta < 100ms between baseline and validated routes
+  - No memory leaks during sustained validation load
+
+### TestPerf_Validated_LogOnly_Vs_FailOnError
+- **Description**: Compare log-only mode vs fail-on-error mode performance
+- **Route Paths**: `/api/v1/validated/logonly/items` vs `/api/v1/validated/basic/items`
+- **Expected Behavior**: Log-only mode should have similar or slightly lower latency since it skips error response generation. Both modes perform the same validation work.
+- **Success Criteria**:
+  - Log-only mode latency ≤ fail-on-error mode latency
+  - Both modes show validation metrics
+  - Log-only mode has 0% rejection rate
+  - Fail-on-error mode rejects invalid requests with 400
+
+### TestPerf_Validated_Metrics_Verification
+- **Description**: Verify validation performance metrics are exposed in VictoriaMetrics
+- **Route Paths**: All validated routes
+- **Expected Behavior**: After running performance tests, VictoriaMetrics should contain validation-specific metrics including request counts, validation durations, and error rates per route.
+- **Success Criteria**:
+  - `avapigw_http_requests_total` metric present with route labels
+  - `avapigw_http_request_duration_seconds` histogram present
+  - `avapigw_openapi_validation_total` metric present with result labels
+  - `avapigw_openapi_validation_errors_total` metric present for routes with validation errors
+  - Metrics queryable via VictoriaMetrics API at http://127.0.0.1:8428

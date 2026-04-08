@@ -1256,3 +1256,44 @@ spec:
   timeout: 30s
   depthLimit: 10
   complexityLimit: 100
+
+---
+# =============================================================================
+# OPENAPI VALIDATION ROUTES
+# =============================================================================
+
+# Route: OpenAPI Validated Items API
+# Features: OpenAPI request validation with ConfigMap-based spec
+# Note: Requires ConfigMap 'items-openapi-spec' with OpenAPI specification
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: items-api-openapi-validated
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: openapi.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+    validateRequestHeaders: false
+    validateSecurity: false

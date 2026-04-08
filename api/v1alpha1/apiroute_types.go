@@ -90,6 +90,10 @@ type APIRouteSpec struct {
 	// Authorization configures route-level authorization.
 	// +optional
 	Authorization *AuthorizationConfig `json:"authorization,omitempty"`
+
+	// OpenAPIValidation configures OpenAPI request validation for this route.
+	// +optional
+	OpenAPIValidation *OpenAPIValidationConfig `json:"openAPIValidation,omitempty"`
 }
 
 // RouteMatch represents matching conditions for a route.

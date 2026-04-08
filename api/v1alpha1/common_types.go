@@ -962,6 +962,106 @@ type BackendCacheConfig struct {
 	PasswordVaultPath string `json:"passwordVaultPath,omitempty"`
 }
 
+// ConfigMapKeyRef references a key in a ConfigMap.
+type ConfigMapKeyRef struct {
+	// Name is the name of the ConfigMap.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Key is the key in the ConfigMap. If empty, the first key is used.
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// OpenAPIValidationConfig configures OpenAPI request validation.
+type OpenAPIValidationConfig struct {
+	// Enabled enables OpenAPI request validation.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// SpecConfigMapRef references a ConfigMap containing the OpenAPI spec.
+	// +optional
+	SpecConfigMapRef *ConfigMapKeyRef `json:"specConfigMapRef,omitempty"`
+
+	// SpecFile is the path to the OpenAPI specification file.
+	// +optional
+	SpecFile string `json:"specFile,omitempty"`
+
+	// SpecURL is the URL to fetch the OpenAPI specification from.
+	// +optional
+	SpecURL string `json:"specURL,omitempty"`
+
+	// FailOnError rejects requests that fail validation (default: true).
+	// When false, validation errors are logged but requests are allowed through.
+	// +optional
+	FailOnError *bool `json:"failOnError,omitempty"`
+
+	// ValidateRequestBody enables request body validation.
+	// +optional
+	ValidateRequestBody *bool `json:"validateRequestBody,omitempty"`
+
+	// ValidateRequestParams enables request parameter validation (path, query, header).
+	// +optional
+	ValidateRequestParams *bool `json:"validateRequestParams,omitempty"`
+
+	// ValidateRequestHeaders enables request header validation.
+	// +optional
+	ValidateRequestHeaders *bool `json:"validateRequestHeaders,omitempty"`
+
+	// ValidateSecurity enables security requirement validation.
+	// +optional
+	ValidateSecurity *bool `json:"validateSecurity,omitempty"`
+}
+
+// ProtoValidationConfig configures proto descriptor-based request validation.
+type ProtoValidationConfig struct {
+	// Enabled enables proto descriptor-based request validation.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// DescriptorConfigMapRef references a ConfigMap containing the proto descriptor.
+	// +optional
+	DescriptorConfigMapRef *ConfigMapKeyRef `json:"descriptorConfigMapRef,omitempty"`
+
+	// DescriptorFile is the path to the proto descriptor file.
+	// +optional
+	DescriptorFile string `json:"descriptorFile,omitempty"`
+
+	// FailOnError rejects requests that fail validation (default: true).
+	// When false, validation errors are logged but requests are allowed through.
+	// +optional
+	FailOnError *bool `json:"failOnError,omitempty"`
+
+	// ValidateRequestMessage enables request message validation.
+	// +optional
+	ValidateRequestMessage *bool `json:"validateRequestMessage,omitempty"`
+}
+
+// GraphQLSchemaValidationConfig configures GraphQL schema validation.
+type GraphQLSchemaValidationConfig struct {
+	// Enabled enables GraphQL schema validation.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// SchemaConfigMapRef references a ConfigMap containing the GraphQL schema.
+	// +optional
+	SchemaConfigMapRef *ConfigMapKeyRef `json:"schemaConfigMapRef,omitempty"`
+
+	// SchemaFile is the path to the GraphQL schema file.
+	// +optional
+	SchemaFile string `json:"schemaFile,omitempty"`
+
+	// FailOnError rejects requests that fail validation (default: true).
+	// When false, validation errors are logged but requests are allowed through.
+	// +optional
+	FailOnError *bool `json:"failOnError,omitempty"`
+
+	// ValidateVariables enables GraphQL variable validation.
+	// +optional
+	ValidateVariables *bool `json:"validateVariables,omitempty"`
+}
+
 // BackendEncodingConfig represents backend encoding configuration.
 type BackendEncodingConfig struct {
 	// Request contains request encoding configuration.

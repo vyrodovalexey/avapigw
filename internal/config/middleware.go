@@ -85,3 +85,135 @@ func (c *RequestLimitsConfig) GetEffectiveMaxHeaderSize() int64 {
 	}
 	return c.MaxHeaderSize
 }
+
+// OpenAPIValidationConfig configures OpenAPI request validation.
+type OpenAPIValidationConfig struct {
+	// Enabled enables OpenAPI request validation.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// SpecFile is the path to the OpenAPI specification file.
+	SpecFile string `yaml:"specFile,omitempty" json:"specFile,omitempty"`
+
+	// SpecURL is the URL to fetch the OpenAPI specification from.
+	SpecURL string `yaml:"specURL,omitempty" json:"specURL,omitempty"`
+
+	// FailOnError rejects requests that fail validation (default: true).
+	// When false, validation errors are logged but requests are allowed through.
+	FailOnError *bool `yaml:"failOnError,omitempty" json:"failOnError,omitempty"`
+
+	// ValidateRequestBody enables request body validation.
+	ValidateRequestBody *bool `yaml:"validateRequestBody,omitempty" json:"validateRequestBody,omitempty"`
+
+	// ValidateRequestParams enables request parameter validation (path, query, header).
+	ValidateRequestParams *bool `yaml:"validateRequestParams,omitempty" json:"validateRequestParams,omitempty"`
+
+	// ValidateRequestHeaders enables request header validation.
+	ValidateRequestHeaders *bool `yaml:"validateRequestHeaders,omitempty" json:"validateRequestHeaders,omitempty"`
+
+	// ValidateSecurity enables security requirement validation.
+	ValidateSecurity *bool `yaml:"validateSecurity,omitempty" json:"validateSecurity,omitempty"`
+}
+
+// GetEffectiveFailOnError returns the effective failOnError value (default: true).
+func (c *OpenAPIValidationConfig) GetEffectiveFailOnError() bool {
+	if c == nil || c.FailOnError == nil {
+		return true
+	}
+	return *c.FailOnError
+}
+
+// GetEffectiveValidateRequestBody returns the effective validateRequestBody value (default: true).
+func (c *OpenAPIValidationConfig) GetEffectiveValidateRequestBody() bool {
+	if c == nil || c.ValidateRequestBody == nil {
+		return true
+	}
+	return *c.ValidateRequestBody
+}
+
+// GetEffectiveValidateRequestParams returns the effective validateRequestParams value (default: true).
+func (c *OpenAPIValidationConfig) GetEffectiveValidateRequestParams() bool {
+	if c == nil || c.ValidateRequestParams == nil {
+		return true
+	}
+	return *c.ValidateRequestParams
+}
+
+// GetEffectiveValidateRequestHeaders returns the effective validateRequestHeaders value (default: false).
+func (c *OpenAPIValidationConfig) GetEffectiveValidateRequestHeaders() bool {
+	if c == nil || c.ValidateRequestHeaders == nil {
+		return false
+	}
+	return *c.ValidateRequestHeaders
+}
+
+// GetEffectiveValidateSecurity returns the effective validateSecurity value (default: false).
+func (c *OpenAPIValidationConfig) GetEffectiveValidateSecurity() bool {
+	if c == nil || c.ValidateSecurity == nil {
+		return false
+	}
+	return *c.ValidateSecurity
+}
+
+// ProtoValidationConfig configures proto descriptor-based request validation for gRPC.
+type ProtoValidationConfig struct {
+	// Enabled enables proto descriptor-based request validation.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// DescriptorFile is the path to the proto descriptor file.
+	DescriptorFile string `yaml:"descriptorFile,omitempty" json:"descriptorFile,omitempty"`
+
+	// FailOnError rejects requests that fail validation (default: true).
+	// When false, validation errors are logged but requests are allowed through.
+	FailOnError *bool `yaml:"failOnError,omitempty" json:"failOnError,omitempty"`
+
+	// ValidateRequestMessage enables request message validation.
+	ValidateRequestMessage *bool `yaml:"validateRequestMessage,omitempty" json:"validateRequestMessage,omitempty"`
+}
+
+// GetEffectiveFailOnError returns the effective failOnError value (default: true).
+func (c *ProtoValidationConfig) GetEffectiveFailOnError() bool {
+	if c == nil || c.FailOnError == nil {
+		return true
+	}
+	return *c.FailOnError
+}
+
+// GetEffectiveValidateRequestMessage returns the effective validateRequestMessage value (default: true).
+func (c *ProtoValidationConfig) GetEffectiveValidateRequestMessage() bool {
+	if c == nil || c.ValidateRequestMessage == nil {
+		return true
+	}
+	return *c.ValidateRequestMessage
+}
+
+// GraphQLSchemaValidationConfig configures GraphQL schema validation.
+type GraphQLSchemaValidationConfig struct {
+	// Enabled enables GraphQL schema validation.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// SchemaFile is the path to the GraphQL schema file.
+	SchemaFile string `yaml:"schemaFile,omitempty" json:"schemaFile,omitempty"`
+
+	// FailOnError rejects requests that fail validation (default: true).
+	// When false, validation errors are logged but requests are allowed through.
+	FailOnError *bool `yaml:"failOnError,omitempty" json:"failOnError,omitempty"`
+
+	// ValidateVariables enables GraphQL variable validation.
+	ValidateVariables *bool `yaml:"validateVariables,omitempty" json:"validateVariables,omitempty"`
+}
+
+// GetEffectiveFailOnError returns the effective failOnError value (default: true).
+func (c *GraphQLSchemaValidationConfig) GetEffectiveFailOnError() bool {
+	if c == nil || c.FailOnError == nil {
+		return true
+	}
+	return *c.FailOnError
+}
+
+// GetEffectiveValidateVariables returns the effective validateVariables value (default: true).
+func (c *GraphQLSchemaValidationConfig) GetEffectiveValidateVariables() bool {
+	if c == nil || c.ValidateVariables == nil {
+		return true
+	}
+	return *c.ValidateVariables
+}

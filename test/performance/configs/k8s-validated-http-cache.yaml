@@ -1,0 +1,43 @@
+# Yandex Tank: K8s HTTP + OpenAPI Validation + Caching (3 minutes)
+# Purpose: Measure combined OpenAPI validation and Redis caching overhead
+# Route: perf-validated-http-cache → /api/v1/validated/cache/items
+# Cache: Redis Sentinel, TTL 5m, key by path+query
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:30150
+  load_profile:
+    load_type: rps
+    schedule: line(10, 200, 30s) const(200, 2m) line(200, 10, 30s)
+  ammofile: /var/loadtest/ammo/k8s-validated-http-cache.txt
+  ammo_type: uri
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 10s
+  instances: 100
+  threads: 4
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/K8sPerftest]"
+    - "[Accept: application/json]"
+    - "[Content-Type: application/json]"
+    - "[Connection: keep-alive]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    - http(5xx,15%,15s)
+    - time(5000,50%,15s)
+    - http(net,10%,15s)

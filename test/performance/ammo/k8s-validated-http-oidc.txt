@@ -1,0 +1,16 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-Validated-HTTP-OIDC]
+[Accept: application/json]
+[Connection: keep-alive]
+[Authorization: Bearer ${JWT_TOKEN}]
+[X-Perf-Test: k8s-validated-http-oidc]
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items
+/api/v1/validated/oidc/items

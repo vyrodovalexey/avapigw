@@ -1,0 +1,15 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-Validated-HTTP-LogOnly]
+[Accept: application/json]
+[Connection: keep-alive]
+[X-Perf-Test: k8s-validated-http-logonly]
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
+/api/v1/validated/logonly/items
