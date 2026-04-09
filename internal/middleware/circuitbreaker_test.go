@@ -160,8 +160,9 @@ func TestCircuitBreakerMiddleware(t *testing.T) {
 func TestCircuitBreakerMiddleware_OpenState(t *testing.T) {
 	t.Parallel()
 
-	// Create a circuit breaker with low threshold
-	cb := NewCircuitBreaker("test-cb", 2, 100*time.Millisecond)
+	// Create a circuit breaker with low threshold but long timeout
+	// so the breaker stays open for the duration of the test
+	cb := NewCircuitBreaker("test-cb-open", 2, 30*time.Second)
 
 	// Trip the circuit breaker by causing failures
 	for i := 0; i < 10; i++ {
@@ -170,26 +171,23 @@ func TestCircuitBreakerMiddleware_OpenState(t *testing.T) {
 		})
 	}
 
-	// Wait a bit for state to update
-	time.Sleep(10 * time.Millisecond)
+	// Verify the circuit breaker is open
+	assert.Equal(t, gobreaker.StateOpen, cb.State(), "circuit breaker should be open after consecutive failures")
 
-	// If circuit is open, middleware should return 503
-	if cb.State() == gobreaker.StateOpen {
-		middleware := CircuitBreakerMiddleware(cb)
+	middleware := CircuitBreakerMiddleware(cb)
 
-		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		}))
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rec := httptest.NewRecorder()
 
-		handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-		assert.Contains(t, rec.Body.String(), "circuit breaker open")
-	}
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	assert.Contains(t, rec.Body.String(), "circuit breaker open")
 }
 
 func TestStatusCapturingResponseWriter_WriteHeader(t *testing.T) {

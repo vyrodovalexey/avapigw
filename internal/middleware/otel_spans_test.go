@@ -27,32 +27,33 @@ func TestCircuitBreaker_OTELSpans(t *testing.T) {
 		otel.SetTracerProvider(tp)
 		defer otel.SetTracerProvider(oldTP)
 
+		// Re-initialize the package-level cbTracer so it uses the test
+		// tracer provider. Restore the original tracer on cleanup.
+		origTracer := cbTracer
+		cbTracer = tp.Tracer("avapigw/circuitbreaker")
+		defer func() { cbTracer = origTracer }()
+
 		stateChanges := make([]string, 0)
 
+		// Use a long timeout so the circuit breaker stays open for the
+		// duration of the test and does not transition to half-open
+		// prematurely when running alongside other tests.
 		cb := NewCircuitBreaker(
 			"test-otel-cb",
-			2,                    // threshold
-			100*time.Millisecond, // timeout
+			2,              // threshold
+			30*time.Second, // timeout – long enough to avoid flakiness
 			WithCircuitBreakerLogger(observability.NopLogger()),
 			WithCircuitBreakerStateCallback(func(name string, state int) {
 				stateChanges = append(stateChanges, name)
 			}),
 		)
 
-		// Force failures to trigger state change
+		// Force failures to trigger state change (closed -> open)
 		for i := 0; i < 10; i++ {
 			_, _ = cb.Execute(func() (interface{}, error) {
 				return nil, assert.AnError
 			})
 		}
-
-		// Wait for timeout to allow half-open transition
-		time.Sleep(200 * time.Millisecond)
-
-		// Try one more request to trigger half-open -> closed or half-open -> open
-		_, _ = cb.Execute(func() (interface{}, error) {
-			return nil, assert.AnError
-		})
 
 		// Verify OTEL spans were created for state changes
 		spans := exporter.GetSpans()
@@ -78,7 +79,7 @@ func TestCircuitBreaker_OTELSpans(t *testing.T) {
 			}
 		}
 
-		// At least one state change should have occurred
+		// At least one state change should have occurred (closed -> open)
 		assert.Greater(t, stateChangeSpans, 0, "expected at least one circuit breaker state change span")
 	})
 }
