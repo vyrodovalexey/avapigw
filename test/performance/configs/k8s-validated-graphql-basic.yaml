@@ -1,0 +1,44 @@
+# Yandex Tank: K8s GraphQL + Schema Validation Baseline (3 minutes)
+# Purpose: Measure GraphQL throughput with schema-based query/mutation validation
+# Route: perf-validated-graphql-basic → /graphql/validated/basic
+# Validation: GraphQL schema validation on queries and mutations
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:30150
+  load_profile:
+    load_type: rps
+    schedule: line(10, 150, 30s) const(150, 2m) line(150, 10, 30s)
+  ammofile: /var/loadtest/ammo/k8s-validated-graphql-basic.txt
+  ammo_type: uri
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 10s
+  instances: 100
+  threads: 4
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/K8sPerftest]"
+    - "[Accept: application/json]"
+    - "[Content-Type: application/json]"
+    - "[Connection: keep-alive]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    - http(5xx,15%,15s)
+    - time(5000,50%,15s)
+    - http(net,10%,15s)
+    - http(4xx,20%,15s)

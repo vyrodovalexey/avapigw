@@ -708,6 +708,50 @@
             },
             "required": ["name"]
           }
+        },
+        "openAPIValidation": {
+          "type": "object",
+          "description": "OpenAPI request validation configuration",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable OpenAPI request validation"
+            },
+            "specFile": {
+              "type": "string",
+              "description": "Path to the OpenAPI specification file"
+            },
+            "specURL": {
+              "type": "string",
+              "description": "URL to fetch the OpenAPI specification from"
+            },
+            "failOnError": {
+              "type": "boolean",
+              "default": true,
+              "description": "Reject requests that fail validation"
+            },
+            "validateRequestBody": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable request body validation"
+            },
+            "validateRequestParams": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable request parameter validation (path, query, header)"
+            },
+            "validateRequestHeaders": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable request header validation"
+            },
+            "validateSecurity": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable security requirement validation"
+            }
+          }
         }
       },
       "description": "Gateway configuration"

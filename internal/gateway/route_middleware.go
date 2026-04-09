@@ -10,6 +10,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/openapi"
 	"github.com/vyrodovalexey/avapigw/internal/security"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
@@ -310,7 +311,12 @@ func (m *RouteMiddlewareManager) buildMiddlewareChain(route *config.Route) []fun
 		)
 	}
 
-	// 5. Headers manipulation
+	// 5. OpenAPI Validation (after body limit, before headers)
+	if openapiMw := m.buildRouteOpenAPIValidationMiddleware(route); openapiMw != nil {
+		middlewares = append(middlewares, openapiMw)
+	}
+
+	// 6. Headers manipulation
 	if route.Headers != nil {
 		headersMiddleware := middleware.HeadersFromConfig(route.Headers)
 		middlewares = append(middlewares, headersMiddleware)
@@ -319,12 +325,12 @@ func (m *RouteMiddlewareManager) buildMiddlewareChain(route *config.Route) []fun
 		)
 	}
 
-	// 6. Cache (applied around the proxy handler)
+	// 7. Cache (applied around the proxy handler)
 	if cacheMw := m.buildRouteCacheMiddleware(route); cacheMw != nil {
 		middlewares = append(middlewares, cacheMw)
 	}
 
-	// 7. Transform (request/response transformation)
+	// 8. Transform (request/response transformation)
 	if route.Transform != nil && !route.Transform.IsEmpty() {
 		transformMiddleware := middleware.TransformFromConfig(route.Transform, m.logger)
 		middlewares = append(middlewares, transformMiddleware)
@@ -333,7 +339,7 @@ func (m *RouteMiddlewareManager) buildMiddlewareChain(route *config.Route) []fun
 		)
 	}
 
-	// 8. Encoding (content negotiation and metrics)
+	// 9. Encoding (content negotiation and metrics)
 	if route.Encoding != nil && !route.Encoding.IsEmpty() {
 		encodingMiddleware := middleware.EncodingFromConfig(route.Encoding, m.logger)
 		middlewares = append(middlewares, encodingMiddleware)
@@ -423,6 +429,41 @@ func (m *RouteMiddlewareManager) GetEffectiveSecurity(route *config.Route) *conf
 	// Fall back to global config
 	if m.globalConfig != nil && m.globalConfig.Security != nil {
 		return m.globalConfig.Security
+	}
+
+	return nil
+}
+
+// buildRouteOpenAPIValidationMiddleware creates an OpenAPI validation middleware
+// for the given route. Returns nil if OpenAPI validation is not configured or not enabled.
+func (m *RouteMiddlewareManager) buildRouteOpenAPIValidationMiddleware(
+	route *config.Route,
+) func(http.Handler) http.Handler {
+	cfg := m.GetEffectiveOpenAPIValidation(route)
+	if cfg == nil || !cfg.Enabled {
+		return nil
+	}
+
+	mw := openapi.MiddlewareFromConfig(cfg, m.logger)
+
+	m.logger.Debug("applied route-level OpenAPI validation",
+		observability.String("route", route.Name),
+	)
+	return mw
+}
+
+// GetEffectiveOpenAPIValidation returns the effective OpenAPI validation config for a route.
+// Route config takes precedence over global config.
+// If both are nil, returns nil (no validation).
+func (m *RouteMiddlewareManager) GetEffectiveOpenAPIValidation(route *config.Route) *config.OpenAPIValidationConfig {
+	// Route-level config takes precedence.
+	if route != nil && route.OpenAPIValidation != nil {
+		return route.OpenAPIValidation
+	}
+
+	// Fall back to global config.
+	if m.globalConfig != nil && m.globalConfig.OpenAPIValidation != nil {
+		return m.globalConfig.OpenAPIValidation
 	}
 
 	return nil

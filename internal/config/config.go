@@ -44,6 +44,8 @@ type GatewaySpec struct {
 	TrustedProxies []string `yaml:"trustedProxies,omitempty" json:"trustedProxies,omitempty"`
 	// GraphQL configures GraphQL-specific settings such as body size limits and endpoint path.
 	GraphQL *GraphQLConfig `yaml:"graphql,omitempty" json:"graphql,omitempty"`
+	// OpenAPIValidation configures global OpenAPI request validation.
+	OpenAPIValidation *OpenAPIValidationConfig `yaml:"openAPIValidation,omitempty" json:"openAPIValidation,omitempty"`
 }
 
 // GraphQLConfig contains GraphQL-specific gateway configuration.

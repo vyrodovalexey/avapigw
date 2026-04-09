@@ -1,0 +1,16 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-Validated-HTTP-CORS]
+[Accept: application/json]
+[Connection: keep-alive]
+[Origin: https://example.com]
+[X-Perf-Test: k8s-validated-http-cors]
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items
+/api/v1/validated/cors/items

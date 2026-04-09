@@ -77,6 +77,7 @@ TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avap
         test-graphql-unit test-graphql-functional test-graphql-integration test-graphql-e2e \
         test-auth-unit test-auth-integration test-auth-e2e \
         test-ingress-unit test-ingress-functional \
+        test-openapi-unit test-openapi-functional test-openapi-integration test-openapi-e2e \
         test-sentinel \
         test-env-up test-env-down test-env-status test-env-logs test-env-wait \
         test-env-setup test-env-setup-vault test-env-setup-keycloak \
@@ -327,6 +328,43 @@ test-ingress-functional:
 	@mkdir -p $(COVERAGE_DIR)
 	$(GO) test -v -race -tags=functional -coverprofile=$(COVERAGE_DIR)/ingress-functional.out ./test/functional/operator/... -run Ingress
 	@echo "==> Ingress controller functional tests completed"
+
+# ==============================================================================
+# OpenAPI validation test targets
+# ==============================================================================
+
+## test-openapi-unit: Run OpenAPI validation unit tests
+test-openapi-unit:
+	@echo "==> Running OpenAPI validation unit tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -race -coverprofile=$(COVERAGE_DIR)/openapi-unit.out -covermode=atomic ./internal/openapi/...
+	@echo "==> OpenAPI validation unit tests completed"
+
+## test-openapi-functional: Run OpenAPI validation functional tests
+test-openapi-functional:
+	@echo "==> Running OpenAPI validation functional tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	$(GO) test -tags=functional -race -count=1 -timeout 60s -coverprofile=$(COVERAGE_DIR)/openapi-functional.out -run ".*[Oo]pen[Aa][Pp][Ii].*" ./test/functional/...
+	@echo "==> OpenAPI validation functional tests completed"
+
+## test-openapi-integration: Run OpenAPI validation integration tests
+test-openapi-integration:
+	@echo "==> Running OpenAPI validation integration tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
+		$(GO) test -tags=integration -race -count=1 -timeout 10m -coverprofile=$(COVERAGE_DIR)/openapi-integration.out -run ".*[Oo]pen[Aa][Pp][Ii].*" ./test/integration/...
+	@echo "==> OpenAPI validation integration tests completed"
+
+## test-openapi-e2e: Run OpenAPI validation e2e tests
+test-openapi-e2e:
+	@echo "==> Running OpenAPI validation e2e tests..."
+	@mkdir -p $(COVERAGE_DIR)
+	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
+	TEST_REDIS_SENTINEL_ADDRS=$(TEST_REDIS_SENTINEL_ADDRS) \
+	TEST_REDIS_SENTINEL_MASTER_NAME=$(TEST_REDIS_SENTINEL_MASTER_NAME) \
+	TEST_REDIS_MASTER_PASSWORD=$(TEST_REDIS_MASTER_PASSWORD) \
+		$(GO) test -tags=e2e -race -count=1 -timeout 15m -coverprofile=$(COVERAGE_DIR)/openapi-e2e.out -run ".*[Oo]pen[Aa][Pp][Ii].*" ./test/e2e/...
+	@echo "==> OpenAPI validation e2e tests completed"
 
 ## test-merge-coverage: Merge all coverage reports
 test-merge-coverage:
@@ -839,6 +877,12 @@ help:
 	@echo "Ingress controller test targets:"
 	@echo "  test-ingress-unit       Run ingress controller unit tests"
 	@echo "  test-ingress-functional Run ingress controller functional tests"
+	@echo ""
+	@echo "OpenAPI validation test targets:"
+	@echo "  test-openapi-unit        Run OpenAPI validation unit tests"
+	@echo "  test-openapi-functional  Run OpenAPI validation functional tests"
+	@echo "  test-openapi-integration Run OpenAPI validation integration tests"
+	@echo "  test-openapi-e2e         Run OpenAPI validation e2e tests"
 	@echo ""
 	@echo "Quality targets:"
 	@echo "  lint            Run golangci-lint"

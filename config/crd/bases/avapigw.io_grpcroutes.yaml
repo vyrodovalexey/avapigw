@@ -743,6 +743,44 @@ spec:
                 required:
                 - destination
                 type: object
+              protoValidation:
+                description: ProtoValidation configures proto descriptor-based request
+                  validation for this gRPC route.
+                properties:
+                  descriptorConfigMapRef:
+                    description: DescriptorConfigMapRef references a ConfigMap containing
+                      the proto descriptor.
+                    properties:
+                      key:
+                        description: Key is the key in the ConfigMap. If empty, the
+                          first key is used.
+                        type: string
+                      name:
+                        description: Name is the name of the ConfigMap.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  descriptorFile:
+                    description: DescriptorFile is the path to the proto descriptor
+                      file.
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enabled enables proto descriptor-based request validation.
+                    type: boolean
+                  failOnError:
+                    description: |-
+                      FailOnError rejects requests that fail validation (default: true).
+                      When false, validation errors are logged but requests are allowed through.
+                    type: boolean
+                  validateRequestMessage:
+                    description: ValidateRequestMessage enables request message validation.
+                    type: boolean
+                required:
+                - enabled
+                type: object
               rateLimit:
                 description: RateLimit contains route-level rate limiting configuration.
                 properties:

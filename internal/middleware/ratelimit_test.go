@@ -284,16 +284,18 @@ func TestRateLimiter_CleanupOldClients_TTLBased(t *testing.T) {
 		rl.Allow("192.168.1." + string(rune(i)))
 	}
 
-	// Wait a bit
-	time.Sleep(50 * time.Millisecond)
+	// Wait long enough so the first batch is clearly older than the TTL.
+	// Use generous margins to avoid flakiness under race detector / CI load.
+	time.Sleep(200 * time.Millisecond)
 
 	// Add more clients
 	for i := 5; i < 10; i++ {
 		rl.Allow("192.168.1." + string(rune(i)))
 	}
 
-	// Cleanup with TTL that should only remove the older clients
-	rl.CleanupOldClients(25 * time.Millisecond)
+	// Cleanup with TTL that should only remove the older clients.
+	// 100ms is well below the 200ms sleep but well above the time to add 5 entries.
+	rl.CleanupOldClients(100 * time.Millisecond)
 
 	rl.mu.RLock()
 	clientCount := len(rl.clients)

@@ -39,6 +39,9 @@ type Route struct {
 	// TLS configures route-level TLS certificate override.
 	// This allows serving different certificates based on SNI for this route.
 	TLS *RouteTLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+
+	// OpenAPIValidation configures OpenAPI request validation for this route (overrides global).
+	OpenAPIValidation *OpenAPIValidationConfig `yaml:"openAPIValidation,omitempty" json:"openAPIValidation,omitempty"`
 }
 
 // RouteTLSConfig contains TLS configuration for a specific route.

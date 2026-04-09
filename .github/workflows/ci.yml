@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.26.1'
+  GO_VERSION: '1.26.2'
   GOLANGCI_LINT_VERSION: 'v2.11.4'
   DOCKER_REGISTRY: ghcr.io
   DOCKER_IMAGE: ghcr.io/${{ github.repository }}
@@ -87,6 +87,7 @@ jobs:
           cache: true
 
       - name: Run unit tests with coverage
+        # Includes OpenAPI validation unit tests from ./internal/openapi/...
         run: |
           mkdir -p coverage
           go test -race -coverprofile=coverage/unit.out -covermode=atomic ./internal/... ./cmd/...
@@ -125,6 +126,7 @@ jobs:
           cache: true
 
       - name: Run functional tests with coverage
+        # Includes OpenAPI validation functional tests from ./test/functional/...
         run: |
           mkdir -p coverage
           go test -race -coverprofile=coverage/functional.out -covermode=atomic -tags=functional ./test/functional/...
@@ -1149,7 +1151,7 @@ jobs:
           cosign sign --yes ${images}
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.22.2
         with:
           image: ${{ env.DOCKER_IMAGE }}:${{ steps.meta.outputs.version }}
           artifact-name: sbom-${{ steps.meta.outputs.version }}.spdx.json
@@ -1237,7 +1239,7 @@ jobs:
           cosign sign --yes ${images}
 
       - name: Generate SBOM for operator
-        uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.22.2
         with:
           image: ${{ env.DOCKER_IMAGE_OPERATOR }}:${{ steps.meta.outputs.version }}
           artifact-name: sbom-operator-${{ steps.meta.outputs.version }}.spdx.json
@@ -1281,7 +1283,7 @@ jobs:
           vuln-type: 'os,library'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@c793b717bc78562f491db7b0e93a3a178b099162 # v4.32.5
+        uses: github/codeql-action/upload-sarif@0d579ffd059c29b07949a3cce3983f0780820c98 # v4.32.5
         with:
           sarif_file: 'trivy-results.sarif'
 
@@ -1332,7 +1334,7 @@ jobs:
           vuln-type: 'os,library'
 
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@c793b717bc78562f491db7b0e93a3a178b099162 # v4.32.5
+        uses: github/codeql-action/upload-sarif@0d579ffd059c29b07949a3cce3983f0780820c98 # v4.32.5
         with:
           sarif_file: 'trivy-operator-results.sarif'
 
@@ -1366,7 +1368,7 @@ jobs:
           version: 'v3.14.0'
 
       - name: Create kind cluster
-        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.13.0
         with:
           cluster_name: helm-test
           wait: 120s
@@ -1511,7 +1513,7 @@ jobs:
           version: 'v3.14.0'
 
       - name: Create kind cluster
-        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.13.0
         with:
           cluster_name: helm-install-test
           wait: 120s

@@ -346,6 +346,9 @@ type GRPCRoute struct {
 
 	// Authorization configures route-level authorization.
 	Authorization *AuthorizationConfig `yaml:"authorization,omitempty" json:"authorization,omitempty"`
+
+	// ProtoValidation configures proto descriptor-based request validation for this gRPC route.
+	ProtoValidation *ProtoValidationConfig `yaml:"protoValidation,omitempty" json:"protoValidation,omitempty"`
 }
 
 // HasTLSOverride returns true if the gRPC route has TLS configuration that overrides listener TLS.

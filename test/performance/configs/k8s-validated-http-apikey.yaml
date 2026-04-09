@@ -1,0 +1,46 @@
+# Yandex Tank: K8s HTTP + OpenAPI Validation + API Key Auth (3 minutes)
+# Purpose: Measure combined OpenAPI validation and API key authentication overhead
+# Route: perf-validated-http-apikey → /api/v1/validated/apikey/items
+# Auth: API key in X-API-Key header (expects 401 without valid key)
+# Note: For authenticated tests, use run-validation-perftest.sh which injects API keys
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:30150
+  load_profile:
+    load_type: rps
+    schedule: line(10, 200, 30s) const(200, 2m) line(200, 10, 30s)
+  ammofile: /var/loadtest/ammo/k8s-validated-http-apikey.txt
+  ammo_type: uri
+  connection_test: true
+  writelog: "0"
+  ssl: true
+  timeout: 10s
+  instances: 100
+  threads: 4
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/K8sPerftest]"
+    - "[Accept: application/json]"
+    - "[Content-Type: application/json]"
+    - "[Connection: keep-alive]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    - http(5xx,15%,15s)
+    - time(5000,50%,15s)
+    - http(net,10%,15s)
+    # Allow higher 4xx since unauthenticated requests return 401
+    - http(4xx,80%,15s)

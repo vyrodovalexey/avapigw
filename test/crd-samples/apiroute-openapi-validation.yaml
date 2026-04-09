@@ -1,0 +1,41 @@
+# APIRoute with OpenAPI Request Validation
+# This example demonstrates how to configure OpenAPI request validation
+# for an API route. The gateway validates incoming requests against the
+# OpenAPI specification before forwarding them to the backend.
+#
+# Prerequisites:
+#   - Create a ConfigMap with the OpenAPI spec:
+#     kubectl create configmap items-openapi-spec --from-file=openapi.yaml=path/to/spec.yaml -n avapigw-test
+#
+# Apply with: kubectl apply -f test/crd-samples/apiroute-openapi-validation.yaml -n avapigw-test
+
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: items-api-validated
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: openapi.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+    validateRequestHeaders: false
+    validateSecurity: false

@@ -176,6 +176,10 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	if spec.Authorization != nil {
 		v.validateAuthorization(spec.Authorization, "spec.authorization")
 	}
+
+	if spec.OpenAPIValidation != nil {
+		v.validateOpenAPIValidationConfig(spec.OpenAPIValidation, "spec.openAPIValidation")
+	}
 }
 
 // validateListeners validates listener configurations.
@@ -395,6 +399,10 @@ func (v *Validator) validateRouteOptions(route *Route, path string) {
 
 	if route.TLS != nil {
 		v.validateRouteTLSConfig(route.TLS, path+".tls")
+	}
+
+	if route.OpenAPIValidation != nil {
+		v.validateOpenAPIValidationConfig(route.OpenAPIValidation, path+".openAPIValidation")
 	}
 }
 
@@ -1103,6 +1111,11 @@ func (v *Validator) validateSingleGRPCRoute(route *GRPCRoute, path string, names
 	if route.TLS != nil {
 		v.validateRouteTLSConfig(route.TLS, path+".tls")
 	}
+
+	// Validate proto validation
+	if route.ProtoValidation != nil {
+		v.validateProtoValidationConfig(route.ProtoValidation, path+".protoValidation")
+	}
 }
 
 // validateGRPCRouteMatch validates a gRPC route match configuration.
@@ -1558,6 +1571,11 @@ func (v *Validator) validateSingleGraphQLRoute(route *GraphQLRoute, path string,
 		v.addError(path+".route", fmt.Sprintf("route weights must sum to 100, got %d", totalWeight))
 	}
 
+	v.validateGraphQLRouteOptions(route, path)
+}
+
+// validateGraphQLRouteOptions validates GraphQL route options (timeout, retries, limits, etc.).
+func (v *Validator) validateGraphQLRouteOptions(route *GraphQLRoute, path string) {
 	// Validate timeout
 	if route.Timeout.Duration() < 0 {
 		v.addError(path+".timeout", "timeout cannot be negative")
@@ -1590,6 +1608,11 @@ func (v *Validator) validateSingleGraphQLRoute(route *GraphQLRoute, path string,
 
 	// Validate allowed operations
 	v.validateGraphQLAllowedOperations(route.AllowedOperations, path)
+
+	// Validate schema validation
+	if route.SchemaValidation != nil {
+		v.validateGraphQLSchemaValidationConfig(route.SchemaValidation, path+".schemaValidation")
+	}
 }
 
 // validateGraphQLRouteMatch validates a GraphQL route match configuration.
@@ -1805,5 +1828,48 @@ func (v *Validator) validateSingleGraphQLBackend(backend *GraphQLBackend, path s
 	// Validate circuit breaker
 	if backend.CircuitBreaker != nil {
 		v.validateCircuitBreaker(backend.CircuitBreaker, path+".circuitBreaker")
+	}
+}
+
+// validateOpenAPIValidationConfig validates OpenAPI validation configuration.
+func (v *Validator) validateOpenAPIValidationConfig(cfg *OpenAPIValidationConfig, path string) {
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+
+	if cfg.SpecFile == "" && cfg.SpecURL == "" {
+		v.addError(path, "either specFile or specURL is required when OpenAPI validation is enabled")
+	}
+
+	if cfg.SpecFile != "" && cfg.SpecURL != "" {
+		v.addError(path, "specFile and specURL are mutually exclusive")
+	}
+
+	if cfg.SpecURL != "" {
+		if err := util.ValidateURL(cfg.SpecURL); err != nil {
+			v.addError(path+".specURL", err.Error())
+		}
+	}
+}
+
+// validateProtoValidationConfig validates proto validation configuration.
+func (v *Validator) validateProtoValidationConfig(cfg *ProtoValidationConfig, path string) {
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+
+	if cfg.DescriptorFile == "" {
+		v.addError(path+".descriptorFile", "descriptorFile is required when proto validation is enabled")
+	}
+}
+
+// validateGraphQLSchemaValidationConfig validates GraphQL schema validation configuration.
+func (v *Validator) validateGraphQLSchemaValidationConfig(cfg *GraphQLSchemaValidationConfig, path string) {
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+
+	if cfg.SchemaFile == "" {
+		v.addError(path+".schemaFile", "schemaFile is required when GraphQL schema validation is enabled")
 	}
 }

@@ -1,0 +1,845 @@
+# Performance Test CRD Manifests for Validation Features
+# This file contains comprehensive CRD manifests for performance testing
+# of OpenAPI, Proto, and GraphQL schema validation combined with other
+# gateway features (rate limiting, caching, auth, CORS, transforms, etc.).
+#
+# Prerequisites:
+#   - Apply OpenAPI spec ConfigMap:
+#     kubectl apply -f test/performance/operator/openapi-spec-configmap.yaml -n avapigw-test
+#   - Mount the ConfigMap as a volume at /app/openapi/ in the gateway pod
+#     (see helm/avapigw/values-local.yaml for volume configuration)
+#
+# Apply with: kubectl apply -f test/performance/operator/crds-validation-perftest.yaml -n avapigw-test
+
+# =============================================================================
+# HTTP Routes with OpenAPI Validation
+# =============================================================================
+
+---
+# 1. perf-validated-http-basic: OpenAPI validation + basic proxy (baseline with validation)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-basic
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-basic
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/basic/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+    validateRequestHeaders: false
+    validateSecurity: false
+
+---
+# 2. perf-validated-http-ratelimit: OpenAPI validation + rate limiting via Redis Sentinel
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-ratelimit
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-ratelimit
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/ratelimit/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+
+---
+# 3. perf-validated-http-cache: OpenAPI validation + caching via Redis Sentinel
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-cache
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-cache
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/cache/items
+      methods:
+        - GET
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  cache:
+    enabled: true
+    ttl: 5m
+    keyComponents:
+      - path
+      - query
+
+---
+# 4. perf-validated-http-transform: OpenAPI validation + request/response transformation
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-transform
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-transform
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/transform/items
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  transform:
+    request:
+      template: |
+        {"wrapped": {{.Body}}}
+    response:
+      allowFields:
+        - id
+        - name
+      denyFields:
+        - password
+        - secret
+
+---
+# 5. perf-validated-http-encoding: OpenAPI validation + encoding
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-encoding
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-encoding
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/encoding/items
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  encoding:
+    request:
+      contentType: application/json
+    response:
+      contentType: application/json
+
+---
+# 6. perf-validated-http-cors: OpenAPI validation + CORS
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-cors
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-cors
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/cors/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  cors:
+    allowOrigins:
+      - "*"
+    allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-API-Key
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 86400
+    allowCredentials: false
+
+---
+# 7. perf-validated-http-basicauth: OpenAPI validation + basic authentication
+# Note: Basic auth is configured via authentication with JWT/APIKey disabled
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-basicauth
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-basicauth
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/basicauth/items
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  authentication:
+    enabled: true
+    jwt:
+      enabled: false
+    apiKey:
+      enabled: false
+
+---
+# 8. perf-validated-http-apikey: OpenAPI validation + API key authentication
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-apikey
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-apikey
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/apikey/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      vaultPath: secret/data/perftest/apikeys
+
+---
+# 9. perf-validated-http-oidc: OpenAPI validation + OIDC/JWT authentication
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-oidc
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-oidc
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/oidc/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+---
+# 10. perf-validated-http-logonly: OpenAPI validation in log-only mode (failOnError=false)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-http-logonly
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-logonly
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/logonly/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: false
+    validateRequestBody: true
+    validateRequestParams: true
+    validateRequestHeaders: false
+    validateSecurity: false
+
+---
+# 11. perf-validated-ws: WebSocket route with OpenAPI validation on upgrade
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-ws
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-websocket
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-validated
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: false
+    validateRequestParams: true
+  maxSessions:
+    enabled: true
+    maxConcurrent: 200
+    queueSize: 50
+    queueTimeout: 30s
+
+---
+# 12. perf-validated-https-basic: HTTPS with OpenAPI validation (TLS via Vault PKI)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: perf-validated-https-basic
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-http-route
+    feature: openapi-https
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/https/items
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specFile: /app/openapi/items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  tls:
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: test-role
+      commonName: avapigw-validated.local
+      altNames:
+        - localhost
+        - host.docker.internal
+      ttl: 24h
+
+# =============================================================================
+# gRPC Routes with Proto Validation
+# =============================================================================
+
+---
+# 13. perf-validated-grpc-basic: Proto validation + basic gRPC proxy
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-validated-grpc-basic
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-grpc-route
+    feature: proto-basic
+spec:
+  match:
+    - service:
+        exact: api.v1.ValidatedService
+      method:
+        prefix: ""
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8812
+      weight: 50
+  timeout: 30s
+  protoValidation:
+    enabled: true
+    descriptorFile: /app/proto/test-service.pb
+    failOnError: true
+    validateRequestMessage: true
+
+---
+# 14. perf-validated-grpc-mtls: Proto validation + mTLS
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-validated-grpc-mtls
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-grpc-route
+    feature: proto-mtls
+spec:
+  match:
+    - service:
+        exact: api.v1.ValidatedService
+      method:
+        exact: SecureUnary
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8812
+      weight: 50
+  timeout: 30s
+  protoValidation:
+    enabled: true
+    descriptorFile: /app/proto/test-service.pb
+    failOnError: true
+    validateRequestMessage: true
+  tls:
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: test-role
+      commonName: avapigw-grpc-validated.local
+      altNames:
+        - localhost
+        - host.docker.internal
+      ttl: 24h
+
+---
+# 15. perf-validated-grpc-oidc: Proto validation + OIDC authentication
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-validated-grpc-oidc
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-grpc-route
+    feature: proto-oidc
+spec:
+  match:
+    - service:
+        exact: api.v1.ValidatedService
+      method:
+        exact: AuthenticatedUnary
+      metadata:
+        - name: authorization
+          present: true
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8812
+      weight: 50
+  timeout: 30s
+  protoValidation:
+    enabled: true
+    descriptorFile: /app/proto/test-service.pb
+    failOnError: true
+    validateRequestMessage: true
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+---
+# 16. perf-validated-grpc-streaming: Proto validation + streaming
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-validated-grpc-streaming
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-grpc-route
+    feature: proto-streaming
+spec:
+  match:
+    - service:
+        exact: api.v1.ValidatedService
+      method:
+        prefix: Stream
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 100
+  timeout: 30s
+  protoValidation:
+    enabled: true
+    descriptorFile: /app/proto/test-service.pb
+    failOnError: true
+    validateRequestMessage: true
+  maxSessions:
+    enabled: true
+    maxConcurrent: 50
+    queueSize: 20
+    queueTimeout: 10s
+
+# =============================================================================
+# GraphQL Routes with Schema Validation
+# =============================================================================
+
+---
+# 17. perf-validated-graphql-basic: Schema validation + basic GraphQL proxy
+# NOTE: GraphQL routes must use the gateway's GraphQL handler path (/graphql).
+# The gateway registers a single GraphQL handler; routes differentiate by
+# operation name, type, or headers — not by URL path.
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-validated-graphql-basic
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-graphql-route
+    feature: schema-basic
+spec:
+  match:
+    - path:
+        exact: /graphql
+      operationName:
+        prefix: "Validated"
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  introspectionEnabled: true
+  schemaValidation:
+    enabled: true
+    schemaFile: /app/graphql/schema.graphql
+    failOnError: true
+    validateVariables: true
+
+---
+# 18. perf-validated-graphql-ratelimit: Schema validation + rate limiting
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-validated-graphql-ratelimit
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-graphql-route
+    feature: schema-ratelimit
+spec:
+  match:
+    - path:
+        exact: /graphql
+      operationName:
+        prefix: "ValidatedRL"
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  schemaValidation:
+    enabled: true
+    schemaFile: /app/graphql/schema.graphql
+    failOnError: true
+    validateVariables: true
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+
+---
+# 19. perf-validated-graphql-oidc: Schema validation + OIDC authentication
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-validated-graphql-oidc
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-graphql-route
+    feature: schema-oidc
+spec:
+  match:
+    - path:
+        exact: /graphql
+      operationName:
+        prefix: "ValidatedOIDC"
+      headers:
+        - name: Authorization
+          prefix: "Bearer "
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  schemaValidation:
+    enabled: true
+    schemaFile: /app/graphql/schema.graphql
+    failOnError: true
+    validateVariables: true
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+---
+# 20. perf-validated-graphql-apikey: Schema validation + API key authentication
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: perf-validated-graphql-apikey
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: validated-graphql-route
+    feature: schema-apikey
+spec:
+  match:
+    - path:
+        exact: /graphql
+      operationName:
+        prefix: "ValidatedKey"
+      headers:
+        - name: X-API-Key
+          prefix: ""
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  schemaValidation:
+    enabled: true
+    schemaFile: /app/graphql/schema.graphql
+    failOnError: true
+    validateVariables: true
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      vaultPath: secret/data/perftest/apikeys

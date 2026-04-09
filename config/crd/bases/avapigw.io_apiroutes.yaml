@@ -795,6 +795,58 @@ spec:
                 required:
                 - destination
                 type: object
+              openAPIValidation:
+                description: OpenAPIValidation configures OpenAPI request validation
+                  for this route.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables OpenAPI request validation.
+                    type: boolean
+                  failOnError:
+                    description: |-
+                      FailOnError rejects requests that fail validation (default: true).
+                      When false, validation errors are logged but requests are allowed through.
+                    type: boolean
+                  specConfigMapRef:
+                    description: SpecConfigMapRef references a ConfigMap containing
+                      the OpenAPI spec.
+                    properties:
+                      key:
+                        description: Key is the key in the ConfigMap. If empty, the
+                          first key is used.
+                        type: string
+                      name:
+                        description: Name is the name of the ConfigMap.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  specFile:
+                    description: SpecFile is the path to the OpenAPI specification
+                      file.
+                    type: string
+                  specURL:
+                    description: SpecURL is the URL to fetch the OpenAPI specification
+                      from.
+                    type: string
+                  validateRequestBody:
+                    description: ValidateRequestBody enables request body validation.
+                    type: boolean
+                  validateRequestHeaders:
+                    description: ValidateRequestHeaders enables request header validation.
+                    type: boolean
+                  validateRequestParams:
+                    description: ValidateRequestParams enables request parameter validation
+                      (path, query, header).
+                    type: boolean
+                  validateSecurity:
+                    description: ValidateSecurity enables security requirement validation.
+                    type: boolean
+                required:
+                - enabled
+                type: object
               rateLimit:
                 description: RateLimit contains route-level rate limiting configuration.
                 properties:

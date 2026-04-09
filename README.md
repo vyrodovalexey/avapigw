@@ -28,6 +28,16 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **GraphQL Routing** - Route by operation type (query/mutation/subscription), operation name, and headers
 - **GraphQL Subscriptions** - WebSocket-based GraphQL subscriptions with graphql-ws protocol support
 
+### Request Validation
+- **OpenAPI 3.x Request Validation** - Comprehensive request validation against OpenAPI specifications for HTTP routes
+- **gRPC Proto Validation** - Protocol Buffer descriptor-based request validation for gRPC routes
+- **GraphQL Schema Validation** - GraphQL schema-based request and variable validation
+- **Multi-Source Spec Loading** - Load specifications from files, URLs, or Kubernetes ConfigMaps
+- **Configurable Validation Scope** - Enable/disable validation of request bodies, parameters, headers, and security
+- **Fail-Safe Modes** - Reject invalid requests or log-only mode for monitoring and debugging
+- **Hot Spec Reload** - Dynamic specification reloading without gateway restart
+- **Validation Metrics** - Comprehensive Prometheus metrics for validation results, performance, and error tracking
+
 ### Security & TLS
 - **Comprehensive TLS Support** - TLS 1.2/1.3 with multiple modes (SIMPLE, MUTUAL, OPTIONAL_MUTUAL)
 - **Certificate Management** - Static and dynamic certificate provisioning with auto-rotation
@@ -120,7 +130,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ### Observability
 - **Comprehensive Prometheus Metrics** - 130+ metrics across gateway and operator components with route-based labels for cardinality control
 - **Core Gateway Metrics** - Request throughput, latency, active connections, build info, and uptime tracking
-- **Middleware Metrics** - Rate limiting, circuit breaker, timeout, retry, body limit, max sessions, recovery, and CORS metrics
+- **Middleware Metrics** - Rate limiting, circuit breaker, timeout, retry, body limit, max sessions, recovery, CORS, and OpenAPI validation metrics
 - **Cache Metrics** - Cache hits, misses, evictions, size, duration, and error tracking for both memory and Redis caches
 - **Authentication & Authorization Metrics** - JWT, API Key, OIDC, mTLS, RBAC, ABAC, and external authorization metrics
 - **TLS & Security Metrics** - Certificate lifecycle, handshake performance, and security event tracking
@@ -157,7 +167,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 #### Two-Tier Middleware Architecture
 - **Global Middleware Chain**: Recovery → RequestID → Logging → Tracing → Audit → Metrics → CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
-- **Per-Route Middleware Chain**: Security Headers → CORS → Body Limit → Headers → Cache → Transform → Encoding → [proxy to backend]
+- **Per-Route Middleware Chain**: Security Headers → CORS → Body Limit → **OpenAPI Validation** → Headers → Cache → Transform → Encoding → [proxy to backend]
 - **RouteMiddlewareApplier Interface**: Decoupled proxy from gateway package to avoid import cycles while enabling per-route middleware
 - **Thread-Safe Cache Factory**: Per-route cache instances with lazy initialization and double-check locking
 
@@ -195,6 +205,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Vault PKI Integration](#-vault-pki-integration)
 - [Authentication](#-authentication)
 - [Authorization](#-authorization)
+- [OpenAPI Request Validation](#-openapi-request-validation)
 - [Data Transformation](#-data-transformation)
 - [API Endpoints](#-api-endpoints)
 - [Routing](#-routing)
@@ -218,7 +229,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.26.1 (for building from source)
+- Go 1.26.2 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -770,6 +781,13 @@ gateway_middleware_retry_attempts_total{route="api-v1"} 25
 gateway_middleware_max_sessions_current 150
 gateway_middleware_panics_recovered_total 0
 gateway_middleware_cors_requests_total{type="preflight"} 100
+
+# OpenAPI validation metrics
+gateway_openapi_validation_requests_total{route="api-v1",result="success"} 1500
+gateway_openapi_validation_requests_total{route="api-v1",result="failed"} 25
+gateway_openapi_validation_duration_seconds{route="api-v1"} 0.002
+gateway_openapi_validation_errors_total{route="api-v1",error_type="body_invalid"} 15
+gateway_openapi_validation_errors_total{route="api-v1",error_type="param_missing"} 8
 ```
 
 #### Cache Metrics
@@ -835,7 +853,7 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 #### Per-Route Middleware Chain
 Applied to specific routes based on configuration:
 ```
-Security Headers → CORS → Body Limit → Headers → Cache → 
+Security Headers → CORS → Body Limit → **OpenAPI Validation** → Headers → Cache → 
 Transform → Encoding → [proxy to backend]
 ```
 
@@ -1031,6 +1049,167 @@ Comprehensive performance testing infrastructure supports:
 - **Kubernetes Testing:** Real cluster validation with CRD and Ingress modes
 
 For detailed performance testing procedures, see [Performance Testing Guide](docs/performance-testing.md).
+
+## 🔍 OpenAPI Request Validation
+
+The AV API Gateway provides comprehensive OpenAPI 3.x request validation capabilities for all gateway modes (HTTP, gRPC, GraphQL). This feature validates incoming requests against OpenAPI specifications to ensure API contract compliance and improve security.
+
+### Key Features
+
+- **OpenAPI 3.x Support** - Full support for OpenAPI 3.0+ specifications
+- **Multiple Spec Sources** - Load specs from files, URLs, or Kubernetes ConfigMaps
+- **Configurable Validation** - Enable/disable validation of request bodies, parameters, headers, and security
+- **Fail-Safe Modes** - Reject invalid requests or log-only mode for monitoring
+- **Hot Reload** - Dynamic spec reloading without gateway restart
+- **Multi-Protocol Support** - HTTP, gRPC (proto descriptors), and GraphQL (schema validation)
+
+### Basic Configuration
+
+```yaml
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: my-gateway
+spec:
+  # Global OpenAPI validation configuration
+  openAPIValidation:
+    enabled: true
+    specFile: "/path/to/openapi.yaml"
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+    validateRequestHeaders: false
+    validateSecurity: false
+  
+  routes:
+    - name: items-api
+      match:
+        - uri:
+            prefix: /api/v1/items
+      route:
+        - destination:
+            host: items-service
+            port: 8080
+      # Route-level OpenAPI validation (overrides global)
+      openAPIValidation:
+        enabled: true
+        specFile: "/path/to/items-openapi.yaml"
+        failOnError: true
+```
+
+### gRPC Proto Validation
+
+```yaml
+spec:
+  grpcRoutes:
+    - name: test-service
+      match:
+        - service:
+            exact: TestService
+      route:
+        - destination:
+            host: grpc-backend
+            port: 9000
+      # Proto validation configuration
+      protoValidation:
+        enabled: true
+        descriptorFile: "/path/to/descriptor.pb"
+        failOnError: true
+        validateRequestMessage: true
+```
+
+### GraphQL Schema Validation
+
+```yaml
+spec:
+  graphqlRoutes:
+    - name: items-graphql
+      match:
+        - path:
+            exact: /graphql
+      route:
+        - destination:
+            host: graphql-backend
+            port: 8080
+      # GraphQL schema validation
+      schemaValidation:
+        enabled: true
+        schemaFile: "/path/to/schema.graphql"
+        failOnError: true
+        validateVariables: true
+```
+
+### Kubernetes CRD Support
+
+```yaml
+apiVersion: gateway.avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: items-api
+  namespace: default
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/items
+  route:
+    - destination:
+        host: items-service
+        port: 8080
+  # OpenAPI validation with ConfigMap reference
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: openapi.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+```
+
+### Middleware Chain Position
+
+OpenAPI validation is positioned strategically in the per-route middleware chain:
+
+```
+Security Headers → CORS → Body Limit → **OpenAPI Validation** → 
+Headers → Cache → Transform → Encoding → [proxy to backend]
+```
+
+This ensures validation occurs after authentication/authorization but before expensive operations like caching and transformation.
+
+### Validation Metrics
+
+Monitor validation performance and results with comprehensive Prometheus metrics:
+
+```prometheus
+# Request validation results
+gateway_openapi_validation_requests_total{route="items-api", result="success"} 1500
+gateway_openapi_validation_requests_total{route="items-api", result="failed"} 25
+
+# Validation duration
+gateway_openapi_validation_duration_seconds{route="items-api"} 0.002
+
+# Validation errors by type
+gateway_openapi_validation_errors_total{route="items-api", error_type="body_invalid"} 15
+gateway_openapi_validation_errors_total{route="items-api", error_type="param_missing"} 8
+```
+
+### Testing
+
+Comprehensive test coverage is available across multiple levels:
+
+```bash
+# Run all OpenAPI validation tests
+make test-openapi
+
+# Run specific test suites
+make test-openapi-unit        # Unit tests
+make test-openapi-functional  # Functional tests
+make test-openapi-integration # Integration tests
+make test-openapi-e2e        # End-to-end tests
+```
+
+For detailed OpenAPI validation documentation, see [OpenAPI Validation Guide](docs/openapi-validation.md).
 
 ## 🔒 TLS & Transport Security
 
@@ -1845,6 +2024,33 @@ When the same option is configured at multiple levels, the more specific level t
 | `authorization.external.opa.headers` | ✅ | ✅ | - | ✅ | Additional headers for OPA |
 | `authorization.external.timeout` | ✅ | ✅ | - | ✅ | External authz timeout |
 | `authorization.external.failOpen` | ✅ | ✅ | - | ✅ | Allow on external authz failure |
+
+### OpenAPI Validation Configuration
+
+| Option | Global | Route | Backend | CRD Route | CRD Backend | Description |
+|--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
+| `openAPIValidation.enabled` | ✅ | ✅ | - | ✅ | - | Enable OpenAPI request validation |
+| `openAPIValidation.specFile` | ✅ | ✅ | - | ✅ | - | Path to OpenAPI specification file |
+| `openAPIValidation.specURL` | ✅ | ✅ | - | ✅ | - | URL to fetch OpenAPI specification from |
+| `openAPIValidation.specConfigMapRef.name` | - | - | - | ✅ | - | Name of ConfigMap containing spec |
+| `openAPIValidation.specConfigMapRef.key` | - | - | - | ✅ | - | Key in ConfigMap (optional) |
+| `openAPIValidation.failOnError` | ✅ | ✅ | - | ✅ | - | Reject requests that fail validation |
+| `openAPIValidation.validateRequestBody` | ✅ | ✅ | - | ✅ | - | Validate request body against schema |
+| `openAPIValidation.validateRequestParams` | ✅ | ✅ | - | ✅ | - | Validate path, query, and header parameters |
+| `openAPIValidation.validateRequestHeaders` | ✅ | ✅ | - | ✅ | - | Validate request headers |
+| `openAPIValidation.validateSecurity` | ✅ | ✅ | - | ✅ | - | Validate security requirements |
+| `grpcRoutes[].protoValidation.enabled` | - | ✅ | - | ✅ | - | Enable proto descriptor validation |
+| `grpcRoutes[].protoValidation.descriptorFile` | - | ✅ | - | ✅ | - | Path to proto descriptor file |
+| `grpcRoutes[].protoValidation.descriptorConfigMapRef.name` | - | - | - | ✅ | - | Name of ConfigMap containing descriptor |
+| `grpcRoutes[].protoValidation.descriptorConfigMapRef.key` | - | - | - | ✅ | - | Key in ConfigMap (optional) |
+| `grpcRoutes[].protoValidation.failOnError` | - | ✅ | - | ✅ | - | Reject requests that fail validation |
+| `grpcRoutes[].protoValidation.validateRequestMessage` | - | ✅ | - | ✅ | - | Validate request message structure |
+| `graphqlRoutes[].schemaValidation.enabled` | - | ✅ | - | ✅ | - | Enable GraphQL schema validation |
+| `graphqlRoutes[].schemaValidation.schemaFile` | - | ✅ | - | ✅ | - | Path to GraphQL schema file |
+| `graphqlRoutes[].schemaValidation.schemaConfigMapRef.name` | - | - | - | ✅ | - | Name of ConfigMap containing schema |
+| `graphqlRoutes[].schemaValidation.schemaConfigMapRef.key` | - | - | - | ✅ | - | Key in ConfigMap (optional) |
+| `graphqlRoutes[].schemaValidation.failOnError` | - | ✅ | - | ✅ | - | Reject requests that fail validation |
+| `graphqlRoutes[].schemaValidation.validateVariables` | - | ✅ | - | ✅ | - | Validate GraphQL variables |
 
 ### Security Configuration
 

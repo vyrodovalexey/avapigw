@@ -672,6 +672,26 @@ gateway:
     #     schemaValidation: true
     #     introspectionEnabled: true
 
+  # OpenAPI request validation (optional)
+  # Validates incoming requests against an OpenAPI specification
+  openAPIValidation:
+    # -- Enable OpenAPI request validation
+    enabled: false
+    # -- Path to the OpenAPI specification file (mounted in container)
+    # specFile: "/app/openapi/spec.yaml"
+    # -- URL to fetch the OpenAPI specification from
+    # specURL: ""
+    # -- Reject requests that fail validation (default: true)
+    # failOnError: true
+    # -- Enable request body validation
+    # validateRequestBody: true
+    # -- Enable request parameter validation (path, query, header)
+    # validateRequestParams: true
+    # -- Enable request header validation
+    # validateRequestHeaders: false
+    # -- Enable security requirement validation
+    # validateSecurity: false
+
   # Custom gateway configuration
   # This will be merged with the generated configuration
   customConfig: {}

@@ -146,6 +146,11 @@ gateway:
   # No inline GraphQL backends - all config comes from CRDs via operator
   graphqlBackends: []
 
+  # OpenAPI request validation - disabled by default for local testing
+  # Enable and provide spec file to test validation
+  openAPIValidation:
+    enabled: false
+
   # Global rate limit defaults
   rateLimit:
     enabled: true
@@ -421,3 +426,24 @@ operator:
   # Network policies - disabled for local testing
   networkPolicy:
     enabled: false
+
+# =============================================================================
+# Volume Mounts for Validation Specs
+# =============================================================================
+# Mount OpenAPI spec ConfigMap as a volume so the gateway can load specs
+# from the filesystem for request validation.
+#
+# Prerequisites:
+#   kubectl apply -f test/performance/operator/openapi-spec-configmap.yaml -n avapigw-test
+
+# Additional volumes for the gateway pod
+volumes:
+  - name: openapi-specs
+    configMap:
+      name: items-openapi-spec
+
+# Additional volume mounts for the gateway container
+volumeMounts:
+  - name: openapi-specs
+    mountPath: /app/openapi
+    readOnly: true

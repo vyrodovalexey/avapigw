@@ -1,0 +1,16 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-Validated-HTTP-Encoding]
+[Accept: application/json]
+[Accept-Encoding: gzip, deflate, br]
+[Connection: keep-alive]
+[X-Perf-Test: k8s-validated-http-encoding]
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items
+/api/v1/validated/encoding/items

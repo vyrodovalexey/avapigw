@@ -1,0 +1,16 @@
+[Host: avapigw.local]
+[User-Agent: YandexTank/K8s-Validated-HTTP-APIKey]
+[Accept: application/json]
+[Connection: keep-alive]
+[X-API-Key: pk_perftest_1234567890abcdef]
+[X-Perf-Test: k8s-validated-http-apikey]
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items
+/api/v1/validated/apikey/items

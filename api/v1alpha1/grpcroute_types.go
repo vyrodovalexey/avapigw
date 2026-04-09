@@ -74,6 +74,10 @@ type GRPCRouteSpec struct {
 	// RequestLimits configures request size limits for this route.
 	// +optional
 	RequestLimits *RequestLimitsConfig `json:"requestLimits,omitempty"`
+
+	// ProtoValidation configures proto descriptor-based request validation for this gRPC route.
+	// +optional
+	ProtoValidation *ProtoValidationConfig `json:"protoValidation,omitempty"`
 }
 
 // GRPCRouteMatch represents matching conditions for a gRPC route.

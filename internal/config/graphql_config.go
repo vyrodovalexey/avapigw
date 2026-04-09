@@ -58,6 +58,10 @@ type GraphQLRoute struct {
 
 	// AllowedOperations restricts which operation types are allowed (query, mutation, subscription).
 	AllowedOperations []string `yaml:"allowedOperations,omitempty" json:"allowedOperations,omitempty"`
+
+	// SchemaValidation configures GraphQL schema validation for this route.
+	//nolint:lll // struct tag requires full yaml/json names
+	SchemaValidation *GraphQLSchemaValidationConfig `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
 }
 
 // HasTLSOverride returns true if the GraphQL route has TLS configuration that overrides listener TLS.

@@ -787,6 +787,43 @@ spec:
                   - destination
                   type: object
                 type: array
+              schemaValidation:
+                description: SchemaValidation configures GraphQL schema validation
+                  for this route.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables GraphQL schema validation.
+                    type: boolean
+                  failOnError:
+                    description: |-
+                      FailOnError rejects requests that fail validation (default: true).
+                      When false, validation errors are logged but requests are allowed through.
+                    type: boolean
+                  schemaConfigMapRef:
+                    description: SchemaConfigMapRef references a ConfigMap containing
+                      the GraphQL schema.
+                    properties:
+                      key:
+                        description: Key is the key in the ConfigMap. If empty, the
+                          first key is used.
+                        type: string
+                      name:
+                        description: Name is the name of the ConfigMap.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  schemaFile:
+                    description: SchemaFile is the path to the GraphQL schema file.
+                    type: string
+                  validateVariables:
+                    description: ValidateVariables enables GraphQL variable validation.
+                    type: boolean
+                required:
+                - enabled
+                type: object
               security:
                 description: Security configures security headers for this GraphQL
                   route.
