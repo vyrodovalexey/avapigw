@@ -384,7 +384,8 @@ func TestE2E_OpenAPIValidation_InvalidQueryParams(t *testing.T) {
 		_ = gw.Stop(context.Background())
 	})
 
-	time.Sleep(500 * time.Millisecond)
+	err := helpers.WaitForReady(baseURL+"/health", 10*time.Second)
+	require.NoError(t, err, "gateway on port 18304 did not become ready")
 
 	t.Run("GET with non-integer limit returns 400", func(t *testing.T) {
 		client := helpers.HTTPClient()
