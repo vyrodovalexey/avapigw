@@ -16,6 +16,9 @@ var (
 	defaultMetricsOnce sync.Once
 )
 
+// subsystemVault is the Prometheus subsystem name for Vault metrics.
+const subsystemVault = "vault"
+
 // Metrics holds Prometheus metrics for Vault operations.
 type Metrics struct {
 	requestsTotal   *prometheus.CounterVec
@@ -79,7 +82,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.requestsTotal = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "vault",
+			Subsystem: subsystemVault,
 			Name:      "requests_total",
 			Help:      "Total number of Vault requests by operation and status",
 		},
@@ -89,7 +92,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.requestDuration = factory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "vault",
+			Subsystem: subsystemVault,
 			Name:      "request_duration_seconds",
 			Help:      "Vault request duration in seconds",
 			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
@@ -100,7 +103,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.tokenTTL = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
-			Subsystem: "vault",
+			Subsystem: subsystemVault,
 			Name:      "token_ttl_seconds",
 			Help:      "Current Vault token TTL in seconds",
 		},
@@ -109,7 +112,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.cacheHits = factory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "vault",
+			Subsystem: subsystemVault,
 			Name:      "cache_hits_total",
 			Help:      "Total number of Vault cache hits",
 		},
@@ -118,7 +121,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.cacheMisses = factory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "vault",
+			Subsystem: subsystemVault,
 			Name:      "cache_misses_total",
 			Help:      "Total number of Vault cache misses",
 		},
@@ -127,7 +130,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.authAttempts = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "vault",
+			Subsystem: subsystemVault,
 			Name:      "auth_attempts_total",
 			Help:      "Total number of Vault authentication attempts by method and status",
 		},
@@ -137,7 +140,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.errors = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "vault",
+			Subsystem: subsystemVault,
 			Name:      "errors_total",
 			Help:      "Total number of Vault errors by type",
 		},

@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+// Authorization type constants.
+const (
+	authzTypeOPA  = "opa"
+	authzTypeGRPC = "grpc"
+	authzTypeHTTP = "http"
+)
+
 // Config represents external authorization configuration.
 type Config struct {
 	// Enabled enables external authorization.
@@ -123,7 +130,7 @@ func (c *Config) Validate() error {
 
 // validateType validates the authorization type.
 func (c *Config) validateType() error {
-	validTypes := map[string]bool{"opa": true, "grpc": true, "http": true}
+	validTypes := map[string]bool{authzTypeOPA: true, authzTypeGRPC: true, authzTypeHTTP: true}
 	if !validTypes[c.Type] {
 		return fmt.Errorf("invalid type: %s (must be 'opa', 'grpc', or 'http')", c.Type)
 	}
@@ -133,17 +140,17 @@ func (c *Config) validateType() error {
 // validateTypeConfig validates type-specific configuration.
 func (c *Config) validateTypeConfig() error {
 	switch c.Type {
-	case "opa":
+	case authzTypeOPA:
 		if c.OPA == nil {
 			return errors.New("opa configuration is required when type is 'opa'")
 		}
 		return c.OPA.Validate()
-	case "grpc":
+	case authzTypeGRPC:
 		if c.GRPC == nil {
 			return errors.New("grpc configuration is required when type is 'grpc'")
 		}
 		return c.GRPC.Validate()
-	case "http":
+	case authzTypeHTTP:
 		if c.HTTP == nil {
 			return errors.New("http configuration is required when type is 'http'")
 		}
@@ -199,7 +206,7 @@ func (c *HTTPConfig) Validate() error {
 func DefaultConfig() *Config {
 	return &Config{
 		Enabled:  false,
-		Type:     "opa",
+		Type:     authzTypeOPA,
 		Timeout:  100 * time.Millisecond,
 		FailOpen: false,
 		Cache: &CacheConfig{

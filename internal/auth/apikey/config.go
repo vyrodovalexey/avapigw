@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// Store type constants.
+const (
+	storeTypeMemory = "memory"
+	storeTypeFile   = "file"
+)
+
 // Config represents API Key authentication configuration.
 type Config struct {
 	// Enabled enables API Key authentication.
@@ -148,10 +154,10 @@ func (c *Config) validateHashAlgorithm() error {
 		return nil
 	}
 	validAlgorithms := map[string]bool{
-		"sha256":    true,
-		"sha512":    true,
-		"bcrypt":    true,
-		"plaintext": true,
+		HashAlgSHA256:    true,
+		HashAlgSHA512:    true,
+		HashAlgBcrypt:    true,
+		HashAlgPlaintext: true,
 	}
 	if !validAlgorithms[c.HashAlgorithm] {
 		return fmt.Errorf("invalid hash algorithm: %s", c.HashAlgorithm)
@@ -212,16 +218,16 @@ func (c *StoreConfig) Validate() error {
 	}
 
 	validTypes := map[string]bool{
-		"":       true,
-		"memory": true,
-		"vault":  true,
-		"file":   true,
+		"":              true,
+		storeTypeMemory: true,
+		"vault":         true,
+		storeTypeFile:   true,
 	}
 	if !validTypes[c.Type] {
 		return fmt.Errorf("invalid store type: %s", c.Type)
 	}
 
-	if c.Type == "file" && c.FilePath == "" {
+	if c.Type == storeTypeFile && c.FilePath == "" {
 		return errors.New("filePath is required for file store")
 	}
 

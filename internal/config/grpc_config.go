@@ -206,7 +206,7 @@ func (c *TLSConfig) validateCertificates() error {
 // validateVersions validates TLS version configuration.
 func (c *TLSConfig) validateVersions() error {
 	validVersions := map[string]bool{
-		"TLS10": true, "TLS11": true, "TLS12": true, "TLS13": true,
+		TLSVersion10: true, TLSVersion11: true, TLSVersion12: true, TLSVersion13: true,
 	}
 
 	if c.MinVersion != "" && !validVersions[c.MinVersion] {

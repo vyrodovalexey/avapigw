@@ -14,9 +14,23 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
-// unmatchedRoute is the label value used for requests that do not
-// match any configured route, ensuring bounded cardinality.
-const unmatchedRoute = "unmatched"
+// Metric/label constants.
+const (
+	labelStatus = "status"
+)
+
+// Metric label constants.
+const (
+	// unmatchedRoute is the label value used for requests that do not
+	// match any configured route, ensuring bounded cardinality.
+	unmatchedRoute = "unmatched"
+
+	// labelMethod is the Prometheus label name for HTTP method.
+	labelMethod = "method"
+
+	// labelRoute is the Prometheus label name for route.
+	labelRoute = "route"
+)
 
 // inFlightRoute is the label value used for tracking in-flight
 // requests before the route is known.
@@ -53,7 +67,7 @@ func NewMetrics(namespace string) *Metrics {
 			Name:      "requests_total",
 			Help:      "Total number of HTTP requests",
 		},
-		[]string{"method", "route", "status"},
+		[]string{labelMethod, labelRoute, labelStatus},
 	)
 
 	m.requestDuration = prometheus.NewHistogramVec(
@@ -66,7 +80,7 @@ func NewMetrics(namespace string) *Metrics {
 				.1, .25, .5, 1, 2.5, 5, 10,
 			},
 		},
-		[]string{"method", "route", "status"},
+		[]string{labelMethod, labelRoute, labelStatus},
 	)
 
 	m.requestSize = prometheus.NewHistogramVec(
@@ -78,7 +92,7 @@ func NewMetrics(namespace string) *Metrics {
 				100, 10, 8,
 			),
 		},
-		[]string{"method", "route"},
+		[]string{labelMethod, labelRoute},
 	)
 
 	m.responseSize = prometheus.NewHistogramVec(
@@ -90,7 +104,7 @@ func NewMetrics(namespace string) *Metrics {
 				100, 10, 8,
 			),
 		},
-		[]string{"method", "route", "status"},
+		[]string{labelMethod, labelRoute, labelStatus},
 	)
 
 	m.activeRequests = prometheus.NewGaugeVec(
@@ -100,7 +114,7 @@ func NewMetrics(namespace string) *Metrics {
 			Help: "Number of active HTTP " +
 				"requests",
 		},
-		[]string{"method", "route"},
+		[]string{labelMethod, labelRoute},
 	)
 
 	m.backendHealth = prometheus.NewGaugeVec(
@@ -130,7 +144,7 @@ func NewMetrics(namespace string) *Metrics {
 			Help: "Total number of rate " +
 				"limit hits",
 		},
-		[]string{"route"},
+		[]string{labelRoute},
 	)
 
 	m.buildInfo = prometheus.NewGaugeVec(

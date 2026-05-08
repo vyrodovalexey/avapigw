@@ -13,6 +13,9 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// metricsNamespace is the Prometheus namespace for reload metrics.
+const metricsNamespace = "gateway"
+
 // reloadMetrics holds Prometheus metrics for configuration reload
 // operations. All collectors are registered with the gateway's custom
 // registry so they appear on the /metrics endpoint.
@@ -30,7 +33,7 @@ func newReloadMetrics(m *observability.Metrics) *reloadMetrics {
 	rm := &reloadMetrics{
 		configReloadTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
+				Namespace: metricsNamespace,
 				Name:      "config_reload_total",
 				Help: "Total number of " +
 					"configuration reloads",
@@ -39,7 +42,7 @@ func newReloadMetrics(m *observability.Metrics) *reloadMetrics {
 		),
 		configReloadDuration: prometheus.NewHistogram(
 			prometheus.HistogramOpts{
-				Namespace: "gateway",
+				Namespace: metricsNamespace,
 				Name: "config_reload_" +
 					"duration_seconds",
 				Help: "Duration of configuration " +
@@ -51,7 +54,7 @@ func newReloadMetrics(m *observability.Metrics) *reloadMetrics {
 		),
 		configReloadLastSuccess: prometheus.NewGauge(
 			prometheus.GaugeOpts{
-				Namespace: "gateway",
+				Namespace: metricsNamespace,
 				Name: "config_reload_" +
 					"last_success_timestamp",
 				Help: "Timestamp of last successful " +
@@ -60,7 +63,7 @@ func newReloadMetrics(m *observability.Metrics) *reloadMetrics {
 		),
 		configWatcherStatus: prometheus.NewGauge(
 			prometheus.GaugeOpts{
-				Namespace: "gateway",
+				Namespace: metricsNamespace,
 				Name:      "config_watcher_running",
 				Help: "Whether the config file " +
 					"watcher is running (1=running, 0=stopped)",
@@ -68,7 +71,7 @@ func newReloadMetrics(m *observability.Metrics) *reloadMetrics {
 		),
 		configReloadComponentTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
+				Namespace: metricsNamespace,
 				Name: "config_reload_" +
 					"component_total",
 				Help: "Total number of component " +

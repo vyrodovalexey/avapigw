@@ -8,6 +8,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace = "avapigw_operator"
+	metricsSubsystem = "cert"
+	labelProvider    = "provider"
+	subsystemWebhook = "webhook"
+)
+
 // CertMetrics holds Prometheus metrics for certificate operations.
 type CertMetrics struct {
 	issuedTotal    *prometheus.CounterVec
@@ -67,38 +75,38 @@ func newCertMetricsWithFactory(factory promauto.Factory) *CertMetrics {
 	return &CertMetrics{
 		issuedTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "cert",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "issued_total",
 				Help: "Total number of " +
 					"certificates issued",
 			},
-			[]string{"provider"},
+			[]string{labelProvider},
 		),
 		rotationsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "cert",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "rotations_total",
 				Help: "Total number of " +
 					"certificate rotations",
 			},
-			[]string{"provider"},
+			[]string{labelProvider},
 		),
 		errorsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "cert",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "errors_total",
 				Help: "Total number of " +
 					"certificate errors",
 			},
-			[]string{"provider", "operation"},
+			[]string{labelProvider, "operation"},
 		),
 		expirySeconds: factory.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "cert",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "expiry_seconds",
 				Help: "Time until certificate " +
 					"expiry in seconds",

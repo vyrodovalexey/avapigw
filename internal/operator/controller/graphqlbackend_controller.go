@@ -45,7 +45,7 @@ func (r *GraphQLBackendReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // callbacks returns the resource-specific callbacks for the base reconciler.
 func (r *GraphQLBackendReconciler) callbacks() *ReconcileCallbacks {
 	return &ReconcileCallbacks{
-		ResourceKind:   "GraphQLBackend",
+		ResourceKind:   KindGraphQLBackend,
 		ControllerName: "graphqlbackend",
 		FinalizerName:  GraphQLBackendFinalizerName,
 		NewResource: func() Reconcilable {
@@ -82,12 +82,12 @@ func (r *GraphQLBackendReconciler) callbacks() *ReconcileCallbacks {
 			recorder.Event(resource, "Warning", EventReasonReconcileFailed, err.Error())
 		},
 		SetSuccessMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("GraphQLBackend", resource.GetName(), resource.GetNamespace(), "Ready", 1)
-			metrics.SetResourceCondition("GraphQLBackend", resource.GetName(), resource.GetNamespace(), "Healthy", 1)
+			metrics.SetResourceCondition(KindGraphQLBackend, resource.GetName(), resource.GetNamespace(), "Ready", 1)
+			metrics.SetResourceCondition(KindGraphQLBackend, resource.GetName(), resource.GetNamespace(), "Healthy", 1)
 		},
 		SetFailureMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("GraphQLBackend", resource.GetName(), resource.GetNamespace(), "Ready", 0)
-			metrics.SetResourceCondition("GraphQLBackend", resource.GetName(), resource.GetNamespace(), "Healthy", 0)
+			metrics.SetResourceCondition(KindGraphQLBackend, resource.GetName(), resource.GetNamespace(), "Ready", 0)
+			metrics.SetResourceCondition(KindGraphQLBackend, resource.GetName(), resource.GetNamespace(), "Healthy", 0)
 		},
 		IsApplied: func(_ context.Context, resource Reconcilable) bool {
 			if r.GRPCServer == nil {

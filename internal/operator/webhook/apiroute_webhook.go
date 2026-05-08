@@ -19,6 +19,9 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// HTTP method constant.
+const methodDELETE = "DELETE"
+
 // webhookTracerName is the OpenTelemetry tracer name for webhook operations.
 const webhookTracerName = "avapigw-operator/webhook"
 
@@ -345,7 +348,7 @@ func (v *APIRouteValidator) validateMatches(matches []avapigwv1alpha1.RouteMatch
 
 		// Validate HTTP methods
 		validMethods := map[string]bool{
-			"GET": true, "POST": true, "PUT": true, "DELETE": true,
+			"GET": true, "POST": true, "PUT": true, methodDELETE: true,
 			"PATCH": true, "HEAD": true, "OPTIONS": true, "CONNECT": true, "TRACE": true,
 		}
 		for _, method := range match.Methods {

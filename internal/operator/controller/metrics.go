@@ -9,6 +9,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric/label constants.
+const (
+	metricsNamespace = "avapigw_operator"
+)
+
 // ControllerMetrics contains Prometheus metrics for controllers.
 // Prometheus metric types (Counter, Gauge, Histogram) are goroutine-safe,
 // so no additional synchronization is needed for metric operations.
@@ -79,7 +84,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 	return &ControllerMetrics{
 		reconcileDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "reconcile_duration_seconds",
 				Help:      "Duration of reconciliation operations in seconds",
 				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
@@ -88,7 +93,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 		),
 		reconcileTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "reconcile_total",
 				Help:      "Total number of reconciliation operations",
 			},
@@ -96,7 +101,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 		),
 		reconcileErrors: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "reconcile_errors_total",
 				Help:      "Total number of reconciliation errors",
 			},
@@ -104,7 +109,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 		),
 		resourcesTotal: factory.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "resources_total",
 				Help:      "Total number of resources by kind and namespace",
 			},
@@ -112,7 +117,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 		),
 		resourceCondition: factory.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "resource_condition",
 				Help:      "Current condition status of resources (1=True, 0=False, -1=Unknown)",
 			},
@@ -120,7 +125,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 		),
 		finalizerOperations: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "finalizer_operations_total",
 				Help:      "Total number of finalizer operations",
 			},
@@ -128,7 +133,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 		),
 		ingressResourcesProcessed: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "ingress_resources_processed_total",
 				Help:      "Total number of Ingress resources processed by the controller",
 			},
@@ -136,7 +141,7 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 		),
 		ingressConversionErrors: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "ingress_conversion_errors_total",
 				Help:      "Total number of Ingress-to-gateway conversion errors",
 			},
@@ -157,7 +162,7 @@ func InitControllerVecMetrics() {
 	}
 	results := []string{ResultSuccess, ResultError, ResultRequeue}
 	operations := []string{OperationAdd, OperationRemove}
-	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend", "GraphQLRoute", "GraphQLBackend"}
+	kinds := []string{KindAPIRoute, KindGRPCRoute, KindBackend, KindGRPCBackend, KindGraphQLRoute, KindGraphQLBackend}
 
 	for _, c := range controllers {
 		// reconcileTotal: controller × result
@@ -193,7 +198,7 @@ func InitControllerVecMetrics() {
 func InitStatusUpdateVecMetrics() {
 	m := GetStatusUpdateMetrics()
 
-	kinds := []string{"APIRoute", "GRPCRoute", "Backend", "GRPCBackend", "GraphQLRoute", "GraphQLBackend"}
+	kinds := []string{KindAPIRoute, KindGRPCRoute, KindBackend, KindGRPCBackend, KindGraphQLRoute, KindGraphQLBackend}
 	results := []string{ResultSuccess, ResultError}
 
 	for _, k := range kinds {
@@ -358,7 +363,7 @@ func newStatusUpdateMetricsWithFactory(factory promauto.Factory) *StatusUpdateMe
 	return &StatusUpdateMetrics{
 		updateDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "status_update_duration_seconds",
 				Help:      "Duration of status update operations in seconds",
 				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
@@ -367,7 +372,7 @@ func newStatusUpdateMetricsWithFactory(factory promauto.Factory) *StatusUpdateMe
 		),
 		updateTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "status_update_total",
 				Help:      "Total number of status update operations",
 			},
@@ -375,7 +380,7 @@ func newStatusUpdateMetricsWithFactory(factory promauto.Factory) *StatusUpdateMe
 		),
 		updateErrors: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Name:      "status_update_errors_total",
 				Help:      "Total number of status update errors",
 			},

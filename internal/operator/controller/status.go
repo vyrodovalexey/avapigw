@@ -256,7 +256,7 @@ func (u *StatusUpdater) UpdateBackendStatus(
 	kind := backend.GetObjectKind().GroupVersionKind().Kind
 	if kind == "" {
 		// Fallback for when GVK is not set
-		kind = "Backend"
+		kind = KindBackend
 	}
 
 	// Capture the base state before modifications for the merge patch

@@ -8,6 +8,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// subsystemABAC is the Prometheus subsystem name for ABAC metrics.
+const subsystemABAC = "abac"
+
 // Metrics holds Prometheus metrics for ABAC operations.
 type Metrics struct {
 	evaluationTotal    *prometheus.CounterVec
@@ -57,7 +60,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.evaluationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "abac",
+			Subsystem: subsystemABAC,
 			Name:      "evaluation_total",
 			Help:      "Total number of ABAC evaluations",
 		},
@@ -67,7 +70,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.evaluationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "abac",
+			Subsystem: subsystemABAC,
 			Name:      "evaluation_duration_seconds",
 			Help:      "ABAC evaluation duration in seconds",
 			Buckets:   []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .025, .05, .1},
@@ -78,7 +81,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.policyCount = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
-			Subsystem: "abac",
+			Subsystem: subsystemABAC,
 			Name:      "policy_count",
 			Help:      "Number of ABAC policies",
 		},
@@ -87,7 +90,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.compilationErrors = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "abac",
+			Subsystem: subsystemABAC,
 			Name:      "compilation_errors_total",
 			Help:      "Total number of CEL compilation errors",
 		},

@@ -82,8 +82,8 @@ func newWebhookInjectorMetricsWithFactory(factory promauto.Factory) *webhookInje
 	return &webhookInjectorMetrics{
 		injectionsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemWebhook,
 				Name:      "ca_injections_total",
 				Help:      "Total number of webhook CA bundle injection attempts",
 			},
@@ -91,8 +91,8 @@ func newWebhookInjectorMetricsWithFactory(factory promauto.Factory) *webhookInje
 		),
 		injectionDuration: factory.NewHistogram(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemWebhook,
 				Name:      "ca_injection_duration_seconds",
 				Help:      "Duration of webhook CA bundle injection operations",
 				Buckets:   prometheus.DefBuckets,
@@ -100,8 +100,8 @@ func newWebhookInjectorMetricsWithFactory(factory promauto.Factory) *webhookInje
 		),
 		lastInjectionTime: factory.NewGauge(
 			prometheus.GaugeOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemWebhook,
 				Name:      "last_ca_injection_timestamp",
 				Help:      "Timestamp of the last successful CA bundle injection",
 			},

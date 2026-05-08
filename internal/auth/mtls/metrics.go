@@ -8,6 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric label constants.
+const (
+	subsystemMTLS = "mtls"
+	labelStatus   = "status"
+)
+
 // Metrics holds Prometheus metrics for mTLS operations.
 type Metrics struct {
 	validationTotal    *prometheus.CounterVec
@@ -60,32 +66,32 @@ func NewMetrics(namespace string) *Metrics {
 	m.validationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "mtls",
+			Subsystem: subsystemMTLS,
 			Name:      "validation_total",
 			Help:      "Total number of mTLS validation attempts",
 		},
-		[]string{"status", "reason"},
+		[]string{labelStatus, "reason"},
 	)
 
 	m.validationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "mtls",
+			Subsystem: subsystemMTLS,
 			Name:      "validation_duration_seconds",
 			Help:      "mTLS validation duration in seconds",
 			Buckets:   []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
 		},
-		[]string{"status", "reason"},
+		[]string{labelStatus, "reason"},
 	)
 
 	m.revocationChecks = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "mtls",
+			Subsystem: subsystemMTLS,
 			Name:      "revocation_checks_total",
 			Help:      "Total number of certificate revocation checks",
 		},
-		[]string{"type", "status"},
+		[]string{"type", labelStatus},
 	)
 
 	// Register all metrics

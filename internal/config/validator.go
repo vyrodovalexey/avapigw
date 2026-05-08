@@ -1373,10 +1373,10 @@ func (v *Validator) validateBackendTLSMutual(cfg *BackendTLSConfig, path string)
 // validateBackendTLSVersions validates TLS version configuration.
 func (v *Validator) validateBackendTLSVersions(cfg *BackendTLSConfig, path string) {
 	validVersions := map[string]bool{
-		"TLS10": true, "TLS11": true, "TLS12": true, "TLS13": true,
+		TLSVersion10: true, TLSVersion11: true, TLSVersion12: true, TLSVersion13: true,
 	}
 	deprecatedVersions := map[string]bool{
-		"TLS10": true, "TLS11": true,
+		TLSVersion10: true, TLSVersion11: true,
 	}
 	if cfg.MinVersion != "" {
 		if !validVersions[cfg.MinVersion] {
@@ -1470,11 +1470,11 @@ func (v *Validator) validateRouteTLSSNIHosts(cfg *RouteTLSConfig, path string) {
 // validateRouteTLSVersions validates route TLS version configuration.
 func (v *Validator) validateRouteTLSVersions(cfg *RouteTLSConfig, path string) {
 	validVersions := map[string]bool{
-		"":      true,
-		"TLS10": true,
-		"TLS11": true,
-		"TLS12": true,
-		"TLS13": true,
+		"":           true,
+		TLSVersion10: true,
+		TLSVersion11: true,
+		TLSVersion12: true,
+		TLSVersion13: true,
 	}
 
 	if !validVersions[cfg.MinVersion] {
@@ -1487,7 +1487,7 @@ func (v *Validator) validateRouteTLSVersions(cfg *RouteTLSConfig, path string) {
 
 	// Validate min <= max if both are specified
 	if cfg.MinVersion != "" && cfg.MaxVersion != "" {
-		versionOrder := map[string]int{"TLS10": 1, "TLS11": 2, "TLS12": 3, "TLS13": 4}
+		versionOrder := map[string]int{TLSVersion10: 1, TLSVersion11: 2, TLSVersion12: 3, TLSVersion13: 4}
 		minOrder, minOk := versionOrder[cfg.MinVersion]
 		maxOrder, maxOk := versionOrder[cfg.MaxVersion]
 		if minOk && maxOk && minOrder > maxOrder {

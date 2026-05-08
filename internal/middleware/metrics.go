@@ -9,6 +9,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric/label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "middleware"
+	labelRoute       = "route"
+	stateClosed      = "closed"
+	stateHalfOpen    = "half-open"
+	stateOpen        = "open"
+)
+
 // MiddlewareMetrics holds Prometheus metrics for middleware
 // operations.
 type MiddlewareMetrics struct {
@@ -82,13 +92,13 @@ func (m *MiddlewareMetrics) Init() {
 		m.retryAttemptsTotal.WithLabelValues(route)
 		m.retrySuccessTotal.WithLabelValues(route)
 	}
-	for _, state := range []string{"closed", "open", "half-open"} {
+	for _, state := range []string{stateClosed, stateOpen, stateHalfOpen} {
 		m.circuitBreakerRequests.WithLabelValues("default", state)
 	}
 	for _, pair := range [][2]string{
-		{"closed", "open"},
-		{"open", "half-open"},
-		{"half-open", "closed"},
+		{stateClosed, stateOpen},
+		{stateOpen, stateHalfOpen},
+		{stateHalfOpen, stateClosed},
 	} {
 		m.circuitBreakerTransitions.WithLabelValues("default", pair[0], pair[1])
 	}
@@ -102,28 +112,28 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 	return &MiddlewareMetrics{
 		rateLimitAllowed: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "rate_limit_allowed_total",
 				Help: "Total number of requests " +
 					"allowed by rate limiter",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		rateLimitRejected: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "rate_limit_rejected_total",
 				Help: "Total number of requests " +
 					"rejected by rate limiter",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		circuitBreakerRequests: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name: "circuit_breaker_" +
 					"requests_total",
 				Help: "Total number of requests " +
@@ -133,8 +143,8 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 		),
 		circuitBreakerTransitions: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name: "circuit_breaker_" +
 					"transitions_total",
 				Help: "Total number of circuit " +
@@ -144,38 +154,38 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 		),
 		timeoutsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "request_timeouts_total",
 				Help: "Total number of request " +
 					"timeouts",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		retryAttemptsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "retry_attempts_total",
 				Help: "Total number of retry " +
 					"attempts",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		retrySuccessTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "retry_success_total",
 				Help: "Total number of successful " +
 					"retries",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		bodyLimitRejected: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "body_limit_rejected_total",
 				Help: "Total number of requests " +
 					"rejected due to body size limit",
@@ -183,8 +193,8 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 		),
 		maxSessionsRejected: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name: "max_sessions_" +
 					"rejected_total",
 				Help: "Total number of requests " +
@@ -193,8 +203,8 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 		),
 		maxSessionsCurrent: promauto.NewGauge(
 			prometheus.GaugeOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "max_sessions_current",
 				Help: "Current number of active " +
 					"sessions",
@@ -202,8 +212,8 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 		),
 		panicsRecovered: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "panics_recovered_total",
 				Help: "Total number of panics " +
 					"recovered",
@@ -211,8 +221,8 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 		),
 		corsRequestsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "middleware",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "cors_requests_total",
 				Help: "Total number of CORS " +
 					"requests by type",

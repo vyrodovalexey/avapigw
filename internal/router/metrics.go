@@ -8,6 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "router"
+)
+
 // regexCacheMetrics contains Prometheus metrics for the regex cache.
 type regexCacheMetrics struct {
 	cacheHits      prometheus.Counter
@@ -27,32 +33,32 @@ func getRegexCacheMetrics() *regexCacheMetrics {
 		regexCacheMetricsInstance = &regexCacheMetrics{
 			cacheHits: promauto.NewCounter(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "router",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "regex_cache_hits_total",
 					Help:      "Total number of regex cache hits",
 				},
 			),
 			cacheMisses: promauto.NewCounter(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "router",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "regex_cache_misses_total",
 					Help:      "Total number of regex cache misses",
 				},
 			),
 			cacheEvictions: promauto.NewCounter(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "router",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "regex_cache_evictions_total",
 					Help:      "Total number of regex cache evictions",
 				},
 			),
 			cacheSize: promauto.NewGauge(
 				prometheus.GaugeOpts{
-					Namespace: "gateway",
-					Subsystem: "router",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "regex_cache_size",
 					Help:      "Current number of entries in the regex cache",
 				},

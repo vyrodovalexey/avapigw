@@ -45,7 +45,7 @@ func (r *GraphQLRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request
 // callbacks returns the resource-specific callbacks for the base reconciler.
 func (r *GraphQLRouteReconciler) callbacks() *ReconcileCallbacks {
 	return &ReconcileCallbacks{
-		ResourceKind:   "GraphQLRoute",
+		ResourceKind:   KindGraphQLRoute,
 		ControllerName: "graphqlroute",
 		FinalizerName:  GraphQLRouteFinalizerName,
 		NewResource: func() Reconcilable {
@@ -76,10 +76,10 @@ func (r *GraphQLRouteReconciler) callbacks() *ReconcileCallbacks {
 			recorder.Event(resource, "Warning", EventReasonReconcileFailed, err.Error())
 		},
 		SetSuccessMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("GraphQLRoute", resource.GetName(), resource.GetNamespace(), "Ready", 1)
+			metrics.SetResourceCondition(KindGraphQLRoute, resource.GetName(), resource.GetNamespace(), "Ready", 1)
 		},
 		SetFailureMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("GraphQLRoute", resource.GetName(), resource.GetNamespace(), "Ready", 0)
+			metrics.SetResourceCondition(KindGraphQLRoute, resource.GetName(), resource.GetNamespace(), "Ready", 0)
 		},
 		IsApplied: func(_ context.Context, resource Reconcilable) bool {
 			if r.GRPCServer == nil {

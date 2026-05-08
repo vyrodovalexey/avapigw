@@ -18,6 +18,12 @@ var (
 	defaultTLSMetricsOnce sync.Once
 )
 
+// Metric label constants.
+const (
+	subsystemTLS  = "tls"
+	resultSuccess = "success"
+)
+
 // Metrics holds Prometheus metrics for TLS operations.
 type Metrics struct {
 	connectionsTotal     *prometheus.CounterVec
@@ -80,7 +86,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.connectionsTotal = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "tls",
+			Subsystem: subsystemTLS,
 			Name:      "connections_total",
 			Help:      "Total number of TLS connections by version, cipher suite, and mode",
 		},
@@ -90,7 +96,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.handshakeDuration = factory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "tls",
+			Subsystem: subsystemTLS,
 			Name:      "handshake_duration_seconds",
 			Help:      "TLS handshake duration in seconds",
 			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
@@ -101,7 +107,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.certificateExpiry = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
-			Subsystem: "tls",
+			Subsystem: subsystemTLS,
 			Name:      "certificate_expiry_seconds",
 			Help:      "Time until certificate expiry in seconds",
 		},
@@ -111,7 +117,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.certificateReload = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "tls",
+			Subsystem: subsystemTLS,
 			Name:      "certificate_reload_total",
 			Help:      "Total number of certificate reload attempts by status",
 		},
@@ -121,7 +127,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.handshakeErrors = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "tls",
+			Subsystem: subsystemTLS,
 			Name:      "handshake_errors_total",
 			Help:      "Total number of TLS handshake errors by reason",
 		},
@@ -131,7 +137,7 @@ func (m *Metrics) initWithFactory(namespace string, factory promauto.Factory) {
 	m.clientCertValidation = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "tls",
+			Subsystem: subsystemTLS,
 			Name:      "client_cert_validation_total",
 			Help:      "Total number of client certificate validations by result",
 		},
@@ -166,7 +172,7 @@ func (m *Metrics) Init() {
 	}
 
 	certValidationResults := []string{
-		"success",
+		resultSuccess,
 		"failure",
 		"expired",
 		"revoked",
@@ -232,7 +238,7 @@ func (m *Metrics) RecordCertificateReload(success bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	status := "success"
+	status := resultSuccess
 	if !success {
 		status = "failure"
 	}
@@ -252,7 +258,7 @@ func (m *Metrics) RecordClientCertValidation(success bool, reason string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	result := "success"
+	result := resultSuccess
 	if !success {
 		result = reason
 	}

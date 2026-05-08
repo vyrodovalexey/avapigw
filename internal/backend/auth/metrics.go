@@ -7,6 +7,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric/label constants.
+const (
+	labelProvider = "provider"
+)
+
+// Metric label constants.
+const (
+	subsystemBackendAuth = "backend_auth"
+	labelAuthType        = "auth_type"
+)
+
 var (
 	sharedMetricsInstance *Metrics
 	sharedMetricsOnce     sync.Once
@@ -47,48 +58,48 @@ func NewMetrics(namespace string) *Metrics {
 	m.requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "backend_auth",
+			Subsystem: subsystemBackendAuth,
 			Name:      "requests_total",
 			Help:      "Total number of backend authentication requests",
 		},
-		[]string{"provider", "auth_type", "status"},
+		[]string{labelProvider, labelAuthType, "status"},
 	)
 
 	m.requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "backend_auth",
+			Subsystem: subsystemBackendAuth,
 			Name:      "request_duration_seconds",
 			Help:      "Backend authentication request duration in seconds",
 			Buckets:   []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		},
-		[]string{"provider", "auth_type", "operation"},
+		[]string{labelProvider, labelAuthType, "operation"},
 	)
 
 	m.tokenRefreshTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "backend_auth",
+			Subsystem: subsystemBackendAuth,
 			Name:      "token_refresh_total",
 			Help:      "Total number of token refresh operations",
 		},
-		[]string{"provider", "auth_type", "status"},
+		[]string{labelProvider, labelAuthType, "status"},
 	)
 
 	m.errorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "backend_auth",
+			Subsystem: subsystemBackendAuth,
 			Name:      "errors_total",
 			Help:      "Total number of backend authentication errors",
 		},
-		[]string{"provider", "auth_type", "error_type"},
+		[]string{labelProvider, labelAuthType, "error_type"},
 	)
 
 	m.credentialCacheHits = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "backend_auth",
+			Subsystem: subsystemBackendAuth,
 			Name:      "credential_cache_hits_total",
 			Help:      "Total number of credential cache hits",
 		},
@@ -97,7 +108,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.credentialCacheMiss = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "backend_auth",
+			Subsystem: subsystemBackendAuth,
 			Name:      "credential_cache_misses_total",
 			Help:      "Total number of credential cache misses",
 		},
@@ -106,11 +117,11 @@ func NewMetrics(namespace string) *Metrics {
 	m.tokenExpiryGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
-			Subsystem: "backend_auth",
+			Subsystem: subsystemBackendAuth,
 			Name:      "token_expiry_seconds",
 			Help:      "Token expiry timestamp in seconds since epoch",
 		},
-		[]string{"provider", "auth_type"},
+		[]string{labelProvider, labelAuthType},
 	)
 
 	// Register all metrics

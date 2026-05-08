@@ -229,7 +229,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.26.2 (for building from source)
+- Go 1.26.3 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -6845,7 +6845,7 @@ on: [push, pull_request]
 
 env:
   GO_VERSION: '1.25.6'
-  GOLANGCI_LINT_VERSION: 'v2.8.0'
+  GOLANGCI_LINT_VERSION: 'v2.12.2'
 
 jobs:
   # Parallel quality checks
@@ -6902,7 +6902,7 @@ jobs:
 ### Enhanced Pipeline Stages
 
 1. **Parallel Quality Checks**
-   - **Lint** - Code quality checks with golangci-lint v2.8.0
+   - **Lint** - Code quality checks with golangci-lint v2.12.2
    - **Vulnerability Check** - Security scanning with govulncheck
    - **Unit Tests** - Comprehensive test suite with 90%+ coverage
    - **Functional Tests** - End-to-end testing with enhanced coverage

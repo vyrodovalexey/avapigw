@@ -362,6 +362,7 @@ func (l *Listener) httpsRedirectMiddleware(next http.Handler) http.Handler {
 		}
 
 		target := "https://" + redirectHost + r.URL.RequestURI()
+		//nolint:gosec // G710: redirect target is validated via getSafeRedirectHost against configured allowed hosts
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	})
 }

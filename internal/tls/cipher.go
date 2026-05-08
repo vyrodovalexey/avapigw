@@ -8,6 +8,17 @@ import (
 	"strings"
 )
 
+// Cipher suite name constants for commonly referenced suites.
+const (
+	cipherECDHEECDSAAES128GCMSHA256  = "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+	cipherECDHEECDSAAES256GCMSHA384  = "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
+	cipherECDHERSAAES128GCMSHA256    = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+	cipherECDHERSAAES256GCMSHA384    = "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+	cipherECDHEECDSACHACHA20POLY1305 = "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"
+	cipherECDHERSACHACHA20POLY1305   = "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
+	curveX25519                      = "X25519"
+)
+
 // CipherSuite represents a TLS cipher suite with metadata.
 type CipherSuite struct {
 	// ID is the cipher suite ID.
@@ -52,39 +63,39 @@ var cipherSuiteRegistry = map[string]CipherSuite{
 	},
 
 	// TLS 1.2 secure cipher suites
-	"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256": {
+	cipherECDHEECDSAAES128GCMSHA256: {
 		ID:     tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-		Name:   "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+		Name:   cipherECDHEECDSAAES128GCMSHA256,
 		Secure: true,
 		FIPS:   true,
 	},
-	"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384": {
+	cipherECDHEECDSAAES256GCMSHA384: {
 		ID:     tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-		Name:   "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+		Name:   cipherECDHEECDSAAES256GCMSHA384,
 		Secure: true,
 		FIPS:   true,
 	},
-	"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256": {
+	cipherECDHERSAAES128GCMSHA256: {
 		ID:     tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-		Name:   "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+		Name:   cipherECDHERSAAES128GCMSHA256,
 		Secure: true,
 		FIPS:   true,
 	},
-	"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384": {
+	cipherECDHERSAAES256GCMSHA384: {
 		ID:     tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-		Name:   "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+		Name:   cipherECDHERSAAES256GCMSHA384,
 		Secure: true,
 		FIPS:   true,
 	},
-	"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256": {
+	cipherECDHEECDSACHACHA20POLY1305: {
 		ID:     tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-		Name:   "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+		Name:   cipherECDHEECDSACHACHA20POLY1305,
 		Secure: true,
 		FIPS:   false,
 	},
-	"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256": {
+	cipherECDHERSACHACHA20POLY1305: {
 		ID:     tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-		Name:   "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+		Name:   cipherECDHERSACHACHA20POLY1305,
 		Secure: true,
 		FIPS:   false,
 	},
@@ -160,7 +171,7 @@ var cipherSuiteRegistry = map[string]CipherSuite{
 
 // curveRegistry maps curve names to their tls.CurveID values.
 var curveRegistry = map[string]tls.CurveID{
-	"X25519":    tls.X25519,
+	curveX25519: tls.X25519,
 	"P256":      tls.CurveP256,
 	"P384":      tls.CurveP384,
 	"P521":      tls.CurveP521,
@@ -185,12 +196,12 @@ func DefaultSecureCipherSuites() []uint16 {
 // DefaultSecureCipherSuiteNames returns the names of default secure cipher suites.
 func DefaultSecureCipherSuiteNames() []string {
 	return []string{
-		"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-		"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
-		"TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+		cipherECDHEECDSAAES256GCMSHA384,
+		cipherECDHERSAAES256GCMSHA384,
+		cipherECDHEECDSAAES128GCMSHA256,
+		cipherECDHERSAAES128GCMSHA256,
+		cipherECDHEECDSACHACHA20POLY1305,
+		cipherECDHERSACHACHA20POLY1305,
 	}
 }
 
@@ -207,10 +218,10 @@ func FIPSCipherSuites() []uint16 {
 // FIPSCipherSuiteNames returns the names of FIPS-compliant cipher suites.
 func FIPSCipherSuiteNames() []string {
 	return []string{
-		"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-		"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-		"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+		cipherECDHEECDSAAES256GCMSHA384,
+		cipherECDHERSAAES256GCMSHA384,
+		cipherECDHEECDSAAES128GCMSHA256,
+		cipherECDHERSAAES128GCMSHA256,
 	}
 }
 
@@ -226,7 +237,7 @@ func DefaultCurvePreferences() []tls.CurveID {
 // DefaultCurvePreferenceNames returns the names of default curve preferences.
 func DefaultCurvePreferenceNames() []string {
 	return []string{
-		"X25519",
+		curveX25519,
 		"P256",
 		"P384",
 	}
@@ -458,7 +469,7 @@ func TLSVersionName(version uint16) string {
 func CurveName(curve tls.CurveID) string {
 	switch curve {
 	case tls.X25519:
-		return "X25519"
+		return curveX25519
 	case tls.CurveP256:
 		return "P-256"
 	case tls.CurveP384:

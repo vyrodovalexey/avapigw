@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// Claim name constants.
+const (
+	claimSub   = "sub"
+	claimEmail = "email"
+	claimName  = "name"
+)
+
 // Config represents OIDC authentication configuration.
 type Config struct {
 	// Enabled enables OIDC authentication.
@@ -227,10 +234,10 @@ func (c *ProviderConfig) GetEffectiveClaimMapping() *ClaimMapping {
 	switch c.Type {
 	case "keycloak":
 		return &ClaimMapping{
-			Subject: "sub",
+			Subject: claimSub,
 			Roles:   "realm_access.roles",
-			Email:   "email",
-			Name:    "name",
+			Email:   claimEmail,
+			Name:    claimName,
 			Groups:  "groups",
 		}
 	case "auth0":
@@ -243,10 +250,10 @@ func (c *ProviderConfig) GetEffectiveClaimMapping() *ClaimMapping {
 		}
 	default:
 		return &ClaimMapping{
-			Subject: "sub",
+			Subject: claimSub,
 			Roles:   "roles",
-			Email:   "email",
-			Name:    "name",
+			Email:   claimEmail,
+			Name:    claimName,
 		}
 	}
 }

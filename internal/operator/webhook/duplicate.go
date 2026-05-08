@@ -18,6 +18,15 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/operator/keys"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace    = "avapigw_operator"
+	metricsSubsystem    = "webhook"
+	labelResourceType   = "resource_type"
+	resTypeAPIRoute     = "apiroute"
+	resTypeGraphQLRoute = "graphqlroute"
+)
+
 // DuplicateCheckerConfig holds configuration for creating a DuplicateChecker.
 type DuplicateCheckerConfig struct {
 	// ClusterWide enables cluster-wide duplicate detection.
@@ -79,40 +88,40 @@ func newDuplicateMetricsWithFactory(factory promauto.Factory) *duplicateMetrics 
 	return &duplicateMetrics{
 		checkDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "duplicate_check_duration_seconds",
 				Help:      "Duration of duplicate check operations in seconds",
 				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1},
 			},
-			[]string{"resource_type", "scope"},
+			[]string{labelResourceType, "scope"},
 		),
 		checkTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "duplicate_check_total",
 				Help:      "Total number of duplicate check operations",
 			},
-			[]string{"resource_type", "scope", "result"},
+			[]string{labelResourceType, "scope", "result"},
 		),
 		cacheHits: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "duplicate_cache_hits_total",
 				Help:      "Total number of duplicate check cache hits",
 			},
-			[]string{"resource_type"},
+			[]string{labelResourceType},
 		),
 		cacheMisses: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "duplicate_cache_misses_total",
 				Help:      "Total number of duplicate check cache misses",
 			},
-			[]string{"resource_type"},
+			[]string{labelResourceType},
 		),
 	}
 }
@@ -122,7 +131,10 @@ func newDuplicateMetricsWithFactory(factory promauto.Factory) *duplicateMetrics 
 func InitDuplicateVecMetrics() {
 	m := getDuplicateMetrics()
 
-	resourceTypes := []string{"apiroute", "grpcroute", "graphqlroute", "backend", "grpcbackend", "graphqlbackend"}
+	resourceTypes := []string{
+		resTypeAPIRoute, "grpcroute", resTypeGraphQLRoute,
+		"backend", "grpcbackend", "graphqlbackend",
+	}
 	scopes := []string{"namespace", "cluster"}
 	results := []string{"ok", "conflict", "error"}
 
@@ -442,7 +454,7 @@ func (c *DuplicateChecker) CheckAPIRouteDuplicate(
 
 	startTime := time.Now()
 	scope := c.getScopeLabel()
-	resourceType := "apiroute"
+	resourceType := resTypeAPIRoute
 
 	dm := getDuplicateMetrics()
 	defer func() {
@@ -1168,7 +1180,7 @@ func (c *DuplicateChecker) CheckGraphQLRouteDuplicate(
 
 	startTime := time.Now()
 	scope := c.getScopeLabel()
-	resourceType := "graphqlroute"
+	resourceType := resTypeGraphQLRoute
 
 	dm := getDuplicateMetrics()
 	defer func() {
@@ -1623,14 +1635,14 @@ func (c *DuplicateChecker) CheckAPIRouteCrossConflictsWithGraphQL(
 
 	startTime := time.Now()
 	scope := c.getScopeLabel()
-	resourceType := "apiroute"
+	resourceType := resTypeAPIRoute
 
 	dm := getDuplicateMetrics()
 	defer func() {
 		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
 	}()
 
-	cacheKey := c.buildCacheKey("graphqlroute", apiRoute.Namespace)
+	cacheKey := c.buildCacheKey(resTypeGraphQLRoute, apiRoute.Namespace)
 	var graphqlRoutes *avapigwv1alpha1.GraphQLRouteList
 
 	// Try to use cached data under a single RLock to avoid TOCTOU race.
@@ -1676,7 +1688,7 @@ func (c *DuplicateChecker) CheckAPIRouteCrossConflictsWithGraphQL(
 	if len(conflicts) > 0 {
 		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
 		c.logger.Warn("cross-CRD APIRoute/GraphQLRoute path conflict detected",
-			observability.String("apiroute", keys.ResourceKey(apiRoute.Namespace, apiRoute.Name)),
+			observability.String(resTypeAPIRoute, keys.ResourceKey(apiRoute.Namespace, apiRoute.Name)),
 			observability.Any("conflicting_graphqlroutes", conflicts),
 		)
 		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
@@ -1702,14 +1714,14 @@ func (c *DuplicateChecker) CheckGraphQLRouteCrossConflictsWithAPIRoute(
 
 	startTime := time.Now()
 	scope := c.getScopeLabel()
-	resourceType := "graphqlroute"
+	resourceType := resTypeGraphQLRoute
 
 	dm := getDuplicateMetrics()
 	defer func() {
 		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
 	}()
 
-	cacheKey := c.buildCacheKey("apiroute", graphqlRoute.Namespace)
+	cacheKey := c.buildCacheKey(resTypeAPIRoute, graphqlRoute.Namespace)
 	var apiRoutes *avapigwv1alpha1.APIRouteList
 
 	// Try to use cached data under a single RLock to avoid TOCTOU race.
@@ -1755,7 +1767,7 @@ func (c *DuplicateChecker) CheckGraphQLRouteCrossConflictsWithAPIRoute(
 	if len(conflicts) > 0 {
 		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
 		c.logger.Warn("cross-CRD GraphQLRoute/APIRoute path conflict detected",
-			observability.String("graphqlroute",
+			observability.String(resTypeGraphQLRoute,
 				keys.ResourceKey(graphqlRoute.Namespace, graphqlRoute.Name)),
 			observability.Any("conflicting_apiroutes", conflicts),
 		)

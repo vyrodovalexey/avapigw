@@ -10,6 +10,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace = "avapigw"
+	metricsSubsystem = "graphql"
+	labelBackend     = "backend"
+	labelOpType      = "operation_type"
+)
+
 // Metrics contains Prometheus metrics for GraphQL operations.
 type Metrics struct {
 	requestsTotal        *prometheus.CounterVec
@@ -53,83 +61,83 @@ func newMetricsWithFactory(factory promauto.Factory) *Metrics {
 	return &Metrics{
 		requestsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "requests_total",
 				Help:      "Total number of GraphQL requests",
 			},
-			[]string{"backend", "operation_type", "status_code"},
+			[]string{labelBackend, labelOpType, "status_code"},
 		),
 		requestDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "request_duration_seconds",
 				Help:      "GraphQL request duration in seconds",
 				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 			},
-			[]string{"backend", "operation_type"},
+			[]string{labelBackend, labelOpType},
 		),
 		errorsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "errors_total",
 				Help:      "Total number of GraphQL errors",
 			},
-			[]string{"backend", "operation_type", "error_type"},
+			[]string{labelBackend, labelOpType, "error_type"},
 		),
 		depthLimitExceeded: factory.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "depth_limit_exceeded_total",
 				Help:      "Total number of queries rejected due to depth limit",
 			},
 		),
 		complexityExceeded: factory.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "complexity_limit_exceeded_total",
 				Help:      "Total number of queries rejected due to complexity limit",
 			},
 		),
 		introspectionBlocked: factory.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "introspection_blocked_total",
 				Help:      "Total number of introspection queries blocked",
 			},
 		),
 		activeSubscriptions: factory.NewGauge(
 			prometheus.GaugeOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "active_subscriptions",
 				Help:      "Number of active GraphQL subscriptions",
 			},
 		),
 		queryDepth: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "query_depth",
 				Help:      "Distribution of GraphQL query depths",
 				Buckets:   []float64{1, 2, 3, 5, 7, 10, 15, 20, 30, 50},
 			},
-			[]string{"operation_type"},
+			[]string{labelOpType},
 		),
 		queryComplexity: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw",
-				Subsystem: "graphql",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "query_complexity",
 				Help:      "Distribution of GraphQL query complexity scores",
 				Buckets:   []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000},
 			},
-			[]string{"operation_type"},
+			[]string{labelOpType},
 		),
 	}
 }
