@@ -6,6 +6,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric label constants.
+const (
+	subsystemAuth = "auth"
+	labelAuthType = "auth_type"
+)
+
 // Metrics holds Prometheus metrics for authentication operations.
 type Metrics struct {
 	requestsTotal    *prometheus.CounterVec
@@ -42,48 +48,48 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "auth",
+			Subsystem: subsystemAuth,
 			Name:      "requests_total",
 			Help:      "Total number of authentication requests",
 		},
-		[]string{"method", "auth_type", "status"},
+		[]string{"method", labelAuthType, "status"},
 	)
 
 	m.requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "auth",
+			Subsystem: subsystemAuth,
 			Name:      "request_duration_seconds",
 			Help:      "Authentication request duration in seconds",
 			Buckets:   []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
 		},
-		[]string{"method", "auth_type"},
+		[]string{"method", labelAuthType},
 	)
 
 	m.authSuccessTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "auth",
+			Subsystem: subsystemAuth,
 			Name:      "success_total",
 			Help:      "Total number of successful authentications",
 		},
-		[]string{"auth_type"},
+		[]string{labelAuthType},
 	)
 
 	m.authFailureTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "auth",
+			Subsystem: subsystemAuth,
 			Name:      "failure_total",
 			Help:      "Total number of failed authentications",
 		},
-		[]string{"auth_type", "reason"},
+		[]string{labelAuthType, "reason"},
 	)
 
 	m.cacheHits = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "auth",
+			Subsystem: subsystemAuth,
 			Name:      "cache_hits_total",
 			Help:      "Total number of authentication cache hits",
 		},
@@ -92,7 +98,7 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.cacheMisses = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "auth",
+			Subsystem: subsystemAuth,
 			Name:      "cache_misses_total",
 			Help:      "Total number of authentication cache misses",
 		},

@@ -170,7 +170,7 @@ func (s *signer) resolveAlgorithm(optAlgorithm string) string {
 	if s.algorithm != "" {
 		return s.algorithm
 	}
-	return "RS256"
+	return AlgRS256
 }
 
 // resolveKeyID resolves the key ID from options or defaults.
@@ -279,31 +279,31 @@ func (s *signer) createSignature(ctx context.Context, signingInput, algorithm st
 // signWithKey signs using a local private key.
 func (s *signer) signWithKey(signingInput, algorithm string) ([]byte, error) {
 	switch algorithm {
-	case "RS256":
+	case AlgRS256:
 		return s.signRSA(signingInput, crypto.SHA256)
-	case "RS384":
+	case AlgRS384:
 		return s.signRSA(signingInput, crypto.SHA384)
-	case "RS512":
+	case AlgRS512:
 		return s.signRSA(signingInput, crypto.SHA512)
-	case "PS256":
+	case AlgPS256:
 		return s.signRSAPSS(signingInput, crypto.SHA256)
-	case "PS384":
+	case AlgPS384:
 		return s.signRSAPSS(signingInput, crypto.SHA384)
-	case "PS512":
+	case AlgPS512:
 		return s.signRSAPSS(signingInput, crypto.SHA512)
-	case "ES256":
+	case AlgES256:
 		return s.signECDSA(signingInput, crypto.SHA256)
-	case "ES384":
+	case AlgES384:
 		return s.signECDSA(signingInput, crypto.SHA384)
-	case "ES512":
+	case AlgES512:
 		return s.signECDSA(signingInput, crypto.SHA512)
-	case "HS256":
+	case AlgHS256:
 		return s.signHMAC(signingInput, sha256.New)
-	case "HS384":
+	case AlgHS384:
 		return s.signHMAC(signingInput, sha512.New384)
-	case "HS512":
+	case AlgHS512:
 		return s.signHMAC(signingInput, sha512.New)
-	case "EdDSA", "Ed25519":
+	case AlgEdDSA, AlgEd25519:
 		return s.signEdDSA(signingInput)
 	default:
 		return nil, NewSigningError(fmt.Sprintf("unsupported algorithm: %s", algorithm), ErrUnsupportedAlgorithm)

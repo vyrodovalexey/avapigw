@@ -12,6 +12,13 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Metric/label constants.
+const (
+	metricsNamespace = "avapigw_operator"
+	metricsSubsystem = "grpc_server"
+	labelMethod      = "method"
+)
+
 var (
 	defaultGRPCServerMetrics     *grpcServerMetrics
 	defaultGRPCServerMetricsOnce sync.Once
@@ -57,48 +64,48 @@ func newGRPCServerMetricsWithFactory(factory promauto.Factory) *grpcServerMetric
 	return &grpcServerMetrics{
 		requestsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc_server",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "requests_total",
 				Help:      "Total number of gRPC server requests",
 			},
-			[]string{"method", "code"},
+			[]string{labelMethod, "code"},
 		),
 		requestDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc_server",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "request_duration_seconds",
 				Help:      "gRPC server request duration in seconds",
 				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 			},
-			[]string{"method"},
+			[]string{labelMethod},
 		),
 		activeStreams: factory.NewGauge(
 			prometheus.GaugeOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc_server",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "active_streams",
 				Help:      "Number of currently active gRPC server streams",
 			},
 		),
 		streamMsgSent: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc_server",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "stream_messages_sent_total",
 				Help:      "Total number of gRPC server stream messages sent",
 			},
-			[]string{"method"},
+			[]string{labelMethod},
 		),
 		streamMsgReceived: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc_server",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "stream_messages_received_total",
 				Help:      "Total number of gRPC server stream messages received",
 			},
-			[]string{"method"},
+			[]string{labelMethod},
 		),
 	}
 }

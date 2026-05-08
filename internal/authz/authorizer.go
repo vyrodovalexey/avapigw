@@ -16,6 +16,15 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// Authorization result and engine constants.
+const (
+	resultDenied   = "denied"
+	resultAllowed  = "allowed"
+	engineExternal = "external"
+	engineRBAC     = "rbac"
+	engineABAC     = "abac"
+)
+
 // authzTracer is the OTEL tracer used for authorization operations.
 var authzTracer = otel.Tracer("avapigw/authz")
 
@@ -307,9 +316,9 @@ func (a *authorizer) Authorize(ctx context.Context, req *Request) (*Decision, er
 	})
 
 	// Record metrics
-	result := "denied"
+	result := resultDenied
 	if decision.Allowed {
-		result = "allowed"
+		result = resultAllowed
 	}
 	a.metrics.RecordEvaluation("combined", result, time.Since(start))
 	a.metrics.RecordDecision(result, decision.Policy)
@@ -368,7 +377,7 @@ func (a *authorizer) evaluate(ctx context.Context, req *Request) (*Decision, err
 				return &Decision{
 					Allowed: true,
 					Reason:  "external authorization failed, fail-open enabled",
-					Engine:  "external",
+					Engine:  engineExternal,
 				}, nil
 			}
 			return nil, err
@@ -406,7 +415,7 @@ func (a *authorizer) evaluateRBAC(ctx context.Context, req *Request) (*Decision,
 		Allowed: rbacDecision.Allowed,
 		Reason:  rbacDecision.Reason,
 		Policy:  rbacDecision.Policy,
-		Engine:  "rbac",
+		Engine:  engineRBAC,
 	}, nil
 }
 
@@ -447,7 +456,7 @@ func (a *authorizer) evaluateABAC(ctx context.Context, req *Request) (*Decision,
 		Allowed: abacDecision.Allowed,
 		Reason:  abacDecision.Reason,
 		Policy:  abacDecision.Policy,
-		Engine:  "abac",
+		Engine:  engineABAC,
 	}, nil
 }
 
@@ -487,7 +496,7 @@ func (a *authorizer) evaluateExternal(ctx context.Context, req *Request) (*Decis
 	return &Decision{
 		Allowed: result.Allow,
 		Reason:  result.Reason,
-		Engine:  "external",
+		Engine:  engineExternal,
 	}, nil
 }
 

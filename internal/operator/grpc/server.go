@@ -24,6 +24,13 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
+// Metric/label constants.
+const (
+	subsystemGRPC  = "grpc"
+	labelOperation = "operation"
+	labelType      = "type"
+)
+
 var (
 	defaultMetrics     *serverMetrics
 	defaultMetricsOnce sync.Once
@@ -170,67 +177,67 @@ func newServerMetricsWithFactory(factory promauto.Factory) *serverMetrics {
 	return &serverMetrics{
 		requestsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
 				Name:      "requests_total",
 				Help:      "Total number of gRPC requests",
 			},
-			[]string{"method", "status"},
+			[]string{labelMethod, "status"},
 		),
 		requestDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
 				Name:      "request_duration_seconds",
 				Help:      "gRPC request duration in seconds",
 				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 			},
-			[]string{"method"},
+			[]string{labelMethod},
 		),
 		activeGateways: factory.NewGauge(
 			prometheus.GaugeOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
 				Name:      "active_gateways",
 				Help:      "Number of active gateway connections",
 			},
 		),
 		configApplied: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
 				Name:      "config_applied_total",
 				Help:      "Total number of configuration applications",
 			},
-			[]string{"type", "operation"},
+			[]string{labelType, labelOperation},
 		),
 		cancelledOps: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
 				Name:      "canceled_operations_total",
 				Help:      "Total number of canceled operations",
 			},
-			[]string{"operation", "reason"},
+			[]string{labelOperation, "reason"},
 		),
 		operationDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
 				Name:      "operation_duration_seconds",
 				Help:      "Duration of configuration operations in seconds",
 				Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 			},
-			[]string{"operation", "type"},
+			[]string{labelOperation, labelType},
 		),
 		retryAttempts: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "grpc",
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
 				Name:      "retry_attempts_total",
 				Help:      "Total number of retry attempts for configuration operations",
 			},
-			[]string{"operation", "type", "result"},
+			[]string{labelOperation, labelType, "result"},
 		),
 	}
 }
@@ -1169,8 +1176,8 @@ func (s *Server) executeWithRetry(
 		OnRetry: func(attempt int, err error, backoff time.Duration) {
 			s.metrics.retryAttempts.WithLabelValues(operation, resourceType, "retry").Inc()
 			s.logger.Warn("operation failed, retrying",
-				observability.String("operation", operation),
-				observability.String("type", resourceType),
+				observability.String(labelOperation, operation),
+				observability.String(labelType, resourceType),
 				observability.Int("attempt", attempt),
 				observability.Duration("backoff", backoff),
 				observability.Error(err),
@@ -1203,7 +1210,7 @@ func (s *Server) recordCanceledOperation(operation string, err error) {
 
 	s.metrics.cancelledOps.WithLabelValues(operation, reason).Inc()
 	s.logger.Warn("operation canceled",
-		observability.String("operation", operation),
+		observability.String(labelOperation, operation),
 		observability.String("reason", reason),
 		observability.Error(err),
 	)

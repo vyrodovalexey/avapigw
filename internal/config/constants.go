@@ -131,6 +131,12 @@ const (
 
 // TLS version constants.
 const (
+	// TLSVersion10 represents TLS 1.0 (deprecated per RFC 8996).
+	TLSVersion10 = "TLS10"
+
+	// TLSVersion11 represents TLS 1.1 (deprecated per RFC 8996).
+	TLSVersion11 = "TLS11"
+
 	// TLSVersion12 represents TLS 1.2.
 	TLSVersion12 = "TLS12"
 

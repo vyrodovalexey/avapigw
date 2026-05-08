@@ -31,17 +31,17 @@ func NewStore(config *Config, logger observability.Logger) (Store, error) {
 		return nil, fmt.Errorf("config is required")
 	}
 
-	storeType := "memory"
+	storeType := storeTypeMemory
 	if config.Store != nil && config.Store.Type != "" {
 		storeType = config.Store.Type
 	}
 
 	switch storeType {
-	case "memory":
+	case storeTypeMemory:
 		return NewMemoryStore(config, logger)
 	case "vault":
 		return nil, fmt.Errorf("vault store requires vault client - use NewVaultStore")
-	case "file":
+	case storeTypeFile:
 		return nil, fmt.Errorf("file store not yet implemented")
 	default:
 		return nil, fmt.Errorf("unknown store type: %s", storeType)

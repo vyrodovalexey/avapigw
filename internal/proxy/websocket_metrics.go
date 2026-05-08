@@ -39,52 +39,52 @@ func initWebSocketMetrics(registry *prometheus.Registry) {
 		wsMetricsInstance = &webSocketMetrics{
 			connectionsTotal: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
+					Namespace: metricsNamespace,
 					Name:      "websocket_connections_total",
 					Help:      "Total number of WebSocket connections established",
 				},
-				[]string{"backend"},
+				[]string{labelBackend},
 			),
 			connectionsActive: factory.NewGaugeVec(
 				prometheus.GaugeOpts{
-					Namespace: "gateway",
+					Namespace: metricsNamespace,
 					Name:      "websocket_connections_active",
 					Help:      "Number of currently active WebSocket connections",
 				},
-				[]string{"backend"},
+				[]string{labelBackend},
 			),
 			errorsTotal: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
+					Namespace: metricsNamespace,
 					Name:      "websocket_errors_total",
 					Help:      "Total number of WebSocket errors",
 				},
-				[]string{"backend", "error_type"},
+				[]string{labelBackend, "error_type"},
 			),
 			messagesSentTotal: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
+					Namespace: metricsNamespace,
 					Name:      "websocket_messages_sent_total",
 					Help:      "Total number of WebSocket messages sent to clients",
 				},
-				[]string{"backend"},
+				[]string{labelBackend},
 			),
 			messagesReceivedTotal: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
+					Namespace: metricsNamespace,
 					Name:      "websocket_messages_received_total",
 					Help:      "Total number of WebSocket messages received from clients",
 				},
-				[]string{"backend"},
+				[]string{labelBackend},
 			),
 			connectionDuration: factory.NewHistogramVec(
 				prometheus.HistogramOpts{
-					Namespace: "gateway",
+					Namespace: metricsNamespace,
 					Name:      "websocket_connection_duration_seconds",
 					Help:      "Duration of WebSocket connections in seconds",
 					Buckets:   []float64{1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600},
 				},
-				[]string{"backend"},
+				[]string{labelBackend},
 			),
 		}
 	})

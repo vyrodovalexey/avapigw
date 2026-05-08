@@ -226,20 +226,20 @@ func (c *VaultConfig) Validate() error {
 // isValidAlgorithm checks if an algorithm is valid.
 func isValidAlgorithm(alg string) bool {
 	validAlgorithms := map[string]bool{
-		"RS256":   true,
-		"RS384":   true,
-		"RS512":   true,
-		"ES256":   true,
-		"ES384":   true,
-		"ES512":   true,
-		"HS256":   true,
-		"HS384":   true,
-		"HS512":   true,
-		"EdDSA":   true,
-		"Ed25519": true,
-		"PS256":   true,
-		"PS384":   true,
-		"PS512":   true,
+		AlgRS256:   true,
+		AlgRS384:   true,
+		AlgRS512:   true,
+		AlgES256:   true,
+		AlgES384:   true,
+		AlgES512:   true,
+		AlgHS256:   true,
+		AlgHS384:   true,
+		AlgHS512:   true,
+		AlgEdDSA:   true,
+		AlgEd25519: true,
+		AlgPS256:   true,
+		AlgPS384:   true,
+		AlgPS512:   true,
 	}
 	return validAlgorithms[alg]
 }
@@ -248,11 +248,11 @@ func isValidAlgorithm(alg string) bool {
 func DefaultConfig() *Config {
 	return &Config{
 		Enabled:      false,
-		Algorithms:   []string{"RS256", "ES256"},
+		Algorithms:   []string{AlgRS256, AlgES256},
 		JWKSCacheTTL: time.Hour,
 		ClockSkew:    5 * time.Minute,
 		ClaimMapping: &ClaimMapping{
-			Subject: "sub",
+			Subject: claimSub,
 			Roles:   "roles",
 			Email:   "email",
 			Name:    "name",

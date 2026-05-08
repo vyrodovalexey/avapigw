@@ -12,10 +12,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric/label constants.
+const (
+	labelStatusCode = "status_code"
+)
+
 const (
 	namespace    = "gateway"
-	subsystem    = "route"
+	subsystem    = labelRoute
 	defaultLabel = "default"
+	labelMethod  = "method"
+	labelRoute   = "route"
 )
 
 // RouteMetrics holds all route-level Prometheus metrics.
@@ -60,7 +67,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "requests_total",
 				Help:      "Total number of requests processed by route",
 			},
-			[]string{"route", "method", "status_code"},
+			[]string{labelRoute, labelMethod, labelStatusCode},
 		),
 		RequestSizeBytes: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -70,7 +77,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Help:      "Request body size in bytes",
 				Buckets:   sizeBuckets,
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		ResponseSizeBytes: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -80,7 +87,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Help:      "Response body size in bytes",
 				Buckets:   sizeBuckets,
 			},
-			[]string{"route", "method", "status_code"},
+			[]string{labelRoute, labelMethod, labelStatusCode},
 		),
 		RequestDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -91,7 +98,7 @@ func NewRouteMetrics() *RouteMetrics {
 					"including upstream",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"route", "method", "status_code"},
+			[]string{labelRoute, labelMethod, labelStatusCode},
 		),
 		UpstreamDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -102,7 +109,7 @@ func NewRouteMetrics() *RouteMetrics {
 					"(backend) request only",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"route", "method", "status_code"},
+			[]string{labelRoute, labelMethod, labelStatusCode},
 		),
 		ErrorsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -111,7 +118,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "errors_total",
 				Help:      "Total number of errors by type",
 			},
-			[]string{"route", "method", "error_type"},
+			[]string{labelRoute, labelMethod, "error_type"},
 		),
 		TimeoutsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -120,7 +127,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "timeouts_total",
 				Help:      "Total number of timeouts by stage",
 			},
-			[]string{"route", "method", "timeout_stage"},
+			[]string{labelRoute, labelMethod, "timeout_stage"},
 		),
 		RateLimitHitsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -129,7 +136,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "ratelimit_hits_total",
 				Help:      "Total number of rate limit hits",
 			},
-			[]string{"route", "method", "consumer"},
+			[]string{labelRoute, labelMethod, "consumer"},
 		),
 		AuthFailuresTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -139,7 +146,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Help: "Total number of " +
 					"authentication failures",
 			},
-			[]string{"route", "method", "auth_type", "reason"},
+			[]string{labelRoute, labelMethod, "auth_type", "reason"},
 		),
 		AuthSuccessesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -149,7 +156,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Help: "Total number of " +
 					"authentication successes",
 			},
-			[]string{"route", "method", "auth_type"},
+			[]string{labelRoute, labelMethod, "auth_type"},
 		),
 		CircuitBreakerState: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -159,7 +166,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Help: "Circuit breaker state " +
 					"(0=closed, 1=half-open, 2=open)",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		CircuitBreakerTripsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -169,7 +176,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Help: "Total number of " +
 					"circuit breaker trips",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		CacheHitsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -178,7 +185,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "cache_hits_total",
 				Help:      "Total number of cache hits",
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		CacheMissesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -187,7 +194,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "cache_misses_total",
 				Help:      "Total number of cache misses",
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		CacheBypassTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -196,7 +203,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "cache_bypass_total",
 				Help:      "Total number of cache bypasses",
 			},
-			[]string{"route", "method", "reason"},
+			[]string{labelRoute, labelMethod, "reason"},
 		),
 		RetriesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -205,7 +212,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "retries_total",
 				Help:      "Total number of retry attempts",
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		RetryExhaustedTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -214,7 +221,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Name:      "retry_exhausted_total",
 				Help:      "Total number of exhausted retries",
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		CertExpirySeconds: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -224,7 +231,7 @@ func NewRouteMetrics() *RouteMetrics {
 				Help: "Time until TLS certificate " +
 					"expiry in seconds",
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 	}
 }

@@ -120,7 +120,7 @@ func buildGRPCRequestEvent(
 
 	event := audit.RequestEvent(reqDetails, subject)
 	event.Resource = &audit.Resource{
-		Type:    "grpc",
+		Type:    resourceTypeGRPC,
 		Path:    fullMethod,
 		Method:  method,
 		Service: service,
@@ -157,7 +157,7 @@ func buildGRPCResponseEvent(
 		WithDuration(duration)
 
 	event.Resource = &audit.Resource{
-		Type:    "grpc",
+		Type:    resourceTypeGRPC,
 		Path:    fullMethod,
 		Method:  method,
 		Service: service,

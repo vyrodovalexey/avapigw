@@ -8,6 +8,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric/label constants.
+const (
+	labelStatus = "status"
+)
+
+// Metric label constants.
+const (
+	subsystemOIDC = "oidc"
+	labelProvider = "provider"
+)
+
 // Metrics holds Prometheus metrics for OIDC operations.
 type Metrics struct {
 	discoveryTotal          *prometheus.CounterVec
@@ -62,63 +73,63 @@ func NewMetrics(namespace string) *Metrics {
 	m.discoveryTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "oidc",
+			Subsystem: subsystemOIDC,
 			Name:      "discovery_total",
 			Help:      "Total number of OIDC discovery requests",
 		},
-		[]string{"status", "provider"},
+		[]string{labelStatus, labelProvider},
 	)
 
 	m.tokenValidationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "oidc",
+			Subsystem: subsystemOIDC,
 			Name:      "token_validation_total",
 			Help:      "Total number of OIDC token validation attempts",
 		},
-		[]string{"status", "provider"},
+		[]string{labelStatus, labelProvider},
 	)
 
 	m.tokenValidationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "oidc",
+			Subsystem: subsystemOIDC,
 			Name:      "token_validation_duration_seconds",
 			Help:      "OIDC token validation duration in seconds",
 			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		},
-		[]string{"status", "provider"},
+		[]string{labelStatus, labelProvider},
 	)
 
 	m.introspectionTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "oidc",
+			Subsystem: subsystemOIDC,
 			Name:      "introspection_total",
 			Help:      "Total number of token introspection requests",
 		},
-		[]string{"status", "provider"},
+		[]string{labelStatus, labelProvider},
 	)
 
 	m.introspectionDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "oidc",
+			Subsystem: subsystemOIDC,
 			Name:      "introspection_duration_seconds",
 			Help:      "Token introspection duration in seconds",
 			Buckets:   []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		},
-		[]string{"status", "provider"},
+		[]string{labelStatus, labelProvider},
 	)
 
 	m.userinfoTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "oidc",
+			Subsystem: subsystemOIDC,
 			Name:      "userinfo_total",
 			Help:      "Total number of userinfo requests",
 		},
-		[]string{"status", "provider"},
+		[]string{labelStatus, labelProvider},
 	)
 
 	// Register all metrics

@@ -4,6 +4,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "openapi_validation"
+	labelRoute       = "route"
+)
+
 // Metrics holds Prometheus metrics for OpenAPI validation.
 type Metrics struct {
 	requestsTotal  *prometheus.CounterVec
@@ -24,31 +31,31 @@ func NewMetrics(registerer prometheus.Registerer) *Metrics {
 		registerer: registerer,
 		requestsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "openapi_validation",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "requests_total",
 				Help:      "Total number of requests validated against OpenAPI spec.",
 			},
-			[]string{"route", "result"},
+			[]string{labelRoute, "result"},
 		),
 		duration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "gateway",
-				Subsystem: "openapi_validation",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "duration_seconds",
 				Help:      "Duration of OpenAPI request validation in seconds.",
 				Buckets:   []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25},
 			},
-			[]string{"route"},
+			[]string{labelRoute},
 		),
 		errorsTotal: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "openapi_validation",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "errors_total",
 				Help:      "Total number of OpenAPI validation errors.",
 			},
-			[]string{"route", "error_type"},
+			[]string{labelRoute, "error_type"},
 		),
 	}
 

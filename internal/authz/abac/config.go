@@ -50,6 +50,9 @@ const (
 	EffectDeny  PolicyEffect = "deny"
 )
 
+// engineCEL is the default and only supported ABAC engine.
+const engineCEL = "cel"
+
 // Validate validates the ABAC configuration.
 func (c *Config) Validate() error {
 	if c == nil || !c.Enabled {
@@ -57,7 +60,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate engine
-	if c.Engine != "" && c.Engine != "cel" {
+	if c.Engine != "" && c.Engine != engineCEL {
 		return fmt.Errorf("invalid engine: %s (only 'cel' is supported)", c.Engine)
 	}
 
@@ -93,7 +96,7 @@ func (p *Policy) Validate() error {
 func DefaultConfig() *Config {
 	return &Config{
 		Enabled: false,
-		Engine:  "cel",
+		Engine:  engineCEL,
 	}
 }
 
@@ -110,5 +113,5 @@ func (c *Config) GetEffectiveEngine() string {
 	if c.Engine != "" {
 		return c.Engine
 	}
-	return "cel"
+	return engineCEL
 }

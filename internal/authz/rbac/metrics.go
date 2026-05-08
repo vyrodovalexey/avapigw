@@ -8,6 +8,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// subsystemRBAC is the Prometheus subsystem name for RBAC metrics.
+const subsystemRBAC = "rbac"
+
 // Metrics holds Prometheus metrics for RBAC operations.
 type Metrics struct {
 	evaluationTotal    *prometheus.CounterVec
@@ -56,7 +59,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.evaluationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "rbac",
+			Subsystem: subsystemRBAC,
 			Name:      "evaluation_total",
 			Help:      "Total number of RBAC evaluations",
 		},
@@ -66,7 +69,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.evaluationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "rbac",
+			Subsystem: subsystemRBAC,
 			Name:      "evaluation_duration_seconds",
 			Help:      "RBAC evaluation duration in seconds",
 			Buckets:   []float64{.00001, .00005, .0001, .0005, .001, .005, .01, .025, .05, .1},
@@ -77,7 +80,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.policyCount = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
-			Subsystem: "rbac",
+			Subsystem: subsystemRBAC,
 			Name:      "policy_count",
 			Help:      "Number of RBAC policies",
 		},

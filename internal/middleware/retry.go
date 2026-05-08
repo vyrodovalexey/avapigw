@@ -15,6 +15,13 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
+// Retry condition constants.
+const (
+	retryOn5xx            = "5xx"
+	retryOnConnectFailure = "connect-failure"
+	retryOnReset          = "reset"
+)
+
 // DefaultMaxBodySize is the default maximum body size for retry buffering (1MB).
 const DefaultMaxBodySize = 1 << 20 // 1MB
 
@@ -36,7 +43,7 @@ func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		Attempts:      3,
 		PerTryTimeout: 10 * time.Second,
-		RetryOn:       []string{"5xx", "reset", "connect-failure"},
+		RetryOn:       []string{retryOn5xx, retryOnReset, retryOnConnectFailure},
 		BackoffBase:   100 * time.Millisecond,
 		BackoffMax:    10 * time.Second,
 		MaxBodySize:   DefaultMaxBodySize,
@@ -307,13 +314,13 @@ func shouldRetry(status int, retryOn []string) bool {
 // matchRetryCondition checks if status matches a retry condition.
 func matchRetryCondition(status int, condition string) bool {
 	switch condition {
-	case "5xx":
+	case retryOn5xx:
 		return status >= 500 && status < 600
 	case "retriable-4xx":
 		return status == 408 || status == 429
-	case "reset":
+	case retryOnReset:
 		return status == http.StatusBadGateway
-	case "connect-failure":
+	case retryOnConnectFailure:
 		return status == http.StatusBadGateway || status == http.StatusServiceUnavailable
 	default:
 		return false
@@ -341,7 +348,7 @@ func RetryFromConfig(
 	if cfg.RetryOn != "" {
 		retryConfig.RetryOn = strings.Split(cfg.RetryOn, ",")
 	} else {
-		retryConfig.RetryOn = []string{"5xx", "reset", "connect-failure"}
+		retryConfig.RetryOn = []string{retryOn5xx, retryOnReset, retryOnConnectFailure}
 	}
 
 	return Retry(retryConfig, logger)

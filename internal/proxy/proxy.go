@@ -862,6 +862,7 @@ func (p *ReverseProxy) handleRedirect(w http.ResponseWriter, r *http.Request, re
 		code = http.StatusFound // 302
 	}
 
+	//nolint:gosec // G710: redirect URL is validated via isRedirectSafe (only http/https schemes allowed)
 	http.Redirect(w, r, redirectURL.String(), code)
 }
 

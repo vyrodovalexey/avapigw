@@ -10,6 +10,9 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
+// mapKeyError is the JSON key for error messages.
+const mapKeyError = "error"
+
 // HTTPAuthorizer handles authorization for HTTP requests.
 type HTTPAuthorizer interface {
 	// Authorize authorizes an HTTP request.
@@ -161,7 +164,7 @@ func (a *httpAuthorizer) handleAuthzError(w http.ResponseWriter, r *http.Request
 
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error": message,
+		mapKeyError: message,
 	})
 }
 
@@ -177,8 +180,8 @@ func (a *httpAuthorizer) handleAccessDenied(w http.ResponseWriter, r *http.Reque
 	w.Header().Set(HeaderContentType, ContentTypeJSON)
 	w.WriteHeader(http.StatusForbidden)
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":  "access denied",
-		"reason": decision.Reason,
+		mapKeyError: "access denied",
+		"reason":    decision.Reason,
 	})
 }
 

@@ -8,6 +8,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "encoding"
+	labelContentType = "content_type"
+	labelResult      = "result"
+)
+
 // EncodingMetrics contains Prometheus metrics for encoding operations.
 type EncodingMetrics struct {
 	negotiationsTotal *prometheus.CounterVec
@@ -27,39 +35,39 @@ func GetEncodingMetrics() *EncodingMetrics {
 		encodingMetricsInstance = &EncodingMetrics{
 			negotiationsTotal: promauto.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "encoding",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "negotiations_total",
 					Help:      "Total number of content type negotiations",
 				},
-				[]string{"content_type", "result"},
+				[]string{labelContentType, labelResult},
 			),
 			encodeTotal: promauto.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "encoding",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "encode_total",
 					Help:      "Total number of encode operations",
 				},
-				[]string{"content_type", "result"},
+				[]string{labelContentType, labelResult},
 			),
 			decodeTotal: promauto.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "encoding",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "decode_total",
 					Help:      "Total number of decode operations",
 				},
-				[]string{"content_type", "result"},
+				[]string{labelContentType, labelResult},
 			),
 			errorsTotal: promauto.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "encoding",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "errors_total",
 					Help:      "Total number of encoding/decoding errors",
 				},
-				[]string{"content_type", "operation"},
+				[]string{labelContentType, "operation"},
 			),
 		}
 	})

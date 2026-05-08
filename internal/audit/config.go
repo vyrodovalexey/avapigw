@@ -17,6 +17,12 @@ const (
 	LevelError Level = "error"
 )
 
+// Output destination constants.
+const (
+	outputStdout = "stdout"
+	outputStderr = "stderr"
+)
+
 // Config represents the audit logging configuration.
 type Config struct {
 	// Enabled enables audit logging.
@@ -134,7 +140,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate format
-	if c.Format != "" && c.Format != "json" && c.Format != "text" {
+	if c.Format != "" && c.Format != formatJSON && c.Format != formatText {
 		return fmt.Errorf("invalid audit format: %s (must be 'json' or 'text')", c.Format)
 	}
 
@@ -183,8 +189,8 @@ func DefaultConfig() *Config {
 	return &Config{
 		Enabled:     true,
 		Level:       LevelInfo,
-		Output:      "stdout",
-		Format:      "json",
+		Output:      outputStdout,
+		Format:      formatJSON,
 		MaxBodySize: 4096,
 		Events: &EventsConfig{
 			Authentication: true,
@@ -220,7 +226,7 @@ func (c *Config) GetEffectiveFormat() string {
 	if c.Format != "" {
 		return c.Format
 	}
-	return "json"
+	return formatJSON
 }
 
 // GetEffectiveOutput returns the effective output destination.
@@ -228,7 +234,7 @@ func (c *Config) GetEffectiveOutput() string {
 	if c.Output != "" {
 		return c.Output
 	}
-	return "stdout"
+	return outputStdout
 }
 
 // ShouldAuditAuthentication returns true if authentication events should be audited.

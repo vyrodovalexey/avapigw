@@ -18,6 +18,16 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Resource kind constants.
+const (
+	KindAPIRoute       = "APIRoute"
+	KindGRPCRoute      = "GRPCRoute"
+	KindBackend        = "Backend"
+	KindGRPCBackend    = "GRPCBackend"
+	KindGraphQLRoute   = "GraphQLRoute"
+	KindGraphQLBackend = "GraphQLBackend"
+)
+
 // controllerTracerName is the OpenTelemetry tracer name for controller operations.
 const controllerTracerName = "avapigw-operator/controller"
 
@@ -34,7 +44,7 @@ type Reconcilable interface {
 // ReconcileCallbacks provides resource-specific logic for the base reconciler.
 // Each controller implements this interface to supply its own reconcile/cleanup behavior.
 type ReconcileCallbacks struct {
-	// ResourceKind is the kind name for logging and metrics (e.g., "APIRoute").
+	// ResourceKind is the kind name for logging and metrics (e.g., KindAPIRoute).
 	ResourceKind string
 
 	// ControllerName is the controller name for metrics (e.g., "apiroute").
@@ -241,7 +251,7 @@ func baseHandleDeletion(
 // deletionMessage returns the appropriate deletion message for a resource kind.
 func deletionMessage(kind string) string {
 	switch kind {
-	case "Backend", "GRPCBackend", "GraphQLBackend":
+	case KindBackend, KindGRPCBackend, KindGraphQLBackend:
 		return MessageBackendDeleted
 	default:
 		return MessageRouteDeleted

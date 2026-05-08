@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// claimSub is the standard JWT "sub" (subject) claim name.
+const claimSub = "sub"
+
 // Claims represents JWT claims.
 type Claims struct {
 	// Standard claims
@@ -131,7 +134,7 @@ func (c *Claims) GetClaim(name string) (interface{}, bool) {
 	switch name {
 	case "iss":
 		return c.Issuer, c.Issuer != ""
-	case "sub":
+	case claimSub:
 		return c.Subject, c.Subject != ""
 	case "aud":
 		return []string(c.Audience), len(c.Audience) > 0
@@ -278,7 +281,7 @@ func parseStandardClaim(claims *Claims, key string, value interface{}) bool {
 			claims.Issuer = s
 		}
 		return true
-	case "sub":
+	case claimSub:
 		if s, ok := value.(string); ok {
 			claims.Subject = s
 		}

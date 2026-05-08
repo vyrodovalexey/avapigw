@@ -45,7 +45,7 @@ func (r *APIRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // callbacks returns the resource-specific callbacks for the base reconciler.
 func (r *APIRouteReconciler) callbacks() *ReconcileCallbacks {
 	return &ReconcileCallbacks{
-		ResourceKind:   "APIRoute",
+		ResourceKind:   KindAPIRoute,
 		ControllerName: "apiroute",
 		FinalizerName:  APIRouteFinalizerName,
 		NewResource: func() Reconcilable {
@@ -76,10 +76,10 @@ func (r *APIRouteReconciler) callbacks() *ReconcileCallbacks {
 			recorder.Event(resource, "Warning", EventReasonReconcileFailed, err.Error())
 		},
 		SetSuccessMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("APIRoute", resource.GetName(), resource.GetNamespace(), "Ready", 1)
+			metrics.SetResourceCondition(KindAPIRoute, resource.GetName(), resource.GetNamespace(), "Ready", 1)
 		},
 		SetFailureMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("APIRoute", resource.GetName(), resource.GetNamespace(), "Ready", 0)
+			metrics.SetResourceCondition(KindAPIRoute, resource.GetName(), resource.GetNamespace(), "Ready", 0)
 		},
 		IsApplied: func(_ context.Context, resource Reconcilable) bool {
 			if r.GRPCServer == nil {

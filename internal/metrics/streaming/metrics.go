@@ -38,9 +38,16 @@ var (
 	grpcMetricsOnce     sync.Once
 )
 
-// defaultLabel is the label value used for pre-populating metrics
-// during Init().
-const defaultLabel = "default"
+// Metric constants.
+const (
+	defaultLabel     = "default"
+	namespaceGateway = "gateway"
+	subsystemWS      = "ws"
+	subsystemGRPCStr = "grpc_stream"
+	labelBackend     = "backend"
+	labelMethod      = "method"
+	labelRoute       = "route"
+)
 
 // sizeBuckets defines histogram buckets for message sizes:
 // 100, 1K, 10K, 100K, 1M, 10M, 100M.
@@ -52,75 +59,75 @@ func NewWSMetrics() *WSMetrics {
 	return &WSMetrics{
 		ConnectionsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "ws",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemWS,
 				Name:      "connections_total",
 				Help: "Total number of WebSocket " +
 					"connections",
 			},
-			[]string{"route", "backend"},
+			[]string{labelRoute, labelBackend},
 		),
 		ConnectionsActive: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "gateway",
-				Subsystem: "ws",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemWS,
 				Name:      "connections_active",
 				Help: "Number of active WebSocket " +
 					"connections",
 			},
-			[]string{"route", "backend"},
+			[]string{labelRoute, labelBackend},
 		),
 		MessagesSentTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "ws",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemWS,
 				Name:      "messages_sent_total",
 				Help: "Total number of WebSocket " +
 					"messages sent",
 			},
-			[]string{"route", "backend"},
+			[]string{labelRoute, labelBackend},
 		),
 		MessagesReceivedTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "ws",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemWS,
 				Name:      "messages_received_total",
 				Help: "Total number of WebSocket " +
 					"messages received",
 			},
-			[]string{"route", "backend"},
+			[]string{labelRoute, labelBackend},
 		),
 		ErrorsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "ws",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemWS,
 				Name:      "errors_total",
 				Help: "Total number of WebSocket " +
 					"errors by type",
 			},
-			[]string{"route", "backend", "error_type"},
+			[]string{labelRoute, labelBackend, "error_type"},
 		),
 		ConnectionDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "gateway",
-				Subsystem: "ws",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemWS,
 				Name:      "connection_duration_seconds",
 				Help: "Duration of WebSocket " +
 					"connections in seconds",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"route", "backend"},
+			[]string{labelRoute, labelBackend},
 		),
 		MessageSizeBytes: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "gateway",
-				Subsystem: "ws",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemWS,
 				Name:      "message_size_bytes",
 				Help: "WebSocket message size " +
 					"in bytes",
 				Buckets: sizeBuckets,
 			},
-			[]string{"route", "backend", "direction"},
+			[]string{labelRoute, labelBackend, "direction"},
 		),
 	}
 }
@@ -245,55 +252,55 @@ func NewGRPCStreamMetrics() *GRPCStreamMetrics {
 	return &GRPCStreamMetrics{
 		MessagesSentTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "grpc_stream",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemGRPCStr,
 				Name:      "messages_sent_total",
 				Help: "Total number of gRPC stream " +
 					"messages sent",
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		MessagesReceivedTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "grpc_stream",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemGRPCStr,
 				Name:      "messages_received_total",
 				Help: "Total number of gRPC stream " +
 					"messages received",
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		Active: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "gateway",
-				Subsystem: "grpc_stream",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemGRPCStr,
 				Name:      "active",
 				Help: "Number of active gRPC " +
 					"streams",
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		DurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "gateway",
-				Subsystem: "grpc_stream",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemGRPCStr,
 				Name:      "duration_seconds",
 				Help: "Duration of gRPC streams " +
 					"in seconds",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"route", "method"},
+			[]string{labelRoute, labelMethod},
 		),
 		MessageSizeBytes: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "gateway",
-				Subsystem: "grpc_stream",
+				Namespace: namespaceGateway,
+				Subsystem: subsystemGRPCStr,
 				Name:      "message_size_bytes",
 				Help: "gRPC stream message size " +
 					"in bytes",
 				Buckets: sizeBuckets,
 			},
-			[]string{"route", "method", "direction"},
+			[]string{labelRoute, labelMethod, "direction"},
 		),
 	}
 }

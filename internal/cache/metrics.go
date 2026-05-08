@@ -8,6 +8,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "cache"
+	labelBackend     = "backend"
+)
+
 // CacheMetrics holds Prometheus metrics for cache operations.
 type CacheMetrics struct {
 	hitsTotal         *prometheus.CounterVec
@@ -68,48 +75,48 @@ func newCacheMetrics() *CacheMetrics {
 	return &CacheMetrics{
 		hitsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "cache",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "hits_total",
 				Help: "Total number of " +
 					"cache hits",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		missesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "cache",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "misses_total",
 				Help: "Total number of " +
 					"cache misses",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		evictionsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "cache",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "evictions_total",
 				Help: "Total number of " +
 					"cache evictions",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		sizeGauge: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "gateway",
-				Subsystem: "cache",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "size",
 				Help: "Current number of " +
 					"items in cache",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		operationDuration: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "gateway",
-				Subsystem: "cache",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name: "operation_duration" +
 					"_seconds",
 				Help: "Duration of cache " +
@@ -119,17 +126,17 @@ func newCacheMetrics() *CacheMetrics {
 					.01, .025, .05, .1,
 				},
 			},
-			[]string{"backend", "operation"},
+			[]string{labelBackend, "operation"},
 		),
 		errorsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "gateway",
-				Subsystem: "cache",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "errors_total",
 				Help: "Total number of " +
 					"cache errors",
 			},
-			[]string{"backend", "operation"},
+			[]string{labelBackend, "operation"},
 		),
 	}
 }

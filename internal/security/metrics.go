@@ -22,6 +22,9 @@ func GetSecurityMetrics() *Metrics {
 	return defaultSecurityMetrics
 }
 
+// subsystemSecurity is the Prometheus subsystem name for security metrics.
+const subsystemSecurity = "security"
+
 // Metrics contains security metrics.
 type Metrics struct {
 	// headersApplied counts the number of times security headers were applied.
@@ -43,7 +46,7 @@ func NewMetrics(namespace string) *Metrics {
 		headersApplied: promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
-				Subsystem: "security",
+				Subsystem: subsystemSecurity,
 				Name:      "headers_applied_total",
 				Help:      "Total number of times security headers were applied",
 			},
@@ -52,7 +55,7 @@ func NewMetrics(namespace string) *Metrics {
 		hstsApplied: promauto.NewCounter(
 			prometheus.CounterOpts{
 				Namespace: namespace,
-				Subsystem: "security",
+				Subsystem: subsystemSecurity,
 				Name:      "hsts_applied_total",
 				Help:      "Total number of times HSTS header was applied",
 			},
@@ -60,7 +63,7 @@ func NewMetrics(namespace string) *Metrics {
 		cspApplied: promauto.NewCounter(
 			prometheus.CounterOpts{
 				Namespace: namespace,
-				Subsystem: "security",
+				Subsystem: subsystemSecurity,
 				Name:      "csp_applied_total",
 				Help:      "Total number of times CSP header was applied",
 			},
@@ -68,7 +71,7 @@ func NewMetrics(namespace string) *Metrics {
 		cspViolations: promauto.NewCounterVec(
 			prometheus.CounterOpts{
 				Namespace: namespace,
-				Subsystem: "security",
+				Subsystem: subsystemSecurity,
 				Name:      "csp_violations_total",
 				Help:      "Total number of CSP violations reported",
 			},

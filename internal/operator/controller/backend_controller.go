@@ -45,7 +45,7 @@ func (r *BackendReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 // callbacks returns the resource-specific callbacks for the base reconciler.
 func (r *BackendReconciler) callbacks() *ReconcileCallbacks {
 	return &ReconcileCallbacks{
-		ResourceKind:   "Backend",
+		ResourceKind:   KindBackend,
 		ControllerName: "backend",
 		FinalizerName:  BackendFinalizerName,
 		NewResource: func() Reconcilable {
@@ -82,12 +82,12 @@ func (r *BackendReconciler) callbacks() *ReconcileCallbacks {
 			recorder.Event(resource, "Warning", EventReasonReconcileFailed, err.Error())
 		},
 		SetSuccessMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Ready", 1)
-			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Healthy", 1)
+			metrics.SetResourceCondition(KindBackend, resource.GetName(), resource.GetNamespace(), "Ready", 1)
+			metrics.SetResourceCondition(KindBackend, resource.GetName(), resource.GetNamespace(), "Healthy", 1)
 		},
 		SetFailureMetrics: func(metrics *ControllerMetrics, resource Reconcilable) {
-			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Ready", 0)
-			metrics.SetResourceCondition("Backend", resource.GetName(), resource.GetNamespace(), "Healthy", 0)
+			metrics.SetResourceCondition(KindBackend, resource.GetName(), resource.GetNamespace(), "Ready", 0)
+			metrics.SetResourceCondition(KindBackend, resource.GetName(), resource.GetNamespace(), "Healthy", 0)
 		},
 		IsApplied: func(_ context.Context, resource Reconcilable) bool {
 			if r.GRPCServer == nil {

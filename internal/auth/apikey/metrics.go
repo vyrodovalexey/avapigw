@@ -8,6 +8,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// subsystemAPIKey is the Prometheus subsystem name for API key metrics.
+const subsystemAPIKey = "apikey"
+
 // Metrics holds Prometheus metrics for API key operations.
 type Metrics struct {
 	validationTotal    *prometheus.CounterVec
@@ -60,7 +63,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.validationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "apikey",
+			Subsystem: subsystemAPIKey,
 			Name:      "validation_total",
 			Help:      "Total number of API key validation attempts",
 		},
@@ -70,7 +73,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.validationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "apikey",
+			Subsystem: subsystemAPIKey,
 			Name:      "validation_duration_seconds",
 			Help:      "API key validation duration in seconds",
 			Buckets:   []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
@@ -81,7 +84,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.cacheHits = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "apikey",
+			Subsystem: subsystemAPIKey,
 			Name:      "cache_hits_total",
 			Help:      "Total number of API key cache hits",
 		},
@@ -90,7 +93,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.cacheMisses = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "apikey",
+			Subsystem: subsystemAPIKey,
 			Name:      "cache_misses_total",
 			Help:      "Total number of API key cache misses",
 		},

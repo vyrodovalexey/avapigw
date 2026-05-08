@@ -492,7 +492,7 @@ deps:
 ## tools: Install development tools
 tools:
 	@echo "==> Installing development tools..."
-	$(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@v2.11.4
+	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 	$(GO) install golang.org/x/vuln/cmd/govulncheck@latest
 	$(GO) install github.com/wadey/gocovmerge@latest
 	@echo "==> Development tools installed"

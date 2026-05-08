@@ -27,6 +27,12 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
+// jsonKeyErrors is the JSON key for error responses.
+const jsonKeyErrors = "errors"
+
+// jsonKeyMessage is the JSON key for message fields.
+const jsonKeyMessage = "message"
+
 // configField is an atomic pointer for lock-free config access.
 // It eliminates the race condition where readers calling Config()
 // with RLock could see stale data after Reload() swaps the pointer.
@@ -423,13 +429,13 @@ func (g *Gateway) handleGraphQL(c *gin.Context) {
 	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, maxSize+1))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{{"message": "failed to read request body"}},
+			jsonKeyErrors: []gin.H{{jsonKeyMessage: "failed to read request body"}},
 		})
 		return
 	}
 	if int64(len(bodyBytes)) > maxSize {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-			"errors": []gin.H{{"message": "request body too large"}},
+			jsonKeyErrors: []gin.H{{jsonKeyMessage: "request body too large"}},
 		})
 		return
 	}
@@ -438,13 +444,13 @@ func (g *Gateway) handleGraphQL(c *gin.Context) {
 	var gqlReq graphqlrouter.GraphQLRequest
 	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{{"message": fmt.Sprintf("invalid GraphQL request: %s", err.Error())}},
+			jsonKeyErrors: []gin.H{{jsonKeyMessage: fmt.Sprintf("invalid GraphQL request: %s", err.Error())}},
 		})
 		return
 	}
 	if gqlReq.Query == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{{"message": "GraphQL query is empty"}},
+			jsonKeyErrors: []gin.H{{jsonKeyMessage: "GraphQL query is empty"}},
 		})
 		return
 	}
@@ -456,7 +462,7 @@ func (g *Gateway) handleGraphQL(c *gin.Context) {
 	match := g.graphqlRouter.Match(c.Request, &gqlReq)
 	if match == nil {
 		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"message": "no matching GraphQL route"}},
+			jsonKeyErrors: []gin.H{{jsonKeyMessage: "no matching GraphQL route"}},
 		})
 		return
 	}
@@ -469,7 +475,7 @@ func (g *Gateway) handleGraphQL(c *gin.Context) {
 			observability.Error(err),
 		)
 		c.JSON(http.StatusBadGateway, gin.H{
-			"errors": []gin.H{{"message": fmt.Sprintf("backend error: %s", err.Error())}},
+			jsonKeyErrors: []gin.H{{jsonKeyMessage: fmt.Sprintf("backend error: %s", err.Error())}},
 		})
 		return
 	}

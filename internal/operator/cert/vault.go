@@ -78,7 +78,7 @@ func newVaultAuthMetricsWithFactory(factory promauto.Factory) *vaultAuthMetrics 
 	return &vaultAuthMetrics{
 		authRetriesTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
+				Namespace: metricsNamespace,
 				Subsystem: "vault",
 				Name:      "auth_retries_total",
 				Help:      "Total number of Vault authentication retry attempts",

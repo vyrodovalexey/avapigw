@@ -7,6 +7,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric/label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "grpc_proxy"
+	labelTarget      = "target"
+	labelMethod      = "method"
+	labelRoute       = "route"
+)
+
 // grpcProxyMetrics contains Prometheus metrics for gRPC proxy operations.
 type grpcProxyMetrics struct {
 	poolSize          prometheus.Gauge
@@ -59,52 +68,52 @@ func InitGRPCProxyMetrics(registry *prometheus.Registry) {
 		grpcProxyMetricsInstance = &grpcProxyMetrics{
 			poolSize: factory.NewGauge(
 				prometheus.GaugeOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "pool_connections",
 					Help:      "Current number of connections in the gRPC connection pool",
 				},
 			),
 			connectionCreated: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "connections_created_total",
 					Help:      "Total number of gRPC connections created",
 				},
-				[]string{"target"},
+				[]string{labelTarget},
 			),
 			connectionErrors: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "connection_errors_total",
 					Help:      "Total number of gRPC connection errors",
 				},
-				[]string{"target", "error_type"},
+				[]string{labelTarget, "error_type"},
 			),
 			connectionClosed: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "connections_closed_total",
 					Help:      "Total number of gRPC connections closed",
 				},
-				[]string{"target"},
+				[]string{labelTarget},
 			),
 			directRequests: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "direct_requests_total",
 					Help:      "Total number of gRPC proxy direct requests",
 				},
-				[]string{"method", "result"},
+				[]string{labelMethod, "result"},
 			),
 			directDuration: factory.NewHistogramVec(
 				prometheus.HistogramOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "direct_duration_seconds",
 					Help:      "Duration of gRPC proxy direct operations in seconds",
 					Buckets: []float64{
@@ -113,108 +122,108 @@ func InitGRPCProxyMetrics(registry *prometheus.Registry) {
 						1, 2.5, 5, 10,
 					},
 				},
-				[]string{"method"},
+				[]string{labelMethod},
 			),
 			requestSize: factory.NewHistogramVec(
 				prometheus.HistogramOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "request_size_bytes",
 					Help:      "Size of gRPC proxy request messages in bytes",
 					Buckets:   prometheus.ExponentialBuckets(64, 4, 10),
 				},
-				[]string{"method"},
+				[]string{labelMethod},
 			),
 			responseSize: factory.NewHistogramVec(
 				prometheus.HistogramOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "response_size_bytes",
 					Help:      "Size of gRPC proxy response messages in bytes",
 					Buckets:   prometheus.ExponentialBuckets(64, 4, 10),
 				},
-				[]string{"method"},
+				[]string{labelMethod},
 			),
 			streamMsgSent: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "stream_messages_sent_total",
 					Help:      "Total number of gRPC stream messages sent to backend",
 				},
-				[]string{"method"},
+				[]string{labelMethod},
 			),
 			streamMsgReceived: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "stream_messages_received_total",
 					Help:      "Total number of gRPC stream messages received from backend",
 				},
-				[]string{"method"},
+				[]string{labelMethod},
 			),
 			backendSelections: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "backend_selections_total",
 					Help:      "Total number of backend selection decisions",
 				},
-				[]string{"route", "target", "strategy"},
+				[]string{labelRoute, labelTarget, "strategy"},
 			),
 			timeoutOccurrences: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "timeout_total",
 					Help:      "Total number of gRPC proxy timeout occurrences",
 				},
-				[]string{"method"},
+				[]string{labelMethod},
 			),
 			rateLimitAllowed: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "rate_limit_allowed_total",
 					Help:      "Total number of gRPC requests allowed by per-route rate limiting",
 				},
-				[]string{"route"},
+				[]string{labelRoute},
 			),
 			rateLimitRejected: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "rate_limit_rejected_total",
 					Help:      "Total number of gRPC requests rejected by per-route rate limiting",
 				},
-				[]string{"route"},
+				[]string{labelRoute},
 			),
 			transformOperations: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "transform_operations_total",
 					Help:      "Total number of gRPC proxy transform operations",
 				},
-				[]string{"route", "direction", "type"},
+				[]string{labelRoute, "direction", "type"},
 			),
 			backendAuthSuccess: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "backend_auth_success_total",
 					Help:      "Total number of successful backend auth token injections",
 				},
-				[]string{"route", "auth_type"},
+				[]string{labelRoute, "auth_type"},
 			),
 			backendAuthFailure: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "grpc_proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "backend_auth_failure_total",
 					Help:      "Total number of failed backend auth token injections",
 				},
-				[]string{"route", "auth_type"},
+				[]string{labelRoute, "auth_type"},
 			),
 		}
 	})

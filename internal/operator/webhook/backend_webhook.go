@@ -14,6 +14,9 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// tokenSourceStatic is the static token source type.
+const tokenSourceStatic = "static"
+
 // Compile-time assertion: BackendValidator must implement admission.Validator
 // for the typed *avapigwv1alpha1.Backend parameter.
 var _ admission.Validator[*avapigwv1alpha1.Backend] = (*BackendValidator)(nil)
@@ -231,7 +234,7 @@ func (v *BackendValidator) validate(backend *avapigwv1alpha1.Backend) (admission
 
 	// Security warning for static JWT tokens
 	if spec.Authentication != nil && spec.Authentication.JWT != nil &&
-		spec.Authentication.JWT.Enabled && spec.Authentication.JWT.TokenSource == "static" {
+		spec.Authentication.JWT.Enabled && spec.Authentication.JWT.TokenSource == tokenSourceStatic {
 		warnings = append(warnings,
 			"SECURITY WARNING: Static JWT tokens are configured. "+
 				"Static tokens pose security risks as they cannot be rotated easily "+

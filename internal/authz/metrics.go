@@ -6,6 +6,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric label constants.
+const (
+	subsystemAuthz = "authz"
+	labelEngine    = "engine"
+)
+
 // Metrics contains authorization metrics.
 type Metrics struct {
 	registerer prometheus.Registerer
@@ -61,28 +67,28 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.evaluationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "evaluation_total",
 			Help:      "Total number of authorization evaluations",
 		},
-		[]string{"engine", "result"},
+		[]string{labelEngine, "result"},
 	)
 
 	m.evaluationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "evaluation_duration_seconds",
 			Help:      "Authorization evaluation duration in seconds",
 			Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1},
 		},
-		[]string{"engine"},
+		[]string{labelEngine},
 	)
 
 	m.decisionTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "decision_total",
 			Help:      "Total number of authorization decisions",
 		},
@@ -92,7 +98,7 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.cacheHits = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "cache_hits_total",
 			Help:      "Total number of authorization cache hits",
 		},
@@ -101,7 +107,7 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.cacheMisses = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "cache_misses_total",
 			Help:      "Total number of authorization cache misses",
 		},
@@ -110,7 +116,7 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.externalRequestTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "external_request_total",
 			Help:      "Total number of external authorization requests",
 		},
@@ -120,7 +126,7 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.externalRequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "external_request_duration_seconds",
 			Help:      "External authorization request duration in seconds",
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
@@ -131,11 +137,11 @@ func NewMetricsWithRegisterer(namespace string, registerer prometheus.Registerer
 	m.policyCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: namespace,
-			Subsystem: "authz",
+			Subsystem: subsystemAuthz,
 			Name:      "policy_count",
 			Help:      "Number of loaded authorization policies",
 		},
-		[]string{"engine"},
+		[]string{labelEngine},
 	)
 
 	// Register all metrics with the provided registerer, ignoring duplicates.
@@ -164,19 +170,19 @@ func (m *Metrics) Init() {
 	if m == nil {
 		return
 	}
-	for _, engine := range []string{"rbac", "abac", "external", "combined"} {
-		for _, result := range []string{"allowed", "denied", "error"} {
+	for _, engine := range []string{engineRBAC + "", "" + engineABAC, "external", "combined"} {
+		for _, result := range []string{resultAllowed, resultDenied, "error"} {
 			m.evaluationTotal.WithLabelValues(engine, result)
 		}
 		m.evaluationDuration.WithLabelValues(engine)
 	}
-	for _, decision := range []string{"allowed", "denied"} {
+	for _, decision := range []string{resultAllowed + "", "" + resultDenied} {
 		m.decisionTotal.WithLabelValues(decision, "default")
 	}
-	for _, engine := range []string{"rbac", "abac"} {
+	for _, engine := range []string{engineRBAC + "", "" + engineABAC} {
 		m.policyCount.WithLabelValues(engine)
 	}
-	for _, result := range []string{"allowed", "denied", "error"} {
+	for _, result := range []string{resultAllowed, resultDenied, "error"} {
 		m.externalRequestTotal.WithLabelValues("opa", result)
 	}
 	m.externalRequestDuration.WithLabelValues("opa")

@@ -8,6 +8,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric label constants.
+const (
+	subsystemJWT   = "jwt"
+	labelAlgorithm = "algorithm"
+	labelStatus    = "status"
+)
+
 // Metrics holds Prometheus metrics for JWT operations.
 type Metrics struct {
 	validationTotal     *prometheus.CounterVec
@@ -40,9 +47,9 @@ func GetSharedMetrics() *Metrics {
 // least once. This method is idempotent and safe to call multiple times.
 func (m *Metrics) Init() {
 	algorithms := []string{
-		"RS256", "RS384", "RS512",
-		"ES256", "ES384", "ES512",
-		"HS256", "HS384", "HS512",
+		AlgRS256, AlgRS384, AlgRS512,
+		AlgES256, AlgES384, AlgES512,
+		AlgHS256, AlgHS384, AlgHS512,
 	}
 	for _, status := range []string{"success", "error"} {
 		for _, algorithm := range algorithms {
@@ -70,49 +77,49 @@ func NewMetrics(namespace string) *Metrics {
 	m.validationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "validation_total",
 			Help:      "Total number of JWT validation attempts",
 		},
-		[]string{"status", "algorithm"},
+		[]string{labelStatus, labelAlgorithm},
 	)
 
 	m.validationDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "validation_duration_seconds",
 			Help:      "JWT validation duration in seconds",
 			Buckets:   []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
 		},
-		[]string{"status", "algorithm"},
+		[]string{labelStatus, labelAlgorithm},
 	)
 
 	m.signingTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "signing_total",
 			Help:      "Total number of JWT signing attempts",
 		},
-		[]string{"status", "algorithm"},
+		[]string{labelStatus, labelAlgorithm},
 	)
 
 	m.signingDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "signing_duration_seconds",
 			Help:      "JWT signing duration in seconds",
 			Buckets:   []float64{.0001, .0005, .001, .005, .01, .025, .05, .1, .25, .5, 1},
 		},
-		[]string{"status", "algorithm"},
+		[]string{labelStatus, labelAlgorithm},
 	)
 
 	m.cacheHits = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "cache_hits_total",
 			Help:      "Total number of JWT cache hits",
 		},
@@ -121,7 +128,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.cacheMisses = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "cache_misses_total",
 			Help:      "Total number of JWT cache misses",
 		},
@@ -130,17 +137,17 @@ func NewMetrics(namespace string) *Metrics {
 	m.jwksRefreshTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "jwks_refresh_total",
 			Help:      "Total number of JWKS refresh attempts",
 		},
-		[]string{"status"},
+		[]string{labelStatus},
 	)
 
 	m.jwksRefreshDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "jwt",
+			Subsystem: subsystemJWT,
 			Name:      "jwks_refresh_duration_seconds",
 			Help:      "JWKS refresh duration in seconds",
 			Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10},

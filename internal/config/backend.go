@@ -150,7 +150,7 @@ func (c *BackendTLSConfig) validateMutualTLS() error {
 // validateVersions validates TLS version configuration.
 func (c *BackendTLSConfig) validateVersions() error {
 	validVersions := map[string]bool{
-		"": true, "TLS10": true, "TLS11": true, "TLS12": true, "TLS13": true,
+		"": true, TLSVersion10: true, TLSVersion11: true, TLSVersion12: true, TLSVersion13: true,
 	}
 	if !validVersions[c.MinVersion] {
 		return fmt.Errorf("invalid minVersion: %s", c.MinVersion)

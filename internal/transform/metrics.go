@@ -8,6 +8,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "transform"
+	labelDirection   = "direction"
+)
+
 // TransformMetrics contains Prometheus metrics for transform operations.
 type TransformMetrics struct {
 	operationsTotal   *prometheus.CounterVec
@@ -26,17 +33,17 @@ func GetTransformMetrics() *TransformMetrics {
 		transformMetricsInstance = &TransformMetrics{
 			operationsTotal: promauto.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "transform",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "operations_total",
 					Help:      "Total number of transform operations",
 				},
-				[]string{"direction", "result"},
+				[]string{labelDirection, "result"},
 			),
 			operationDuration: promauto.NewHistogramVec(
 				prometheus.HistogramOpts{
-					Namespace: "gateway",
-					Subsystem: "transform",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "operation_duration_seconds",
 					Help:      "Duration of transform operations in seconds",
 					Buckets: []float64{
@@ -44,16 +51,16 @@ func GetTransformMetrics() *TransformMetrics {
 						.01, .025, .05, .1,
 					},
 				},
-				[]string{"direction"},
+				[]string{labelDirection},
 			),
 			errorsTotal: promauto.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "transform",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "errors_total",
 					Help:      "Total number of transform errors",
 				},
-				[]string{"direction", "error_type"},
+				[]string{labelDirection, "error_type"},
 			),
 		}
 	})

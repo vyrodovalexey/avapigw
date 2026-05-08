@@ -9,6 +9,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric label constants.
+const labelResource = "resource"
+
 // WebhookMetrics holds Prometheus metrics for webhook operations.
 type WebhookMetrics struct {
 	validationsTotal   *prometheus.CounterVec
@@ -47,18 +50,18 @@ func newWebhookMetricsWithFactory(factory promauto.Factory) *WebhookMetrics {
 	return &WebhookMetrics{
 		validationsTotal: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name:      "validations_total",
 				Help: "Total number of " +
 					"webhook validations",
 			},
-			[]string{"resource", "operation", "result"},
+			[]string{labelResource, "operation", "result"},
 		),
 		validationDuration: factory.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name: "validation_duration" +
 					"_seconds",
 				Help: "Duration of webhook " +
@@ -68,18 +71,18 @@ func newWebhookMetricsWithFactory(factory promauto.Factory) *WebhookMetrics {
 					.05, .1, .25, .5, 1,
 				},
 			},
-			[]string{"resource", "operation"},
+			[]string{labelResource, "operation"},
 		),
 		validationWarnings: factory.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "avapigw_operator",
-				Subsystem: "webhook",
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
 				Name: "validation_warnings" +
 					"_total",
 				Help: "Total number of " +
 					"webhook validation warnings",
 			},
-			[]string{"resource"},
+			[]string{labelResource},
 		),
 	}
 }

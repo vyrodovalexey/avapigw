@@ -8,6 +8,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Metric/label constants.
+const (
+	metricsNamespace = "gateway"
+	metricsSubsystem = "proxy"
+	labelBackend     = "backend"
+)
+
 // proxyMetrics contains Prometheus metrics for proxy operations.
 type proxyMetrics struct {
 	errorsTotal        *prometheus.CounterVec
@@ -36,18 +43,18 @@ func initProxyMetrics(registry *prometheus.Registry) {
 		proxyMetricsInstance = &proxyMetrics{
 			errorsTotal: factory.NewCounterVec(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "errors_total",
 					Help: "Total number of " +
 						"proxy errors",
 				},
-				[]string{"backend", "error_type"},
+				[]string{labelBackend, "error_type"},
 			),
 			backendDuration: factory.NewHistogramVec(
 				prometheus.HistogramOpts{
-					Namespace: "gateway",
-					Subsystem: "proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name: "backend_duration" +
 						"_seconds",
 					Help: "Duration of backend " +
@@ -58,12 +65,12 @@ func initProxyMetrics(registry *prometheus.Registry) {
 						1, 2.5, 5, 10,
 					},
 				},
-				[]string{"backend"},
+				[]string{labelBackend},
 			),
 			cryptoRandFailures: factory.NewCounter(
 				prometheus.CounterOpts{
-					Namespace: "gateway",
-					Subsystem: "proxy",
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
 					Name:      "crypto_rand_failures_total",
 					Help:      "Total number of crypto/rand failures with math/rand fallback",
 				},

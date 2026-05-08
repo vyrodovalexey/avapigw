@@ -198,9 +198,9 @@ func (l *logger) createWriter() (io.Writer, io.Closer, error) {
 	output := l.config.GetEffectiveOutput()
 
 	switch output {
-	case "stdout":
+	case outputStdout:
 		return os.Stdout, nil, nil
-	case "stderr":
+	case outputStderr:
 		return os.Stderr, nil, nil
 	default:
 		// Assume it's a file path - path comes from trusted configuration

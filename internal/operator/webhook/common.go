@@ -11,6 +11,18 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 )
 
+// Policy constants.
+const policyAllow = "allow"
+
+// policyDeny is the deny policy effect.
+const policyDeny = "deny"
+
+// TLS version constants.
+const (
+	tlsVersion12 = "TLS12"
+	tlsVersion13 = "TLS13"
+)
+
 // Validation boundary constants for webhook validation.
 const (
 	// MinPort is the minimum valid port number.
@@ -89,7 +101,7 @@ func validateRateLimit(rl *avapigwv1alpha1.RateLimitConfig) error {
 func validateCORS(cors *avapigwv1alpha1.CORSConfig) error {
 	// Validate allowed methods
 	validMethods := map[string]bool{
-		"GET": true, "POST": true, "PUT": true, "DELETE": true,
+		"GET": true, "POST": true, "PUT": true, methodDELETE: true,
 		"PATCH": true, "HEAD": true, "OPTIONS": true,
 	}
 	for _, method := range cors.AllowMethods {
@@ -132,7 +144,7 @@ func validateMaxSessions(ms *avapigwv1alpha1.MaxSessionsConfig) error {
 // validateRouteTLS validates route TLS configuration.
 func validateRouteTLS(tls *avapigwv1alpha1.RouteTLSConfig) error {
 	// Validate TLS version
-	validVersions := map[string]bool{"TLS12": true, "TLS13": true, "": true}
+	validVersions := map[string]bool{tlsVersion12: true, tlsVersion13: true, "": true}
 	if !validVersions[tls.MinVersion] {
 		return fmt.Errorf("tls.minVersion must be 'TLS12' or 'TLS13'")
 	}
@@ -141,7 +153,7 @@ func validateRouteTLS(tls *avapigwv1alpha1.RouteTLSConfig) error {
 	}
 
 	// Validate min <= max
-	if tls.MinVersion == "TLS13" && tls.MaxVersion == "TLS12" {
+	if tls.MinVersion == tlsVersion13 && tls.MaxVersion == tlsVersion12 {
 		return fmt.Errorf("tls.minVersion cannot be greater than tls.maxVersion")
 	}
 
@@ -180,7 +192,7 @@ func validateBackendTLS(tls *avapigwv1alpha1.BackendTLSConfig) error {
 	}
 
 	// Validate TLS version
-	validVersions := map[string]bool{"TLS12": true, "TLS13": true, "": true}
+	validVersions := map[string]bool{tlsVersion12: true, tlsVersion13: true, "": true}
 	if !validVersions[tls.MinVersion] {
 		return fmt.Errorf("tls.minVersion must be 'TLS12' or 'TLS13'")
 	}
@@ -189,7 +201,7 @@ func validateBackendTLS(tls *avapigwv1alpha1.BackendTLSConfig) error {
 	}
 
 	// Validate min <= max
-	if tls.MinVersion == "TLS13" && tls.MaxVersion == "TLS12" {
+	if tls.MinVersion == tlsVersion13 && tls.MaxVersion == tlsVersion12 {
 		return fmt.Errorf("tls.minVersion cannot be greater than tls.maxVersion")
 	}
 
@@ -623,7 +635,7 @@ func validateAuthorization(authz *avapigwv1alpha1.AuthorizationConfig) error {
 
 	// Validate default policy
 	if authz.DefaultPolicy != "" {
-		validPolicies := map[string]bool{"allow": true, "deny": true}
+		validPolicies := map[string]bool{policyAllow: true, policyDeny: true}
 		if !validPolicies[authz.DefaultPolicy] {
 			return fmt.Errorf("authorization.defaultPolicy must be 'allow' or 'deny'")
 		}
@@ -678,7 +690,7 @@ func validateRBACConfig(rbac *avapigwv1alpha1.RBACConfig) error {
 
 		// Validate effect if specified
 		if policy.Effect != "" {
-			validEffects := map[string]bool{"allow": true, "deny": true}
+			validEffects := map[string]bool{policyAllow: true, policyDeny: true}
 			if !validEffects[policy.Effect] {
 				return fmt.Errorf("authorization.rbac.policies[%d].effect must be 'allow' or 'deny'", i)
 			}
@@ -710,7 +722,7 @@ func validateABACConfig(abac *avapigwv1alpha1.ABACConfig) error {
 
 		// Validate effect if specified
 		if policy.Effect != "" {
-			validEffects := map[string]bool{"allow": true, "deny": true}
+			validEffects := map[string]bool{policyAllow: true, policyDeny: true}
 			if !validEffects[policy.Effect] {
 				return fmt.Errorf("authorization.abac.policies[%d].effect must be 'allow' or 'deny'", i)
 			}

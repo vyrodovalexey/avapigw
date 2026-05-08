@@ -16,6 +16,8 @@ const (
 	namespace    = "gateway"
 	subsystem    = "backend"
 	defaultLabel = "default"
+	labelBackend = "backend"
+	labelMethod  = "method"
 )
 
 // BackendMetrics holds all backend-level Prometheus metrics.
@@ -70,7 +72,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of requests " +
 					"sent to backend",
 			},
-			[]string{"backend", "method", "status_code"},
+			[]string{labelBackend, labelMethod, "status_code"},
 		),
 		ConnectionsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -80,7 +82,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of connections " +
 					"established to backend",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		ConnectionErrorsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -90,7 +92,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of connection " +
 					"errors by type",
 			},
-			[]string{"backend", "error_type"},
+			[]string{labelBackend, "error_type"},
 		),
 		ResponseDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -101,7 +103,7 @@ func NewBackendMetrics() *BackendMetrics {
 					"response in seconds",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"backend", "method", "status_code"},
+			[]string{labelBackend, labelMethod, "status_code"},
 		),
 		ConnectDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -112,7 +114,7 @@ func NewBackendMetrics() *BackendMetrics {
 					"connection establishment",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		HealthCheckStatus: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -122,7 +124,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Backend health check status " +
 					"(1=healthy, 0=unhealthy)",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		HealthChecksTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -132,7 +134,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of health " +
 					"checks by result",
 			},
-			[]string{"backend", "result"},
+			[]string{labelBackend, "result"},
 		),
 		HealthCheckDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -144,7 +146,7 @@ func NewBackendMetrics() *BackendMetrics {
 					"execution",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		ConsecutiveFailures: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -154,7 +156,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Number of consecutive " +
 					"failures for backend",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		LBSelectionsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -164,7 +166,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of load balancer " +
 					"selections by algorithm",
 			},
-			[]string{"backend", "lb_algorithm"},
+			[]string{labelBackend, "lb_algorithm"},
 		),
 		LBWeight: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -174,7 +176,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Current load balancer weight " +
 					"for backend",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		PoolSize: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -194,7 +196,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Circuit breaker state " +
 					"(0=closed, 1=half-open, 2=open)",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		CircuitBreakerTripsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -204,7 +206,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of circuit " +
 					"breaker trips",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		CircuitBreakerRejectionsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -215,7 +217,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of requests " +
 					"rejected by circuit breaker",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		PoolIdleConnections: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -225,7 +227,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Number of idle connections " +
 					"in pool",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		PoolActiveConnections: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -235,7 +237,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Number of active connections " +
 					"in pool",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		PoolWaitTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -245,7 +247,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of pool " +
 					"wait events",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		PoolWaitDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -256,7 +258,7 @@ func NewBackendMetrics() *BackendMetrics {
 					"in seconds",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		PoolExhaustedTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -266,7 +268,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of pool " +
 					"exhaustion events",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 		CacheHitsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -275,7 +277,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Name:      "cache_hits_total",
 				Help:      "Total number of cache hits",
 			},
-			[]string{"backend", "method"},
+			[]string{labelBackend, labelMethod},
 		),
 		CacheMissesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -284,7 +286,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Name:      "cache_misses_total",
 				Help:      "Total number of cache misses",
 			},
-			[]string{"backend", "method"},
+			[]string{labelBackend, labelMethod},
 		),
 		CacheBypassTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -293,7 +295,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Name:      "cache_bypass_total",
 				Help:      "Total number of cache bypasses",
 			},
-			[]string{"backend", "method", "reason"},
+			[]string{labelBackend, labelMethod, "reason"},
 		),
 		RateLimitHitsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -302,7 +304,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Name:      "ratelimit_hits_total",
 				Help:      "Total number of rate limit hits",
 			},
-			[]string{"backend", "method", "consumer"},
+			[]string{labelBackend, labelMethod, "consumer"},
 		),
 		AuthFailuresTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -312,7 +314,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of " +
 					"authentication failures",
 			},
-			[]string{"backend", "method", "auth_type", "reason"},
+			[]string{labelBackend, labelMethod, "auth_type", "reason"},
 		),
 		AuthSuccessesTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -322,7 +324,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Total number of " +
 					"authentication successes",
 			},
-			[]string{"backend", "method", "auth_type"},
+			[]string{labelBackend, labelMethod, "auth_type"},
 		),
 		TLSHandshakeDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -334,7 +336,7 @@ func NewBackendMetrics() *BackendMetrics {
 					"by version",
 				Buckets: prometheus.DefBuckets,
 			},
-			[]string{"backend", "tls_version"},
+			[]string{labelBackend, "tls_version"},
 		),
 		TLSErrorsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -343,7 +345,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Name:      "tls_errors_total",
 				Help:      "Total number of TLS errors",
 			},
-			[]string{"backend", "error_type"},
+			[]string{labelBackend, "error_type"},
 		),
 		CertExpirySeconds: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -353,7 +355,7 @@ func NewBackendMetrics() *BackendMetrics {
 				Help: "Time until TLS certificate " +
 					"expiry in seconds",
 			},
-			[]string{"backend"},
+			[]string{labelBackend},
 		),
 	}
 }

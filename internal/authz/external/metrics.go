@@ -8,6 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// Metric label constants.
+const (
+	subsystemExternalAuthz = "external_authz"
+	labelType              = "type"
+)
+
 // Metrics holds Prometheus metrics for external authorization operations.
 type Metrics struct {
 	requestTotal    *prometheus.CounterVec
@@ -36,13 +42,13 @@ func GetSharedMetrics() *Metrics {
 // *Vec types only emit metric lines after WithLabelValues() is called at
 // least once. This method is idempotent and safe to call multiple times.
 func (m *Metrics) Init() {
-	for _, typ := range []string{"http", "grpc"} {
+	for _, typ := range []string{authzTypeHTTP, authzTypeGRPC} {
 		for _, decision := range []string{"allow", "deny"} {
 			m.requestTotal.WithLabelValues(typ, decision)
 			m.requestDuration.WithLabelValues(typ, decision)
 		}
 	}
-	for _, typ := range []string{"http", "grpc"} {
+	for _, typ := range []string{authzTypeHTTP, authzTypeGRPC} {
 		for _, reason := range []string{"timeout", "connection_error", "invalid_response"} {
 			m.errors.WithLabelValues(typ, reason)
 		}
@@ -62,28 +68,28 @@ func NewMetrics(namespace string) *Metrics {
 	m.requestTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "external_authz",
+			Subsystem: subsystemExternalAuthz,
 			Name:      "request_total",
 			Help:      "Total number of external authorization requests",
 		},
-		[]string{"type", "decision"},
+		[]string{labelType, "decision"},
 	)
 
 	m.requestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
-			Subsystem: "external_authz",
+			Subsystem: subsystemExternalAuthz,
 			Name:      "request_duration_seconds",
 			Help:      "External authorization request duration in seconds",
 			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		},
-		[]string{"type", "decision"},
+		[]string{labelType, "decision"},
 	)
 
 	m.cacheHits = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "external_authz",
+			Subsystem: subsystemExternalAuthz,
 			Name:      "cache_hits_total",
 			Help:      "Total number of cache hits",
 		},
@@ -92,7 +98,7 @@ func NewMetrics(namespace string) *Metrics {
 	m.cacheMisses = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "external_authz",
+			Subsystem: subsystemExternalAuthz,
 			Name:      "cache_misses_total",
 			Help:      "Total number of cache misses",
 		},
@@ -101,11 +107,11 @@ func NewMetrics(namespace string) *Metrics {
 	m.errors = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
-			Subsystem: "external_authz",
+			Subsystem: subsystemExternalAuthz,
 			Name:      "errors_total",
 			Help:      "Total number of errors",
 		},
-		[]string{"type", "reason"},
+		[]string{labelType, "reason"},
 	)
 
 	// Register all metrics
