@@ -3,7 +3,7 @@ module github.com/vyrodovalexey/avapigw
 go 1.26.3
 
 require (
-	github.com/alicebob/miniredis/v2 v2.37.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getkin/kin-openapi v0.138.0
 	github.com/gin-gonic/gin v1.12.0
