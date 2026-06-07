@@ -65,6 +65,9 @@ COVERAGE_MERGED := $(COVERAGE_DIR)/merged.out
 OPERATOR_BINARY_NAME := operator
 OPERATOR_CMD_DIR := cmd/operator
 OPERATOR_DOCKER_IMAGE ?= $(DOCKER_REGISTRY)/avapigw/avapigw-operator
+# Pin controller-gen to the version used to generate committed manifests to
+# avoid spurious drift in the controller-gen.kubebuilder.io/version annotation.
+CONTROLLER_GEN_VERSION ?= v0.20.1
 CONTROLLER_GEN := $(shell which controller-gen 2>/dev/null || echo "$(shell go env GOPATH)/bin/controller-gen")
 
 # Test environment variables
@@ -93,6 +96,7 @@ TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avap
         perf-setup-vault-k8s perf-verify-vault-k8s \
         perf-test-ingress \
         ci help version \
+        controller-gen \
         build-operator operator-generate operator-manifests operator-install-crds \
         operator-docker-build operator-docker-push operator-deploy operator-undeploy \
         test-operator-unit test-operator-functional test-operator-integration \
@@ -490,12 +494,18 @@ deps:
 	@echo "==> Dependencies installed"
 
 ## tools: Install development tools
-tools:
+tools: controller-gen
 	@echo "==> Installing development tools..."
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 	$(GO) install golang.org/x/vuln/cmd/govulncheck@latest
 	$(GO) install github.com/wadey/gocovmerge@latest
 	@echo "==> Development tools installed"
+
+## controller-gen: Install controller-gen at the pinned version
+controller-gen:
+	@echo "==> Installing controller-gen $(CONTROLLER_GEN_VERSION)..."
+	$(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
+	@echo "==> controller-gen installed"
 
 ## generate: Generate code (mocks, etc.)
 generate:

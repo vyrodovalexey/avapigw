@@ -19,6 +19,8 @@
 #   --vault-token=<token> Vault root token (default: myroot)
 #   --namespace=<ns>      K8s namespace (default: avapigw-test)
 #   --sa-name=<name>      Service account name (default: avapigw)
+#   --operator-sa-name=<name>  Operator service account name (default: avapigw-operator)
+#   --operator-role=<name>     Operator Vault auth role name (default: avapigw-operator)
 #   --verify              Only verify setup, don't configure
 #   --clean               Remove configuration
 #   --setup-pki           Also configure PKI engine with test-role
@@ -43,6 +45,8 @@ VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
 VAULT_TOKEN="${VAULT_TOKEN:-myroot}"
 K8S_NAMESPACE="${K8S_NAMESPACE:-avapigw-test}"
 SA_NAME="${SA_NAME:-avapigw}"
+OPERATOR_SA_NAME="${OPERATOR_SA_NAME:-avapigw-operator}"
+OPERATOR_ROLE="${OPERATOR_ROLE:-avapigw-operator}"
 VERIFY_ONLY=false
 CLEAN=false
 SETUP_PKI=false
@@ -54,6 +58,8 @@ while [[ $# -gt 0 ]]; do
         --vault-token=*) VAULT_TOKEN="${1#*=}"; shift ;;
         --namespace=*) K8S_NAMESPACE="${1#*=}"; shift ;;
         --sa-name=*) SA_NAME="${1#*=}"; shift ;;
+        --operator-sa-name=*) OPERATOR_SA_NAME="${1#*=}"; shift ;;
+        --operator-role=*) OPERATOR_ROLE="${1#*=}"; shift ;;
         --verify) VERIFY_ONLY=true; shift ;;
         --clean) CLEAN=true; shift ;;
         --setup-pki) SETUP_PKI=true; shift ;;
@@ -185,6 +191,16 @@ verify_setup() {
         ((errors++))
     fi
 
+    # Check operator K8s auth role
+    if vault read "auth/kubernetes/role/$OPERATOR_ROLE" &> /dev/null; then
+        log_success "Kubernetes auth role '$OPERATOR_ROLE' exists"
+        vault read -format=json "auth/kubernetes/role/$OPERATOR_ROLE" 2>/dev/null | \
+            jq -r '.data | "  SA: \(.bound_service_account_names[0]), NS: \(.bound_service_account_namespaces[0]), TTL: \(.token_ttl)s, Policies: \(.token_policies | join(", "))"' 2>/dev/null || true
+    else
+        log_error "Kubernetes auth role '$OPERATOR_ROLE' not found"
+        ((errors++))
+    fi
+
     # Check PKI engine
     if vault secrets list 2>/dev/null | grep -q "pki/"; then
         log_success "PKI secrets engine enabled"
@@ -229,6 +245,13 @@ clean_setup() {
         log_success "Deleted K8s auth role 'avapigw'"
     else
         log_warn "K8s auth role 'avapigw' not found or already deleted"
+    fi
+
+    # Delete operator role
+    if vault delete "auth/kubernetes/role/$OPERATOR_ROLE" &> /dev/null; then
+        log_success "Deleted K8s auth role '$OPERATOR_ROLE'"
+    else
+        log_warn "K8s auth role '$OPERATOR_ROLE' not found or already deleted"
     fi
 
     # Delete policy
@@ -340,10 +363,26 @@ configure_k8s_auth() {
     kubectl create sa vault-auth -n "$K8S_NAMESPACE" 2>/dev/null || \
         log_info "Service account vault-auth already exists"
 
-    kubectl create clusterrolebinding vault-auth-tokenreview \
-        --clusterrole=system:auth-delegator \
-        --serviceaccount="$K8S_NAMESPACE:vault-auth" 2>/dev/null || \
-        log_info "ClusterRoleBinding vault-auth-tokenreview already exists"
+    # Use a namespace-scoped ClusterRoleBinding name so multiple projects/namespaces
+    # can each grant system:auth-delegator to their own vault-auth SA without
+    # colliding on a single shared binding name. `kubectl apply` keeps it idempotent
+    # and ensures the subject always points at the correct namespace.
+    local crb_name="vault-auth-tokenreview-${K8S_NAMESPACE}"
+    log_info "Ensuring ClusterRoleBinding '$crb_name' binds vault-auth in '$K8S_NAMESPACE'..."
+    kubectl apply -f - <<CRB
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${crb_name}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: vault-auth
+    namespace: ${K8S_NAMESPACE}
+CRB
 
     # Create a long-lived token secret for the vault-auth SA
     kubectl apply -f - <<'K8S_SECRET'
@@ -390,6 +429,17 @@ configure_k8s_role() {
         max_ttl=24h
 
     log_success "K8s auth role 'avapigw' created (SA: $SA_NAME, NS: $K8S_NAMESPACE)"
+
+    log_info "Creating Kubernetes auth role '$OPERATOR_ROLE' for the operator..."
+
+    vault write "auth/kubernetes/role/$OPERATOR_ROLE" \
+        bound_service_account_names="$OPERATOR_SA_NAME" \
+        bound_service_account_namespaces="$K8S_NAMESPACE" \
+        policies=avapigw \
+        ttl=1h \
+        max_ttl=24h
+
+    log_success "K8s auth role '$OPERATOR_ROLE' created (SA: $OPERATOR_SA_NAME, NS: $K8S_NAMESPACE)"
 }
 
 # ==============================================================================
@@ -434,7 +484,7 @@ configure_pki() {
     # Also allows IP SANs for 127.0.0.1
     log_info "Creating PKI role 'test-role' for $K8S_NAMESPACE namespace..."
     vault write pki/roles/test-role \
-        allowed_domains="localhost,local,test,avapigw.local,avapigw-test.local" \
+        allowed_domains="localhost,local,test,avapigw.local,avapigw-test.local,docker.internal" \
         allow_subdomains=true \
         allow_localhost=true \
         allow_ip_sans=true \
