@@ -60,7 +60,7 @@ If you experience or witness unacceptable behavior, please report it to the proj
 
 Before contributing, ensure you have the following installed:
 
-- **Go 1.26.3+** - [Download Go](https://golang.org/dl/)
+- **Go 1.26.4+** - [Download Go](https://golang.org/dl/)
 - **Docker** - [Install Docker](https://docs.docker.com/get-docker/)
 - **kubectl** - [Install kubectl](https://kubernetes.io/docs/tasks/tools/)
 - **Helm 3.x** - [Install Helm](https://helm.sh/docs/intro/install/)
@@ -90,6 +90,11 @@ Before contributing, ensure you have the following installed:
    ```bash
    make tools
    ```
+
+   `make tools` also installs `controller-gen` pinned to `v0.20.1` (via the
+   `controller-gen` target). This is the exact version used to generate the
+   committed operator manifests, so regenerating CRD/RBAC/DeepCopy artifacts with
+   `make operator-manifests` produces no spurious drift.
 
 3. **Verify your setup**:
    ```bash

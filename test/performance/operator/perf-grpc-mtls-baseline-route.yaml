@@ -1,0 +1,26 @@
+# Dedicated gRPC backend-mTLS baseline route for performance testing (group 1.5 / 2.5).
+# Matches api.v1.TestService carrying metadata `x-perf-mtls: true` and routes to the
+# grpc-backend-mtls GRPCBackend (port 8813) which connects to the backend using
+# MUTUAL TLS with Vault-issued client certs. Exercises gateway->backend mTLS path.
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-grpc-mtls-baseline-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: grpc-route
+    feature: mtls-baseline
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+      metadata:
+        - name: x-perf-mtls
+          present: true
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8813
+      weight: 100
+  timeout: 30s

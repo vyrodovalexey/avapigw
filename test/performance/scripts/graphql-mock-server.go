@@ -42,6 +42,13 @@ func resolveResponse(query string) string {
 }
 
 func graphqlHandler(w http.ResponseWriter, r *http.Request) {
+	// Health probes may hit the catch-all path with GET; answer them.
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"status":"healthy"}`)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"errors":[{"message":"method not allowed"}]}`, http.StatusMethodNotAllowed)
 		return
@@ -82,6 +89,11 @@ func startServer(port int, wg *sync.WaitGroup) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/graphql", graphqlHandler)
 	mux.HandleFunc("/health", healthHandler)
+	// Catch-all: the gateway GraphQL proxy preserves the original request path,
+	// but some perf GraphQLRoutes resolve to backends whose inline destination
+	// path differs (e.g. "/"). Register the resolver on the root so the mock
+	// answers GraphQL POSTs regardless of the forwarded path.
+	mux.HandleFunc("/", graphqlHandler)
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("GraphQL mock server starting on %s", addr)

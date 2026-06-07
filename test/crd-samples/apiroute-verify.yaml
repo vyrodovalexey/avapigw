@@ -1,0 +1,22 @@
+# Verification APIRoute for operator-mode end-to-end proxy testing.
+# Matches /verify and rewrites to the backend's /health endpoint, proxying to
+# the basic-backend Backend (host.docker.internal:8801) configured via CRD.
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: verify-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /verify
+      methods:
+        - GET
+  rewrite:
+    uri: /health
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s

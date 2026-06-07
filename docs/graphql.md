@@ -525,6 +525,14 @@ spec:
 - `graphql_request_duration_seconds{operation_type, operation_name, route}` - Request duration histogram
 - `graphql_errors_total{operation_type, error_type, route}` - GraphQL error count
 
+> **Known limitation (pre-existing, not a Go 1.26.4 regression):** `/graphql` query and
+> mutation requests are served correctly with valid data, but the gateway-level GraphQL
+> handler currently **bypasses the metrics/middleware chain**, so the
+> `avapigw_graphql_*` / `gateway_requests_*` counters above are **not** incremented for
+> those requests. GraphQL **subscription** proxying (over WebSocket) **does** record
+> metrics (see [Subscription Metrics](#subscription-metrics)). Track this as an
+> observability follow-up.
+
 #### Query Analysis Metrics
 - `graphql_query_depth{route}` - Query depth distribution
 - `graphql_query_complexity{route}` - Query complexity distribution

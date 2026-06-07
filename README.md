@@ -3,7 +3,7 @@
 [![CI](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vyrodovalexey/avapigw)](https://goreportcard.com/report/github.com/vyrodovalexey/avapigw)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/go-1.26-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26.4-blue.svg)](https://golang.org/dl/)
 
 A high-performance, production-ready API Gateway built with Go and gin-gonic. Designed for cloud-native environments with comprehensive traffic management, observability, and reliability features.
 
@@ -142,7 +142,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Health Check Metrics** - Backend health monitoring and probe success/failure rates
 - **OpenTelemetry Tracing** - Comprehensive distributed tracing with spans for proxy, transform, auth, authz, and circuit breaker operations
 - **4 Grafana Dashboards** - Complete monitoring coverage with 100% metrics visualization
-- **Production Monitoring Stack** - vmagent and otel-collector integration for enterprise observability
+- **Production Monitoring Stack** - VMAgent and OpenTelemetry Collector Helm charts (`test/monitoring`) scrape gateway/operator metrics and feed VictoriaMetrics for enterprise observability
 - **Structured Logging** - JSON and console logging formats
 - **Health Endpoints** - Health, readiness, and liveness probes
 - **Access Logs** - Detailed request/response logging
@@ -160,7 +160,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Ingress Controller Mode** - Standard Kubernetes Ingress support with rich annotation processing
 - **Certificate Management** - Automated TLS certificate management with Vault PKI integration
 - **Memory Leak Prevention** - Robust timer and resource cleanup in configuration watcher
-- **Production-Ready Quality** - 94.1% test coverage with 2,986 tests and zero vulnerabilities
+- **Production-Ready Quality** - 94.4% unit-test coverage with all quality gates passing (lint, vet, govulncheck) and zero vulnerabilities
 - **Performance Validated** - Comprehensive performance testing across deployment scenarios
 - **Enterprise Monitoring** - 130+ metrics, 4 Grafana dashboards, and OTEL tracing integration
 
@@ -172,12 +172,12 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Thread-Safe Cache Factory**: Per-route cache instances with lazy initialization and double-check locking
 
 #### Comprehensive Test Coverage and Quality Assurance
-- **Unit Test Coverage**: 94.1% across all 41 packages (all packages ≥90% coverage)
-- **Functional Tests**: 1,843 tests passed with comprehensive scenario coverage
-- **Integration Tests**: 671 tests run (667 passed, 4 expected skips for environment-specific features)
-- **E2E Tests**: 472 tests run (454 passed, 18 expected skips for WIP features)
-- **Total Test Suite**: 2,986 tests with 100% pass rate for production readiness
-- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities
+- **Unit Test Coverage**: 94.4% with all packages maintaining ≥90% coverage
+- **Functional Tests**: 2097 tests passed with comprehensive scenario coverage
+- **Integration Tests**: 739 tests passed (4 documented skips)
+- **E2E Tests**: 521 tests passed (18 documented skips)
+- **Quality Gates**: `go build`, `go vet`, `golangci-lint` (0 issues), and `govulncheck` (no vulnerabilities) all pass
+- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.4)
 - **Lint Clean**: Zero linting issues across the entire codebase
 
 #### Performance Validation
@@ -193,7 +193,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Dashboard Fixes**: Fixed 5 stale metric references in gateway-operator-dashboard.json
 - **New Dashboard Panels**: Added gRPC Server Stream Messages panel for enhanced gRPC monitoring
 - **OTEL Tracing**: Distributed tracing with spans for proxy, transform, auth, authz, circuit breaker operations
-- **Production Monitoring**: vmagent and otel-collector deployed in Kubernetes for enterprise observability
+- **Production Monitoring**: VMAgent and OpenTelemetry Collector Helm charts deployed to local Kubernetes (namespace `avapigw-test`) and integrated with VictoriaMetrics; Grafana dashboards published from `monitoring/grafana` via `test/monitoring/scripts/publish-dashboards.sh`
 
 ## 📋 Table of Contents
 
@@ -223,13 +223,14 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Docker](#-docker)
 - [CI/CD](#-cicd)
 - [Performance Testing](#-performance-testing)
+- [Known Issues / Follow-ups](#-known-issues--follow-ups)
 - [Contributing](#-contributing)
 - [License](#-license)
 
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.26.3 (for building from source)
+- Go 1.26.4 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -5458,6 +5459,13 @@ observability:
     serviceName: avapigw
 ```
 
+> **Semantic-convention version:** The gateway tracks the OpenTelemetry SDK **v1.44.0**
+> line, whose `resource.Default()` carries semantic-convention schema **v1.41.0**. The
+> tracer initialization in `internal/observability/tracing.go` imports
+> `go.opentelemetry.io/otel/semconv/v1.41.0` so the tracer resource schema URL matches the
+> SDK default — using an older semconv import (e.g. `v1.40.0`) with the v1.44.0 SDK causes a
+> fatal `conflicting Schema URL` error at gateway startup.
+
 ### Structured Logging
 
 JSON and console logging formats:
@@ -5488,6 +5496,32 @@ Kubernetes-compatible health endpoints:
 - `/health` - Overall health
 - `/ready` - Readiness probe
 - `/live` - Liveness probe
+
+### Monitoring Stack Deployment
+
+For local Kubernetes validation, the project ships Helm charts that deploy a VMAgent
+and an OpenTelemetry Collector into the `avapigw-test` namespace. VMAgent scrapes the
+gateway and operator `/metrics` endpoints and remote-writes to VictoriaMetrics, while
+the OpenTelemetry Collector receives OTLP traces/metrics from the gateway.
+
+```bash
+# Deploy the VMAgent chart (scrapes gateway/operator metrics into VictoriaMetrics)
+helm upgrade --install vmagent test/monitoring/vmagent \
+  -n avapigw-test --create-namespace
+
+# Deploy the OpenTelemetry Collector chart
+helm upgrade --install otel-collector test/monitoring/otel-collector \
+  -n avapigw-test
+```
+
+The four Grafana dashboards under `monitoring/grafana`
+(`gateway-dashboard.json`, `gateway-operator-dashboard.json`,
+`telemetry-dashboard.json`, and `spans-dashboard.json`) are published to Grafana with:
+
+```bash
+# Publish all Grafana dashboards from monitoring/grafana
+./test/monitoring/scripts/publish-dashboards.sh
+```
 
 ## 📊 Performance Testing
 
@@ -5550,16 +5584,21 @@ Test the performance impact of security features:
 
 ### Kubernetes Performance Testing
 
-Test performance in Kubernetes environment using the `avapigw-test` namespace:
+Test performance in Kubernetes environment using the `avapigw-test` namespace. The
+`setup-vault-k8s.sh` script configures Vault Kubernetes auth for both the gateway
+and the operator service accounts (namespace-scoped, idempotent token-reviewer
+binding, `docker.internal` added to the PKI role's allowed domains, plus a dedicated
+`avapigw-operator` Vault role):
 
 ```bash
-# Setup Vault for K8s testing
-./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test
+# Setup Vault Kubernetes auth for K8s testing (gateway + operator roles)
+make perf-setup-vault-k8s
 
-# Deploy gateway to K8s
-helm upgrade --install avapigw helm/avapigw/ \
-  -f helm/avapigw/values-local.yaml \
-  -n avapigw-test --create-namespace
+# Verify the Vault Kubernetes auth setup
+make perf-verify-vault-k8s
+
+# Deploy gateway with the operator enabled (CRD-driven route/backend config)
+make helm-install-with-operator
 
 # Run K8s performance tests
 make perf-test-k8s-http
@@ -5568,6 +5607,16 @@ make perf-test-k8s-grpc
 # Run all K8s tests
 make perf-test-k8s
 ```
+
+The latest validation cycle ran 6 scenario groups for 180 seconds each against the
+in-cluster gateway and verified that datapoints landed in VictoriaMetrics:
+
+1. gRPC & streaming (including mTLS/OIDC)
+2. TLS gRPC & streaming
+3. HTTP & WebSocket (ws)
+4. HTTPS & secure WebSocket (wss)
+5. GraphQL & WebSocket (ws)
+6. TLS GraphQL & secure WebSocket (wss)
 
 ### Performance Results
 
@@ -5852,39 +5901,49 @@ helm upgrade avapigw ./helm/avapigw \
 
 #### Vault TLS with Kubernetes Auth Deployment
 
-For secure deployments with Vault PKI TLS certificates and Kubernetes authentication:
+For secure deployments with Vault PKI TLS certificates and Kubernetes authentication.
+In operator mode, **both** the gateway and the operator authenticate to Vault via the
+Kubernetes auth method: each service-account JWT is exchanged for a Vault role, which
+maps to a policy granting access to the PKI and KV backends. The `setup-vault-k8s.sh`
+script provisions a namespace-scoped, idempotent token-reviewer `ClusterRoleBinding`,
+adds `docker.internal` to the PKI role's `allowed_domains`, and creates a dedicated
+`avapigw-operator` Vault role bound to the operator service account.
 
 **Prerequisites:**
 - Vault running with PKI engine enabled
-- PKI role configured (e.g., `test-role`)
+- PKI role configured (e.g., `test-role`) with `allowed_domains` including `docker.internal`
 - Root CA generated
 - Kubernetes auth method enabled and configured
-- `avapigw` policy created
-- `avapigw` K8s auth role bound to the service account
+- `avapigw` policy and K8s auth role bound to the gateway service account
+- `avapigw-operator` policy and K8s auth role bound to the operator service account
 
 **Setup Steps:**
 
 ```bash
 # 1. Start infrastructure (Vault, backends)
-docker-compose -f test/docker-compose/docker-compose.yml up -d
+docker compose -f test/docker-compose/docker-compose.yml -p avapigw-test up -d
 
-# 2. Configure Vault K8s auth
-./test/performance/scripts/setup-vault-k8s.sh
+# 2. Configure Vault K8s auth (gateway + operator roles)
+make perf-setup-vault-k8s
 
 # 3. Build and load Docker image
 docker build -t avapigw:test .
 
-# 4. Deploy with Vault TLS enabled
-helm upgrade --install avapigw helm/avapigw/ -f helm/avapigw/values-local.yaml
+# 4. Deploy with the operator enabled and Vault TLS active
+make helm-install-with-operator
 
 # 5. Verify deployment
-kubectl get pods
-kubectl get svc avapigw
+kubectl get pods -n avapigw-test
+kubectl get svc avapigw -n avapigw-test
 
 # 6. Test HTTPS (self-signed cert, use -k)
-HTTPS_PORT=$(kubectl get svc avapigw -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}')
+HTTPS_PORT=$(kubectl get svc avapigw -n avapigw-test -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}')
 curl -k https://127.0.0.1:$HTTPS_PORT/health
 ```
+
+With the operator enabled, all route and backend options are configured via the
+`apigw-operator` CRDs (`APIRoute`, `GRPCRoute`, `GraphQLRoute`, `Backend`,
+`GRPCBackend`, `GraphQLBackend`) rather than a static config file.
 
 **Environment Variables for Vault:**
 
@@ -5908,11 +5967,11 @@ curl -k https://127.0.0.1:$HTTPS_PORT/health
 
 **Vault Prerequisites:**
 - Vault running with PKI engine enabled
-- PKI role configured (e.g., `test-role`)
+- PKI role configured (e.g., `test-role`) with `allowed_domains` including `docker.internal`
 - Root CA generated
 - Kubernetes auth method enabled and configured
-- `avapigw` policy created
-- `avapigw` K8s auth role bound to the service account
+- `avapigw` policy and K8s auth role bound to the gateway service account
+- `avapigw-operator` policy and K8s auth role bound to the operator service account
 
 #### Configuration Options
 
@@ -6844,7 +6903,7 @@ name: CI
 on: [push, pull_request]
 
 env:
-  GO_VERSION: '1.25.6'
+  GO_VERSION: '1.26.4'
   GOLANGCI_LINT_VERSION: 'v2.12.2'
 
 jobs:
@@ -7182,6 +7241,35 @@ For comprehensive documentation including:
 - Integration with CI/CD
 
 See: [test/performance/README.md](test/performance/README.md)
+
+## ⚠️ Known Issues / Follow-ups
+
+The following items are **pre-existing** findings surfaced during the Go 1.26.4 upgrade
+and validation cycle. They are not regressions introduced by the upgrade; they are
+tracked here as follow-ups.
+
+### HTTP per-route rate limiting falls back to the global limit
+
+For HTTP routes, the per-route rate limit is currently not enforced because the route
+label resolves to `unknown`, so matching traffic falls back to the **global** rate
+limit instead of the route-specific limit. Per-route **gRPC** rate limiting works
+correctly. Until this is fixed, rely on the global rate limit for HTTP routes or use
+gRPC routes when per-route limiting is required.
+
+### GraphQL observability gap on the gateway-level handler
+
+`/graphql` requests are served correctly and return valid data, but the gateway-level
+GraphQL handler bypasses the metrics/middleware chain, so it does **not** increment the
+`avapigw_graphql_*` / `gateway_requests_*` counters. GraphQL **subscription** proxying
+(over WebSocket) **does** record metrics. Treat the absence of GraphQL request counters
+as an observability gap, not a traffic failure.
+
+### HTTP Basic Auth is not a first-class CRD auth method
+
+The CRD auth model supports `apiKey`, `jwt`, `oidc`, `mtls`, and `allowAnonymous`.
+HTTP Basic Auth is **not** a first-class gateway auth method — a `basic` value maps to
+the no-auth baseline. (Note: Basic Auth remains fully supported for **backend**
+authentication, where the gateway authenticates to upstream services.)
 
 ## 🤝 Contributing
 

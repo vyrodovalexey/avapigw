@@ -1,0 +1,31 @@
+# Dedicated gRPC baseline route for performance throughput testing (groups 1 & 2).
+# Matches api.v1.TestService calls carrying metadata `x-perf-baseline: true`,
+# which is MORE specific than perf-grpc-ratelimit-route, so it wins route
+# selection and bypasses the per-route rate limit while still exercising the
+# full TLS gRPC listener + proxy path. Backends: grpc examples on 8811/8812.
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: perf-grpc-baseline-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-perftest
+    component: grpc-route
+    feature: baseline-throughput
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+      metadata:
+        - name: x-perf-baseline
+          present: true
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8812
+      weight: 50
+  timeout: 30s
