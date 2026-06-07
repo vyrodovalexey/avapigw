@@ -173,9 +173,9 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 #### Comprehensive Test Coverage and Quality Assurance
 - **Unit Test Coverage**: 94.4% with all packages maintaining ≥90% coverage
-- **Functional Tests**: 329 tests passed with comprehensive scenario coverage
-- **Integration Tests**: 276 tests passed
-- **E2E Tests**: 521 tests passed
+- **Functional Tests**: 2097 tests passed with comprehensive scenario coverage
+- **Integration Tests**: 739 tests passed (4 documented skips)
+- **E2E Tests**: 521 tests passed (18 documented skips)
 - **Quality Gates**: `go build`, `go vet`, `golangci-lint` (0 issues), and `govulncheck` (no vulnerabilities) all pass
 - **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.4)
 - **Lint Clean**: Zero linting issues across the entire codebase
@@ -5458,6 +5458,13 @@ observability:
     otlpEndpoint: "http://jaeger:14268/api/traces"
     serviceName: avapigw
 ```
+
+> **Semantic-convention version:** The gateway tracks the OpenTelemetry SDK **v1.44.0**
+> line, whose `resource.Default()` carries semantic-convention schema **v1.41.0**. The
+> tracer initialization in `internal/observability/tracing.go` imports
+> `go.opentelemetry.io/otel/semconv/v1.41.0` so the tracer resource schema URL matches the
+> SDK default — using an older semconv import (e.g. `v1.40.0`) with the v1.44.0 SDK causes a
+> fatal `conflicting Schema URL` error at gateway startup.
 
 ### Structured Logging
 

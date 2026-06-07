@@ -1919,12 +1919,14 @@ The following dependencies have been upgraded for improved performance and secur
 **Go Dependencies:**
 - `go-redis` upgraded to v9.17.3 - Enhanced Redis client with improved connection pooling and Sentinel support
 - `protobuf` upgraded to v1.36.11 - Latest Protocol Buffers implementation with performance improvements
-- **OpenTelemetry** upgraded to v1.40.0 - Latest observability framework with enhanced tracing capabilities and performance improvements
+- **OpenTelemetry** upgraded to v1.44.0 - Latest observability framework with enhanced tracing capabilities and performance improvements. The v1.44.0 SDK line carries semantic-convention schema **v1.41.0**, so the tracer resource is built against `go.opentelemetry.io/otel/semconv/v1.41.0` (see [Observability](#opentelemetry-semconv-version) note below)
+- `github.com/getkin/kin-openapi` upgraded to v0.139.0 - OpenAPI request/response validation (transitively pulls `github.com/oasdiff/yaml` v0.1.0)
+- `github.com/alicebob/miniredis/v2` upgraded to v2.38.0 - In-memory Redis used by the test suite (test-only dependency)
 
 **CI/CD Action Upgrades:**
 - `actions/checkout` upgraded to v6.0.2 - Improved Git checkout performance and security
 - `docker/login-action` upgraded to v3.7.0 - Enhanced Docker registry authentication
-- `github/codeql-action` upgraded to v4.32.2 - Latest CodeQL security analysis
+- `github/codeql-action` upgraded to v4.32.6 - Latest CodeQL security analysis (SHA pin aligned with the `# v4.32.6` version comment)
 - `anchore/sbom-action` upgraded to v0.22.2 - Improved Software Bill of Materials generation
 - `helm/kind-action` upgraded to v1.13.0 - Latest Kubernetes in Docker for testing
 
@@ -2182,6 +2184,16 @@ export OPERATOR_METRICS_GRPC_ENABLED=true
 ```
 
 ## OTLP Exporter TLS Configuration
+
+<a id="opentelemetry-semconv-version"></a>
+
+> **OpenTelemetry semantic-convention version:** The gateway tracks the OpenTelemetry
+> SDK **v1.44.0** line, which builds `resource.Default()` against semantic-convention
+> schema **v1.41.0**. The gateway's tracer initialization therefore imports
+> `go.opentelemetry.io/otel/semconv/v1.41.0` so the tracer resource schema URL matches
+> the SDK default. Mixing an older semconv import (e.g. `v1.40.0`) with the v1.44.0 SDK
+> produces a fatal `conflicting Schema URL` error at gateway startup. With the aligned
+> v1.41.0 import, tracer initialization succeeds and OTLP export to Tempo/Jaeger works.
 
 The OpenTelemetry Protocol (OTLP) exporter supports comprehensive TLS configuration for secure trace export to collectors like Jaeger, Zipkin, or OTEL Collector.
 

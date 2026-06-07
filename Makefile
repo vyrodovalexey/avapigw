@@ -100,7 +100,21 @@ TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avap
         build-operator operator-generate operator-manifests operator-install-crds \
         operator-docker-build operator-docker-push operator-deploy operator-undeploy \
         test-operator-unit test-operator-functional test-operator-integration \
-        helm-template-ingress helm-install-ingress
+        helm-lint helm-template helm-template-with-operator helm-template-local \
+        helm-package helm-install helm-install-with-operator helm-uninstall \
+        helm-test helm-upgrade helm-upgrade-with-operator \
+        helm-template-ingress helm-install-ingress \
+        helm-lint-operator helm-template-operator helm-template-operator-local \
+        helm-package-operator helm-install-operator helm-uninstall-operator \
+        helm-test-operator helm-upgrade-operator \
+        ci-full test-merge-coverage perf-setup-vault perf-setup-keycloak perf-verify-infra \
+        perf-test-load-balancing perf-test-rate-limiting perf-test-circuit-breaker \
+        perf-clean perf-test-grpc-all perf-test-websocket-connection \
+        perf-test-websocket-message perf-test-websocket-concurrent run-debug \
+        perf-test-operator perf-test-operator-local perf-test-operator-reconciliation \
+        perf-test-operator-grpc perf-test-operator-config-push perf-test-operator-k8s \
+        perf-test-operator-benchmarks perf-analyze-operator perf-analyze-operator-charts \
+        perf-analyze-operator-export
 
 # ==============================================================================
 # Default target

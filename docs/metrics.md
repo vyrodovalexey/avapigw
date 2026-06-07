@@ -61,6 +61,17 @@ The gateway includes **4 comprehensive Grafana dashboards**:
 - **5+ panels** for distributed tracing
 - **Coverage**: Trace analysis, span metrics
 
+## OpenTelemetry Version Note
+
+The gateway tracks the OpenTelemetry SDK **v1.44.0** line for tracing and metrics
+export. The v1.44.0 SDK builds `resource.Default()` against semantic-convention schema
+**v1.41.0**, so the tracer initialization imports
+`go.opentelemetry.io/otel/semconv/v1.41.0` to keep the tracer resource schema URL aligned
+with the SDK default. Using an older semconv import (e.g. `v1.40.0`) with the v1.44.0 SDK
+triggers a fatal `conflicting Schema URL` error during tracer initialization. With the
+aligned v1.41.0 import, OTLP export to the OpenTelemetry Collector / Tempo works as
+expected.
+
 ## Key Metrics Examples
 
 ### Request Metrics
