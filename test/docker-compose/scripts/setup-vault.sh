@@ -259,12 +259,22 @@ copy_certs_to_volume() {
 
     log_info "Copying certificates into Docker volume 'mtls_certs'..."
 
+    # Skip gracefully when Docker is not available (e.g. GitHub Actions CI runs
+    # this script against service-container ports and has no mtls_certs volume to
+    # populate; the live mTLS backend test is a local-docker-compose-only path).
+    if ! command -v docker > /dev/null 2>&1; then
+        log_warn "Docker not available; skipping mtls_certs volume copy (CI/host-only mode)"
+        return 0
+    fi
+
     # Detect the correct volume name (project name may vary)
     local volume_name
-    volume_name=$(docker volume ls --format '{{.Name}}' | grep '_mtls_certs$' | head -1)
+    volume_name=$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep '_mtls_certs$' | head -1 || true)
     if [ -z "$volume_name" ]; then
-        volume_name="${COMPOSE_PROJECT_NAME:-avapigw-test}_mtls_certs"
-        log_warn "No mtls_certs volume found, using default: ${volume_name}"
+        # No mtls_certs volume present: nothing to populate (script is being run
+        # outside the docker-compose env). Skip rather than create a stray volume.
+        log_warn "No mtls_certs Docker volume found; skipping volume copy (CI/host-only mode)"
+        return 0
     fi
     log_info "Using Docker volume: ${volume_name}"
 
