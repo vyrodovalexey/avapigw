@@ -115,7 +115,7 @@ create_realm() {
     log_info "Creating realm '${realm_name}'..."
 
     local status
-    status=$(curl -sf -o /dev/null -w "%{http_code}" \
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
         -X POST \
         -H "Authorization: Bearer ${ADMIN_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -156,7 +156,7 @@ create_client() {
     log_info "Creating client '${client_id}' in realm '${realm}'..."
 
     local status
-    status=$(curl -sf -o /dev/null -w "%{http_code}" \
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
         -X POST \
         -H "Authorization: Bearer ${ADMIN_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -184,6 +184,66 @@ create_client() {
 }
 
 # ---------------------------------------------------------------------------
+# Get internal client UUID by clientId
+# ---------------------------------------------------------------------------
+get_client_uuid() {
+    local realm="$1"
+    local client_id="$2"
+    curl -s \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+        -H "X-Forwarded-Proto: https" \
+        "${KEYCLOAK_ADDR}/admin/realms/${realm}/clients?clientId=${client_id}" \
+        | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin)
+    print(d[0]['id'] if d else '')
+except Exception:
+    print('')" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Add an audience protocol mapper to a client so its access tokens include the
+# given audience in the "aud" claim. Required for resource servers (e.g. the
+# gRPC backend) that strictly validate the token audience.
+# ---------------------------------------------------------------------------
+add_audience_mapper() {
+    local realm="$1"
+    local client_uuid="$2"
+    local audience="$3"
+    local mapper_name="aud-${audience}"
+
+    log_info "  Adding audience mapper '${mapper_name}' for audience '${audience}'..."
+
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -H "X-Forwarded-Proto: https" \
+        "${KEYCLOAK_ADDR}/admin/realms/${realm}/clients/${client_uuid}/protocol-mappers/models" \
+        -d "{
+            \"name\": \"${mapper_name}\",
+            \"protocol\": \"openid-connect\",
+            \"protocolMapper\": \"oidc-audience-mapper\",
+            \"consentRequired\": false,
+            \"config\": {
+                \"included.client.audience\": \"${audience}\",
+                \"id.token.claim\": \"false\",
+                \"access.token.claim\": \"true\",
+                \"introspection.token.claim\": \"true\"
+            }
+        }")
+
+    if [ "$status" = "201" ]; then
+        log_info "    Audience mapper '${mapper_name}' created"
+    elif [ "$status" = "409" ]; then
+        log_info "    Audience mapper '${mapper_name}' already exists"
+    else
+        log_warn "    Audience mapper '${mapper_name}' creation returned status ${status}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Create realm role
 # ---------------------------------------------------------------------------
 create_realm_role() {
@@ -191,7 +251,7 @@ create_realm_role() {
     local role_name="$2"
 
     local status
-    status=$(curl -sf -o /dev/null -w "%{http_code}" \
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
         -X POST \
         -H "Authorization: Bearer ${ADMIN_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -217,7 +277,7 @@ create_user() {
     log_info "Creating user '${username}' in realm '${realm}'..."
 
     local status
-    status=$(curl -sf -o /dev/null -w "%{http_code}" \
+    status=$(curl -s -o /dev/null -w "%{http_code}" \
         -X POST \
         -H "Authorization: Bearer ${ADMIN_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -264,6 +324,19 @@ setup_backend_realm() {
 
     # Gateway service account client (avapigw uses this to obtain tokens via client_credentials)
     create_client "${BACKEND_REALM}" "${GATEWAY_BACKEND_CLIENT_ID}" "${GATEWAY_BACKEND_CLIENT_SECRET}" "true" "false" "false"
+
+    # Add audience mappers so the gateway-backend client_credentials tokens carry
+    # the resource-server audiences. The gRPC backend (grpc-server) strictly
+    # validates "aud"; without these mappers tokens only contain aud="account"
+    # and are rejected by the gRPC OIDC backend.
+    local gw_uuid
+    gw_uuid=$(get_client_uuid "${BACKEND_REALM}" "${GATEWAY_BACKEND_CLIENT_ID}")
+    if [ -n "${gw_uuid}" ]; then
+        add_audience_mapper "${BACKEND_REALM}" "${gw_uuid}" "${RESTAPI_SERVER_CLIENT_ID}"
+        add_audience_mapper "${BACKEND_REALM}" "${gw_uuid}" "${GRPC_SERVER_CLIENT_ID}"
+    else
+        log_warn "Could not resolve UUID for '${GATEWAY_BACKEND_CLIENT_ID}'; audience mappers not added"
+    fi
 
     log_info "Backend realm setup complete"
     log_info "  Gateway can obtain tokens via:"

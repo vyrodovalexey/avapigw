@@ -29,6 +29,9 @@ type GraphQLRoute struct {
 	// RateLimit contains route-level rate limiting configuration.
 	RateLimit *RateLimitConfig `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 
+	// Aggregate contains aggregate (fan-out) mirroring configuration.
+	Aggregate *AggregateConfig `yaml:"aggregate,omitempty" json:"aggregate,omitempty"`
+
 	// Cache contains caching configuration.
 	Cache *CacheConfig `yaml:"cache,omitempty" json:"cache,omitempty"`
 

@@ -16,6 +16,10 @@ TOK_LH="$(cat /tmp/tok_lh.txt 2>/dev/null)"
 TOK_IP="$(cat /tmp/tok_ip.txt 2>/dev/null)"
 WSJS="$ROOT/test/performance/configs/websocket/ws-feature-180s.js"
 
+# PERF_PARALLEL=1 runs all scenarios concurrently so the GROUP wall-clock is a
+# single ~DUR (3 min) steady-state window with the full feature stack under load.
+PARALLEL="${PERF_PARALLEL:-0}"
+
 # hey scenario: $1=name $2=path [extra hey args...]
 hscn() {
   local name="$1" path="$2"; shift 2
@@ -26,6 +30,8 @@ hscn() {
   rps=$(grep 'Requests/sec' "$out" | awk '{print $2}')
   echo "    rps=$rps $(grep -E '^\s+\[[0-9]+\]' "$out" | tr -d '\n')"
 }
+# parallel dispatch helper
+maybe_bg() { if [ "$PARALLEL" = "1" ]; then "$@" & else "$@"; fi; }
 
 # ws scenario via k6: $1=name $2=wsurl [WS_HEADER]
 wscn() {
@@ -45,20 +51,26 @@ refresh_tok() { # $1=host
 }
 
 if [ "$GROUP" = "group3" ] || [ "$GROUP" = "group4" ]; then
-  hscn basic     /api/v1/validated/items
-  hscn apikey    /api/v1/validated/apikey/items -H "X-API-Key: $APIKEY"
   TOK_LH="$(refresh_tok localhost)"
-  hscn oidc      /api/v1/validated/oidc/items   -H "Authorization: Bearer $TOK_LH"
-  hscn ratelimit /api/v1/validated/ratelimit/items
-  hscn transform /api/v1/validated/transform/items
-  hscn encoding  /api/v1/validated/encoding/items -H 'Accept-Encoding: gzip'
-  hscn cache     /api/v1/validated/cache/items
-  hscn cors      /api/v1/validated/cors/items -H 'Origin: http://example.com'
-  # WS scenarios (use 127.0.0.1 issuer token for ws-oidc route)
-  wscn ws-plain  "$WSBASE/ws"
-  wscn ws-apikey "$WSBASE/ws-perf-apikey" "X-API-Key: $APIKEY"
   TOK_IP="$(refresh_tok 127.0.0.1)"
-  wscn ws-oidc   "$WSBASE/ws-perf-oidc"   "Authorization: Bearer $TOK_IP"
+  maybe_bg hscn basic     /api/v1/validated/items
+  maybe_bg hscn apikey    /api/v1/validated/apikey/items -H "X-API-Key: $APIKEY"
+  maybe_bg hscn oidc      /api/v1/validated/oidc/items   -H "Authorization: Bearer $TOK_LH"
+  maybe_bg hscn ratelimit /api/v1/validated/ratelimit/items
+  maybe_bg hscn transform /api/v1/validated/transform/items
+  maybe_bg hscn encoding  /api/v1/validated/encoding/items -H 'Accept-Encoding: gzip'
+  maybe_bg hscn cache     /api/v1/validated/cache/items
+  maybe_bg hscn cors      /api/v1/validated/cors/items -H 'Origin: http://example.com'
+  # WS scenarios (use 127.0.0.1 issuer token for ws-oidc route)
+  maybe_bg wscn ws-plain  "$WSBASE/ws"
+  maybe_bg wscn ws-apikey "$WSBASE/ws-perf-apikey" "X-API-Key: $APIKEY"
+  maybe_bg wscn ws-oidc   "$WSBASE/ws-perf-oidc"   "Authorization: Bearer $TOK_IP"
+  # group4 = https + mirroring: also drive the REST AGGREGATE fan-out route so
+  # gateway_aggregate_* metrics increment for this scenario group.
+  if [ "$GROUP" = "group4" ]; then
+    maybe_bg hscn aggregate /api/v1/items
+  fi
+  [ "$PARALLEL" = "1" ] && wait
 fi
 
 # summary

@@ -214,6 +214,13 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 		}
 	}
 
+	// Validate aggregate (fan-out) configuration
+	if spec.Aggregate != nil {
+		if err := validateAggregate(spec.Aggregate, false); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+
 	// Security warnings for plaintext secrets in authentication config
 	if spec.Authentication != nil {
 		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)

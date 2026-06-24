@@ -1917,11 +1917,17 @@ spec:
 The following dependencies have been upgraded for improved performance and security:
 
 **Go Dependencies:**
-- `go-redis` upgraded to v9.17.3 - Enhanced Redis client with improved connection pooling and Sentinel support
+- `github.com/redis/go-redis/v9` upgraded to v9.20.1 - Enhanced Redis client with improved connection pooling and Sentinel support
 - `protobuf` upgraded to v1.36.11 - Latest Protocol Buffers implementation with performance improvements
 - **OpenTelemetry** upgraded to v1.44.0 - Latest observability framework with enhanced tracing capabilities and performance improvements. The v1.44.0 SDK line carries semantic-convention schema **v1.41.0**, so the tracer resource is built against `go.opentelemetry.io/otel/semconv/v1.41.0` (see [Observability](#opentelemetry-semconv-version) note below)
-- `github.com/getkin/kin-openapi` upgraded to v0.139.0 - OpenAPI request/response validation (transitively pulls `github.com/oasdiff/yaml` v0.1.0)
+- `github.com/getkin/kin-openapi` upgraded to v0.140.0 - OpenAPI request/response validation (transitively pulls `github.com/oasdiff/yaml` v0.1.0)
+- `github.com/vektah/gqlparser/v2` upgraded to v2.5.35 - GraphQL schema/query parser used by the GraphQL proxy
+- `golang.org/x/crypto` upgraded to v0.53.0 - Cryptographic primitives (TLS, JWT signing, certificate handling)
+- `golang.org/x/text` upgraded to v0.38.0 - Text processing and encoding utilities
+- `k8s.io/api`, `k8s.io/apimachinery`, and `k8s.io/client-go` upgraded to v0.36.2 - Kubernetes API types and client used by the operator and CRD modes
 - `github.com/alicebob/miniredis/v2` upgraded to v2.38.0 - In-memory Redis used by the test suite (test-only dependency)
+
+All quality gates (build, lint, vet, govulncheck, and the full unit, functional, integration, and e2e suites) pass after these upgrades, and performance was re-validated (see [test/performance/results](../test/performance/results) for the latest report).
 
 **CI/CD Action Upgrades:**
 - `actions/checkout` upgraded to v6.0.2 - Improved Git checkout performance and security

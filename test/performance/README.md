@@ -1837,8 +1837,9 @@ This can be used to monitor operator metrics under load while running Ingress re
 The performance testing infrastructure has been updated with the latest dependencies:
 
 **Go Dependencies:**
-- `go-redis` v9.17.3 - Enhanced Redis client with improved connection pooling, Sentinel support, and performance optimizations
+- `github.com/redis/go-redis/v9` v9.20.1 - Enhanced Redis client with improved connection pooling, Sentinel support, and performance optimizations
 - `protobuf` v1.36.11 - Latest Protocol Buffers implementation with performance improvements for gRPC testing
+- `k8s.io/api`, `k8s.io/apimachinery`, `k8s.io/client-go` v0.36.2 - Kubernetes API types and client used by operator/CRD-mode performance testing
 
 **CI/CD Action Upgrades:**
 - `actions/checkout` v6.0.2 - Improved Git checkout performance for CI pipelines

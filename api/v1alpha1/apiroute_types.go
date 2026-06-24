@@ -43,6 +43,10 @@ type APIRouteSpec struct {
 	// +optional
 	Mirror *MirrorConfig `json:"mirror,omitempty"`
 
+	// Aggregate contains aggregate (fan-out) mirroring configuration.
+	// +optional
+	Aggregate *AggregateConfig `json:"aggregate,omitempty"`
+
 	// Fault contains fault injection configuration.
 	// +optional
 	Fault *FaultInjection `json:"fault,omitempty"`

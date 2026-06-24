@@ -549,6 +549,78 @@
                     "type": "string"
                   }
                 }
+              },
+              "aggregate": {
+                "type": "object",
+                "description": "Aggregate (fan-out) mirroring configuration for the route",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable aggregate fan-out for this route"
+                  },
+                  "failMode": {
+                    "type": "string",
+                    "enum": ["all", "any", "quorum"],
+                    "default": "all",
+                    "description": "Partial-failure handling mode"
+                  },
+                  "quorumCount": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Explicit success threshold when failMode is quorum"
+                  },
+                  "maxParallel": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1024,
+                    "default": 8,
+                    "description": "Bound on concurrent target invocations"
+                  },
+                  "perMessageMerge": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable per-message JSON merge for streaming traffic"
+                  },
+                  "targets": {
+                    "type": "array",
+                    "description": "Backends to fan out to (at least one)"
+                  },
+                  "merge": {
+                    "type": "object",
+                    "description": "Optional response merging",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "default": false
+                      },
+                      "strategy": {
+                        "type": "string",
+                        "enum": ["deep", "shallow", "replace"],
+                        "default": "deep"
+                      }
+                    }
+                  },
+                  "spool": {
+                    "type": "object",
+                    "description": "Optional off-heap spooling of partial responses",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "default": false
+                      },
+                      "backend": {
+                        "type": "string",
+                        "enum": ["memory", "redis"],
+                        "default": "memory"
+                      },
+                      "thresholdBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
               }
             }
           }

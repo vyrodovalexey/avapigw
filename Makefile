@@ -100,7 +100,7 @@ TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avap
         build-operator operator-generate operator-manifests operator-install-crds \
         operator-docker-build operator-docker-push operator-deploy operator-undeploy \
         test-operator-unit test-operator-functional test-operator-integration \
-        helm-lint helm-template helm-template-with-operator helm-template-local \
+        helm-lint helm-template helm-template-with-operator helm-template-local helm-sync-crds \
         helm-package helm-install helm-install-with-operator helm-uninstall \
         helm-test helm-upgrade helm-upgrade-with-operator \
         helm-template-ingress helm-install-ingress \
@@ -1076,6 +1076,7 @@ operator-manifests: operator-generate
 	@mkdir -p config/rbac
 	$(CONTROLLER_GEN) rbac:roleName=avapigw-operator-role paths="./internal/operator/controller/..." output:rbac:artifacts:config=config/rbac
 	@echo "==> Manifests generated"
+	@$(MAKE) helm-sync-crds
 
 ## operator-install-crds: Install CRDs into the cluster
 operator-install-crds: operator-manifests
@@ -1133,6 +1134,15 @@ HELM := helm
 CHART_DIR := helm/avapigw
 CHART_NAME := avapigw
 TEST_NAMESPACE := avapigw-test
+CRD_SRC_DIR := config/crd/bases
+CRD_CHART_DIR := $(CHART_DIR)/crds
+
+## helm-sync-crds: Copy generated CRDs from config/crd/bases into the Helm chart
+helm-sync-crds:
+	@echo "==> Syncing CRDs into Helm chart..."
+	@mkdir -p $(CRD_CHART_DIR)
+	@cp $(CRD_SRC_DIR)/*.yaml $(CRD_CHART_DIR)/
+	@echo "==> CRDs synced to $(CRD_CHART_DIR)"
 
 ## helm-lint: Lint Helm chart
 helm-lint:

@@ -31,6 +31,10 @@ type GraphQLRouteSpec struct {
 	// +optional
 	RateLimit *RateLimitConfig `json:"rateLimit,omitempty"`
 
+	// Aggregate contains aggregate (fan-out) mirroring configuration.
+	// +optional
+	Aggregate *AggregateConfig `json:"aggregate,omitempty"`
+
 	// Cache contains caching configuration.
 	// +optional
 	Cache *CacheConfig `json:"cache,omitempty"`

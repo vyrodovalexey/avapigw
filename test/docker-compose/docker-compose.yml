@@ -243,6 +243,14 @@ services:
   redis-master:
     image: bitnami/redis:latest
     container_name: redis-master
+    # Expose a hyphen-less network alias so the replica can reach the master:
+    # the bitnami/redis entrypoint strips the hyphen from REDIS_MASTER_HOST when
+    # it generates the replica's `replicaof` directive (redis-master ->
+    # redismaster), which otherwise breaks replication.
+    networks:
+      default:
+        aliases:
+          - redismaster
     environment:
       REDIS_REPLICATION_MODE: master
       REDIS_PASSWORD: password
@@ -268,6 +276,11 @@ services:
     image: bitnami/redis-sentinel:latest
     container_name: redis-sentinel-1
     environment:
+      # Sentinel's own listener has no password (matches test client config which sets
+      # only the master Password, leaving SentinelPassword empty). ALLOW_EMPTY_PASSWORD
+      # is required by recent bitnami/redis-sentinel images to start without a sentinel
+      # auth password.
+      ALLOW_EMPTY_PASSWORD: "yes"
       REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
       REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
       REDIS_SENTINEL_QUORUM: 2
@@ -287,6 +300,7 @@ services:
     image: bitnami/redis-sentinel:latest
     container_name: redis-sentinel-2
     environment:
+      ALLOW_EMPTY_PASSWORD: "yes"
       REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
       REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
       REDIS_SENTINEL_QUORUM: 2
@@ -306,6 +320,7 @@ services:
     image: bitnami/redis-sentinel:latest
     container_name: redis-sentinel-3
     environment:
+      ALLOW_EMPTY_PASSWORD: "yes"
       REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS: 5000
       REDIS_SENTINEL_FAILOVER_TIMEOUT: 10000
       REDIS_SENTINEL_QUORUM: 2

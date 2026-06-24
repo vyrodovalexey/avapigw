@@ -78,6 +78,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Retry Policies** - Exponential backoff with configurable retry conditions
 - **Timeouts** - Request and per-try timeout configuration
 - **Traffic Mirroring** - Mirror traffic to multiple backends for testing
+- **Aggregate (Fan-out) Mirroring** - Fan a single request out to multiple backends in parallel and return one aggregated response. Unary support is wired for REST, GraphQL, and gRPC unary, with optional merge and Redis spool; gRPC streaming and WebSocket aggregate are documented follow-ups
 - **Fault Injection** - Inject delays and errors for chaos engineering
 
 ### Request/Response Processing
@@ -5381,6 +5382,49 @@ mirror:
   percentage: 10
 ```
 
+### Aggregate (Fan-out) Mirroring
+
+Fan a single client request out to multiple backends in parallel and return one
+aggregated response. Unlike the single-destination `mirror` above (asynchronous,
+fire-and-forget, response discarded), aggregate mirroring is **synchronous**,
+fans out to **one or more targets**, and **aggregates the responses** into the
+client reply. Aggregate fan-out is wired into the data plane for **unary**
+traffic: **REST**, **GraphQL** (POST/unary), and **gRPC unary**. **gRPC
+streaming** aggregate is not supported yet (a streaming method with aggregate
+enabled returns gRPC `Unimplemented`) and **WebSocket** aggregate is not yet
+wired into the gateway entrypoint; both are documented follow-ups. Response
+merging (`deep` / `shallow` / `replace`) and an off-heap Redis spool are both
+optional.
+
+```yaml
+aggregate:
+  enabled: true
+  failMode: all          # all | any | quorum
+  maxParallel: 8
+  merge:
+    enabled: true
+    strategy: deep       # deep | shallow | replace
+  targets:
+    - name: backend-a
+      destination:
+        host: backend-a
+        port: 8080
+      timeout: 30s
+      retries: 1
+    - name: backend-b
+      destination:
+        host: backend-b
+        port: 8080
+  spool:                 # optional off-heap spool for large bodies
+    enabled: false
+    backend: memory      # memory | redis
+    thresholdBytes: 1048576
+```
+
+For full configuration (per-protocol YAML and CRD examples, streaming/envelope
+semantics, merge strategies, Redis spool, failure modes, and observability), see
+the [Aggregate (Fan-out) Mirroring Guide](docs/aggregate-mirroring.md).
+
 ### Fault Injection
 
 Inject faults for chaos engineering:
@@ -5420,6 +5464,16 @@ The gateway exposes comprehensive metrics:
 - `gateway_backend_requests_total` - Backend request count
 - `gateway_backend_request_duration_seconds` - Backend request duration
 - `gateway_grpc_backend_health` - gRPC backend health status
+
+#### Aggregate (Fan-out) Mirroring Metrics
+- `gateway_aggregate_requests_total` - Total aggregate fan-out requests
+- `gateway_aggregate_targets_total` - Total target invocations across all aggregate requests
+- `gateway_aggregate_target_errors_total{target}` - Failed target invocations by target
+- `gateway_aggregate_results_total{result}` - Aggregate results by outcome (success/failure)
+- `gateway_aggregate_duration_seconds` - End-to-end fan-out duration histogram
+- `gateway_aggregate_merge_duration_seconds` - Response merge duration histogram
+- `gateway_aggregate_spool_bytes` - Size of responses spooled off-heap histogram
+- `gateway_aggregate_spool_errors_total` - Total spool errors
 
 #### Circuit Breaker Metrics
 - `gateway_circuit_breaker_state` - Circuit breaker state

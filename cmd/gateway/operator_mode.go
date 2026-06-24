@@ -7,6 +7,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/gateway/operator"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/retry"
 )
 
 // operatorClientInterface abstracts the operator client for testability.
@@ -178,8 +179,15 @@ func runOperatorGateway(opApp *operatorApplication, logger observability.Logger)
 	// Start metrics server if enabled
 	startMetricsServerIfEnabled(opApp.application, logger)
 
-	// Start operator client
-	if err := opApp.operatorClient.Start(ctx); err != nil {
+	// Start operator client with retry + exponential backoff. The operator's
+	// gRPC server (self-signed cert on :9444) can take several seconds to
+	// become ready after a fresh deploy. Treating the first "unavailable" as
+	// fatal would CrashLoopBackoff the gateway until the operator is up, so we
+	// retry the initial connect/register with a bounded, context-aware backoff
+	// and only fail fatally after the overall deadline is exhausted. The
+	// steady-state stream reconnect is unaffected — it is handled internally by
+	// the operator client once Start succeeds.
+	if err := startOperatorClientWithRetry(ctx, opApp.operatorClient, logger); err != nil {
 		fatalWithSync(logger, "failed to start operator client", observability.Error(err))
 		return
 	}
@@ -190,6 +198,65 @@ func runOperatorGateway(opApp *operatorApplication, logger observability.Logger)
 
 	// Wait for shutdown
 	waitForOperatorShutdown(opApp, logger)
+}
+
+// Operator initial-connection retry tuning. These bound the startup retry loop
+// so the gateway tolerates a not-yet-ready operator gRPC server (which can take
+// ~12s after a fresh deploy) without CrashLoopBackoff, while still failing
+// fatally if the operator never becomes reachable within the overall deadline.
+const (
+	// operatorStartMaxRetries is the maximum number of initial connect/register
+	// attempts before giving up. With exponential backoff (1s base, 30s cap)
+	// this spans well over a minute of total wait, comfortably covering the
+	// operator's typical readiness window.
+	operatorStartMaxRetries = 8
+
+	// operatorStartInitialBackoff is the initial backoff between attempts.
+	operatorStartInitialBackoff = 1 * time.Second
+
+	// operatorStartMaxBackoff caps the per-attempt backoff.
+	operatorStartMaxBackoff = 30 * time.Second
+
+	// operatorStartOverallDeadline bounds the total time spent retrying the
+	// initial operator connection before failing fatally.
+	operatorStartOverallDeadline = 3 * time.Minute
+)
+
+// startOperatorClientWithRetry attempts to start the operator client, retrying
+// the initial connect/register with exponential backoff (bounded and
+// context-aware) instead of failing fatally on the first error. It returns nil
+// once the client starts successfully, or the last error after the retries or
+// the overall deadline are exhausted.
+func startOperatorClientWithRetry(
+	ctx context.Context,
+	client operatorClientInterface,
+	logger observability.Logger,
+) error {
+	retryCtx, cancel := context.WithTimeout(ctx, operatorStartOverallDeadline)
+	defer cancel()
+
+	cfg := &retry.Config{
+		MaxRetries:     operatorStartMaxRetries,
+		InitialBackoff: operatorStartInitialBackoff,
+		MaxBackoff:     operatorStartMaxBackoff,
+		JitterFactor:   retry.DefaultJitterFactor,
+	}
+
+	return retry.Do(retryCtx, cfg, func() error {
+		return client.Start(retryCtx)
+	}, &retry.Options{
+		// Every Start error during initial bring-up is treated as transient:
+		// the operator may simply not be ready yet. The overall deadline and
+		// MaxRetries provide the bound that prevents an unbounded loop.
+		ShouldRetry: func(error) bool { return true },
+		OnRetry: func(attempt int, err error, backoff time.Duration) {
+			logger.Warn("operator client start failed; retrying with backoff",
+				observability.Int("attempt", attempt),
+				observability.String("backoff", backoff.String()),
+				observability.Error(err),
+			)
+		},
+	})
 }
 
 // waitForOperatorShutdown waits for shutdown signal and performs graceful shutdown.

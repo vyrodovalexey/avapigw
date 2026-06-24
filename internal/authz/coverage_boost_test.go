@@ -158,27 +158,36 @@ func TestMemoryDecisionCache_BatchEviction_LargerCache(t *testing.T) {
 func TestMemoryDecisionCache_BatchEviction_WithExpiredEntries(t *testing.T) {
 	t.Parallel()
 
-	// Create cache with very short TTL so entries expire quickly
+	// Create cache with a generous TTL so the newly added entry survives its
+	// own retrieval. Expiry of the initial entries is forced deterministically
+	// below by mutating ExpiresAt, avoiding race-prone short-TTL timing.
 	maxSize := 20
-	cache := NewMemoryDecisionCache(1*time.Millisecond, maxSize)
+	cache := NewMemoryDecisionCache(5*time.Minute, maxSize)
 	defer cache.Close()
 
 	ctx := context.Background()
 
-	// Fill the cache to capacity
+	// Fill the cache to capacity, keeping references to the stored pointers.
+	decisions := make([]*CachedDecision, 0, maxSize)
 	for i := 0; i < maxSize; i++ {
 		key := &CacheKey{
 			Subject:  fmt.Sprintf("user%d", i),
 			Resource: "/api/resource",
 			Action:   "GET",
 		}
-		cache.Set(ctx, key, &CachedDecision{Allowed: true})
+		d := &CachedDecision{Allowed: true}
+		cache.Set(ctx, key, d)
+		decisions = append(decisions, d)
 	}
 
-	// Wait for entries to expire
-	time.Sleep(10 * time.Millisecond)
+	// Force the initial entries to be expired. Set stores the same pointer we
+	// passed in, so mutating ExpiresAt here marks them expired for the eviction
+	// scan (IsExpired is time.Now().After(ExpiresAt)).
+	for _, d := range decisions {
+		d.ExpiresAt = time.Now().Add(-time.Hour)
+	}
 
-	// Add a new entry - should trigger eviction of expired entries first
+	// Add a new entry - should trigger eviction of the expired entries first.
 	newKey := &CacheKey{
 		Subject:  "new-user",
 		Resource: "/api/resource",
@@ -189,7 +198,7 @@ func TestMemoryDecisionCache_BatchEviction_WithExpiredEntries(t *testing.T) {
 		Reason:  "new-entry",
 	})
 
-	// The new entry should be retrievable
+	// The new entry (with the generous TTL) should be retrievable.
 	retrieved, ok := cache.Get(ctx, newKey)
 	require.True(t, ok)
 	assert.Equal(t, "new-entry", retrieved.Reason)

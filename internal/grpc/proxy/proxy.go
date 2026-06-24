@@ -30,6 +30,7 @@ type Proxy struct {
 	vaultClient        vault.Client
 	backendRegistry    *backend.Registry
 	rateLimiterManager *RouteRateLimiterManager
+	aggregateHandler   GRPCAggregateHandler
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -207,6 +208,21 @@ func (p *Proxy) handleStream(srv interface{}, stream grpc.ServerStream) error {
 
 	// Wrap stream with new context
 	wrappedStream := WrapServerStream(stream, ctx)
+
+	// Handle aggregate (fan-out) mirroring when configured and enabled.
+	// Aggregate routes are treated as unary fan-out; normal single-destination
+	// proxying is bypassed for them. When no aggregate handler is injected or
+	// the route does not declare an enabled aggregate config, proxying proceeds
+	// unchanged below.
+	if handled, aggErr := p.handleAggregate(
+		srv, wrappedStream, fullMethod, &matchResult.Route.Config,
+	); handled {
+		if aggErr != nil && ctx.Err() == context.DeadlineExceeded {
+			metrics := getGRPCProxyMetrics()
+			metrics.timeoutOccurrences.WithLabelValues(fullMethod).Inc()
+		}
+		return aggErr
+	}
 
 	// Handle the stream with route config for transforms
 	err := p.streamHandler.HandleStream(srv, wrappedStream, &matchResult.Route.Config)

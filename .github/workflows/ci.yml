@@ -471,66 +471,66 @@ jobs:
           VAULT_ADDR: http://127.0.0.1:8200
           VAULT_TOKEN: myroot
         run: |
-          # Enable PKI secrets engine
-          echo "Enabling PKI secrets engine..."
-          curl -s -X POST -H "X-Vault-Token: myroot" \
-            http://127.0.0.1:8200/v1/sys/mounts/pki \
-            -d '{"type":"pki"}'
-          
-          # Configure PKI max lease TTL
-          echo "Configuring PKI max lease TTL..."
-          curl -s -X POST -H "X-Vault-Token: myroot" \
-            http://127.0.0.1:8200/v1/sys/mounts/pki/tune \
-            -d '{"max_lease_ttl":"87600h"}'
-          
-          # Generate root CA
-          echo "Generating root CA..."
-          curl -s -X POST -H "X-Vault-Token: myroot" \
-            http://127.0.0.1:8200/v1/pki/root/generate/internal \
-            -d '{"common_name":"Test Root CA","ttl":"87600h"}'
-          
-          # Create PKI role
-          echo "Creating PKI role..."
-          curl -s -X POST -H "X-Vault-Token: myroot" \
-            http://127.0.0.1:8200/v1/pki/roles/test-role \
-            -d '{"allowed_domains":"localhost,*.local,*.test","allow_subdomains":true,"allow_localhost":true,"max_ttl":"72h"}'
-          
-          # Enable KV v2 secrets engine (note: in dev mode, 'secret/' is already enabled as KV v2)
-          # We'll create a test secret to verify it works
-          echo "Creating test secret in KV store..."
+          # ---------------------------------------------------------------------
+          # Provision Vault EXACTLY like the local docker-compose env by running
+          # the repo's setup-vault.sh. This creates the shared-CA 'pki' mount with
+          # BOTH the server role (test-role) AND the client role (client-role) and
+          # issues certs from the SAME CA, so the aggregate mTLS test can issue a
+          # client cert from client-role. The script is ENV-driven (VAULT_ADDR/
+          # VAULT_TOKEN) and idempotent. It gracefully skips the Docker-volume cert
+          # copy when no mtls_certs volume exists (the CI case).
+          #
+          # The runner already has curl, openssl and python3 (used by the script);
+          # no extra tooling install is required.
+          # ---------------------------------------------------------------------
+          echo "==> Running setup-vault.sh (shared-CA PKI: test-role + client-role)..."
+          bash test/docker-compose/scripts/setup-vault.sh
+
+          # ---------------------------------------------------------------------
+          # Keep the extra engines/secrets that OTHER tests rely on but which the
+          # shared-CA script does not create: Transit (JWT signing) and the
+          # api-keys / generic KV test secrets. These are additive and idempotent.
+          # ---------------------------------------------------------------------
+          echo "==> Adding Transit engine + JWT signing key + test KV secrets..."
+
+          # Generic KV test secret (KV v2 'secret/' is enabled by the script).
           curl -s -X POST -H "X-Vault-Token: myroot" \
             http://127.0.0.1:8200/v1/secret/data/test \
             -d '{"data":{"key":"value"}}'
-          
-          # Verify PKI setup
-          echo "Verifying PKI setup..."
-          curl -s -H "X-Vault-Token: myroot" \
-            http://127.0.0.1:8200/v1/pki/roles/test-role | grep -q "test-role" && echo "PKI role verified"
-          
-          # Enable Transit for JWT signing
-          echo "Enabling Transit secrets engine..."
+
+          # Enable Transit for JWT signing (ignore error if already enabled).
           curl -s -X POST -H "X-Vault-Token: myroot" \
             http://127.0.0.1:8200/v1/sys/mounts/transit \
-            -d '{"type":"transit"}'
-          
-          # Create JWT signing key
-          echo "Creating JWT signing key..."
+            -d '{"type":"transit"}' || true
+
+          # Create JWT signing key.
           curl -s -X POST -H "X-Vault-Token: myroot" \
             http://127.0.0.1:8200/v1/transit/keys/jwt-signing \
             -d '{"type":"rsa-2048"}'
-          
-          # Store API keys for testing
-          echo "Storing test API keys..."
+
+          # Store API keys for testing.
           curl -s -X POST -H "X-Vault-Token: myroot" \
             http://127.0.0.1:8200/v1/secret/data/api-keys/test-key \
             -d '{"data":{"key":"test-api-key-12345","scopes":"read,write","enabled":true}}'
-          
+
+          # Verify both PKI roles exist (gate: shared-CA client-role must be present).
+          echo "==> Verifying PKI roles..."
+          curl -s -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/pki/roles/test-role | grep -q "test-role" && echo "PKI role test-role verified"
+          curl -s -H "X-Vault-Token: myroot" \
+            http://127.0.0.1:8200/v1/pki/roles/client-role | grep -q "client-role" && echo "PKI role client-role verified"
+
           echo "Vault setup complete!"
 
       - name: Setup Keycloak for Testing
         env:
           KEYCLOAK_ADDR: http://127.0.0.1:8090
+          KEYCLOAK_ADMIN: admin
+          KEYCLOAK_ADMIN_PASSWORD: admin
         run: |
+          # ---------------------------------------------------------------------
+          # Wait for Keycloak readiness (management port 8091) before provisioning.
+          # ---------------------------------------------------------------------
           echo "Waiting for Keycloak to be ready..."
           for i in {1..60}; do
             if curl -sf http://127.0.0.1:8091/health/ready; then
@@ -540,120 +540,29 @@ jobs:
             echo "Attempt $i: Waiting for Keycloak..."
             sleep 5
           done
-          
-          # Get admin token (with X-Forwarded-Proto for Keycloak 24+ SSL requirement)
-          echo "Getting admin token..."
-          ADMIN_TOKEN=$(curl -s -X POST "http://127.0.0.1:8090/realms/master/protocol/openid-connect/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -H "X-Forwarded-Proto: https" \
-            -d "username=admin" \
-            -d "password=admin" \
-            -d "grant_type=password" \
-            -d "client_id=admin-cli" | jq -r '.access_token')
-          
-          if [ -z "$ADMIN_TOKEN" ] || [ "$ADMIN_TOKEN" = "null" ]; then
-            echo "Failed to get admin token"
-            exit 1
-          fi
-          
-          # Create test realm with sslRequired=none
-          echo "Creating test realm..."
-          curl -s -X POST "http://127.0.0.1:8090/admin/realms" \
-            -H "Authorization: Bearer $ADMIN_TOKEN" \
-            -H "Content-Type: application/json" \
-            -H "X-Forwarded-Proto: https" \
-            -d '{"realm": "gateway-test", "enabled": true, "sslRequired": "none"}'
-          
-          # Create client
-          echo "Creating gateway client..."
-          curl -s -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/clients" \
-            -H "Authorization: Bearer $ADMIN_TOKEN" \
-            -H "Content-Type: application/json" \
-            -H "X-Forwarded-Proto: https" \
-            -d '{
-              "clientId": "gateway",
-              "enabled": true,
-              "publicClient": false,
-              "secret": "gateway-secret",
-              "directAccessGrantsEnabled": true,
-              "standardFlowEnabled": true,
-              "serviceAccountsEnabled": true
-            }'
-          
-          # Function to create or update user
-          create_or_update_user() {
-            local username=$1
-            local password=$2
-            
-            echo "Setting up user: $username..."
-            
-            # Try to create user first
-            CREATE_RESULT=$(curl -s -w "%{http_code}" -o /tmp/create_response.txt -X POST "http://127.0.0.1:8090/admin/realms/gateway-test/users" \
-              -H "Authorization: Bearer $ADMIN_TOKEN" \
-              -H "Content-Type: application/json" \
-              -H "X-Forwarded-Proto: https" \
-              -d "{
-                \"username\": \"$username\",
-                \"enabled\": true,
-                \"emailVerified\": true,
-                \"email\": \"${username}@test.local\",
-                \"firstName\": \"$username\",
-                \"lastName\": \"TestUser\",
-                \"requiredActions\": [],
-                \"credentials\": [{\"type\": \"password\", \"value\": \"$password\", \"temporary\": false}]
-              }")
-            
-            if [ "$CREATE_RESULT" = "201" ]; then
-              echo "User $username created successfully"
-              return 0
-            fi
-            
-            # User exists (409), need to update it
-            if [ "$CREATE_RESULT" = "409" ]; then
-              echo "User $username already exists, updating..."
-              
-              # Get user ID
-              USER_ID=$(curl -s "http://127.0.0.1:8090/admin/realms/gateway-test/users?username=$username" \
-                -H "Authorization: Bearer $ADMIN_TOKEN" \
-                -H "X-Forwarded-Proto: https" | jq -r '.[0].id')
-              
-              if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
-                echo "Failed to get user ID for $username"
-                return 1
-              fi
-              
-              # Update user to clear required actions and ensure enabled
-              curl -s -X PUT "http://127.0.0.1:8090/admin/realms/gateway-test/users/$USER_ID" \
-                -H "Authorization: Bearer $ADMIN_TOKEN" \
-                -H "Content-Type: application/json" \
-                -H "X-Forwarded-Proto: https" \
-                -d "{
-                  \"enabled\": true,
-                  \"emailVerified\": true,
-                  \"requiredActions\": []
-                }"
-              
-              # Reset password
-              curl -s -X PUT "http://127.0.0.1:8090/admin/realms/gateway-test/users/$USER_ID/reset-password" \
-                -H "Authorization: Bearer $ADMIN_TOKEN" \
-                -H "Content-Type: application/json" \
-                -H "X-Forwarded-Proto: https" \
-                -d "{\"type\": \"password\", \"value\": \"$password\", \"temporary\": false}"
-              
-              echo "User $username updated successfully"
-              return 0
-            fi
-            
-            echo "Failed to create user $username: HTTP $CREATE_RESULT"
-            cat /tmp/create_response.txt
-            return 1
-          }
-          
-          # Create or update test users
-          create_or_update_user "testuser" "testpass"
-          create_or_update_user "adminuser" "adminpass"
-          create_or_update_user "reader" "readerpass"
-          
+
+          # ---------------------------------------------------------------------
+          # Provision Keycloak EXACTLY like the local docker-compose env by running
+          # the repo's setup-keycloak.sh. The script is idempotent and creates BOTH
+          # realms in one pass:
+          #   * backend-test  -> clients restapi-server, grpc-server and
+          #                      gateway-backend (with audience mappers) for the
+          #                      service-to-service OIDC aggregate test.
+          #   * gateway-test  -> client 'gateway' + test users (testuser/adminuser/
+          #                      reader) that the existing OIDC/user-auth tests use.
+          # Running the script therefore fully covers what the previous inline step
+          # created, so the duplicate inline gateway-test provisioning is dropped.
+          # The script is ENV-driven (KEYCLOAK_ADDR / KEYCLOAK_ADMIN[_PASSWORD]).
+          # The runner has curl + python3 (used by the script); no extra tooling.
+          # ---------------------------------------------------------------------
+          echo "==> Running setup-keycloak.sh (backend-test + gateway-test realms)..."
+          bash test/docker-compose/scripts/setup-keycloak.sh
+
+          # Explicit verification gate: both realms + client_credentials/password
+          # grants must work (the script's --verify mode asserts all of these).
+          echo "==> Verifying Keycloak provisioning..."
+          bash test/docker-compose/scripts/setup-keycloak.sh --verify
+
           echo "Keycloak setup complete!"
 
       - name: Run integration tests (includes WebSocket integration tests)
@@ -665,6 +574,23 @@ jobs:
           TEST_KEYCLOAK_REALM: gateway-test
           TEST_KEYCLOAK_CLIENT_ID: gateway
           TEST_KEYCLOAK_CLIENT_SECRET: gateway-secret
+          # Backend (service-to-service) OIDC realm/client provisioned by
+          # setup-keycloak.sh; enables the aggregate per-target OIDC test to RUN.
+          TEST_BACKEND_KEYCLOAK_REALM: backend-test
+          TEST_BACKEND_KEYCLOAK_CLIENT_ID: gateway-backend
+          TEST_BACKEND_KEYCLOAK_CLIENT_SECRET: gateway-backend-secret
+          # Shared-CA PKI client role provisioned by setup-vault.sh; the aggregate
+          # mTLS test issues a client cert from this role.
+          TEST_VAULT_PKI_CLIENT_ROLE: client-role
+          # NOTE: the aggregate live mTLS REST backend test (I-1b) intentionally
+          # SKIPS in CI. GitHub Actions service containers start BEFORE any setup
+          # step, so a Vault-PKI-issued server cert (signed by the shared CA) cannot
+          # be injected into a backend service container at startup. The test runs
+          # in the local docker-compose env (setup-vault.sh seeds the shared CA into
+          # the mtls_certs volume the backend mounts). Point the probe at an
+          # unreachable port so the in-test mTLS handshake fails deterministically
+          # and the test SKIPS (rather than flaking) here.
+          TEST_MTLS_REST_BACKEND: 127.0.0.1:9
           TEST_BACKEND1_URL: http://127.0.0.1:8801
           TEST_BACKEND2_URL: http://127.0.0.1:8802
           TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803
@@ -687,6 +613,18 @@ jobs:
           TEST_KEYCLOAK_REALM: gateway-test
           TEST_KEYCLOAK_CLIENT_ID: gateway
           TEST_KEYCLOAK_CLIENT_SECRET: gateway-secret
+          # Backend (service-to-service) OIDC realm/client provisioned by
+          # setup-keycloak.sh; enables the aggregate per-target OIDC test to RUN.
+          TEST_BACKEND_KEYCLOAK_REALM: backend-test
+          TEST_BACKEND_KEYCLOAK_CLIENT_ID: gateway-backend
+          TEST_BACKEND_KEYCLOAK_CLIENT_SECRET: gateway-backend-secret
+          # Shared-CA PKI client role provisioned by setup-vault.sh; the aggregate
+          # mTLS test issues a client cert from this role.
+          TEST_VAULT_PKI_CLIENT_ROLE: client-role
+          # See the integration step: the live mTLS REST backend test SKIPS in CI
+          # (GHA service containers cannot receive Vault-PKI-issued certs at
+          # startup); point at an unreachable port for deterministic skip.
+          TEST_MTLS_REST_BACKEND: 127.0.0.1:9
           TEST_BACKEND1_URL: http://127.0.0.1:8801
           TEST_BACKEND2_URL: http://127.0.0.1:8802
           TEST_GRPC_BACKEND1_URL: 127.0.0.1:8803

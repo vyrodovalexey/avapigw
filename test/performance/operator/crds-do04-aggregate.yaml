@@ -1,0 +1,258 @@
+# DO-04 Operator-Mode CRD Manifests (avapigw-test)
+# =============================================================================
+# Deployed by the DevOps DO-04 subtask to bring up a working set of routes /
+# backends for the e2e (AGG-17 / E-1..E-6) and performance (PT-01..06) phases.
+#
+# Includes at least one route exercising the new AGGREGATE (fan-out) config so
+# e2e/perf can drive the aggregate feature end-to-end via CRDs only.
+#
+# Apply with:
+#   kubectl apply -f test/performance/operator/crds-do04-aggregate.yaml -n avapigw-test
+#
+# Backends point at the docker-compose test ENV exposed on the host:
+#   REST   : host.docker.internal:8801..8805
+#   gRPC   : host.docker.internal:8811..8814
+#   GraphQL: host.docker.internal:8801/8802 (REST backends also serve /graphql)
+
+# =============================================================================
+# HTTP Backends (Backend CRDs)
+# =============================================================================
+---
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: do04-http-backend-1
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: http-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8801
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+---
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: do04-http-backend-2
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: http-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8802
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+# =============================================================================
+# gRPC Backends (GRPCBackend CRDs)
+# =============================================================================
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: do04-grpc-backend-1
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: grpc-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8811
+      weight: 1
+  healthCheck:
+    enabled: true
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  connectionPool:
+    maxConnsPerHost: 100
+    maxIdleConns: 10
+    idleConnTimeout: 5m
+
+# =============================================================================
+# GraphQL Backends (GraphQLBackend CRDs)
+# =============================================================================
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: do04-graphql-backend-1
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: graphql-backend
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8801
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+
+# =============================================================================
+# HTTP Route (APIRoute CRD) - basic proxy
+# =============================================================================
+# NOTE: The previous plain-proxy route on /api/v1/items has been removed so the
+# AGGREGATE route below can own that prefix and demonstrate fan-out against the
+# backend-served path. A non-conflicting plain proxy route is kept on a
+# dedicated prefix (/api/v1/single) for basic-proxy coverage.
+---
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: do04-http-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: http-route
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/single
+      methods:
+        - GET
+        - POST
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  timeout: 30s
+
+# =============================================================================
+# HTTP AGGREGATE Route (APIRoute CRD) - NEW fan-out feature
+# =============================================================================
+# Fans one client request out to two REST backends in parallel and returns a
+# single merged JSON response (deep merge). This is the route the e2e/perf
+# aggregate scenarios reference (E-1, E-2, PT-02/04/06).
+---
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: do04-aggregate-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: http-route
+    feature: aggregate
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/aggregate
+      methods:
+        - GET
+        - POST
+    # The aggregate fan-out handler forwards the inbound request path verbatim
+    # to every target (it does not apply spec.rewrite). The REST test backends
+    # serve /api/v1/items, so we ALSO match that prefix here, letting clients
+    # drive a fan-out whose targets hit a path the backends actually serve and
+    # return real JSON payloads that are deep-merged into one response.
+    - uri:
+        prefix: /api/v1/items
+      methods:
+        - GET
+        - POST
+  # A primary destination is still required for routing; the aggregate block
+  # drives the fan-out behaviour.
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    merge:
+      enabled: true
+      strategy: deep
+    targets:
+      - name: rest-backend-1
+        destination:
+          host: host.docker.internal
+          port: 8801
+        timeout: 10s
+        retries: 1
+      - name: rest-backend-2
+        destination:
+          host: host.docker.internal
+          port: 8802
+        timeout: 10s
+        retries: 1
+
+# =============================================================================
+# gRPC Route (GRPCRoute CRD) - basic proxy
+# =============================================================================
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: do04-grpc-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: grpc-route
+spec:
+  match:
+    - service:
+        prefix: api.v1.TestService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 100
+  timeout: 30s
+
+# =============================================================================
+# GraphQL Route (GraphQLRoute CRD) - basic proxy
+# =============================================================================
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: do04-graphql-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: graphql-route
+spec:
+  match:
+    - path:
+        exact: /graphql
+      operationType: query
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
