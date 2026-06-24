@@ -204,7 +204,64 @@ func tlsHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // e2e against self-signed gateway cert
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // e2e against self-signed gateway cert
+			DisableKeepAlives: true,                                  // each request gets a fresh tunnel conn; avoids reusing a half-open forwarded stream
 		},
+	}
+}
+
+// transientForwardError reports whether err is a transient failure caused by a
+// freshly-established `kubectl port-forward` tunnel that is not yet fully
+// plumbed to the pod. The local TCP listener accepts connections the moment
+// kubectl binds it (so the readiness DialTimeout in portForward passes), but the
+// stream to the pod may not be ready, so the first request(s) can observe an
+// immediate connection close (EOF), reset, or refusal. Under the full e2e suite
+// (many parallel forwards + race detector) this window is wide enough to flake.
+func transientForwardError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, s := range []string{
+		"EOF",
+		"connection reset by peer",
+		"connection refused",
+		"broken pipe",
+		"unexpected EOF",
+		"server closed idle connection",
+		"http2: client connection lost",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// getThroughGateway performs an HTTPS GET through the port-forwarded gateway,
+// retrying briefly on transient port-forward tunnel errors so the test is
+// deterministic rather than dependent on tunnel-warmup timing. It returns the
+// first non-transient result (success or a real error). Timeouts everywhere:
+// the retry window is bounded.
+func getThroughGateway(ctx context.Context, t *testing.T, client *http.Client, urlStr string) (*http.Response, error) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for attempt := 1; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			if attempt > 1 {
+				t.Logf("gateway GET %s succeeded on attempt %d (after transient port-forward warmup)", urlStr, attempt)
+			}
+			return resp, nil
+		}
+		if !transientForwardError(err) || time.Now().After(deadline) {
+			return nil, err
+		}
+		t.Logf("gateway GET %s transient port-forward error (attempt %d), retrying: %v", urlStr, attempt, err)
+		time.Sleep(300 * time.Millisecond)
 	}
 }

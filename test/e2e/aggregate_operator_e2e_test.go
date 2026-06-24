@@ -165,7 +165,7 @@ func TestE2E_Aggregate_E1_CRDReconciledAndEffective(t *testing.T) {
 		defer stop()
 
 		client := tlsHTTPClient()
-		resp, err := client.Get(fmt.Sprintf("https://127.0.0.1:%d%s", localPort, liveAggregatePath()))
+		resp, err := getThroughGateway(ctx, t, client, fmt.Sprintf("https://127.0.0.1:%d%s", localPort, liveAggregatePath()))
 		require.NoError(t, err, "gateway reachable on the aggregate path (route effective)")
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
@@ -208,7 +208,7 @@ func TestE2E_Aggregate_E2_FanOutMerge(t *testing.T) {
 	client := tlsHTTPClient()
 	aggURL := fmt.Sprintf("https://127.0.0.1:%d%s", localPort, liveAggregatePath())
 
-	resp, err := client.Get(aggURL)
+	resp, err := getThroughGateway(ctx, t, client, aggURL)
 	require.NoError(t, err, "aggregate route reachable through deployed gateway")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)

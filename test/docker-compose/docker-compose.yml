@@ -243,6 +243,14 @@ services:
   redis-master:
     image: bitnami/redis:latest
     container_name: redis-master
+    # Expose a hyphen-less network alias so the replica can reach the master:
+    # the bitnami/redis entrypoint strips the hyphen from REDIS_MASTER_HOST when
+    # it generates the replica's `replicaof` directive (redis-master ->
+    # redismaster), which otherwise breaks replication.
+    networks:
+      default:
+        aliases:
+          - redismaster
     environment:
       REDIS_REPLICATION_MODE: master
       REDIS_PASSWORD: password
