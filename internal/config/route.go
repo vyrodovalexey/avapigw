@@ -12,6 +12,7 @@ type Route struct {
 	DirectResponse *DirectResponseConfig `yaml:"directResponse,omitempty" json:"directResponse,omitempty"`
 	Headers        *HeaderManipulation   `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Mirror         *MirrorConfig         `yaml:"mirror,omitempty" json:"mirror,omitempty"`
+	Aggregate      *AggregateConfig      `yaml:"aggregate,omitempty" json:"aggregate,omitempty"`
 	Fault          *FaultInjection       `yaml:"fault,omitempty" json:"fault,omitempty"`
 	RateLimit      *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 	Transform      *TransformConfig      `yaml:"transform,omitempty" json:"transform,omitempty"`

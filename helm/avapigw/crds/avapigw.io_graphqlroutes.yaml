@@ -48,6 +48,481 @@ spec:
           spec:
             description: GraphQLRouteSpec defines the desired state of GraphQLRoute.
             properties:
+              aggregate:
+                description: Aggregate contains aggregate (fan-out) mirroring configuration.
+                properties:
+                  enabled:
+                    default: false
+                    description: Enabled enables aggregate fan-out for this route.
+                    type: boolean
+                  failMode:
+                    default: all
+                    description: FailMode controls partial-failure handling.
+                    enum:
+                    - all
+                    - any
+                    - quorum
+                    type: string
+                  maxParallel:
+                    default: 8
+                    description: MaxParallel bounds the number of concurrent target
+                      invocations.
+                    maximum: 1024
+                    minimum: 1
+                    type: integer
+                  merge:
+                    description: Merge configures optional response merging.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables merging. When false the labeled-envelope
+                          output is used.
+                        type: boolean
+                      strategy:
+                        default: deep
+                        description: Strategy is the merge strategy.
+                        enum:
+                        - deep
+                        - shallow
+                        - replace
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  perMessageMerge:
+                    description: |-
+                      PerMessageMerge enables per-message JSON merge for streaming traffic
+                      (WS / gRPC streaming). Default: false (passthrough framed interleave).
+                    type: boolean
+                  quorumCount:
+                    description: |-
+                      QuorumCount is the explicit success threshold when FailMode is quorum.
+                      When zero, a simple majority is used.
+                    minimum: 0
+                    type: integer
+                  spool:
+                    description: Spool configures optional off-heap (Redis) spooling
+                      for large responses.
+                    properties:
+                      backend:
+                        default: memory
+                        description: Backend is the spool backend.
+                        enum:
+                        - memory
+                        - redis
+                        type: string
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled enables off-heap spooling. When false (or when Redis is
+                          unavailable) responses are buffered in memory.
+                        type: boolean
+                      redisRef:
+                        description: RedisRef configures the Redis connection used
+                          when Backend is redis.
+                        properties:
+                          address:
+                            description: |-
+                              Address is the standalone Redis address (host:port). Mutually exclusive
+                              with Sentinel.
+                            type: string
+                          db:
+                            description: DB is the Redis database number.
+                            maximum: 15
+                            minimum: 0
+                            type: integer
+                          password:
+                            description: Password is the Redis password (prefer PasswordVaultPath).
+                            type: string
+                          passwordVaultPath:
+                            description: |-
+                              PasswordVaultPath is the Vault path resolving the Redis password.
+                              Format: mount/path.
+                            type: string
+                          sentinel:
+                            description: |-
+                              Sentinel configures a Redis Sentinel connection (HA). Mutually exclusive
+                              with Address.
+                            properties:
+                              db:
+                                description: DB is the Redis database number.
+                                maximum: 15
+                                minimum: 0
+                                type: integer
+                              masterName:
+                                description: MasterName is the name of the Redis master
+                                  monitored by Sentinel.
+                                minLength: 1
+                                type: string
+                              password:
+                                description: Password is the password for the Redis
+                                  master.
+                                type: string
+                              passwordVaultPath:
+                                description: |-
+                                  PasswordVaultPath is the Vault path for the Redis master password.
+                                  The secret should have a "password" key. Format: mount/path.
+                                type: string
+                              sentinelAddrs:
+                                description: SentinelAddrs is the list of Sentinel
+                                  addresses (host:port).
+                                items:
+                                  type: string
+                                minItems: 1
+                                type: array
+                              sentinelPassword:
+                                description: SentinelPassword is the password for
+                                  Sentinel authentication.
+                                type: string
+                              sentinelPasswordVaultPath:
+                                description: |-
+                                  SentinelPasswordVaultPath is the Vault path for the Sentinel password.
+                                  The secret should have a "password" key. Format: mount/path.
+                                type: string
+                            required:
+                            - masterName
+                            - sentinelAddrs
+                            type: object
+                        type: object
+                      thresholdBytes:
+                        description: |-
+                          ThresholdBytes is the body-size threshold (in bytes) above which a
+                          response is spooled.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      ttl:
+                        description: TTL is the lifetime of spooled entries.
+                        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                        type: string
+                    required:
+                    - enabled
+                    type: object
+                  targets:
+                    description: Targets is the list of backends to fan out to.
+                    items:
+                      description: AggregateTarget describes a single fan-out backend
+                        destination.
+                      properties:
+                        authentication:
+                          description: |-
+                            Authentication configures per-target backend authentication.
+                            Sensitive values may reference Vault.
+                          properties:
+                            basic:
+                              description: Basic configures Basic authentication for
+                                backend.
+                              properties:
+                                enabled:
+                                  default: false
+                                  description: Enabled enables Basic authentication.
+                                  type: boolean
+                                password:
+                                  description: Password is the password for Basic
+                                    auth.
+                                  type: string
+                                passwordKey:
+                                  default: password
+                                  description: 'PasswordKey is the key in Vault for
+                                    password (default: password).'
+                                  type: string
+                                username:
+                                  description: Username is the username for Basic
+                                    auth.
+                                  type: string
+                                usernameKey:
+                                  default: username
+                                  description: 'UsernameKey is the key in Vault for
+                                    username (default: username).'
+                                  type: string
+                                vaultPath:
+                                  description: VaultPath is the Vault path for credentials.
+                                  type: string
+                              required:
+                              - enabled
+                              type: object
+                            jwt:
+                              description: JWT configures JWT authentication for backend.
+                              properties:
+                                enabled:
+                                  default: false
+                                  description: Enabled enables JWT authentication.
+                                  type: boolean
+                                headerName:
+                                  default: Authorization
+                                  description: 'HeaderName is the header name for
+                                    the token (default: Authorization).'
+                                  type: string
+                                headerPrefix:
+                                  default: Bearer
+                                  description: 'HeaderPrefix is the prefix for the
+                                    token (default: Bearer).'
+                                  type: string
+                                oidc:
+                                  description: OIDC configures OIDC token acquisition.
+                                  properties:
+                                    clientId:
+                                      description: ClientID is the OIDC client ID.
+                                      minLength: 1
+                                      type: string
+                                    clientSecret:
+                                      description: ClientSecret is the OIDC client
+                                        secret.
+                                      type: string
+                                    clientSecretRef:
+                                      description: ClientSecretRef references a Kubernetes
+                                        secret containing the client secret.
+                                      properties:
+                                        key:
+                                          description: Key is the key in the secret.
+                                          minLength: 1
+                                          type: string
+                                        name:
+                                          description: Name is the name of the secret.
+                                          minLength: 1
+                                          type: string
+                                      required:
+                                      - key
+                                      - name
+                                      type: object
+                                    issuerUrl:
+                                      description: IssuerURL is the OIDC issuer URL.
+                                      minLength: 1
+                                      type: string
+                                    scopes:
+                                      description: Scopes are the scopes to request.
+                                      items:
+                                        type: string
+                                      type: array
+                                    tokenCacheTTL:
+                                      description: TokenCacheTTL is the TTL for cached
+                                        tokens.
+                                      pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                                      type: string
+                                  required:
+                                  - clientId
+                                  - issuerUrl
+                                  type: object
+                                staticToken:
+                                  description: StaticToken is a static JWT token (for
+                                    development only).
+                                  type: string
+                                tokenSource:
+                                  description: TokenSource specifies where to get
+                                    the token (static, vault, oidc).
+                                  enum:
+                                  - static
+                                  - vault
+                                  - oidc
+                                  type: string
+                                vaultPath:
+                                  description: VaultPath is the Vault path for JWT
+                                    token.
+                                  type: string
+                              required:
+                              - enabled
+                              - tokenSource
+                              type: object
+                            mtls:
+                              description: MTLS configures mTLS authentication for
+                                backend.
+                              properties:
+                                caFile:
+                                  description: CAFile is the path to the CA certificate
+                                    for server verification.
+                                  type: string
+                                certFile:
+                                  description: CertFile is the path to the client
+                                    certificate.
+                                  type: string
+                                enabled:
+                                  default: false
+                                  description: Enabled enables mTLS authentication.
+                                  type: boolean
+                                keyFile:
+                                  description: KeyFile is the path to the client private
+                                    key.
+                                  type: string
+                                vault:
+                                  description: Vault configures Vault-based certificate
+                                    management.
+                                  properties:
+                                    altNames:
+                                      description: AltNames for certificate requests.
+                                      items:
+                                        type: string
+                                      type: array
+                                    commonName:
+                                      description: CommonName for certificate requests.
+                                      type: string
+                                    enabled:
+                                      default: false
+                                      description: Enabled enables Vault integration
+                                        for client certificates.
+                                      type: boolean
+                                    pkiMount:
+                                      description: PKIMount is the Vault PKI mount
+                                        path.
+                                      type: string
+                                    role:
+                                      description: Role is the Vault PKI role name.
+                                      type: string
+                                    ttl:
+                                      description: TTL for certificate requests.
+                                      type: string
+                                  required:
+                                  - enabled
+                                  type: object
+                              required:
+                              - enabled
+                              type: object
+                            type:
+                              description: Type specifies the authentication type
+                                (jwt, basic, mtls).
+                              enum:
+                              - jwt
+                              - basic
+                              - mtls
+                              type: string
+                          required:
+                          - type
+                          type: object
+                        destination:
+                          description: Destination is the backend destination (host
+                            + port).
+                          properties:
+                            host:
+                              description: Host is the backend host (service name
+                                or IP).
+                              minLength: 1
+                              type: string
+                            port:
+                              description: Port is the backend port.
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
+                          required:
+                          - host
+                          - port
+                          type: object
+                        name:
+                          description: |-
+                            Name is a stable, unique label for this target (used in metrics,
+                            tracing and the labeled-envelope output).
+                          minLength: 1
+                          type: string
+                        retries:
+                          description: Retries is the maximum number of retry attempts
+                            for transient errors.
+                          maximum: 10
+                          minimum: 0
+                          type: integer
+                        timeout:
+                          description: Timeout is the per-target request timeout.
+                          pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                          type: string
+                        tls:
+                          description: TLS configures per-target TLS (including mTLS)
+                            for the backend connection.
+                          properties:
+                            alpn:
+                              description: ALPN protocols for negotiation.
+                              items:
+                                type: string
+                              type: array
+                            caFile:
+                              description: CAFile is the path to the CA certificate
+                                for server verification.
+                              type: string
+                            certFile:
+                              description: CertFile is the path to the client certificate
+                                (for mTLS).
+                              type: string
+                            cipherSuites:
+                              description: CipherSuites is the list of allowed cipher
+                                suites.
+                              items:
+                                type: string
+                              type: array
+                            enabled:
+                              default: false
+                              description: Enabled enables TLS for backend connections.
+                              type: boolean
+                            insecureSkipVerify:
+                              description: InsecureSkipVerify skips server certificate
+                                verification (dev only).
+                              type: boolean
+                            keyFile:
+                              description: KeyFile is the path to the client private
+                                key (for mTLS).
+                              type: string
+                            maxVersion:
+                              description: MaxVersion is the maximum TLS version.
+                              enum:
+                              - TLS12
+                              - TLS13
+                              type: string
+                            minVersion:
+                              description: MinVersion is the minimum TLS version (TLS12,
+                                TLS13).
+                              enum:
+                              - TLS12
+                              - TLS13
+                              type: string
+                            mode:
+                              default: SIMPLE
+                              description: Mode specifies the TLS mode (SIMPLE, MUTUAL).
+                              enum:
+                              - SIMPLE
+                              - MUTUAL
+                              - INSECURE
+                              type: string
+                            serverName:
+                              description: ServerName overrides the server name for
+                                TLS verification.
+                              type: string
+                            vault:
+                              description: Vault configures Vault-based client certificate
+                                management.
+                              properties:
+                                altNames:
+                                  description: AltNames for certificate requests.
+                                  items:
+                                    type: string
+                                  type: array
+                                commonName:
+                                  description: CommonName for certificate requests.
+                                  type: string
+                                enabled:
+                                  default: false
+                                  description: Enabled enables Vault integration for
+                                    client certificates.
+                                  type: boolean
+                                pkiMount:
+                                  description: PKIMount is the Vault PKI mount path.
+                                  type: string
+                                role:
+                                  description: Role is the Vault PKI role name.
+                                  type: string
+                                ttl:
+                                  description: TTL for certificate requests.
+                                  type: string
+                              required:
+                              - enabled
+                              type: object
+                          required:
+                          - enabled
+                          type: object
+                      required:
+                      - destination
+                      - name
+                      type: object
+                    minItems: 1
+                    type: array
+                required:
+                - enabled
+                - targets
+                type: object
               allowedOperations:
                 description: AllowedOperations restricts which operation types are
                   allowed (query, mutation, subscription).

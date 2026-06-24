@@ -3986,3 +3986,156 @@ Runner script: `test/performance/scripts/run-validation-perftest.sh`.
   - `avapigw_openapi_validation_total` metric present with result labels
   - `avapigw_openapi_validation_errors_total` metric present for routes with validation errors
   - Metrics queryable via VictoriaMetrics API at http://127.0.0.1:8428
+
+---
+
+## Aggregate (Fan-out) Mirroring Tests
+
+Aggregate mirroring fans a single client request out to multiple backends in
+parallel, optionally merges their responses (or wraps them in labeled
+envelopes), and returns a single aggregated response. It is additive and
+distinct from single-destination `MirrorConfig` shadow traffic.
+
+### AGG-15 — Functional (`test/functional/aggregate_test.go`, `-tags=functional`)
+
+In-process httptest backends are used for deterministic merge behavior, matching
+the existing in-proc functional-test convention.
+
+#### TestFunctional_Aggregate_REST_Merge (F-1)
+- **Description**: REST aggregate deep-merge across three REST backends into one merged JSON document.
+- **Steps**: fan out to 3 JSON backends; deep-merge nested objects, preserve scalars, concatenate arrays.
+- **Expected**: single merged JSON; `gateway_aggregate_requests_total`=1, `targets_total`=3; duration histogram observed.
+
+#### TestFunctional_Aggregate_REST_Envelope_NonJSON (F-2)
+- **Description**: REST aggregate of non-JSON (text/plain) backends falls back to labeled envelopes.
+- **Expected**: JSON array of `{target,status,payload}` frames; non-JSON payloads JSON-string-encoded; one frame per target.
+
+#### TestFunctional_Aggregate_GraphQL_MergeDataAndErrors (F-3)
+- **Description**: GraphQL aggregate deep-merges `data`/`extensions` and concatenates `errors[]`.
+- **Expected**: merged `data` contains all backends' fields; `errors[]` contains every backend error.
+
+#### TestFunctional_Aggregate_GRPC_Unary_Combined (F-4)
+- **Description**: gRPC unary aggregate combines JSON-mappable unary payloads via a caller-injected Invoker.
+- **Expected**: descriptor-based merge produces a combined response (`Merged=true`).
+
+#### TestFunctional_Aggregate_WS_InterleavedFrames (F-5)
+- **Description**: WebSocket aggregate interleaves labeled frames from all backend streams (StreamMux).
+- **Expected**: every backend message becomes a valid labeled JSON frame; all targets' frames present and interleaved.
+
+#### TestFunctional_Aggregate_GRPC_Streaming_FramedInterleave (F-6)
+- **Description**: gRPC streaming aggregate framed interleave + FailMode behavior on stream error.
+- **Expected**: framed interleave from all streams; FailMode=any tolerates one failed stream; FailMode=all fails.
+
+#### TestFunctional_Aggregate_CoexistWithSingleMirror (F-7)
+- **Description**: An aggregate route and a single-mirror-configured normal route coexist through one proxy (regression).
+- **Expected**: aggregate route returns merged JSON; normal route proxies to its primary unchanged; `MirrorConfig` preserved.
+
+#### TestFunctional_Aggregate_MetricsQueryable (F-8)
+- **Description**: Aggregate metrics emitted and queryable, including per-target error metric on partial failure.
+- **Expected**: request/targets counters, per-target error counter for the dead target, duration + merge histograms observable.
+
+### AGG-16 — Integration (`test/integration/aggregate_test.go`, `-tags=integration`)
+
+Runs against the docker-compose test ENV (Vault PKI, Keycloak, REST/gRPC
+backends, Redis standalone + sentinel). All addresses/credentials come from ENV.
+
+#### TestIntegration_Aggregate_MTLS_PerTarget / _MTLS_LiveBackend (I-1)
+- **Description**: Per-target mTLS fan-out using Vault-PKI-issued client certs; plus the live mTLS REST backend (8804).
+- **Expected**: both mTLS backends require + accept the client cert; merged response returned; live 8804 accepts the Vault PKI client cert.
+
+#### TestIntegration_Aggregate_OIDC_PerTarget (I-2)
+- **Description**: Per-target OIDC fan-out using a real Keycloak `backend-test` client_credentials token injected as a per-target bearer.
+- **Note**: in-test bearer-validating backends are used because the live OIDC backend (8803) validates `iss=host.docker.internal:8090`, unreachable from host-side tests (token `iss` is `127.0.0.1:8090`). The real token is still acquired from Keycloak.
+
+#### TestIntegration_Aggregate_MixedAuth (I-3)
+- **Description**: One aggregate with none / basic / API-key / OIDC-bearer targets (live 8801/8805 when reachable, in-test otherwise).
+- **Expected**: every target authenticates (status 200) and appears as a labeled envelope.
+
+#### TestIntegration_Aggregate_Spool_RedisStandalone (I-4)
+- **Description**: 256KB body spooled off-heap to Redis standalone, retrieved intact, key cleaned up.
+
+#### TestIntegration_Aggregate_Spool_RedisSentinel (I-5)
+- **Description**: Same off-heap spool round-trip against Redis Sentinel (failover-tolerant connection via the Docker sentinel dialer).
+
+#### TestIntegration_Aggregate_Spool_RedisOutage_MemoryFallback (I-6)
+- **Description**: Redis outage mid-flight (failing store) → memory fallback; Put/Get still succeed; spool error metric increments.
+
+#### TestIntegration_Aggregate_CoOperatesWithStack (I-7)
+- **Description**: Aggregate route co-operates with CORS + transform via the real proxy per-route middleware chain, and with a redis-sentinel-backed cache.
+- **Expected**: CORS headers applied to the aggregate response; transform strips denied fields from the merged body; sentinel cache stores/serves the aggregated response.
+
+#### TestIntegration_Aggregate_PartialFailure_AllFailModes (I-8)
+- **Description**: Partial failure (one dead target) under each FailMode (all/any/quorum-majority/quorum-explicit).
+- **Expected**: all → error; any → success; quorum majority (2/3) → success; explicit quorum 3 → error; dead-target error metric increments in all cases.
+
+## E2E Tests — Aggregate (Fan-out) Mirroring, OPERATOR MODE (AGG-17)
+
+Files: `test/e2e/aggregate_operator_e2e_test.go`, `test/e2e/aggregate_live_helpers_test.go`
+(build tag `e2e`). These are user-journey tests against the **deployed** operator-mode
+gateway + operator in the `avapigw-test` namespace (docker-desktop). All endpoints,
+namespace, route names and credentials come from ENV (`AVAPIGW_E2E_NAMESPACE`,
+`AVAPIGW_E2E_AGGREGATE_ROUTE`, `AVAPIGW_E2E_AGGREGATE_PATH`, `AVAPIGW_E2E_VM_URL`,
+`AVAPIGW_E2E_GATEWAY_SVC`, `TEST_REDIS_SENTINEL_*`) with sane defaults; no hardcoded
+secrets. The whole live suite auto-skips (CI-safe) when the cluster/aggregate CRD is
+not reachable, or when `AVAPIGW_E2E_LIVE=0`.
+
+How the gateway is reached: the gateway Service exposes only TLS listeners
+(https/8443, grpcs/9443) + metrics/9090; NodePorts are not host-routable on
+docker-desktop, so tests use `kubectl port-forward svc/avapigw <local>:8443` (unique
+local port per test for parallel isolation) and an InsecureSkipVerify TLS client.
+
+#### TestE2E_Aggregate_E1_CRDReconciledAndEffective (E-1)
+- **Description**: Aggregate config delivered ONLY via CRD → reconciled → effective.
+- **Steps**: read deployed `do04-aggregate-route` CRD; assert `spec.aggregate`
+  (enabled, ≥2 targets, deep merge) is present; poll until operator sets
+  `status.conditions[Ready]=True reason=Reconciled`; port-forward and hit the aggregate
+  path, asserting the gateway owns the route (stamps `X-Request-Id`, non-5xx).
+- **Expected**: aggregate config is CRD-only; route reconciled to Ready; route effective
+  at the gateway data plane.
+
+#### TestE2E_Aggregate_E2_FanOutMerge (E-2)
+- **Description**: Fan-out + merge verified through the deployed gateway.
+- **Steps**: port-forward; GET the aggregate path; if a 2xx merged JSON object is
+  returned, assert it is a non-empty merged document.
+- **Expected**: merged response from both backends. **Documented skip** when the deployed
+  gateway image does not execute fan-out at the data plane (runtime proxy built without
+  `proxy.WithAggregateHandler` in `cmd/gateway/app.go`); the test first proves the route
+  is reachable, then skips with the precise root cause. Fan-out+merge behavior is covered
+  at functional (`test/functional/aggregate_test.go`) and integration
+  (`test/integration/aggregate_test.go`) layers.
+
+#### TestE2E_Aggregate_E3_RedisSentinelSpool (E-3)
+- **Description**: Redis Sentinel spool verified in-cluster via CRD.
+- **Steps**: apply an aggregate APIRoute with `spool.backend=redis` + `redisRef.sentinel`
+  (addrs/master from ENV) and a low `thresholdBytes` (large-body path); poll until Ready;
+  verify the spool block round-tripped on the reconciled CRD; delete the CRD (cleanup,
+  unique name per run).
+- **Expected**: redis-sentinel spool aggregate CRD admitted, reconciled Ready, spool
+  config effective; resource cleaned up.
+
+#### TestE2E_Aggregate_E4_MetricsScraped (E-4)
+- **Description**: Metrics scraped into VictoriaMetrics.
+- **Steps**: query VM (`http://localhost:8428`) for `up{namespace=...}` and a
+  representative `gateway_*` series (proves the scrape pipeline); drive aggregate traffic;
+  query VM for `gateway_aggregate_*` series.
+- **Expected**: gateway scraped into VM. **Documented skip** for the aggregate-series
+  assertion when the data plane emits no aggregate metrics (same root cause as E-2);
+  scrape-pipeline health is still asserted. Aggregate metric emission is covered by
+  `test/functional/aggregate_test.go`.
+
+#### TestE2E_Aggregate_E5_VaultAuthAndBackends (E-5)
+- **Description**: Vault kubernetes-auth path used by gateway+operator; backends healthy.
+- **Steps**: read gateway pod logs and assert Vault usage (CA pool loaded / certificate
+  issued from Vault); read Backend CRD status for `do04-http-backend-1/2`, asserting the
+  `Healthy` condition is True with ≥1 healthy host.
+- **Expected**: gateway uses the Vault path; aggregate fan-out backends are healthy.
+
+#### TestE2E_Aggregate_E6_AdmissionRejectsInvalid (E-6)
+- **Description**: Admission rejects invalid aggregate CRDs in-cluster (data-driven).
+- **Cases**: zero targets (MinItems), invalid `failMode` enum, invalid `merge.strategy`
+  enum, invalid `spool.backend` enum.
+- **Steps**: `kubectl apply` each invalid manifest (short RFC-1123 names); assert the
+  apiserver rejects it at admission via the CRD kubebuilder validation surface with a
+  message naming the violated constraint; defensive cleanup.
+- **Expected**: every invalid aggregate CRD is rejected at admission; no invalid object
+  is persisted.

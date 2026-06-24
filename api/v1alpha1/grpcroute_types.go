@@ -31,6 +31,10 @@ type GRPCRouteSpec struct {
 	// +optional
 	Mirror *MirrorConfig `json:"mirror,omitempty"`
 
+	// Aggregate contains aggregate (fan-out) mirroring configuration.
+	// +optional
+	Aggregate *AggregateConfig `json:"aggregate,omitempty"`
+
 	// RateLimit contains route-level rate limiting configuration.
 	// +optional
 	RateLimit *RateLimitConfig `json:"rateLimit,omitempty"`

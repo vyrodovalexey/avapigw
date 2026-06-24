@@ -22,6 +22,7 @@ import (
 	graphqlproxy "github.com/vyrodovalexey/avapigw/internal/graphql/proxy"
 	graphqlrouter "github.com/vyrodovalexey/avapigw/internal/graphql/router"
 	grpcmiddleware "github.com/vyrodovalexey/avapigw/internal/grpc/middleware"
+	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
@@ -102,10 +103,23 @@ type Gateway struct {
 	authMetrics         *auth.Metrics
 	vaultClient         vault.Client
 	grpcBackendRegistry *backend.Registry
+	grpcAggregator      grpcproxy.GRPCAggregateHandler
 
 	// GraphQL components
-	graphqlRouter *graphqlrouter.Router
-	graphqlProxy  *graphqlproxy.Proxy
+	graphqlRouter     *graphqlrouter.Router
+	graphqlProxy      *graphqlproxy.Proxy
+	graphqlAggregator GraphQLAggregateHandler
+}
+
+// GraphQLAggregateHandler executes a GraphQL aggregate (fan-out) request for a
+// matched route. This interface decouples the gateway from the
+// internal/aggregate engine (mirroring the proxy.AggregateHandler pattern) to
+// avoid import cycles. It returns an error only when the aggregate could not
+// satisfy its configured FailMode; in that case no response has been written.
+type GraphQLAggregateHandler interface {
+	// ServeAggregate fans the GraphQL request out per the route's aggregate
+	// config and writes the merged response.
+	ServeAggregate(w http.ResponseWriter, r *http.Request, cfg *config.AggregateConfig) error
 }
 
 // Option is a functional option for configuring the gateway.
@@ -195,6 +209,16 @@ func WithGatewayGRPCBackendRegistry(registry *backend.Registry) Option {
 	}
 }
 
+// WithGatewayGRPCAggregateHandler sets the gRPC aggregate (fan-out) handler.
+// The handler is propagated to all gRPC listeners created by the gateway so
+// gRPC routes declaring an enabled aggregate config fan the unary request out to
+// their configured targets instead of single-destination proxying.
+func WithGatewayGRPCAggregateHandler(h grpcproxy.GRPCAggregateHandler) Option {
+	return func(g *Gateway) {
+		g.grpcAggregator = h
+	}
+}
+
 // WithGraphQLRouter sets the GraphQL router for the gateway.
 func WithGraphQLRouter(router *graphqlrouter.Router) Option {
 	return func(g *Gateway) {
@@ -206,6 +230,16 @@ func WithGraphQLRouter(router *graphqlrouter.Router) Option {
 func WithGraphQLProxy(proxy *graphqlproxy.Proxy) Option {
 	return func(g *Gateway) {
 		g.graphqlProxy = proxy
+	}
+}
+
+// WithGraphQLAggregateHandler sets the GraphQL aggregate (fan-out) handler.
+// When configured and a matched GraphQL route declares an enabled aggregate
+// config, the request is fanned out to the configured targets instead of being
+// forwarded to a single backend.
+func WithGraphQLAggregateHandler(h GraphQLAggregateHandler) Option {
+	return func(g *Gateway) {
+		g.graphqlAggregator = h
 	}
 }
 
@@ -467,6 +501,13 @@ func (g *Gateway) handleGraphQL(c *gin.Context) {
 		return
 	}
 
+	// Handle aggregate (fan-out) mirroring when configured and enabled for the
+	// matched route. The aggregate handler deep-merges data/extensions and
+	// concatenates errors across all targets.
+	if g.handleGraphQLAggregate(c, match) {
+		return
+	}
+
 	// Forward to backend
 	resp, err := g.graphqlProxy.Forward(ctx, match.BackendName, c.Request)
 	if err != nil {
@@ -494,6 +535,31 @@ func (g *Gateway) handleGraphQL(c *gin.Context) {
 			observability.String("backend", match.BackendName),
 		)
 	}
+}
+
+// handleGraphQLAggregate fans the GraphQL request out to multiple backends when
+// the matched route declares an enabled aggregate config and a GraphQL aggregate
+// handler is injected. It returns true when the request was handled (success or
+// terminal error), false when aggregation does not apply and normal forwarding
+// must proceed.
+func (g *Gateway) handleGraphQLAggregate(c *gin.Context, match *graphqlrouter.MatchResult) bool {
+	if g.graphqlAggregator == nil || match == nil || match.Route == nil {
+		return false
+	}
+	if !match.Route.Aggregate.IsEnabled() {
+		return false
+	}
+
+	if err := g.graphqlAggregator.ServeAggregate(c.Writer, c.Request, match.Route.Aggregate); err != nil {
+		g.logger.Warn("GraphQL aggregate fan-out failed",
+			observability.String("route", match.Route.Name),
+			observability.Error(err),
+		)
+		c.JSON(http.StatusBadGateway, gin.H{
+			jsonKeyErrors: []gin.H{{jsonKeyMessage: fmt.Sprintf("aggregate error: %s", err.Error())}},
+		})
+	}
+	return true
 }
 
 // createListeners creates listeners from configuration.
@@ -600,6 +666,11 @@ func (g *Gateway) createGRPCListener(
 	// Pass gRPC backend registry for load-balanced backend resolution
 	if g.grpcBackendRegistry != nil {
 		grpcOpts = append(grpcOpts, WithGRPCBackendRegistry(g.grpcBackendRegistry))
+	}
+
+	// Pass gRPC aggregate handler so aggregate-enabled gRPC routes fan out
+	if g.grpcAggregator != nil {
+		grpcOpts = append(grpcOpts, WithGRPCAggregateHandler(g.grpcAggregator))
 	}
 
 	grpcListener, err := NewGRPCListener(listenerCfg, grpcOpts...)

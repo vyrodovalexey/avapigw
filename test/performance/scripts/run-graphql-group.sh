@@ -42,14 +42,25 @@ refresh_tok() { # $1=host
     -d 'username=testuser' -d 'password=testpass' | jq -r '.access_token'
 }
 
-gscn basic
-gscn apikey    -H "X-API-Key: $APIKEY"
+PARALLEL="${PERF_PARALLEL:-0}"
+maybe_bg() { if [ "$PARALLEL" = "1" ]; then "$@" & else "$@"; fi; }
+
 TOK_LH="$(refresh_tok localhost)"
-gscn oidc      -H "Authorization: Bearer $TOK_LH"
-gscn ratelimit
-gscn transform
-gscn cors      -H 'Origin: http://example.com'
-wscn ws        "$WSBASE/ws" 
+maybe_bg gscn basic
+maybe_bg gscn apikey    -H "X-API-Key: $APIKEY"
+maybe_bg gscn oidc      -H "Authorization: Bearer $TOK_LH"
+maybe_bg gscn ratelimit
+maybe_bg gscn transform
+maybe_bg gscn cors      -H 'Origin: http://example.com'
+maybe_bg wscn ws        "$WSBASE/ws"
+# group6 = tls graphql + mirroring: drive the GraphQL AGGREGATE fan-out route
+# (do04-graphql-route has aggregate enabled). The /graphql query path is the
+# aggregate route; gscn already POSTs to /graphql so the aggregate scenario is
+# the same path. Add an explicit aggregate-labeled run for clarity/metrics.
+if [ "$GROUP" = "group6" ]; then
+  maybe_bg gscn aggregate
+fi
+[ "$PARALLEL" = "1" ] && wait
 
 # summary (reuse hey parser)
 python3 - "$OUTDIR" <<'PY'

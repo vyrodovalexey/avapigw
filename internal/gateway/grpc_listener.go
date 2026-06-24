@@ -45,6 +45,7 @@ type GRPCListener struct {
 	authMetrics          *auth.Metrics
 	vaultClient          vault.Client
 	backendRegistry      *backend.Registry
+	aggregateHandler     grpcproxy.GRPCAggregateHandler
 }
 
 // GRPCListenerOption is a functional option for configuring a gRPC listener.
@@ -160,6 +161,16 @@ func WithGRPCBackendRegistry(registry *backend.Registry) GRPCListenerOption {
 	}
 }
 
+// WithGRPCAggregateHandler sets the gRPC aggregate (fan-out) handler for the
+// listener. When set, gRPC routes declaring an enabled aggregate config fan the
+// unary request out to their configured targets instead of single-destination
+// proxying.
+func WithGRPCAggregateHandler(h grpcproxy.GRPCAggregateHandler) GRPCListenerOption {
+	return func(l *GRPCListener) {
+		l.aggregateHandler = h
+	}
+}
+
 // NewGRPCListener creates a new gRPC listener.
 func NewGRPCListener(
 	cfg config.Listener,
@@ -202,6 +213,9 @@ func NewGRPCListener(
 	}
 	if l.backendRegistry != nil {
 		proxyOpts = append(proxyOpts, grpcproxy.WithBackendRegistry(l.backendRegistry))
+	}
+	if l.aggregateHandler != nil {
+		proxyOpts = append(proxyOpts, grpcproxy.WithAggregateHandler(l.aggregateHandler))
 	}
 	l.proxy = grpcproxy.New(l.router, proxyOpts...)
 

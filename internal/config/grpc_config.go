@@ -319,6 +319,9 @@ type GRPCRoute struct {
 	// Mirror contains traffic mirroring configuration.
 	Mirror *MirrorConfig `yaml:"mirror,omitempty" json:"mirror,omitempty"`
 
+	// Aggregate contains aggregate (fan-out) mirroring configuration.
+	Aggregate *AggregateConfig `yaml:"aggregate,omitempty" json:"aggregate,omitempty"`
+
 	// RateLimit contains route-level rate limiting configuration.
 	RateLimit *RateLimitConfig `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 

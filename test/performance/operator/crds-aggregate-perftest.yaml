@@ -1,0 +1,113 @@
+# Aggregate (fan-out) Mirroring CRDs for performance scenarios PT-02/PT-04/PT-06
+# =============================================================================
+# Extends the DO-04 baseline (crds-do04-aggregate.yaml) with aggregate fan-out
+# enabled for the gRPC and GraphQL routes so the "independent full mirroring"
+# perf scenarios (PT-02 grpc, PT-06 graphql) exercise gateway_aggregate_* metrics
+# in addition to the REST aggregate route (do04-aggregate-route → PT-04).
+#
+# All options are driven exclusively through apigw-operator CRDs.
+#
+# Apply with:
+#   kubectl apply -f test/performance/operator/crds-aggregate-perftest.yaml -n avapigw-test
+#
+# Backends (docker-compose test ENV exposed on host):
+#   REST   : host.docker.internal:8801,8802  (also serve /graphql)
+#   gRPC   : host.docker.internal:8811,8812
+#
+# Mapping to scenario groups:
+#   PT-02 (tls grpc & streaming + mirroring) -> do04-grpc-route (aggregate enabled)
+#   PT-04 (https & wss + mirroring)          -> do04-aggregate-route (REST, already in DO-04 file)
+#   PT-06 (tls graphql & wss + mirroring)    -> do04-graphql-route (aggregate enabled)
+
+# =============================================================================
+# gRPC AGGREGATE Route (GRPCRoute CRD) - fan-out across two gRPC backends
+# =============================================================================
+# Fans every api.v1.TestService call out to gRPC backends 8811 + 8812 in
+# parallel. failMode=any so a single healthy backend yields a response;
+# labeled-envelope/last-wins semantics apply for gRPC unary (default, no merge).
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: do04-grpc-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: grpc-route
+    feature: aggregate
+spec:
+  match:
+    - service:
+        prefix: api.v1.TestService
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 100
+  timeout: 30s
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    targets:
+      - name: grpc-backend-1
+        destination:
+          host: host.docker.internal
+          port: 8811
+        timeout: 10s
+        retries: 1
+      - name: grpc-backend-2
+        destination:
+          host: host.docker.internal
+          port: 8812
+        timeout: 10s
+        retries: 1
+
+# =============================================================================
+# GraphQL AGGREGATE Route (GraphQLRoute CRD) - fan-out across two GraphQL backends
+# =============================================================================
+# Fans every /graphql query out to backends 8801 + 8802 in parallel and deep-merges
+# the `data` objects (errors concatenated) into a single GraphQL response.
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: do04-graphql-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: graphql-route
+    feature: aggregate
+spec:
+  match:
+    - path:
+        exact: /graphql
+      operationType: query
+  # GraphQL routes reference backends by NAME (resolved via GraphQLBackend CRDs),
+  # not a literal host:port. do04-graphql-backend-1 -> host.docker.internal:8801.
+  route:
+    - destination:
+        host: do04-graphql-backend-1
+        port: 8801
+      weight: 100
+  timeout: 30s
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    merge:
+      enabled: true
+      strategy: deep
+    targets:
+      - name: graphql-backend-1
+        destination:
+          host: host.docker.internal
+          port: 8901
+        timeout: 10s
+        retries: 1
+      - name: graphql-backend-2
+        destination:
+          host: host.docker.internal
+          port: 8902
+        timeout: 10s
+        retries: 1

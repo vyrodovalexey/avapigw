@@ -49,6 +49,17 @@ type RouteMiddlewareApplier interface {
 	ApplyMiddleware(handler http.Handler, route *config.Route) http.Handler
 }
 
+// AggregateHandler executes an aggregate (fan-out) request for a route.
+// This interface decouples the proxy from the internal/aggregate engine to
+// avoid import cycles, mirroring the RouteMiddlewareApplier pattern. It returns
+// an error only when the aggregate could not satisfy its configured FailMode; in
+// that case no response has been written.
+type AggregateHandler interface {
+	// ServeAggregate fans the request out per the route's aggregate config and
+	// writes the aggregated response.
+	ServeAggregate(w http.ResponseWriter, r *http.Request, cfg *config.AggregateConfig) error
+}
+
 // ReverseProxy handles proxying requests to backend services.
 type ReverseProxy struct {
 	router                *router.Router
@@ -62,6 +73,7 @@ type ReverseProxy struct {
 	flushInterval         time.Duration
 	metricsRegistry       *prometheus.Registry
 	routeMiddleware       RouteMiddlewareApplier
+	aggregateHandler      AggregateHandler
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -135,6 +147,15 @@ func WithRouteMiddleware(rm RouteMiddlewareApplier) ProxyOption {
 	}
 }
 
+// WithAggregateHandler sets the aggregate (fan-out) handler. When configured and
+// a matched route declares an enabled aggregate config, the request is fanned
+// out to the configured targets instead of single-destination proxying.
+func WithAggregateHandler(h AggregateHandler) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.aggregateHandler = h
+	}
+}
+
 // NewReverseProxy creates a new reverse proxy.
 func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...ProxyOption) *ReverseProxy {
 	p := &ReverseProxy{
@@ -199,8 +220,54 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle aggregate (fan-out) mirroring when configured and enabled.
+	if p.handleAggregate(w, r, route) {
+		return
+	}
+
 	// Proxy to backend
 	p.proxyRequest(w, r, route)
+}
+
+// handleAggregate fans the request out to multiple backends when the route
+// declares an enabled aggregate config and an aggregate handler is injected. It
+// returns true when the request was handled (success or terminal error).
+//
+// Per-route middleware (CORS, cache, transform, encoding, headers, openapi
+// validation, rate-limit) is applied around the fan-out exactly as it is for
+// single-destination proxying, so aggregate routes co-operate with the same
+// cross-cutting features.
+func (p *ReverseProxy) handleAggregate(
+	w http.ResponseWriter,
+	r *http.Request,
+	route *router.CompiledRoute,
+) bool {
+	if p.aggregateHandler == nil || !route.Config.Aggregate.IsEnabled() {
+		return false
+	}
+
+	fanout := http.HandlerFunc(func(innerW http.ResponseWriter, innerR *http.Request) {
+		if err := p.aggregateHandler.ServeAggregate(innerW, innerR, route.Config.Aggregate); err != nil {
+			p.logger.Warn("aggregate fan-out failed",
+				observability.String("route", route.Name),
+				observability.Error(err),
+			)
+			p.errorHandler(innerW, innerR, err)
+		}
+	})
+
+	// Apply per-route middleware if configured and the route has any, mirroring
+	// the proxyRequest wrapping so aggregate routes honor cross-cutting concerns.
+	if p.routeMiddleware != nil {
+		if middlewares := p.routeMiddleware.GetMiddleware(&route.Config); len(middlewares) > 0 {
+			handler := p.routeMiddleware.ApplyMiddleware(fanout, &route.Config)
+			handler.ServeHTTP(w, r)
+			return true
+		}
+	}
+
+	fanout.ServeHTTP(w, r)
+	return true
 }
 
 // proxyTracerName is the OpenTelemetry tracer name for proxy operations.

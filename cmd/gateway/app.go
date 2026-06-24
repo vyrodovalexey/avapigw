@@ -3,6 +3,10 @@ package main
 import (
 	"net/http"
 
+	"github.com/vyrodovalexey/avapigw/internal/aggregate"
+	aggregategraphql "github.com/vyrodovalexey/avapigw/internal/aggregate/graphqladapter"
+	aggregategrpc "github.com/vyrodovalexey/avapigw/internal/aggregate/grpcadapter"
+	aggregaterest "github.com/vyrodovalexey/avapigw/internal/aggregate/rest"
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/auth/apikey"
@@ -142,10 +146,17 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		routeMiddlewareOpts...,
 	)
 
+	// Build the shared aggregate (fan-out) handlers. The REST handler is wired
+	// into the reverse proxy so routes declaring aggregate.enabled=true fan out
+	// to their configured targets, merge/envelope the responses, and emit the
+	// gateway_aggregate_* metrics. The same engine backs the GraphQL handler.
+	restAggregateHandler, graphqlAggregateHandler, grpcAggregateHandler := initAggregateHandlers(metrics, logger)
+
 	reverseProxy := proxy.NewReverseProxy(r, backendRegistry,
 		proxy.WithProxyLogger(logger),
 		proxy.WithMetricsRegistry(metrics.Registry()),
 		proxy.WithRouteMiddleware(routeMiddlewareMgr),
+		proxy.WithAggregateHandler(restAggregateHandler),
 	)
 	middlewareResult, mwErr := buildMiddlewareChain(
 		reverseProxy, cfg, logger, metrics, tracer, auditLogger,
@@ -169,6 +180,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		gateway.WithMetricsRegistry(metrics.Registry()),
 		gateway.WithGatewayTLSMetrics(tlsMetrics),
 		gateway.WithGatewayAuthMetrics(authMetrics),
+		gateway.WithGatewayGRPCAggregateHandler(grpcAggregateHandler),
 	}
 	if vaultFactory != nil {
 		gwOpts = append(gwOpts, gateway.WithGatewayVaultProviderFactory(vaultFactory))
@@ -183,7 +195,10 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		gwOpts = append(gwOpts, gateway.WithGraphQLRouter(gqlRouter))
 	}
 	if gqlProxy != nil {
-		gwOpts = append(gwOpts, gateway.WithGraphQLProxy(gqlProxy))
+		gwOpts = append(gwOpts,
+			gateway.WithGraphQLProxy(gqlProxy),
+			gateway.WithGraphQLAggregateHandler(graphqlAggregateHandler),
+		)
 	}
 
 	gw, err := gateway.New(cfg, gwOpts...)
@@ -383,6 +398,44 @@ func initGraphQLComponents(
 	)
 
 	return gqlRouter, gqlProxy
+}
+
+// initAggregateHandlers builds the REST, GraphQL and gRPC aggregate (fan-out)
+// handlers backed by a shared engine. All handlers share a single
+// aggregate.Metrics registered on the gateway's custom Prometheus registry so
+// the gateway_aggregate_* series appear on the /metrics endpoint, and a single
+// OTLP tracer (B3/Jaeger propagation is configured at process startup).
+//
+// The REST and GraphQL handlers use REST invokers (reusing internal/backend for
+// per-target TLS/mTLS and per-target authentication). The gRPC handler is a
+// transport-level ProxyHandler: it builds a pool-backed gRPC invoker per call
+// (reusing the proxy's connection pool and per-target mTLS) and treats the call
+// as UNARY. All handlers are injected via decoupling interfaces to avoid import
+// cycles.
+func initAggregateHandlers(
+	metrics *observability.Metrics,
+	logger observability.Logger,
+) (
+	restHandler *aggregaterest.Handler,
+	graphqlHandler *aggregategraphql.Handler,
+	grpcHandler *aggregategrpc.ProxyHandler,
+) {
+	aggMetrics := aggregate.NewMetricsWith(metrics.Registry())
+	aggTracer := aggregate.NewTracer()
+	restHandler = aggregaterest.NewHandler(
+		aggregaterest.NewInvoker(aggregaterest.WithLogger(logger)),
+		logger, aggMetrics, aggTracer,
+	)
+	graphqlHandler = aggregategraphql.NewHandler(
+		aggregaterest.NewInvoker(aggregaterest.WithLogger(logger)),
+		logger, aggMetrics, aggTracer,
+	)
+	grpcHandler = aggregategrpc.NewProxyHandler(
+		logger,
+		aggregategrpc.WithProxyHandlerMetrics(aggMetrics),
+		aggregategrpc.WithProxyHandlerTracer(aggTracer),
+	)
+	return restHandler, graphqlHandler, grpcHandler
 }
 
 // initBackendRegistry creates and loads the HTTP backend registry.

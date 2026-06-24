@@ -26,18 +26,23 @@ run() {
   jq -r '"    rps=\(.rps|floor) count=\(.count) p50=\(.latencyDistribution[]|select(.percentage==50)|.latency/1e6)ms p95=\(.latencyDistribution[]|select(.percentage==95)|.latency/1e6)ms p99=\(.latencyDistribution[]|select(.percentage==99)|.latency/1e6)ms status=\(.statusCodeDistribution)"' "$OUTDIR/${name}.json" 2>/dev/null || echo "    (ghz failed; see ${name}.err)"
 }
 
+PARALLEL="${PERF_PARALLEL:-0}"
+maybe_bg() { if [ "$PARALLEL" = "1" ]; then "$@" & else "$@"; fi; }
+
 if [ "$GROUP" = "group1" ]; then
-  run unary       api.v1.TestService/Unary               '{"message":"perf"}'        '{"x-perf-baseline":"true"}'
-  run serverstream api.v1.TestService/ServerStream        '{"count":5,"interval_ms":10}' '{"x-perf-baseline":"true"}'
-  run bidistream  api.v1.TestService/BidirectionalStream '{"value":3,"operation":"double"}' '{"x-perf-baseline":"true"}'
-  run oidc_unary  api.v1.TestService/Unary               '{"message":"perf"}'        "{\"x-test-scenario\":\"oidc\",\"authorization\":\"Bearer $TOK_LH\"}"
-  run mtls_unary  api.v1.TestService/Unary               '{"message":"perf"}'        '{"x-test-scenario":"mtls"}'
+  maybe_bg run unary       api.v1.TestService/Unary               '{"message":"perf"}'        '{"x-perf-baseline":"true"}'
+  maybe_bg run serverstream api.v1.TestService/ServerStream        '{"count":5,"interval_ms":10}' '{"x-perf-baseline":"true"}'
+  maybe_bg run bidistream  api.v1.TestService/BidirectionalStream '{"value":3,"operation":"double"}' '{"x-perf-baseline":"true"}'
+  maybe_bg run oidc_unary  api.v1.TestService/Unary               '{"message":"perf"}'        "{\"x-test-scenario\":\"oidc\",\"authorization\":\"Bearer $TOK_LH\"}"
+  maybe_bg run mtls_unary  api.v1.TestService/Unary               '{"message":"perf"}'        '{"x-test-scenario":"mtls"}'
+  [ "$PARALLEL" = "1" ] && wait
 elif [ "$GROUP" = "group2" ]; then
   # TLS group: same TLS listener; exercise TLS unary (more conns), TLS serverstream(10x10ms), mTLS stream, TLS OIDC
-  run tls_unary       api.v1.TestService/Unary        '{"message":"perf"}'           '{"x-perf-baseline":"true"}'
-  run tls_serverstream api.v1.TestService/ServerStream '{"count":10,"interval_ms":10}' '{"x-perf-baseline":"true"}'
-  run mtls_stream     api.v1.TestService/ServerStream '{"count":5,"interval_ms":10}' '{"x-test-scenario":"mtls-stream"}'
-  run tls_oidc_unary  api.v1.TestService/Unary        '{"message":"perf"}'           "{\"x-test-scenario\":\"oidc\",\"authorization\":\"Bearer $TOK_LH\"}"
+  maybe_bg run tls_unary       api.v1.TestService/Unary        '{"message":"perf"}'           '{"x-perf-baseline":"true"}'
+  maybe_bg run tls_serverstream api.v1.TestService/ServerStream '{"count":10,"interval_ms":10}' '{"x-perf-baseline":"true"}'
+  maybe_bg run mtls_stream     api.v1.TestService/ServerStream '{"count":5,"interval_ms":10}' '{"x-test-scenario":"mtls-stream"}'
+  maybe_bg run tls_oidc_unary  api.v1.TestService/Unary        '{"message":"perf"}'           "{\"x-test-scenario\":\"oidc\",\"authorization\":\"Bearer $TOK_LH\"}"
+  [ "$PARALLEL" = "1" ] && wait
 fi
 
 # Build group summary.json

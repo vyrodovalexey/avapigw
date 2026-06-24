@@ -520,6 +520,41 @@ gateway:
     #       altNames:
     #         - api.tenant-a.example.com
     #       ttl: "24h"
+    #
+    # Example: Route with aggregate (fan-out) mirroring
+    # Fans a single client request out to multiple backends in parallel and
+    # returns a single aggregated response. Distinct from the single-destination
+    # fire-and-forget "mirror" config. Merge and Redis spool are both optional.
+    # - name: aggregate-route
+    #   match:
+    #     - uri:
+    #         prefix: /api/aggregate
+    #   aggregate:
+    #     enabled: true
+    #     # all | any | quorum
+    #     failMode: all
+    #     # Bound on concurrent target invocations (1-1024)
+    #     maxParallel: 8
+    #     targets:
+    #       - name: backend-a
+    #         destination:
+    #           host: backend-a.default.svc.cluster.local
+    #           port: 8080
+    #         timeout: 30s
+    #         retries: 1
+    #       - name: backend-b
+    #         destination:
+    #           host: backend-b.default.svc.cluster.local
+    #           port: 8080
+    #     # Optional response merging (deep | shallow | replace)
+    #     merge:
+    #       enabled: true
+    #       strategy: deep
+    #     # Optional off-heap spool for large responses / many targets
+    #     spool:
+    #       enabled: false
+    #       backend: memory  # memory | redis
+    #       thresholdBytes: 1048576
 
   # Backends configuration
   # Define backend services with optional authentication, circuit breaker, maxSessions, and rateLimit
