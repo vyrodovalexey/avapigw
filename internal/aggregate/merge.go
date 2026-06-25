@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/transform"
 )
@@ -82,8 +83,22 @@ func (m *Merger) Combine(ctx context.Context, opts *MergeOptions, responses []*R
 		return m.envelope(responses)
 	}
 
+	// Explicit NDJSON strategy always uses the line merger, regardless of
+	// detection or content types (opt-in, predictable).
+	if opts.Strategy == config.MergeStrategyNDJSON {
+		return m.mergeNDJSON(opts, responses, "explicit")
+	}
+
 	docs, ok := decodeJSONDocs(responses)
 	if !ok {
+		// The deep/shallow/replace path would otherwise fall back to a labeled
+		// envelope here (some body is not valid JSON-as-a-whole). Auto-promote
+		// to NDJSON only when EVERY successful body is detected NDJSON; this
+		// keeps existing JSON merges byte-identical and never promotes
+		// valid-JSON-whole bodies.
+		if allResponsesNDJSON(responses) {
+			return m.mergeNDJSON(opts, responses, "auto")
+		}
 		m.logger.Debug("aggregate merge falling back to labeled envelope (non-JSON payload)")
 		return m.envelope(responses)
 	}
@@ -101,6 +116,40 @@ func (m *Merger) Combine(ctx context.Context, opts *MergeOptions, responses []*R
 		return m.envelope(responses)
 	}
 	return &MergeOutput{Body: body, ContentType: contentTypeJSON, Merged: true}, nil
+}
+
+// mergeNDJSON merges the responses as NDJSON record streams via the line
+// merger. mode is "explicit" (strategy: ndjson) or "auto" (promoted from the
+// would-be-envelope branch); it is logged for observability with bounded
+// cardinality.
+func (m *Merger) mergeNDJSON(opts *MergeOptions, responses []*Response, mode string) (*MergeOutput, error) {
+	out, err := newLineMerger(opts).Merge(responses)
+	if err != nil {
+		m.logger.Warn("aggregate ndjson merge failed, using labeled envelope",
+			observability.Error(err))
+		return m.envelope(responses)
+	}
+	m.logger.Debug("aggregate merge produced NDJSON stream",
+		observability.String("merge_strategy", config.MergeStrategyNDJSON),
+		observability.String("merge_mode", mode),
+		observability.Int("records", countNDJSONRecords(out.Body)),
+	)
+	return out, nil
+}
+
+// countNDJSONRecords counts the non-empty newline-delimited records in body for
+// debug logging only (bounded, cheap).
+func countNDJSONRecords(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 // envelope builds a labeled-envelope JSON array from the responses.

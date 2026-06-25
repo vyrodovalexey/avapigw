@@ -4034,6 +4034,44 @@ the existing in-proc functional-test convention.
 - **Description**: Aggregate metrics emitted and queryable, including per-target error metric on partial failure.
 - **Expected**: request/targets counters, per-target error counter for the dead target, duration + merge histograms observable.
 
+### AGG-15 NDJSON — Functional (`test/functional/aggregate_ndjson_test.go`, `-tags=functional`)
+
+NDJSON aggregate merge strategy. In-process httptest NDJSON backends keep merges
+deterministic; each test asserts the response content type and body shape (valid
+NDJSON: each line valid JSON, whole body NOT valid JSON).
+
+#### TestFunctional_Aggregate_NDJSON_Explicit_SortDedupeLimit (FN-1)
+- **Description**: Explicit `strategy: ndjson` across two `application/x-ndjson` backends; records collected, sorted by `_time` (numeric), deduped by `id` (first-wins), limited.
+- **Expected**: `Content-Type: application/stream+json` + `X-Content-Type-Options: nosniff`; 2 records after sort+dedupe+limit; first-wins keeps the earliest-`_time` duplicate.
+
+#### TestFunctional_Aggregate_NDJSON_Explicit_PlainConcatOrder (FN-1b)
+- **Description**: Explicit ndjson with `TimeField=""` (sort disabled) over two backends.
+- **Expected**: plain concat preserves target-then-line order; `application/stream+json` output.
+
+#### TestFunctional_Aggregate_NDJSON_AutoPromotion (FN-2)
+- **Description**: Deep strategy (non-ndjson) + NDJSON bodies -> auto-promotion on the would-be-envelope branch. Data-driven over content types `application/x-ndjson`, `application/jsonl`, `application/stream+json`, charset-parameterized, and a body-heuristic case (no NDJSON content type, detection via valid-per-line/invalid-whole shape).
+- **Expected**: `application/stream+json` output (auto-promoted); records sorted by `_time` by the auto path too.
+
+#### TestFunctional_Aggregate_NDJSON_NoPromotion_MixedNonJSON (FN-2b)
+- **Description**: Mixed targets (one NDJSON, one non-JSON text) with deep strategy.
+- **Expected**: NOT promoted (not ALL bodies NDJSON) -> labeled envelope JSON array, `application/json`.
+
+#### TestFunctional_Aggregate_NDJSON_Regression_JSONMergeUnchanged (FN-3a)
+- **Description**: deep/shallow/replace JSON merge over valid-JSON-whole bodies (data-driven over the three strategies).
+- **Expected**: NEVER promoted; output stays `application/json` (single JSON document); strategy-specific semantics intact (deep nests, shallow replaces nested object, replace keeps last doc only).
+
+#### TestFunctional_Aggregate_NDJSON_Regression_DeepMergeByteIdentical (FN-3b)
+- **Description**: Deep-merge fixture (nested object + arrays) with the NDJSON code path present.
+- **Expected**: nested objects deep-merged, arrays concatenated (unchanged behavior); `application/json`.
+
+#### TestFunctional_Aggregate_NDJSON_Regression_MergeDisabledEnvelopes (FN-3c)
+- **Description**: Merge DISABLED over NDJSON bodies.
+- **Expected**: labeled envelope (NDJSON detection only fires on the would-be-envelope branch of an enabled non-ndjson merge); `application/json`.
+
+#### TestFunctional_Aggregate_NDJSON_CoexistWithSingleMirror (FN-3d)
+- **Description**: An NDJSON aggregate route and a single-mirror normal route coexist through one proxy (additive-config regression for the ndjson strategy).
+- **Expected**: ndjson aggregate route returns a `_time`-sorted `application/stream+json` stream; normal single-mirror route proxies to its primary unchanged; `MirrorConfig` preserved.
+
 ### AGG-16 — Integration (`test/integration/aggregate_test.go`, `-tags=integration`)
 
 Runs against the docker-compose test ENV (Vault PKI, Keycloak, REST/gRPC
@@ -4067,6 +4105,26 @@ backends, Redis standalone + sentinel). All addresses/credentials come from ENV.
 #### TestIntegration_Aggregate_PartialFailure_AllFailModes (I-8)
 - **Description**: Partial failure (one dead target) under each FailMode (all/any/quorum-majority/quorum-explicit).
 - **Expected**: all → error; any → success; quorum majority (2/3) → success; explicit quorum 3 → error; dead-target error metric increments in all cases.
+
+### AGG-16 NDJSON — Integration (`test/integration/aggregate_ndjson_test.go`, `-tags=integration`)
+
+NDJSON aggregate strategy against the docker-compose ENV. The live REST backends
+(rest_api_1..5) do not emit native NDJSON, so the NDJSON record streams are
+produced by in-test backends while the production REST aggregate invoker, the
+proxy per-route middleware chain, and the merge pipeline all run through real
+code paths.
+
+#### TestIntegration_Aggregate_NDJSON_ThroughProxy (IN-1)
+- **Description**: REST aggregate `strategy: ndjson` over two in-test NDJSON backends wired through a real `ReverseProxy` + per-route middleware manager; RFC3339 `_time` sort, `id` dedupe (first-wins), `limit: 2`.
+- **Expected**: client receives `application/stream+json` + `nosniff`; 2 records after RFC3339 sort + first-wins dedupe + limit; `targets_total`=2.
+
+#### TestIntegration_Aggregate_NDJSON_AutoPromotion (IN-2)
+- **Description**: Deep strategy + `application/jsonl` bodies -> auto-promotion on the would-be-envelope branch.
+- **Expected**: `application/stream+json` output; all records collected and sorted by `_time` by the auto path.
+
+#### TestIntegration_Aggregate_NDJSON_PartialFailure_FailModeAny (IN-3)
+- **Description**: Two successful NDJSON targets + one dead target under FailMode=any with `strategy: ndjson`.
+- **Expected**: request succeeds (dead tolerated); only the 3 records from the 2 successful targets contribute; `application/stream+json`; dead-target error metric increments.
 
 ## E2E Tests — Aggregate (Fan-out) Mirroring, OPERATOR MODE (AGG-17)
 
@@ -4139,3 +4197,25 @@ local port per test for parallel isolation) and an InsecureSkipVerify TLS client
   message naming the violated constraint; defensive cleanup.
 - **Expected**: every invalid aggregate CRD is rejected at admission; no invalid object
   is persisted.
+
+### AGG-17 NDJSON — E2E (`test/e2e/aggregate_ndjson_e2e_test.go`, `-tags=e2e`)
+
+NDJSON aggregate strategy driven via operator CRD against the deployed
+`avapigw-test` gateway + operator. Self-gated on `AVAPIGW_E2E_LIVE` + live
+cluster reachability (same gate as AGG-17). Each test first PROBES the installed
+APIRoute CRD with a server-side dry-run apply: if the CRD predates the NDJSON
+merge surface (no `strategy=ndjson` / `timeField` / `keyField` / `limit`), the
+test SKIPS gracefully with the precise reason (CRD re-apply pending) rather than
+failing.
+
+#### TestE2E_Aggregate_EN1_NDJSONStrategyViaCRD (EN-1)
+- **Description**: Apply an aggregate APIRoute with `strategy: ndjson` + `timeField`/`keyField`/`limit` (unique name per run), reconcile, drive through the deployed gateway.
+- **Subtests**:
+  - `crd_admitted_and_reconciled` — always asserts: route admitted, reconciled `Ready`, and the ndjson/timeField/keyField/limit fields round-trip on the CRD spec.
+  - `data_plane_ndjson_stream` — drives the route; asserts `application/stream+json` + `nosniff` + NDJSON stream shape (valid-per-line / invalid-as-a-whole, `_time`-sorted when records are JSON objects). **Documented skip** when the running gateway does not hot-reload newly-created APIRoutes into the live data plane (routes loaded at gateway startup) so the fresh route falls through to the catch-all; the data-plane NDJSON behavior is fully covered at the functional/integration layers.
+- **Expected**: CRD admission + operator reconcile of the ndjson strategy fully asserted; data-plane stream asserted when the route is served, else graceful skip.
+
+#### TestE2E_Aggregate_EN2_AdmissionNDJSON (EN-2)
+- **Description**: Black-box admission (via `kubectl --dry-run=server`) of the ndjson merge surface.
+- **Subtests**: valid ndjson aggregate CRD (`strategy: ndjson`, `timeField`/`keyField`, `limit: 0`) is admitted; a negative `limit` (`-1`) is rejected at admission with a message naming the `limit` constraint (`Minimum=0`).
+- **Expected**: valid ndjson CRD admitted; negative limit rejected; persists nothing (dry-run). Graceful skip when the installed CRD lacks the NDJSON surface.

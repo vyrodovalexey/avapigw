@@ -49,6 +49,7 @@ on the gRPC streaming or WebSocket data paths.
 - [How It Works](#how-it-works)
 - [Merging Responses](#merging-responses)
 - [Labeled Envelope](#labeled-envelope)
+- [NDJSON aggregation](#ndjson-aggregation)
 - [Streaming and WebSocket Semantics](#streaming-and-websocket-semantics)
 - [Redis Spool](#redis-spool)
 - [Configuration Reference](#configuration-reference)
@@ -96,8 +97,11 @@ document using the shared response merger.
 | `deep` (default) | Recursively merge nested objects; later targets overlay earlier ones. |
 | `shallow` | Merge only top-level keys. |
 | `replace` | Last non-nil value wins. |
+| `ndjson` | Merge newline-delimited JSON (NDJSON) record streams instead of JSON documents. Each target body is split into per-line records, the records are collected across all successful targets, then optionally stably sorted, de-duplicated, and limited, and emitted as a single NDJSON stream. Use this for line-oriented log/event/record streams (one JSON record per line) rather than a single JSON object or array. See [NDJSON aggregation](#ndjson-aggregation). |
 
-Arrays are **concatenated** across targets under all strategies.
+Arrays are **concatenated** across targets under the `deep`, `shallow`, and
+`replace` strategies. The `ndjson` strategy is line-oriented and does not merge
+JSON documents (see [NDJSON aggregation](#ndjson-aggregation)).
 
 Merging applies to unary JSON traffic: **REST**, **GraphQL** (POST/unary), and
 **gRPC unary** when the message is JSON-mappable.
@@ -133,6 +137,93 @@ Each envelope carries:
   encoded as a JSON string so the envelope stays valid JSON.
 
 The aggregated content type is always `application/json`.
+
+## NDJSON aggregation
+
+NDJSON (newline-delimited JSON, also called JSON Lines) aggregation merges
+**line-oriented record streams** - one JSON record per line - from multiple
+targets into a single NDJSON stream. It is line-oriented and does **not** merge
+JSON documents; use it for log, event, metric, or audit streams where each
+target returns many records.
+
+The merged output always uses the content type `application/stream+json`.
+
+### Detection
+
+A successful target response is treated as NDJSON when **either** condition
+holds:
+
+1. **Content type.** The response `Content-Type` (case-insensitive, ignoring any
+   `; charset=...` parameter) is one of:
+   - `application/stream+json`
+   - `application/x-ndjson`
+   - `application/jsonl`
+2. **Body heuristic.** The body is "valid JSON per line but invalid as a whole":
+   it has at least one non-empty line, every non-empty (trimmed) line is
+   independently valid JSON, **and** the body as a whole is not valid JSON. A
+   single JSON object or array body (including one with a trailing newline) is
+   valid as a whole and is therefore **not** detected as NDJSON.
+
+### lineMerger pipeline
+
+When NDJSON merging runs, the line merger applies this pipeline in order:
+
+1. **Split.** Each successful target body is split on `\n`. Blank and
+   whitespace-only lines are skipped.
+2. **Collect.** Records are collected across all successful targets in stable
+   order: targets in fan-out order, lines in file order.
+3. **Sort (optional).** When `timeField` is set (default `_time`), records are
+   **stably** sorted by that field. Comparison follows a fixed typing order:
+   numeric first, then RFC3339 timestamp, then canonical string. Records that
+   carry the field sort **before** those missing it (present-first /
+   missing-last); records that are equal or both missing the field keep their
+   input order. An empty `timeField` disables sorting.
+4. **De-duplicate (optional).** When `keyField` is set, duplicate records are
+   removed **first-wins** (after sorting). Records that lack the key are always
+   kept. An empty `keyField` disables de-duplication.
+5. **Limit (optional).** When `limit` is greater than `0`, only the first
+   `limit` records are emitted. `0` means unlimited.
+6. **Emit.** The surviving records are joined as newline-delimited raw lines and
+   written back with `Content-Type: application/stream+json`.
+
+### Explicit vs. auto-promotion semantics
+
+There are two ways NDJSON aggregation runs:
+
+- **Explicit (`strategy: ndjson`).** When merge is enabled and the strategy is
+  `ndjson`, the line merger **always** runs, regardless of content types or
+  detection. This is the opt-in, predictable path.
+- **Auto-promotion.** When merge is enabled with a JSON strategy
+  (`deep` / `shallow` / `replace`), the engine first attempts the normal JSON
+  document merge. Auto-promotion to NDJSON happens **only** on the
+  would-be-envelope branch - that is, when the bodies could not be merged as
+  whole JSON **and** every successful body is detected as NDJSON. In that case
+  the engine produces an NDJSON stream instead of a labeled envelope.
+
+Existing `deep` / `shallow` / `replace` merges of valid whole-JSON bodies are
+**unchanged and byte-identical**: a valid JSON object or array is never promoted
+to NDJSON.
+
+### Config fields
+
+The NDJSON strategy adds three fields under `merge` (`spec.aggregate.merge` in
+operator mode). They apply only to the `ndjson` strategy.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `merge.timeField` | string | `_time` | Sort key. Records are stably sorted by this field (numeric -> RFC3339 -> string; present-first / missing-last). An empty value disables sorting. |
+| `merge.keyField` | string | (empty) | De-duplication key. Duplicates are removed first-wins after sorting; records lacking the field are never de-duplicated. An empty value disables de-duplication. |
+| `merge.limit` | int | `0` | Maximum number of emitted records (minimum `0`). `0` means unlimited. |
+
+### Edge cases
+
+| Case | Behavior |
+|---|---|
+| **Huge NDJSON bodies** | Bodies at or above `spool.thresholdBytes` spool off-heap (when spooling is enabled) before merging; the record `limit` is applied after collection so the emitted stream stays bounded. |
+| **Mixed JSON / NDJSON targets** | Auto-promotion requires **every** successful body to be detected as NDJSON. If some targets return whole JSON and others NDJSON, auto-promotion does not trigger and the engine falls back to the labeled envelope. With an explicit `strategy: ndjson`, every body is split line-wise; a whole-JSON object body becomes a single record line. |
+| **Missing time field** | Records lacking `timeField` sort after those that have it (missing-last) and keep their input order among themselves. |
+| **Missing key field** | Records lacking `keyField` are never de-duplicated; each is kept. |
+| **Non-object lines** | A line that is valid JSON but not an object (e.g. a scalar or array) is treated as lacking any sort/de-dupe field and is preserved. |
 
 ## Streaming and WebSocket Semantics
 
@@ -211,7 +302,10 @@ modes.
 | `targets[].tls` | object | - | Per-target TLS (including mTLS). |
 | `targets[].authentication` | object | - | Per-target backend auth (basic/JWT/OIDC/mTLS; Vault refs supported). |
 | `merge.enabled` | bool | `false` | Enable response merging (else labeled envelope). |
-| `merge.strategy` | enum | `deep` | `deep` \| `shallow` \| `replace`. |
+| `merge.strategy` | enum | `deep` | `deep` \| `shallow` \| `replace` \| `ndjson`. |
+| `merge.timeField` | string | `_time` | NDJSON sort key (`ndjson` strategy only). Empty disables sorting. |
+| `merge.keyField` | string | - | NDJSON de-duplication key (`ndjson` strategy only). Empty disables de-duplication. |
+| `merge.limit` | int | `0` | Max emitted NDJSON records (`ndjson` strategy only; minimum `0`). `0` = unlimited. |
 | `spool.enabled` | bool | `false` | Enable off-heap spooling. |
 | `spool.backend` | enum | `memory` | `memory` \| `redis`. |
 | `spool.thresholdBytes` | int | `1048576` | Spool only bodies >= this size. |
@@ -304,6 +398,75 @@ spec:
       - name: backend-b
         destination:
           host: backend-b.default.svc.cluster.local
+          port: 8080
+```
+
+### REST (NDJSON aggregation)
+
+Aggregate a line-oriented record stream with an explicit `strategy: ndjson`,
+sorting by `_time`, de-duplicating by `id`, and capping the output at 1000
+records. The merged response is returned as `application/stream+json`.
+
+File mode:
+
+```yaml
+routes:
+  - name: rest-ndjson-aggregate
+    match:
+      - uri:
+          prefix: /api/events
+    aggregate:
+      enabled: true
+      failMode: all
+      maxParallel: 8
+      merge:
+        enabled: true
+        strategy: ndjson
+        timeField: _time
+        keyField: id
+        limit: 1000
+      targets:
+        - name: events-a
+          destination:
+            host: events-a.default.svc.cluster.local
+            port: 8080
+          timeout: 30s
+        - name: events-b
+          destination:
+            host: events-b.default.svc.cluster.local
+            port: 8080
+```
+
+Operator mode:
+
+```yaml
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: rest-ndjson-aggregate
+spec:
+  match:
+    - uri:
+        prefix: /api/events
+  aggregate:
+    enabled: true
+    failMode: all
+    maxParallel: 8
+    merge:
+      enabled: true
+      strategy: ndjson
+      timeField: _time
+      keyField: id
+      limit: 1000
+    targets:
+      - name: events-a
+        destination:
+          host: events-a.default.svc.cluster.local
+          port: 8080
+        timeout: 30s
+      - name: events-b
+        destination:
+          host: events-b.default.svc.cluster.local
           port: 8080
 ```
 
@@ -651,6 +814,8 @@ duration percentiles, results breakdown, and spool bytes/errors.
 | **Transient error** | Retried with exponential backoff up to `retries`; permanent errors are not retried. |
 | **Huge bodies / many targets** | Bodies at or above `spool.thresholdBytes` spool to Redis (when enabled); concurrency is bounded by `maxParallel`. |
 | **Non-JSON body** | The engine falls back to the labeled envelope; no merge is attempted and no error is raised. |
+| **NDJSON streams** | With `strategy: ndjson` the line merger always runs; with a JSON strategy, NDJSON-detected bodies that cannot merge as whole JSON are auto-promoted to an NDJSON stream (`application/stream+json`). See [NDJSON aggregation](#ndjson-aggregation). |
+| **Mixed JSON / NDJSON targets** | Auto-promotion requires every successful body to be NDJSON; otherwise the engine falls back to the labeled envelope. |
 | **Merge conflict** (type mismatch) | Deterministic, source-wins behavior per the configured strategy. |
 | **Redis outage** | The engine degrades to the in-memory fallback; the request still succeeds and the spool error is counted. |
 | **Per-target mTLS / OIDC** | Each target carries its own `tls` and `authentication`; sensitive values may reference Vault. |

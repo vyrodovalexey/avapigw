@@ -210,6 +210,46 @@ func TestValidateAggregate(t *testing.T) {
 			},
 		},
 		{
+			name: "ndjson merge strategy accepted",
+			cfg: &avapigwv1alpha1.AggregateConfig{
+				Enabled: true,
+				Targets: []avapigwv1alpha1.AggregateTarget{aggTarget("a")},
+				Merge:   &avapigwv1alpha1.MergeOptions{Enabled: true, Strategy: "ndjson"},
+			},
+		},
+		{
+			name: "ndjson with knobs accepted",
+			cfg: &avapigwv1alpha1.AggregateConfig{
+				Enabled: true,
+				Targets: []avapigwv1alpha1.AggregateTarget{aggTarget("a")},
+				Merge: &avapigwv1alpha1.MergeOptions{
+					Enabled:   true,
+					Strategy:  "ndjson",
+					TimeField: "ts",
+					KeyField:  "id",
+					Limit:     50,
+				},
+			},
+		},
+		{
+			name: "negative merge limit rejected",
+			cfg: &avapigwv1alpha1.AggregateConfig{
+				Enabled: true,
+				Targets: []avapigwv1alpha1.AggregateTarget{aggTarget("a")},
+				Merge:   &avapigwv1alpha1.MergeOptions{Enabled: true, Strategy: "ndjson", Limit: -1},
+			},
+			wantErr: "merge.limit must be non-negative",
+		},
+		{
+			name: "invalid merge strategy error lists ndjson",
+			cfg: &avapigwv1alpha1.AggregateConfig{
+				Enabled: true,
+				Targets: []avapigwv1alpha1.AggregateTarget{aggTarget("a")},
+				Merge:   &avapigwv1alpha1.MergeOptions{Enabled: true, Strategy: "weird"},
+			},
+			wantErr: "ndjson",
+		},
+		{
 			name: "disabled merge skips strategy check",
 			cfg: &avapigwv1alpha1.AggregateConfig{
 				Enabled: true,

@@ -596,8 +596,22 @@
                       },
                       "strategy": {
                         "type": "string",
-                        "enum": ["deep", "shallow", "replace"],
-                        "default": "deep"
+                        "enum": ["deep", "shallow", "replace", "ndjson"],
+                        "default": "deep",
+                        "description": "Merge strategy. 'ndjson' merges newline-delimited JSON record streams (with optional sort/de-dupe/limit) instead of merging JSON documents"
+                      },
+                      "timeField": {
+                        "type": "string",
+                        "description": "NDJSON sort key (ndjson strategy only). Records are stably sorted by this field. Default: '_time'"
+                      },
+                      "keyField": {
+                        "type": "string",
+                        "description": "NDJSON de-duplication key (ndjson strategy only). Duplicate records are removed first-wins after sorting"
+                      },
+                      "limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Caps the number of emitted NDJSON records (ndjson strategy only). 0 means unlimited"
                       }
                     }
                   },

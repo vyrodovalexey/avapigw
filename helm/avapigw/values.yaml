@@ -546,7 +546,7 @@ gateway:
     #         destination:
     #           host: backend-b.default.svc.cluster.local
     #           port: 8080
-    #     # Optional response merging (deep | shallow | replace)
+    #     # Optional response merging (deep | shallow | replace | ndjson)
     #     merge:
     #       enabled: true
     #       strategy: deep
@@ -555,6 +555,34 @@ gateway:
     #       enabled: false
     #       backend: memory  # memory | redis
     #       thresholdBytes: 1048576
+    #
+    # Example: Aggregate route merging NDJSON record streams
+    # The "ndjson" strategy merges newline-delimited JSON record streams from
+    # each target (instead of merging JSON documents), with optional stable sort
+    # by timeField, first-wins de-duplication by keyField, and an output limit.
+    # - name: aggregate-ndjson-route
+    #   match:
+    #     - uri:
+    #         prefix: /api/logs/aggregate
+    #   aggregate:
+    #     enabled: true
+    #     failMode: any
+    #     maxParallel: 8
+    #     targets:
+    #       - name: logs-a
+    #         destination:
+    #           host: logs-a.default.svc.cluster.local
+    #           port: 8080
+    #       - name: logs-b
+    #         destination:
+    #           host: logs-b.default.svc.cluster.local
+    #           port: 8080
+    #     merge:
+    #       enabled: true
+    #       strategy: ndjson
+    #       timeField: _time   # NDJSON sort key (default: _time)
+    #       keyField: id       # de-dup key (first-wins); empty disables de-dup
+    #       limit: 1000        # cap emitted records; 0 = unlimited
 
   # Backends configuration
   # Define backend services with optional authentication, circuit breaker, maxSessions, and rateLimit

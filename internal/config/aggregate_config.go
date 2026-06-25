@@ -54,6 +54,10 @@ const (
 	// configuration.
 	MinAggregateTargets = 1
 
+	// defaultNDJSONTimeField is the default NDJSON sort key applied when the
+	// ndjson merge strategy is selected without an explicit TimeField.
+	defaultNDJSONTimeField = "_time"
+
 	// envAggregateMaxParallel overrides AggregateConfig.MaxParallel.
 	envAggregateMaxParallel = "AVAPIGW_AGGREGATE_MAX_PARALLEL"
 
@@ -125,8 +129,23 @@ type MergeOptions struct {
 	// Enabled enables merging. When false the labeled-envelope output is used.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 
-	// Strategy is the merge strategy (deep|shallow|replace). Default: deep.
+	// Strategy is the merge strategy (deep|shallow|replace|ndjson). Default: deep.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// TimeField is the NDJSON sort key (ndjson strategy only). Records are
+	// stably sorted by this field. Default: "_time"; an empty value disables
+	// sorting. Records lacking the field sort after those that have it.
+	TimeField string `yaml:"timeField,omitempty" json:"timeField,omitempty"`
+
+	// KeyField is the NDJSON de-duplication key (ndjson strategy only). When
+	// set, duplicate records (by this field's value) are removed first-wins
+	// after sorting. Empty disables de-duplication; records lacking the field
+	// are never de-duplicated.
+	KeyField string `yaml:"keyField,omitempty" json:"keyField,omitempty"`
+
+	// Limit caps the number of emitted NDJSON records (ndjson strategy only).
+	// 0 means unlimited; must be non-negative.
+	Limit int `yaml:"limit,omitempty" json:"limit,omitempty"`
 }
 
 // SpoolOptions configures optional off-heap spooling of partial responses.
@@ -220,11 +239,25 @@ func (c *AggregateConfig) ApplyDefaults() {
 	if c.MaxParallel <= 0 {
 		c.MaxParallel = DefaultAggregateMaxParallel
 	}
-	if c.Merge != nil && c.Merge.Enabled && c.Merge.Strategy == "" {
-		c.Merge.Strategy = MergeStrategyDeep
-	}
+	c.applyMergeDefaults()
 	c.applySpoolDefaults()
 	c.applyTargetDefaults()
+}
+
+// applyMergeDefaults fills merge-related defaults. An empty strategy with merge
+// enabled defaults to deep. For the ndjson strategy an unset TimeField defaults
+// to "_time" (sorting only applies to records that actually carry that field;
+// records lacking it keep a stable relative order, so the default is safe).
+func (c *AggregateConfig) applyMergeDefaults() {
+	if c.Merge == nil || !c.Merge.Enabled {
+		return
+	}
+	if c.Merge.Strategy == "" {
+		c.Merge.Strategy = MergeStrategyDeep
+	}
+	if c.Merge.Strategy == MergeStrategyNDJSON && c.Merge.TimeField == "" {
+		c.Merge.TimeField = defaultNDJSONTimeField
+	}
 }
 
 // applySpoolDefaults fills spool-related defaults.
@@ -331,11 +364,17 @@ func (c *AggregateConfig) validateMerge() error {
 	if c.Merge == nil || !c.Merge.Enabled {
 		return nil
 	}
+	if c.Merge.Limit < 0 {
+		return fmt.Errorf("aggregate: merge.limit must be non-negative")
+	}
 	switch c.Merge.Strategy {
-	case MergeStrategyDeep, MergeStrategyShallow, MergeStrategyReplace, "":
+	case MergeStrategyDeep, MergeStrategyShallow, MergeStrategyReplace, MergeStrategyNDJSON, "":
 		return nil
 	default:
-		return fmt.Errorf("aggregate: invalid merge.strategy %q (must be deep, shallow or replace)", c.Merge.Strategy)
+		return fmt.Errorf(
+			"aggregate: invalid merge.strategy %q (must be deep, shallow, replace or ndjson)",
+			c.Merge.Strategy,
+		)
 	}
 }
 

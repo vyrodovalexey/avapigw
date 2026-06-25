@@ -87,11 +87,31 @@ type MergeOptions struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
 
-	// Strategy is the merge strategy.
-	// +kubebuilder:validation:Enum=deep;shallow;replace
+	// Strategy is the merge strategy. "ndjson" merges newline-delimited JSON
+	// record streams (with optional sort/de-dupe/limit) instead of merging JSON
+	// documents.
+	// +kubebuilder:validation:Enum=deep;shallow;replace;ndjson
 	// +kubebuilder:default=deep
 	// +optional
 	Strategy string `json:"strategy,omitempty"`
+
+	// TimeField is the NDJSON sort key (ndjson strategy only). Records are
+	// stably sorted by this field. Default: "_time". Records lacking the field
+	// sort after those that have it.
+	// +optional
+	TimeField string `json:"timeField,omitempty"`
+
+	// KeyField is the NDJSON de-duplication key (ndjson strategy only). When
+	// set, duplicate records are removed first-wins after sorting. Empty
+	// disables de-duplication; records lacking the field are never de-duplicated.
+	// +optional
+	KeyField string `json:"keyField,omitempty"`
+
+	// Limit caps the number of emitted NDJSON records (ndjson strategy only).
+	// 0 means unlimited.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Limit int `json:"limit,omitempty"`
 }
 
 // SpoolOptions configures optional off-heap spooling of partial responses.

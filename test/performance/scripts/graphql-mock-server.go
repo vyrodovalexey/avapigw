@@ -83,12 +83,40 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprint(w, `{"status":"healthy"}`)
 }
 
+// ndjsonHandler emits a newline-delimited JSON (NDJSON) record stream so the
+// aggregate fan-out NDJSON merge strategy (strategy=ndjson + timeField/keyField/
+// limit) can be exercised end-to-end against a real upstream. Each server emits
+// records tagged with its own port so the merged stream can be observed to
+// contain records from both targets, sorted by _time and de-duplicated by id.
+// Content-Type is application/x-ndjson so the gateway's NDJSON detector/merger
+// promotes correctly.
+func ndjsonHandler(port int) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		// Intentionally out-of-order _time values and an overlapping id (id=2 on
+		// both ports) so the merger's stable sort + first-wins de-dupe are
+		// meaningfully exercised. Each line is a standalone JSON object.
+		recs := []string{
+			fmt.Sprintf(`{"id":"%d-3","_time":300,"port":%d,"name":"rec-c","price":9.99}`, port, port),
+			fmt.Sprintf(`{"id":"%d-1","_time":100,"port":%d,"name":"rec-a","price":19.99}`, port, port),
+			fmt.Sprintf(`{"id":"shared-2","_time":200,"port":%d,"name":"rec-b","price":29.99}`, port),
+			fmt.Sprintf(`{"id":"%d-4","_time":400,"port":%d,"name":"rec-d","price":4.99}`, port, port),
+		}
+		for _, line := range recs {
+			fmt.Fprintln(w, line)
+		}
+	}
+}
+
 func startServer(port int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/graphql", graphqlHandler)
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/api/v1/ndjson", ndjsonHandler(port))
+	mux.HandleFunc("/aggregate-ndjson", ndjsonHandler(port))
 	// Catch-all: the gateway GraphQL proxy preserves the original request path,
 	// but some perf GraphQLRoutes resolve to backends whose inline destination
 	// path differs (e.g. "/"). Register the resolver on the root so the mock

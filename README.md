@@ -78,7 +78,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Retry Policies** - Exponential backoff with configurable retry conditions
 - **Timeouts** - Request and per-try timeout configuration
 - **Traffic Mirroring** - Mirror traffic to multiple backends for testing
-- **Aggregate (Fan-out) Mirroring** - Fan a single request out to multiple backends in parallel and return one aggregated response. Unary support is wired for REST, GraphQL, and gRPC unary, with optional merge and Redis spool; gRPC streaming and WebSocket aggregate are documented follow-ups
+- **Aggregate (Fan-out) Mirroring** - Fan a single request out to multiple backends in parallel and return one aggregated response. Unary support is wired for REST, GraphQL, and gRPC unary, with optional merge (`deep` / `shallow` / `replace` / `ndjson`) and Redis spool; gRPC streaming and WebSocket aggregate are documented follow-ups
 - **Fault Injection** - Inject delays and errors for chaos engineering
 
 ### Request/Response Processing
@@ -5393,8 +5393,11 @@ traffic: **REST**, **GraphQL** (POST/unary), and **gRPC unary**. **gRPC
 streaming** aggregate is not supported yet (a streaming method with aggregate
 enabled returns gRPC `Unimplemented`) and **WebSocket** aggregate is not yet
 wired into the gateway entrypoint; both are documented follow-ups. Response
-merging (`deep` / `shallow` / `replace`) and an off-heap Redis spool are both
-optional.
+merging (`deep` / `shallow` / `replace` / `ndjson`) and an off-heap Redis spool
+are both optional. The `ndjson` strategy merges newline-delimited JSON record
+streams (with optional sort by `timeField`, first-wins de-dupe by `keyField`,
+and a record `limit`) and emits `application/stream+json`; see the
+[Aggregate (Fan-out) Mirroring Guide](docs/aggregate-mirroring.md#ndjson-aggregation).
 
 ```yaml
 aggregate:
@@ -5403,7 +5406,11 @@ aggregate:
   maxParallel: 8
   merge:
     enabled: true
-    strategy: deep       # deep | shallow | replace
+    strategy: deep       # deep | shallow | replace | ndjson
+    # NDJSON-only knobs (strategy: ndjson):
+    # timeField: _time   # sort key (default _time; empty disables sort)
+    # keyField: id       # first-wins de-dupe key (empty disables dedupe)
+    # limit: 1000        # max records (0 = unlimited)
   targets:
     - name: backend-a
       destination:
