@@ -44,7 +44,7 @@ type ResponseTransformConfig struct {
 	Template string `yaml:"template,omitempty" json:"template,omitempty"`
 
 	// MergeStrategy defines how to merge responses from multiple backends.
-	// Valid values: "deep", "shallow", "replace".
+	// Valid values: "deep", "shallow", "replace", "ndjson".
 	MergeStrategy string `yaml:"mergeStrategy,omitempty" json:"mergeStrategy,omitempty"`
 }
 
@@ -143,6 +143,11 @@ const (
 
 	// MergeStrategyReplace replaces the entire response.
 	MergeStrategyReplace = "replace"
+
+	// MergeStrategyNDJSON merges newline-delimited JSON (NDJSON) record streams
+	// from multiple backends into a single NDJSON stream, with optional sort,
+	// de-duplication and record limiting.
+	MergeStrategyNDJSON = "ndjson"
 )
 
 // ArrayOperationType constants for array operations.

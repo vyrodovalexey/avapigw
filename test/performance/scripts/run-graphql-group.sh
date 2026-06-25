@@ -72,9 +72,9 @@ def parse_hey(p):
     def num(rx):
         m = re.search(rx, t); return float(m.group(1)) if m else None
     rps = num(r'Requests/sec:\s+([\d.]+)')
-    p50 = num(r'\n\s+50%\s+in\s+([\d.]+)\s+secs')
-    p95 = num(r'\n\s+95%\s+in\s+([\d.]+)\s+secs')
-    p99 = num(r'\n\s+99%\s+in\s+([\d.]+)\s+secs')
+    p50 = num(r'\n\s+50%+\s+in\s+([\d.]+)\s+secs')
+    p95 = num(r'\n\s+95%+\s+in\s+([\d.]+)\s+secs')
+    p99 = num(r'\n\s+99%+\s+in\s+([\d.]+)\s+secs')
     avg = num(r'Average:\s+([\d.]+)\s+secs')
     codes = {}
     for m in re.finditer(r'\[(\d{3})\]\s+(\d+)\s+responses', t):

@@ -103,8 +103,20 @@ type MergeOptions struct {
 	// Enabled reports whether merging is enabled.
 	Enabled bool
 
-	// Strategy is the merge strategy (deep|shallow|replace).
+	// Strategy is the merge strategy (deep|shallow|replace|ndjson).
 	Strategy string
+
+	// TimeField is the NDJSON sort key (ndjson strategy only). Empty disables
+	// sorting. Default applied at config layer is "_time".
+	TimeField string
+
+	// KeyField is the NDJSON de-duplication key (ndjson strategy only). Empty
+	// disables de-duplication.
+	KeyField string
+
+	// Limit caps the number of emitted NDJSON records (ndjson strategy only).
+	// 0 means unlimited.
+	Limit int
 }
 
 // SpoolOptions holds runtime spool options.

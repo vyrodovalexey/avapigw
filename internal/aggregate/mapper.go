@@ -67,8 +67,11 @@ func mapMerge(in *config.MergeOptions) *MergeOptions {
 		strategy = config.MergeStrategyDeep
 	}
 	return &MergeOptions{
-		Enabled:  in.Enabled,
-		Strategy: strategy,
+		Enabled:   in.Enabled,
+		Strategy:  strategy,
+		TimeField: in.TimeField,
+		KeyField:  in.KeyField,
+		Limit:     in.Limit,
 	}
 }
 

@@ -1,0 +1,127 @@
+# NDJSON Aggregate (fan-out) CRD for performance scenario PT-04 (HTTPS + mirroring)
+# =============================================================================
+# Exercises the NEW NDJSON aggregate merge strategy (strategy=ndjson +
+# timeField/keyField/limit) end-to-end via the apigw-operator, giving the new
+# go-redis v9.21.0 + NDJSON code path real performance coverage.
+#
+# The fan-out handler forwards the inbound request path verbatim to every target.
+# The GraphQL mock servers (graphql-mock-server.go on host ports 8901/8902, also
+# used by the GraphQL aggregate scenarios) have been extended to serve an NDJSON
+# record stream at GET /api/v1/ndjson (Content-Type application/x-ndjson). Each
+# server emits records tagged with its own port; records have an out-of-order
+# _time field and an overlapping id (shared-2) so the merger's stable sort
+# (timeField=_time), first-wins de-dupe (keyField=id) and limit are all
+# meaningfully exercised under load.
+#
+# Apply with:
+#   kubectl apply -f test/performance/operator/crds-ndjson-aggregate-perftest.yaml -n avapigw-test
+#
+# Drive with (PT-04 HTTP group adds an ndjson scenario):
+#   GET https://<gw>/api/v1/ndjson
+# =============================================================================
+
+---
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: do04-ndjson-backend-1
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: http-backend
+    feature: ndjson-aggregate
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8901
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+---
+apiVersion: avapigw.io/v1alpha1
+kind: Backend
+metadata:
+  name: do04-ndjson-backend-2
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: http-backend
+    feature: ndjson-aggregate
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8902
+      weight: 1
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+# =============================================================================
+# NDJSON AGGREGATE Route (APIRoute CRD) - fan-out + NDJSON line merge
+# =============================================================================
+# Fans GET /api/v1/ndjson out to the two NDJSON-emitting mock backends in
+# parallel and merges their newline-delimited JSON record streams into a single
+# NDJSON response: stable-sorted by _time, de-duplicated first-wins by id,
+# capped at `limit` records. Emits Content-Type application/stream+json.
+---
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: do04-ndjson-aggregate-route
+  namespace: avapigw-test
+  labels:
+    app: avapigw-do04
+    component: http-route
+    feature: ndjson-aggregate
+spec:
+  match:
+    # Use a dedicated, non-colliding prefix. The existing test-api-route owns the
+    # broad "/api/v1/" prefix and the longest-prefix tiebreak in the router was
+    # observed to route "/api/v1/ndjson" to that proxy (→ backend 404) rather
+    # than to this aggregate route. "/aggregate-ndjson" has no competing route,
+    # so this aggregate route owns it unambiguously. The fan-out handler forwards
+    # the inbound path verbatim, and the mock backends serve /aggregate-ndjson.
+    - uri:
+        prefix: /aggregate-ndjson
+      methods:
+        - GET
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8901
+      weight: 100
+  timeout: 30s
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    merge:
+      enabled: true
+      strategy: ndjson
+      timeField: _time
+      keyField: id
+      limit: 100
+    targets:
+      - name: ndjson-backend-1
+        destination:
+          host: host.docker.internal
+          port: 8901
+        timeout: 10s
+        retries: 1
+      - name: ndjson-backend-2
+        destination:
+          host: host.docker.internal
+          port: 8902
+        timeout: 10s
+        retries: 1

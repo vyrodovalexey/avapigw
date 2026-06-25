@@ -141,6 +141,31 @@ func TestMergeOptions_DeepCopy(t *testing.T) {
 	assert.Nil(t, nilMerge.DeepCopy())
 }
 
+// DeepCopy preserves the NDJSON knobs (timeField/keyField/limit).
+func TestMergeOptions_DeepCopy_NDJSONFields(t *testing.T) {
+	original := &MergeOptions{
+		Enabled:   true,
+		Strategy:  "ndjson",
+		TimeField: "ts",
+		KeyField:  "id",
+		Limit:     42,
+	}
+	clone := original.DeepCopy()
+	require.NotNil(t, clone)
+	assert.Equal(t, *original, *clone)
+	assert.NotSame(t, original, clone)
+	assert.Equal(t, "ndjson", clone.Strategy)
+	assert.Equal(t, "ts", clone.TimeField)
+	assert.Equal(t, "id", clone.KeyField)
+	assert.Equal(t, 42, clone.Limit)
+
+	// Mutating the clone must not affect the original (value-copy independence).
+	clone.TimeField = "other"
+	clone.Limit = 0
+	assert.Equal(t, "ts", original.TimeField)
+	assert.Equal(t, 42, original.Limit)
+}
+
 func TestSpoolOptions_DeepCopy(t *testing.T) {
 	original := &SpoolOptions{
 		Enabled:        true,

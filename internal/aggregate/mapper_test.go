@@ -129,3 +129,39 @@ func TestMapTargets_Empty(t *testing.T) {
 func TestMapMerge_Nil(t *testing.T) {
 	assert.Nil(t, mapMerge(nil))
 }
+
+func TestMapMerge_NDJSONFields(t *testing.T) {
+	out := mapMerge(&config.MergeOptions{
+		Enabled:   true,
+		Strategy:  config.MergeStrategyNDJSON,
+		TimeField: "ts",
+		KeyField:  "id",
+		Limit:     7,
+	})
+	require.NotNil(t, out)
+	assert.True(t, out.Enabled)
+	assert.Equal(t, config.MergeStrategyNDJSON, out.Strategy)
+	assert.Equal(t, "ts", out.TimeField)
+	assert.Equal(t, "id", out.KeyField)
+	assert.Equal(t, 7, out.Limit)
+}
+
+func TestFromConfig_NDJSONMapping(t *testing.T) {
+	cfg := &config.AggregateConfig{
+		Enabled: true,
+		Targets: []config.AggregateTarget{{Name: "a", Destination: config.Destination{Host: "h", Port: 80}}},
+		Merge: &config.MergeOptions{
+			Enabled:   true,
+			Strategy:  config.MergeStrategyNDJSON,
+			TimeField: "_time",
+			KeyField:  "id",
+			Limit:     5,
+		},
+	}
+	out := FromConfig(cfg)
+	require.NotNil(t, out.Merge)
+	assert.Equal(t, config.MergeStrategyNDJSON, out.Merge.Strategy)
+	assert.Equal(t, "_time", out.Merge.TimeField)
+	assert.Equal(t, "id", out.Merge.KeyField)
+	assert.Equal(t, 5, out.Merge.Limit)
+}

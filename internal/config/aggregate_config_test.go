@@ -132,6 +132,41 @@ func TestAggregateConfig_ApplyDefaults(t *testing.T) {
 			},
 		},
 		{
+			name: "ndjson defaults TimeField to _time when empty",
+			cfg: &AggregateConfig{
+				Enabled: true,
+				Targets: []AggregateTarget{validTarget("a")},
+				Merge:   &MergeOptions{Enabled: true, Strategy: MergeStrategyNDJSON},
+			},
+			verify: func(t *testing.T, c *AggregateConfig) {
+				assert.Equal(t, MergeStrategyNDJSON, c.Merge.Strategy)
+				assert.Equal(t, "_time", c.Merge.TimeField)
+			},
+		},
+		{
+			name: "ndjson keeps explicit TimeField",
+			cfg: &AggregateConfig{
+				Enabled: true,
+				Targets: []AggregateTarget{validTarget("a")},
+				Merge:   &MergeOptions{Enabled: true, Strategy: MergeStrategyNDJSON, TimeField: "ts"},
+			},
+			verify: func(t *testing.T, c *AggregateConfig) {
+				assert.Equal(t, "ts", c.Merge.TimeField)
+			},
+		},
+		{
+			name: "deep strategy does not set TimeField",
+			cfg: &AggregateConfig{
+				Enabled: true,
+				Targets: []AggregateTarget{validTarget("a")},
+				Merge:   &MergeOptions{Enabled: true, Strategy: MergeStrategyDeep},
+			},
+			verify: func(t *testing.T, c *AggregateConfig) {
+				assert.Equal(t, MergeStrategyDeep, c.Merge.Strategy)
+				assert.Empty(t, c.Merge.TimeField)
+			},
+		},
+		{
 			name: "spool defaults",
 			cfg: &AggregateConfig{
 				Enabled: true,
@@ -301,6 +336,46 @@ func TestAggregateConfig_Validate(t *testing.T) {
 			wantErr: "invalid merge.strategy",
 		},
 		{
+			name: "ndjson merge strategy accepted",
+			cfg: &AggregateConfig{
+				Enabled: true,
+				Targets: []AggregateTarget{validTarget("a")},
+				Merge:   &MergeOptions{Enabled: true, Strategy: MergeStrategyNDJSON},
+			},
+		},
+		{
+			name: "ndjson with knobs accepted",
+			cfg: &AggregateConfig{
+				Enabled: true,
+				Targets: []AggregateTarget{validTarget("a")},
+				Merge: &MergeOptions{
+					Enabled:   true,
+					Strategy:  MergeStrategyNDJSON,
+					TimeField: "ts",
+					KeyField:  "id",
+					Limit:     10,
+				},
+			},
+		},
+		{
+			name: "negative merge limit rejected",
+			cfg: &AggregateConfig{
+				Enabled: true,
+				Targets: []AggregateTarget{validTarget("a")},
+				Merge:   &MergeOptions{Enabled: true, Strategy: MergeStrategyNDJSON, Limit: -1},
+			},
+			wantErr: "merge.limit must be non-negative",
+		},
+		{
+			name: "invalid strategy error lists ndjson",
+			cfg: &AggregateConfig{
+				Enabled: true,
+				Targets: []AggregateTarget{validTarget("a")},
+				Merge:   &MergeOptions{Enabled: true, Strategy: "bogus"},
+			},
+			wantErr: "ndjson",
+		},
+		{
 			name: "invalid spool backend",
 			cfg: &AggregateConfig{
 				Enabled: true,
@@ -395,6 +470,42 @@ func TestAggregateConfig_Validate(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+// NDJSON merge knobs round-trip through YAML.
+func TestAggregateConfig_NDJSONYAMLRoundTrip(t *testing.T) {
+	in := `
+enabled: true
+targets:
+  - name: a
+    destination:
+      host: a.svc
+      port: 8080
+merge:
+  enabled: true
+  strategy: ndjson
+  timeField: ts
+  keyField: id
+  limit: 100
+`
+	var cfg AggregateConfig
+	require.NoError(t, yaml.Unmarshal([]byte(in), &cfg))
+	require.NotNil(t, cfg.Merge)
+	assert.Equal(t, MergeStrategyNDJSON, cfg.Merge.Strategy)
+	assert.Equal(t, "ts", cfg.Merge.TimeField)
+	assert.Equal(t, "id", cfg.Merge.KeyField)
+	assert.Equal(t, 100, cfg.Merge.Limit)
+
+	out, err := yaml.Marshal(&cfg)
+	require.NoError(t, err)
+	var cfg2 AggregateConfig
+	require.NoError(t, yaml.Unmarshal(out, &cfg2))
+	assert.Equal(t, cfg, cfg2)
+}
+
+// MergeStrategyNDJSON constant has the canonical value.
+func TestMergeStrategyNDJSON_Constant(t *testing.T) {
+	assert.Equal(t, "ndjson", MergeStrategyNDJSON)
 }
 
 // U-CFG-6: Vault ref for per-target auth is preserved.

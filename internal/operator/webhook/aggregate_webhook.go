@@ -22,6 +22,7 @@ const (
 	mergeStrategyDeep    = "deep"
 	mergeStrategyShallow = "shallow"
 	mergeStrategyReplace = "replace"
+	mergeStrategyNDJSON  = "ndjson"
 
 	spoolBackendMemory = "memory"
 	spoolBackendRedis  = "redis"
@@ -136,11 +137,17 @@ func validateAggregateMerge(merge *avapigwv1alpha1.MergeOptions, streaming bool)
 	if streaming {
 		return fmt.Errorf("aggregate: merge cannot be enabled on a pure-streaming route")
 	}
+	if merge.Limit < 0 {
+		return fmt.Errorf("aggregate: merge.limit must be non-negative")
+	}
 	switch merge.Strategy {
-	case "", mergeStrategyDeep, mergeStrategyShallow, mergeStrategyReplace:
+	case "", mergeStrategyDeep, mergeStrategyShallow, mergeStrategyReplace, mergeStrategyNDJSON:
 		return nil
 	default:
-		return fmt.Errorf("aggregate: invalid merge.strategy %q (must be deep, shallow or replace)", merge.Strategy)
+		return fmt.Errorf(
+			"aggregate: invalid merge.strategy %q (must be deep, shallow, replace or ndjson)",
+			merge.Strategy,
+		)
 	}
 }
 

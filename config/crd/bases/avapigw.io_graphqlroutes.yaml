@@ -78,13 +78,35 @@ spec:
                         description: Enabled enables merging. When false the labeled-envelope
                           output is used.
                         type: boolean
+                      keyField:
+                        description: |-
+                          KeyField is the NDJSON de-duplication key (ndjson strategy only). When
+                          set, duplicate records are removed first-wins after sorting. Empty
+                          disables de-duplication; records lacking the field are never de-duplicated.
+                        type: string
+                      limit:
+                        description: |-
+                          Limit caps the number of emitted NDJSON records (ndjson strategy only).
+                          0 means unlimited.
+                        minimum: 0
+                        type: integer
                       strategy:
                         default: deep
-                        description: Strategy is the merge strategy.
+                        description: |-
+                          Strategy is the merge strategy. "ndjson" merges newline-delimited JSON
+                          record streams (with optional sort/de-dupe/limit) instead of merging JSON
+                          documents.
                         enum:
                         - deep
                         - shallow
                         - replace
+                        - ndjson
+                        type: string
+                      timeField:
+                        description: |-
+                          TimeField is the NDJSON sort key (ndjson strategy only). Records are
+                          stably sorted by this field. Default: "_time". Records lacking the field
+                          sort after those that have it.
                         type: string
                     required:
                     - enabled
