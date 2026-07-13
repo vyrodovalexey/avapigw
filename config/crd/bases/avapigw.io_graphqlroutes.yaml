@@ -1315,6 +1315,12 @@ spec:
                   schemaFile:
                     description: SchemaFile is the path to the GraphQL schema file.
                     type: string
+                  schemaInline:
+                    description: |-
+                      SchemaInline holds the resolved GraphQL schema content. It is populated
+                      internally by the operator from SchemaConfigMapRef and is not intended to
+                      be set directly by users.
+                    type: string
                   validateVariables:
                     description: ValidateVariables enables GraphQL variable validation.
                     type: boolean

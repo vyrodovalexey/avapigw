@@ -97,6 +97,12 @@ type OpenAPIValidationConfig struct {
 	// SpecURL is the URL to fetch the OpenAPI specification from.
 	SpecURL string `yaml:"specURL,omitempty" json:"specURL,omitempty"`
 
+	// SpecInline is the inline OpenAPI specification content. It is populated by
+	// the operator when the source APIRoute references the spec via a ConfigMap
+	// (specConfigMapRef); the operator resolves the ConfigMap and inlines the
+	// content so the gateway can validate requests without cluster access.
+	SpecInline string `yaml:"specInline,omitempty" json:"specInline,omitempty"`
+
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.
 	FailOnError *bool `yaml:"failOnError,omitempty" json:"failOnError,omitempty"`
@@ -162,6 +168,11 @@ type ProtoValidationConfig struct {
 	// DescriptorFile is the path to the proto descriptor file.
 	DescriptorFile string `yaml:"descriptorFile,omitempty" json:"descriptorFile,omitempty"`
 
+	// DescriptorInline is the inline, base64-encoded proto descriptor content.
+	// It is populated by the operator when the source GRPCRoute references the
+	// descriptor via a ConfigMap (descriptorConfigMapRef).
+	DescriptorInline string `yaml:"descriptorInline,omitempty" json:"descriptorInline,omitempty"`
+
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.
 	FailOnError *bool `yaml:"failOnError,omitempty" json:"failOnError,omitempty"`
@@ -193,6 +204,11 @@ type GraphQLSchemaValidationConfig struct {
 
 	// SchemaFile is the path to the GraphQL schema file.
 	SchemaFile string `yaml:"schemaFile,omitempty" json:"schemaFile,omitempty"`
+
+	// SchemaInline is the inline GraphQL schema content. It is populated by the
+	// operator when the source GraphQLRoute references the schema via a
+	// ConfigMap (schemaConfigMapRef).
+	SchemaInline string `yaml:"schemaInline,omitempty" json:"schemaInline,omitempty"`
 
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.

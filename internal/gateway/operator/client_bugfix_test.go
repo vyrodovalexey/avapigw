@@ -15,10 +15,115 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	operatorv1alpha1 "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1"
 )
+
+// ============================================================================
+// Regression: Start must decouple long-lived stream/heartbeat loops from the
+// (potentially short-lived) context passed to Start.
+//
+// Previously Start passed the caller's ctx directly to runStreamLoop and
+// runHeartbeatLoop. When the caller wrapped Start in a bounded initial-connect
+// retry (context.WithTimeout + defer cancel()), returning from that retry would
+// cancel the ctx and immediately tear down the freshly established stream:
+// IsConnected() flipped to false and the config stream failed with
+// "context canceled". This test asserts the background loops survive the
+// cancellation of the context passed to Start.
+// ============================================================================
+
+func TestStart_BackgroundLoopsSurviveParentContextCancel(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	mockServer := &MockConfigurationServiceServer{}
+	mockServer.On("RegisterGateway", mock.Anything, mock.Anything).Return(
+		&operatorv1alpha1.RegisterGatewayResponse{
+			Success:           true,
+			SessionId:         "session-regression",
+			HeartbeatInterval: timestamppbDuration(30 * time.Second),
+		}, nil,
+	)
+	// StreamConfiguration blocks until its own (server-side) context is
+	// canceled, mimicking a healthy long-lived stream. If the client's
+	// background context were incorrectly tied to Start's ctx, this stream
+	// would be canceled right after Start returns.
+	mockServer.On("StreamConfiguration", mock.Anything, mock.Anything).Return(nil).
+		Run(func(args mock.Arguments) {
+			stream := args.Get(1).(operatorv1alpha1.ConfigurationService_StreamConfigurationServer)
+			<-stream.Context().Done()
+		}).Maybe()
+	mockServer.On("Heartbeat", mock.Anything, mock.Anything).Return(
+		&operatorv1alpha1.HeartbeatResponse{Acknowledged: true}, nil,
+	).Maybe()
+	mockServer.On("AcknowledgeConfiguration", mock.Anything, mock.Anything).Return(
+		&operatorv1alpha1.AcknowledgeConfigurationResponse{Received: true}, nil,
+	).Maybe()
+
+	grpcServer := grpc.NewServer()
+	operatorv1alpha1.RegisterConfigurationServiceServer(grpcServer, mockServer)
+	go func() { _ = grpcServer.Serve(listener) }()
+	defer grpcServer.Stop()
+
+	registry := prometheus.NewRegistry()
+	cfg := &Config{
+		Enabled:           true,
+		Address:           listener.Addr().String(),
+		GatewayName:       "test-gateway",
+		GatewayNamespace:  "default",
+		HeartbeatInterval: 50 * time.Millisecond,
+	}
+
+	client, err := NewClient(cfg, WithMetricsRegistry(registry))
+	require.NoError(t, err)
+
+	// Simulate the production call site: a bounded initial-connect retry ctx
+	// that is canceled as soon as Start returns (defer cancel()).
+	startCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err = client.Start(startCtx)
+	require.NoError(t, err)
+	// Cancel the ctx passed to Start, exactly as startOperatorClientWithRetry's
+	// defer cancel() does once retry.Do returns successfully.
+	cancel()
+
+	// After the parent ctx is canceled, the client must remain connected: the
+	// background loops run under the decoupled long-lived context.
+	require.Eventually(t, func() bool {
+		return client.IsConnected()
+	}, time.Second, 10*time.Millisecond, "client should stay connected after Start ctx is canceled")
+
+	// Give the background loops time to (incorrectly) observe a cancellation
+	// if the bug were present, then re-assert connectivity is stable.
+	time.Sleep(200 * time.Millisecond)
+	assert.True(t, client.IsConnected(), "client must remain connected; background loops must not be canceled by Start's ctx")
+
+	// The connected gauge must read 1.
+	assert.InDelta(t, 1.0, gaugeValue(t, client.metrics.connected), 0.0001,
+		"gateway_operator_client_connected must be 1 while connected")
+
+	// Stop cleanly cancels the background loops.
+	require.NoError(t, client.Stop())
+	assert.False(t, client.IsConnected())
+	assert.InDelta(t, 0.0, gaugeValue(t, client.metrics.connected), 0.0001,
+		"connected gauge must be 0 after Stop")
+}
+
+// gaugeValue reads the current value of a prometheus Gauge.
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	dto := &io_prometheus_client.Metric{}
+	require.NoError(t, g.Write(dto))
+	return dto.GetGauge().GetValue()
+}
+
+// timestamppbDuration is a small helper to build a durationpb from a duration
+// without importing durationpb into this test file's top-level imports.
+func timestamppbDuration(d time.Duration) *durationpb.Duration {
+	return durationpb.New(d)
+}
 
 // ============================================================================
 // Fix 4: Timestamp fallback when update.Timestamp == nil

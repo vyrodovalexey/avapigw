@@ -36,6 +36,7 @@ type APIRouteReconciler struct {
 // +kubebuilder:rbac:groups=avapigw.io,resources=apiroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=avapigw.io,resources=apiroutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // Reconcile handles reconciliation of APIRoute resources.
 func (r *APIRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -92,6 +93,15 @@ func (r *APIRouteReconciler) callbacks() *ReconcileCallbacks {
 
 // reconcileAPIRoute reconciles the APIRoute configuration.
 func (r *APIRouteReconciler) reconcileAPIRoute(ctx context.Context, apiRoute *avapigwv1alpha1.APIRoute) error {
+	// Resolve any ConfigMap-referenced OpenAPI specs into inline content so the
+	// gateway (which has no cluster access) receives a self-contained,
+	// validatable configuration.
+	if err := r.resolveValidationRefs(ctx, apiRoute); err != nil {
+		r.Recorder.Eventf(apiRoute, "Warning", EventReasonReconcileFailed,
+			"Failed to resolve OpenAPI validation spec: %v", err)
+		return fmt.Errorf("failed to resolve OpenAPI validation spec: %w", err)
+	}
+
 	// Convert APIRoute spec to JSON
 	configJSON, err := json.Marshal(apiRoute.Spec)
 	if err != nil {
@@ -122,6 +132,14 @@ func (r *APIRouteReconciler) reconcileAPIRoute(ctx context.Context, apiRoute *av
 	}
 
 	return nil
+}
+
+// resolveValidationRefs resolves ConfigMap-referenced OpenAPI validation specs
+// on the route (route-level and per-match rule) into inline content.
+func (r *APIRouteReconciler) resolveValidationRefs(
+	ctx context.Context, apiRoute *avapigwv1alpha1.APIRoute,
+) error {
+	return resolveOpenAPIValidation(ctx, r.Client, apiRoute.Namespace, apiRoute.Spec.OpenAPIValidation)
 }
 
 // cleanupAPIRoute cleans up the APIRoute configuration.

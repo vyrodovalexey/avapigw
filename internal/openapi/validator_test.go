@@ -33,6 +33,10 @@ func (m *mockLoader) LoadFromURL(_ context.Context, _ string) (*openapi3.T, erro
 	return m.doc, m.err
 }
 
+func (m *mockLoader) LoadFromData(_ context.Context, _ []byte) (*openapi3.T, error) {
+	return m.doc, m.err
+}
+
 func (m *mockLoader) Invalidate(_ string) {}
 
 // newTestMetrics creates a Metrics instance with a unique registry for testing.

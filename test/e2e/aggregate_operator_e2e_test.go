@@ -445,18 +445,27 @@ func TestE2E_Aggregate_E5_VaultAuthAndBackends(t *testing.T) {
 	skipUnlessLive(t, ctx)
 
 	t.Run("gateway uses Vault (CA pool loaded / certificate issued)", func(t *testing.T) {
+		// Vault kubernetes-auth -> PKI evidence ("authenticated with vault",
+		// "certificate issued from vault", "CA pool loaded from vault") is
+		// emitted ONCE at gateway startup. Fetch the full log history
+		// (--tail=-1) rather than a fixed tail window: once a long-running pod
+		// accumulates more than a fixed tail's worth of request logs, the
+		// one-time startup evidence scrolls out of a bounded tail and the
+		// assertion flakes even though Vault usage is unchanged. Reading all
+		// lines makes the check deterministic.
 		out, err := kubectl(ctx, "",
 			"logs", "-n", liveNamespace(),
 			"-l", "app.kubernetes.io/component=gateway",
-			"--tail=500")
+			"--tail=-1")
 		require.NoError(t, err, "fetch gateway logs: %s", out)
 
-		usesVault := strings.Contains(out, "vault") ||
+		usesVault := strings.Contains(out, "authenticated with vault") ||
 			strings.Contains(out, "CA pool loaded from vault") ||
-			strings.Contains(out, "certificate issued from vault")
+			strings.Contains(out, "certificate issued from vault") ||
+			strings.Contains(out, "vault client initialized")
 		require.True(t, usesVault,
 			"gateway logs evidence Vault usage (kubernetes-auth -> PKI). "+
-				"Tail did not mention vault; got last lines:\n%s", lastLines(out, 5))
+				"Full log did not mention vault; got last lines:\n%s", lastLines(out, 5))
 		t.Logf("E-5: gateway Vault usage confirmed in pod logs (CA pool / cert issuance)")
 	})
 

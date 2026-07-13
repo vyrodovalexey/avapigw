@@ -76,6 +76,14 @@ type Client struct {
 	wg                  sync.WaitGroup // WaitGroup for goroutine coordination
 	reconnectAttempts   int
 
+	// bgCtx is the long-lived context that governs the background streaming
+	// and heartbeat goroutines. It is intentionally decoupled from the
+	// (potentially short-lived) context passed to Start so that a bounded
+	// initial connect/register retry deadline cannot cancel the steady-state
+	// loops once Start succeeds. It is canceled by Stop via bgCancel.
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+
 	// Callbacks
 	onConfigUpdate ConfigUpdateHandler
 	onSnapshot     SnapshotHandler
@@ -281,6 +289,13 @@ func (c *Client) buildTLSConfig() (*tls.Config, error) {
 }
 
 // Start starts the client (registration, streaming, heartbeat).
+//
+// stream/heartbeat loops under a fresh context.Background()-rooted context
+// (c.bgCtx) rather than inheriting the caller's (potentially short-lived)
+// ctx. Inheriting it would cancel the steady-state loops the moment the
+// caller's initial-connect retry deadline fires. See the comment on c.bgCtx.
+//
+//nolint:contextcheck // Start intentionally launches its long-lived background
 func (c *Client) Start(ctx context.Context) error {
 	if !c.started.CompareAndSwap(false, true) {
 		return ErrAlreadyStarted
@@ -293,9 +308,23 @@ func (c *Client) Start(ctx context.Context) error {
 	c.stopCh = make(chan struct{})
 	c.stoppedCh = make(chan struct{})
 
+	// The initial connect + register RPCs run under the caller-provided ctx,
+	// which may carry a bounded startup-retry deadline. That is correct: the
+	// bring-up handshake should honor that deadline.
+	//
+	// The long-lived streaming/heartbeat loops, however, must NOT be tied to
+	// that short-lived ctx — otherwise the caller's retry deadline (or its
+	// defer cancel()) would immediately cancel the loops right after Start
+	// returns, tearing down the freshly established stream. We therefore run
+	// them under a dedicated background context that lives until Stop() is
+	// called (via bgCancel). It is deliberately rooted at context.Background()
+	// so it is independent of the initial-retry cancellation.
+	c.bgCtx, c.bgCancel = context.WithCancel(context.Background())
+
 	// Connect if not already connected
 	if c.conn == nil {
 		if err := c.Connect(ctx); err != nil {
+			c.bgCancel()
 			c.started.Store(false)
 			span.RecordError(err)
 			return err
@@ -304,20 +333,24 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Register with operator
 	if err := c.register(ctx); err != nil {
+		c.bgCancel()
 		c.started.Store(false)
 		span.RecordError(err)
 		return err
 	}
 
-	// Start background goroutines with WaitGroup coordination
+	// Start background goroutines with WaitGroup coordination. They run under
+	// the long-lived bgCtx so they survive after Start returns and are only
+	// canceled by Stop().
+	bgCtx := c.bgCtx
 	c.wg.Add(2)
 	go func() {
 		defer c.wg.Done()
-		c.runStreamLoop(ctx)
+		c.runStreamLoop(bgCtx)
 	}()
 	go func() {
 		defer c.wg.Done()
-		c.runHeartbeatLoop(ctx)
+		c.runHeartbeatLoop(bgCtx)
 	}()
 
 	c.logger.Info("operator client started",
@@ -337,8 +370,13 @@ func (c *Client) Stop() error {
 
 	c.logger.Info("stopping operator client")
 
-	// Signal stop
+	// Signal stop: close stopCh for select-based loop exits and cancel the
+	// long-lived background context so any in-flight streaming/heartbeat RPCs
+	// (which are bound to bgCtx, not stopCh) unblock promptly.
 	close(c.stopCh)
+	if c.bgCancel != nil {
+		c.bgCancel()
+	}
 
 	// Wait for goroutines to finish with timeout using WaitGroup
 	done := make(chan struct{})

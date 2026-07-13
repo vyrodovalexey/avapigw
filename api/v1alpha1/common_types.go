@@ -992,6 +992,12 @@ type OpenAPIValidationConfig struct {
 	// +optional
 	SpecURL string `json:"specURL,omitempty"`
 
+	// SpecInline holds the resolved OpenAPI specification content.
+	// It is populated internally by the operator from SpecConfigMapRef and is
+	// not intended to be set directly by users.
+	// +optional
+	SpecInline string `json:"specInline,omitempty"`
+
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.
 	// +optional
@@ -1028,6 +1034,12 @@ type ProtoValidationConfig struct {
 	// +optional
 	DescriptorFile string `json:"descriptorFile,omitempty"`
 
+	// DescriptorInline holds the resolved, base64-encoded proto descriptor
+	// content. It is populated internally by the operator from
+	// DescriptorConfigMapRef and is not intended to be set directly by users.
+	// +optional
+	DescriptorInline string `json:"descriptorInline,omitempty"`
+
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.
 	// +optional
@@ -1051,6 +1063,12 @@ type GraphQLSchemaValidationConfig struct {
 	// SchemaFile is the path to the GraphQL schema file.
 	// +optional
 	SchemaFile string `json:"schemaFile,omitempty"`
+
+	// SchemaInline holds the resolved GraphQL schema content. It is populated
+	// internally by the operator from SchemaConfigMapRef and is not intended to
+	// be set directly by users.
+	// +optional
+	SchemaInline string `json:"schemaInline,omitempty"`
 
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.

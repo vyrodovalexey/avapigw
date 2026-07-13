@@ -36,6 +36,7 @@ type GRPCRouteReconciler struct {
 // +kubebuilder:rbac:groups=avapigw.io,resources=grpcroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=avapigw.io,resources=grpcroutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // Reconcile handles reconciliation of GRPCRoute resources.
 func (r *GRPCRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -92,6 +93,16 @@ func (r *GRPCRouteReconciler) callbacks() *ReconcileCallbacks {
 
 // reconcileGRPCRoute reconciles the GRPCRoute configuration.
 func (r *GRPCRouteReconciler) reconcileGRPCRoute(ctx context.Context, grpcRoute *avapigwv1alpha1.GRPCRoute) error {
+	// Resolve any ConfigMap-referenced proto descriptors into inline content so
+	// the gateway receives a self-contained, validatable configuration.
+	if err := resolveProtoValidation(
+		ctx, r.Client, grpcRoute.Namespace, grpcRoute.Spec.ProtoValidation,
+	); err != nil {
+		r.Recorder.Eventf(grpcRoute, "Warning", EventReasonReconcileFailed,
+			"Failed to resolve proto validation descriptor: %v", err)
+		return fmt.Errorf("failed to resolve proto validation descriptor: %w", err)
+	}
+
 	configJSON, err := json.Marshal(grpcRoute.Spec)
 	if err != nil {
 		r.Recorder.Eventf(grpcRoute, "Warning", EventReasonReconcileFailed,

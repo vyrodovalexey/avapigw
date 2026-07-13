@@ -4,8 +4,8 @@
 set -u
 cd "$(dirname "$0")/../../.." || exit 1
 ROOT="$(pwd)"
-BASE="${HTTP_BASE:-https://127.0.0.1:30988}"
-WSBASE="${WS_BASE:-wss://127.0.0.1:30988}"
+BASE="${HTTP_BASE:-https://127.0.0.1:18443}"    # GAP-P2: default to PF port (svc HTTPS 8443)
+WSBASE="${WS_BASE:-wss://127.0.0.1:18443}"
 DUR="${PERF_DURATION:-180}"
 CONN="${PERF_CONN:-50}"
 QPS="${PERF_QPS:-10}"

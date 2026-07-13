@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "$0")/../../.." || exit 1
 ROOT="$(pwd)"
 PROTO="$ROOT/test/performance/proto/test_service.proto"
-GRPC_TARGET="${GRPC_TARGET:-127.0.0.1:30159}"
+GRPC_TARGET="${GRPC_TARGET:-127.0.0.1:19443}"  # GAP-P2: default to PF port (svc gRPC-TLS 9443)
 DUR="${PERF_DURATION:-180s}"
 CONC="${PERF_CONC:-50}"
 CONNS="${PERF_CONNS:-10}"

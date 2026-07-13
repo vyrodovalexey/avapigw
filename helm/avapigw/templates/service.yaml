@@ -49,5 +49,8 @@ spec:
       targetPort: metrics
       protocol: TCP
       name: metrics
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.metricsNodePort }}
+      nodePort: {{ .Values.service.metricsNodePort }}
+      {{- end }}
   selector:
     {{- include "avapigw.gateway.selectorLabels" . | nindent 4 }}

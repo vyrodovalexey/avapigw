@@ -342,11 +342,30 @@ configure_k8s_auth() {
         log_info "Kubernetes auth method already enabled"
     fi
 
-    # Use kubernetes.docker.internal for Docker Desktop K8s
-    # The K8s API TLS certificate includes kubernetes.docker.internal in SANs
-    # but NOT host.docker.internal, so Vault TLS verification requires this hostname
-    local k8s_host="https://kubernetes.docker.internal:6443"
-    log_info "K8s API server: $k8s_host"
+    # Determine the K8s API server address Vault (running in docker-compose) must
+    # reach for TokenReview calls. It has to be BOTH reachable from the Vault
+    # container AND present in the API server certificate SANs (TLS verification).
+    #
+    # Classic Docker Desktop K8s exposes the API at kubernetes.docker.internal:6443
+    # (in the cert SANs). kind-based clusters (e.g. desktop-control-plane) expose
+    # the API server on the node container's IP at :6443 which IS in the SANs
+    # (IP Address:<nodeIP>), while kubernetes.docker.internal:6443 is NOT routable.
+    #
+    # Resolution order (override with K8S_HOST env):
+    #   1. explicit K8S_HOST env var
+    #   2. the kind node container IP on :6443 if that IP appears in the cert SANs
+    #   3. kubernetes.docker.internal:6443 (classic Docker Desktop default)
+    local k8s_host="${K8S_HOST:-}"
+    if [[ -z "$k8s_host" ]]; then
+        local node_ip
+        node_ip=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null | awk '{print $1}')
+        if [[ -n "$node_ip" ]]; then
+            k8s_host="https://${node_ip}:6443"
+        else
+            k8s_host="https://kubernetes.docker.internal:6443"
+        fi
+    fi
+    log_info "K8s API server (kubernetes_host for Vault): $k8s_host"
 
     # Get K8s CA certificate
     local k8s_ca_cert
@@ -384,22 +403,27 @@ subjects:
     namespace: ${K8S_NAMESPACE}
 CRB
 
-    # Create a long-lived token secret for the vault-auth SA
-    kubectl apply -f - <<'K8S_SECRET'
+    # Create a long-lived token secret for the vault-auth SA. The namespace MUST
+    # match the SA namespace, otherwise the token controller will not populate it
+    # (and modern Kubernetes garbage-collects an unpopulated legacy token secret).
+    kubectl apply -f - <<K8S_SECRET
 apiVersion: v1
 kind: Secret
 metadata:
   name: vault-auth-token
+  namespace: ${K8S_NAMESPACE}
   annotations:
     kubernetes.io/service-account.name: vault-auth
 type: kubernetes.io/service-account-token
 K8S_SECRET
 
-    # Wait for token to be populated
-    sleep 2
-
-    local reviewer_jwt
-    reviewer_jwt=$(kubectl get secret vault-auth-token -n "$K8S_NAMESPACE" -o jsonpath='{.data.token}' | base64 -d)
+    # Wait for the token controller to populate the secret data.token field.
+    local reviewer_jwt=""
+    for _ in $(seq 1 15); do
+        reviewer_jwt=$(kubectl get secret vault-auth-token -n "$K8S_NAMESPACE" -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
+        [[ -n "$reviewer_jwt" ]] && break
+        sleep 1
+    done
 
     if [[ -z "$reviewer_jwt" ]]; then
         log_error "Could not extract vault-auth token reviewer JWT"

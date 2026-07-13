@@ -359,7 +359,7 @@ This pattern allows:
 
 ## Known Issues / Follow-ups
 
-These are **pre-existing** observability findings (not Go 1.26.4 regressions) tracked as follow-ups:
+These are **pre-existing** observability findings (not Go 1.26.5 regressions) tracked as follow-ups:
 
 - **HTTP per-route rate-limit label resolves to `unknown`** — for HTTP routes, the
   per-route rate limit is not enforced because the route label resolves to `unknown`,

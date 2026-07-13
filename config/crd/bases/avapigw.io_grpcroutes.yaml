@@ -1263,6 +1263,12 @@ spec:
                     description: DescriptorFile is the path to the proto descriptor
                       file.
                     type: string
+                  descriptorInline:
+                    description: |-
+                      DescriptorInline holds the resolved, base64-encoded proto descriptor
+                      content. It is populated internally by the operator from
+                      DescriptorConfigMapRef and is not intended to be set directly by users.
+                    type: string
                   enabled:
                     default: false
                     description: Enabled enables proto descriptor-based request validation.

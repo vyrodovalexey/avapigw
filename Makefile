@@ -114,7 +114,10 @@ TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avap
         perf-test-operator perf-test-operator-local perf-test-operator-reconciliation \
         perf-test-operator-grpc perf-test-operator-config-push perf-test-operator-k8s \
         perf-test-operator-benchmarks perf-analyze-operator perf-analyze-operator-charts \
-        perf-analyze-operator-export
+        perf-analyze-operator-export \
+        perf-test-pt-suite perf-test-pt-01 perf-test-pt-02 perf-test-pt-03 \
+        perf-test-pt-04 perf-test-pt-05 perf-test-pt-06 \
+        perf-pt-portforward perf-pt-portforward-stop perf-pt-verify-metrics
 
 # ==============================================================================
 # Default target
@@ -1319,3 +1322,95 @@ perf-test-ingress: build-operator
 perf-analyze-operator-export:
 	@echo "==> Exporting operator performance results..."
 	@$(PERF_SCRIPTS)/analyze-operator-results.sh --export=json
+
+# ==============================================================================
+# PT scenario-group performance suite (run-pt-suite.sh + group runners)
+# ==============================================================================
+# The PT suite drives the 6 scenario groups (PT-01..06), ~180s steady-state each,
+# against the operator-mode gateway deployed in NS avapigw-test. Endpoints are
+# reached via kubectl port-forward: HTTPS/WSS on 18443->8443 and gRPC-TLS on
+# 19443->9443 (the defaults exported by run-pt-suite.sh). These wrappers make the
+# suite invokable through make while keeping the underlying script semantics.
+#
+# Port-forward defaults (override with HTTP_BASE/WS_BASE/GRPC_TARGET env).
+PT_HTTPS_LOCAL_PORT ?= 18443
+PT_GRPC_LOCAL_PORT  ?= 19443
+PT_HTTPS_SVC_PORT   ?= 8443
+PT_GRPC_SVC_PORT    ?= 9443
+PT_PF_PIDFILE       := $(BUILD_DIR)/.pt-portforward.pid
+VM_URL              ?= http://127.0.0.1:8428
+
+## perf-pt-portforward: Start kubectl port-forwards for the PT suite (18443/19443)
+perf-pt-portforward:
+	@echo "==> Starting PT suite port-forwards (svc/$(CHART_NAME) $(PT_HTTPS_LOCAL_PORT)->$(PT_HTTPS_SVC_PORT), $(PT_GRPC_LOCAL_PORT)->$(PT_GRPC_SVC_PORT)) in $(TEST_NAMESPACE)..."
+	@mkdir -p $(BUILD_DIR)
+	@kubectl -n $(TEST_NAMESPACE) port-forward svc/$(CHART_NAME) \
+		$(PT_HTTPS_LOCAL_PORT):$(PT_HTTPS_SVC_PORT) $(PT_GRPC_LOCAL_PORT):$(PT_GRPC_SVC_PORT) \
+		> $(BUILD_DIR)/pt-portforward.log 2>&1 & echo $$! > $(PT_PF_PIDFILE)
+	@sleep 3
+	@echo "==> Port-forward PID: $$(cat $(PT_PF_PIDFILE)) (log: $(BUILD_DIR)/pt-portforward.log)"
+
+## perf-pt-portforward-stop: Stop the PT suite port-forwards
+perf-pt-portforward-stop:
+	@if [ -f $(PT_PF_PIDFILE) ]; then \
+		echo "==> Stopping PT port-forward PID $$(cat $(PT_PF_PIDFILE))..."; \
+		kill $$(cat $(PT_PF_PIDFILE)) 2>/dev/null || true; \
+		rm -f $(PT_PF_PIDFILE); \
+	else \
+		echo "==> No PT port-forward PID file found"; \
+	fi
+
+## perf-test-pt-suite: Run all 6 PT scenario groups (PT-01..06) via run-pt-suite.sh
+perf-test-pt-suite:
+	@echo "==> Running PT scenario suite (PT-01..06)..."
+	@VM_URL=$(VM_URL) $(PERF_SCRIPTS)/run-pt-suite.sh
+
+## perf-test-pt-01: Run PT-01 (gRPC & streaming: mTLS + OIDC)
+perf-test-pt-01:
+	@echo "==> Running PT-01..."
+	@PT_GROUPS="PT-01" VM_URL=$(VM_URL) $(PERF_SCRIPTS)/run-pt-suite.sh
+
+## perf-test-pt-02: Run PT-02 (TLS gRPC & streaming: mTLS + OIDC + aggregate)
+perf-test-pt-02:
+	@echo "==> Running PT-02..."
+	@PT_GROUPS="PT-02" VM_URL=$(VM_URL) $(PERF_SCRIPTS)/run-pt-suite.sh
+
+## perf-test-pt-03: Run PT-03 (HTTP & WS feature stack)
+perf-test-pt-03:
+	@echo "==> Running PT-03..."
+	@PT_GROUPS="PT-03" VM_URL=$(VM_URL) $(PERF_SCRIPTS)/run-pt-suite.sh
+
+## perf-test-pt-04: Run PT-04 (HTTPS & WSS + REST/NDJSON aggregate)
+perf-test-pt-04:
+	@echo "==> Running PT-04..."
+	@PT_GROUPS="PT-04" VM_URL=$(VM_URL) $(PERF_SCRIPTS)/run-pt-suite.sh
+
+## perf-test-pt-05: Run PT-05 (GraphQL & WS feature stack)
+perf-test-pt-05:
+	@echo "==> Running PT-05..."
+	@PT_GROUPS="PT-05" VM_URL=$(VM_URL) $(PERF_SCRIPTS)/run-pt-suite.sh
+
+## perf-test-pt-06: Run PT-06 (TLS GraphQL & WSS + GraphQL aggregate)
+perf-test-pt-06:
+	@echo "==> Running PT-06..."
+	@PT_GROUPS="PT-06" VM_URL=$(VM_URL) $(PERF_SCRIPTS)/run-pt-suite.sh
+
+## perf-pt-verify-metrics: Query VictoriaMetrics for the core PT gateway metric series
+perf-pt-verify-metrics:
+	@echo "==> Verifying PT gateway metrics in VictoriaMetrics ($(VM_URL))..."
+	@for q in \
+		'sum(gateway_route_requests_total)' \
+		'sum(gateway_backend_requests_total)' \
+		'sum(gateway_aggregate_requests_total)' \
+		'sum(gateway_grpc_stream_duration_seconds_count)' \
+		'sum(gateway_ws_connections_total)' \
+		'sum(gateway_route_auth_successes_total)' \
+		'sum(gateway_route_ratelimit_hits_total)' \
+		'sum(gateway_route_cache_hits_total)' \
+		'sum(gateway_transform_operations_total)' \
+		'sum(gateway_middleware_cors_requests_total)' ; do \
+		v=$$(curl -s "$(VM_URL)/api/v1/query?query=$$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$$q")" \
+			| python3 -c 'import sys,json; d=json.load(sys.stdin); r=d.get("data",{}).get("result",[]); print(r[0]["value"][1] if r else "null")' 2>/dev/null); \
+		printf "  %-55s = %s\n" "$$q" "$$v"; \
+	done
+	@echo "==> PT metric verification complete"

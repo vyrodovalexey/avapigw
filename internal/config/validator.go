@@ -1837,7 +1837,7 @@ func (v *Validator) validateOpenAPIValidationConfig(cfg *OpenAPIValidationConfig
 		return
 	}
 
-	if cfg.SpecFile == "" && cfg.SpecURL == "" {
+	if cfg.SpecFile == "" && cfg.SpecURL == "" && cfg.SpecInline == "" {
 		v.addError(path, "either specFile or specURL is required when OpenAPI validation is enabled")
 	}
 
@@ -1858,7 +1858,7 @@ func (v *Validator) validateProtoValidationConfig(cfg *ProtoValidationConfig, pa
 		return
 	}
 
-	if cfg.DescriptorFile == "" {
+	if cfg.DescriptorFile == "" && cfg.DescriptorInline == "" {
 		v.addError(path+".descriptorFile", "descriptorFile is required when proto validation is enabled")
 	}
 }
@@ -1869,7 +1869,7 @@ func (v *Validator) validateGraphQLSchemaValidationConfig(cfg *GraphQLSchemaVali
 		return
 	}
 
-	if cfg.SchemaFile == "" {
+	if cfg.SchemaFile == "" && cfg.SchemaInline == "" {
 		v.addError(path+".schemaFile", "schemaFile is required when GraphQL schema validation is enabled")
 	}
 }

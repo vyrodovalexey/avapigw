@@ -38,6 +38,11 @@ service:
   grpcPort: 9000
   grpcTlsPort: 9443
   metricsPort: 9090
+  # Fixed NodePort for the metrics endpoint so the docker-compose VictoriaMetrics
+  # static scrape job 'avapigw-gateway-k8s' (host.docker.internal:31918) has a
+  # deterministic target across redeploys. The in-cluster vmagent scrapes the pod
+  # directly regardless of this value.
+  metricsNodePort: 31918
 
 # Relax security for local testing
 podSecurityContext:

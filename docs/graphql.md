@@ -525,7 +525,7 @@ spec:
 - `graphql_request_duration_seconds{operation_type, operation_name, route}` - Request duration histogram
 - `graphql_errors_total{operation_type, error_type, route}` - GraphQL error count
 
-> **Known limitation (pre-existing, not a Go 1.26.4 regression):** `/graphql` query and
+> **Known limitation (pre-existing, not a Go 1.26.5 regression):** `/graphql` query and
 > mutation requests are served correctly with valid data, but the gateway-level GraphQL
 > handler currently **bypasses the metrics/middleware chain**, so the
 > `avapigw_graphql_*` / `gateway_requests_*` counters above are **not** incremented for

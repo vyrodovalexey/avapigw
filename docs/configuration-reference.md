@@ -1914,14 +1914,19 @@ spec:
 
 ### Dependency Upgrades
 
-The following dependencies have been upgraded for improved performance and security:
+The project targets the **Go 1.26.5** toolchain (see `go.mod`, the Docker images, and CI). The
+following dependencies have been upgraded for improved performance, security, and compatibility
+with Go 1.26.5:
 
 **Go Dependencies:**
 - `github.com/redis/go-redis/v9` upgraded to v9.21.0 (from v9.20.1) - Enhanced Redis client with improved connection pooling and Sentinel support
 - `protobuf` upgraded to v1.36.11 - Latest Protocol Buffers implementation with performance improvements
 - **OpenTelemetry** upgraded to v1.44.0 - Latest observability framework with enhanced tracing capabilities and performance improvements. The v1.44.0 SDK line carries semantic-convention schema **v1.41.0**, so the tracer resource is built against `go.opentelemetry.io/otel/semconv/v1.41.0` (see [Observability](#opentelemetry-semconv-version) note below)
-- `github.com/getkin/kin-openapi` upgraded to v0.140.0 - OpenAPI request/response validation (transitively pulls `github.com/oasdiff/yaml` v0.1.0)
-- `github.com/vektah/gqlparser/v2` upgraded to v2.5.35 - GraphQL schema/query parser used by the GraphQL proxy
+- `github.com/getkin/kin-openapi` upgraded to v0.142.0 (from v0.140.0) - OpenAPI request/response validation (transitively pulls `github.com/oasdiff/yaml` v0.1.0; `github.com/go-openapi/swag` and other transitive patch bumps came along)
+- `github.com/vektah/gqlparser/v2` upgraded to v2.5.36 (from v2.5.35) - GraphQL schema/query parser used by the GraphQL proxy
+- `github.com/google/cel-go` upgraded to v0.29.2 (from v0.28.1) - CEL expression evaluation used by ABAC authorization
+- `github.com/golang-jwt/jwt/v5` upgraded to v5.3.1 (from v5.3.0) - JWT parsing and validation
+- `github.com/lestrrat-go/jwx/v2` upgraded to v2.1.7 (from v2.1.6) - JWKS handling and JOSE primitives
 - `golang.org/x/crypto` upgraded to v0.53.0 - Cryptographic primitives (TLS, JWT signing, certificate handling)
 - `golang.org/x/text` upgraded to v0.38.0 - Text processing and encoding utilities
 - `k8s.io/api`, `k8s.io/apimachinery`, and `k8s.io/client-go` upgraded to v0.36.2 - Kubernetes API types and client used by the operator and CRD modes

@@ -1324,6 +1324,12 @@ spec:
                     description: SpecFile is the path to the OpenAPI specification
                       file.
                     type: string
+                  specInline:
+                    description: |-
+                      SpecInline holds the resolved OpenAPI specification content.
+                      It is populated internally by the operator from SpecConfigMapRef and is
+                      not intended to be set directly by users.
+                    type: string
                   specURL:
                     description: SpecURL is the URL to fetch the OpenAPI specification
                       from.

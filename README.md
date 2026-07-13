@@ -3,7 +3,7 @@
 [![CI](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vyrodovalexey/avapigw)](https://goreportcard.com/report/github.com/vyrodovalexey/avapigw)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/go-1.26.4-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26.5-blue.svg)](https://golang.org/dl/)
 
 A high-performance, production-ready API Gateway built with Go and gin-gonic. Designed for cloud-native environments with comprehensive traffic management, observability, and reliability features.
 
@@ -178,7 +178,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Integration Tests**: 739 tests passed (4 documented skips)
 - **E2E Tests**: 521 tests passed (18 documented skips)
 - **Quality Gates**: `go build`, `go vet`, `golangci-lint` (0 issues), and `govulncheck` (no vulnerabilities) all pass
-- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.4)
+- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.5)
 - **Lint Clean**: Zero linting issues across the entire codebase
 
 #### Performance Validation
@@ -231,7 +231,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.26.4 (for building from source)
+- Go 1.26.5 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -6964,7 +6964,7 @@ name: CI
 on: [push, pull_request]
 
 env:
-  GO_VERSION: '1.26.4'
+  GO_VERSION: '1.26.5'
   GOLANGCI_LINT_VERSION: 'v2.12.2'
 
 jobs:
@@ -7305,7 +7305,7 @@ See: [test/performance/README.md](test/performance/README.md)
 
 ## ⚠️ Known Issues / Follow-ups
 
-The following items are **pre-existing** findings surfaced during the Go 1.26.4 upgrade
+The following items are **pre-existing** findings surfaced during the Go 1.26.5 upgrade
 and validation cycle. They are not regressions introduced by the upgrade; they are
 tracked here as follow-ups.
 

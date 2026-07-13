@@ -2,6 +2,7 @@ package openapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/url"
 	"sync"
@@ -16,6 +17,12 @@ type Loader interface {
 
 	// LoadFromURL loads an OpenAPI spec from a URL.
 	LoadFromURL(ctx context.Context, specURL string) (*openapi3.T, error)
+
+	// LoadFromData loads an OpenAPI spec from raw in-memory bytes.
+	// This is used when the spec content is delivered inline (for example,
+	// resolved from a Kubernetes ConfigMap by the operator) rather than
+	// referenced by file path or URL.
+	LoadFromData(ctx context.Context, data []byte) (*openapi3.T, error)
 
 	// Invalidate removes a cached spec, forcing reload on next access.
 	Invalidate(key string)
@@ -106,6 +113,49 @@ func (l *SpecLoader) LoadFromURL(ctx context.Context, specURL string) (*openapi3
 
 	l.cache[specURL] = doc
 	return doc, nil
+}
+
+// LoadFromData loads an OpenAPI spec from raw in-memory bytes.
+// Parsed specs are cached by a content-derived key so that identical inline
+// specs are only parsed once.
+func (l *SpecLoader) LoadFromData(ctx context.Context, data []byte) (*openapi3.T, error) {
+	cacheKey := dataCacheKey(data)
+
+	l.mu.RLock()
+	if doc, ok := l.cache[cacheKey]; ok {
+		l.mu.RUnlock()
+		return doc, nil
+	}
+	l.mu.RUnlock()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Double-check after acquiring write lock.
+	if doc, ok := l.cache[cacheKey]; ok {
+		return doc, nil
+	}
+
+	loader := openapi3.NewLoader()
+	loader.Context = ctx
+
+	doc, err := loader.LoadFromData(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load OpenAPI spec from inline data: %w", err)
+	}
+
+	if err := doc.Validate(ctx); err != nil {
+		return nil, fmt.Errorf("invalid OpenAPI spec in inline data: %w", err)
+	}
+
+	l.cache[cacheKey] = doc
+	return doc, nil
+}
+
+// dataCacheKey derives a stable cache key from inline spec content.
+func dataCacheKey(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "inline:" + fmt.Sprintf("%x", sum)
 }
 
 // Invalidate removes a cached spec, forcing reload on next access.

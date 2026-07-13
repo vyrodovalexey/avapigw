@@ -391,6 +391,14 @@ rules:
     resources: ["*/status"]
     verbs: ["get", "update", "patch"]
   
+  # ConfigMap resolution: the operator reads ConfigMaps referenced by
+  # openAPIValidation.specConfigMapRef, protoValidation.descriptorConfigMapRef,
+  # and schemaValidation.schemaConfigMapRef, and inlines their content before
+  # delivering configuration to the gateway.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  
   # Leader election
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
