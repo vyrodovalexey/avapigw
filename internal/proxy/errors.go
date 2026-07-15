@@ -49,6 +49,10 @@ var (
 
 	// ErrNoAvailableHosts indicates that no backend hosts are available.
 	ErrNoAvailableHosts = errors.New("no available backend hosts")
+
+	// ErrWSOriginNotAllowed indicates that a WebSocket upgrade request was
+	// rejected because its Origin header is not in the configured allowlist.
+	ErrWSOriginNotAllowed = errors.New("websocket origin not allowed")
 )
 
 // ProxyError represents a proxy-related error with details.

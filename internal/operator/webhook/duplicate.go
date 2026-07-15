@@ -803,12 +803,32 @@ func (c *DuplicateChecker) CheckGRPCBackendDuplicate(
 	return nil
 }
 
-// routesOverlap checks if two APIRoutes have overlapping match conditions.
+// routesOverlap checks if two APIRoutes are TRUE duplicates, i.e. the data
+// plane cannot deterministically order them.
+//
+// The gateway router resolves matches by specificity (see internal/router
+// calculatePriority: exact=1000 > prefix=500+len(prefix) > regex=100, with an
+// empty match acting as a priority-0 catch-all), so routes with DIFFERENT
+// specificity coexist deterministically and are not admission conflicts:
+//   - a catch-all (empty match or prefix "/") coexists with exact routes,
+//   - nested prefixes (e.g. "/" and "/api") resolve by longest-prefix,
+//   - exact vs prefix resolves exact-first.
+//
+// Only true duplicates — same match TYPE with the same path and overlapping
+// methods — are ambiguous and rejected.
 func (c *DuplicateChecker) routesOverlap(a, b *avapigwv1alpha1.APIRoute) bool {
-	// An empty match list means "catch-all" — it matches everything.
-	// If either route is a catch-all, it overlaps with any other route.
-	if len(a.Spec.Match) == 0 || len(b.Spec.Match) == 0 {
+	aCatchAll := len(a.Spec.Match) == 0
+	bCatchAll := len(b.Spec.Match) == 0
+
+	// Two match-less catch-alls have identical (zero) specificity — a true
+	// duplicate the router cannot order deterministically.
+	if aCatchAll && bCatchAll {
 		return true
+	}
+	// A match-less catch-all vs any route WITH match conditions is resolved
+	// deterministically by specificity — not a conflict.
+	if aCatchAll || bCatchAll {
+		return false
 	}
 
 	// Check if any match conditions overlap
@@ -824,29 +844,28 @@ func (c *DuplicateChecker) routesOverlap(a, b *avapigwv1alpha1.APIRoute) bool {
 	return false
 }
 
-// matchConditionsOverlap checks if two RouteMatch conditions overlap.
-//
-//nolint:gocyclo // URI matching requires checking multiple conditions for exact, prefix, and regex patterns
+// matchConditionsOverlap checks if two RouteMatch conditions are TRUE
+// duplicates: the same match type with the same path and overlapping methods.
+// Combinations of different specificity (exact vs prefix, nested prefixes)
+// are resolved deterministically by the router and therefore allowed.
 func (c *DuplicateChecker) matchConditionsOverlap(a, b *avapigwv1alpha1.RouteMatch) bool {
 	if a.URI == nil || b.URI == nil {
 		return false
 	}
 
-	// Check exact match overlap
+	// Identical exact paths → identical specificity → true duplicate.
 	if c.exactURIsOverlap(a, b) {
 		return c.methodsOverlap(a.Methods, b.Methods)
 	}
 
-	// Check prefix overlap
-	if c.prefixURIsOverlap(a, b) {
+	// Identical prefixes → identical specificity → true duplicate.
+	if c.prefixURIsIdentical(a, b) {
 		return c.methodsOverlap(a.Methods, b.Methods)
 	}
 
-	// Check exact and prefix overlap
-	if c.exactAndPrefixOverlap(a, b) {
-		return c.methodsOverlap(a.Methods, b.Methods)
-	}
-
+	// Every other combination (exact vs prefix, one prefix nested in the
+	// other, regex, …) is ordered deterministically by the router's
+	// specificity rules and is not an admission conflict.
 	return false
 }
 
@@ -855,24 +874,14 @@ func (c *DuplicateChecker) exactURIsOverlap(a, b *avapigwv1alpha1.RouteMatch) bo
 	return a.URI.Exact != "" && b.URI.Exact != "" && a.URI.Exact == b.URI.Exact
 }
 
-// prefixURIsOverlap checks if two prefix URIs overlap.
-func (c *DuplicateChecker) prefixURIsOverlap(a, b *avapigwv1alpha1.RouteMatch) bool {
+// prefixURIsIdentical checks if two prefix URIs are identical. Nested but
+// non-identical prefixes (e.g. "/" and "/api") are NOT considered conflicts:
+// the router resolves them by longest-prefix specificity.
+func (c *DuplicateChecker) prefixURIsIdentical(a, b *avapigwv1alpha1.RouteMatch) bool {
 	if a.URI.Prefix == "" || b.URI.Prefix == "" {
 		return false
 	}
-	return strings.HasPrefix(a.URI.Prefix, b.URI.Prefix) ||
-		strings.HasPrefix(b.URI.Prefix, a.URI.Prefix)
-}
-
-// exactAndPrefixOverlap checks if an exact URI overlaps with a prefix URI.
-func (c *DuplicateChecker) exactAndPrefixOverlap(a, b *avapigwv1alpha1.RouteMatch) bool {
-	if a.URI.Exact != "" && b.URI.Prefix != "" && strings.HasPrefix(a.URI.Exact, b.URI.Prefix) {
-		return true
-	}
-	if b.URI.Exact != "" && a.URI.Prefix != "" && strings.HasPrefix(b.URI.Exact, a.URI.Prefix) {
-		return true
-	}
-	return false
+	return a.URI.Prefix == b.URI.Prefix
 }
 
 // methodsOverlap checks if two method lists overlap.
@@ -1781,15 +1790,36 @@ func (c *DuplicateChecker) CheckGraphQLRouteCrossConflictsWithAPIRoute(
 	return nil
 }
 
-// apiRouteAndGraphQLRouteOverlap checks if an APIRoute and a GraphQLRoute have overlapping paths.
+// apiRouteAndGraphQLRouteOverlap checks if an APIRoute and a GraphQLRoute are
+// TRUE cross-kind duplicates, i.e. the data plane cannot deterministically
+// split traffic between the HTTP and GraphQL pipelines.
+//
+// Data-plane precedence (see internal/gateway setupRoutes / the GraphQL path
+// dispatcher): the GraphQL pipeline exclusively owns the configured GraphQL
+// endpoint path — requests on that path are handled by the GraphQL handler
+// before the HTTP router's catch-all — while every other path is resolved by
+// the HTTP router's specificity rules. Cross-kind combinations of DIFFERENT
+// specificity therefore coexist deterministically and are not admission
+// conflicts:
+//   - an APIRoute catch-all (no match, nil URI, or a shorter prefix) serves
+//     everything except the GraphQL endpoint path — not a conflict,
+//   - a GraphQLRoute catch-all only ever receives GraphQL endpoint traffic —
+//     not a conflict with path-specific APIRoutes.
+//
+// Only identical-specificity path duplicates (same exact path or same
+// prefix) are ambiguous: the APIRoute would be silently shadowed by the
+// GraphQL pipeline on exactly the path space it claims, so they are rejected.
+// This mirrors the same-kind routesOverlap/matchConditionsOverlap semantics.
 func (c *DuplicateChecker) apiRouteAndGraphQLRouteOverlap(
 	apiRoute *avapigwv1alpha1.APIRoute,
 	graphqlRoute *avapigwv1alpha1.GraphQLRoute,
 ) bool {
-	// An empty match list means "catch-all" — it matches everything.
-	// If either route is a catch-all, it overlaps with any other route.
+	// A match-less catch-all on either side has lower specificity than any
+	// route with match conditions, and cross-kind catch-alls live in
+	// different routers split deterministically by the GraphQL endpoint
+	// path. Never a cross-kind conflict.
 	if len(apiRoute.Spec.Match) == 0 || len(graphqlRoute.Spec.Match) == 0 {
-		return true
+		return false
 	}
 
 	for i := range apiRoute.Spec.Match {
@@ -1813,44 +1843,38 @@ func (c *DuplicateChecker) graphqlRouteAndAPIRouteOverlap(
 	return c.apiRouteAndGraphQLRouteOverlap(apiRoute, graphqlRoute)
 }
 
-// apiRouteAndGraphQLRoutePathsOverlap checks if an APIRoute match and a GraphQLRoute match
-// have overlapping paths. Path overlap alone is considered a conflict because REST and GraphQL
-// routes serving on the same path would cause routing ambiguity regardless of operation type.
+// apiRouteAndGraphQLRoutePathsOverlap checks if an APIRoute match and a
+// GraphQLRoute match are TRUE cross-kind path duplicates: the same match
+// TYPE with the same path (identical specificity). Every other combination —
+// catch-all vs specific, exact vs prefix, nested prefixes, regex — is
+// resolved deterministically by the data plane (the GraphQL pipeline owns
+// its endpoint path; the HTTP router orders the rest by specificity) and is
+// therefore not an admission conflict. This mirrors the same-kind
+// matchConditionsOverlap semantics.
 func (c *DuplicateChecker) apiRouteAndGraphQLRoutePathsOverlap(
 	apiMatch *avapigwv1alpha1.RouteMatch,
 	graphqlMatch *avapigwv1alpha1.GraphQLRouteMatch,
 ) bool {
-	// If the APIRoute has no URI match, it matches all paths
-	if apiMatch.URI == nil {
-		return true
+	// A nil URI/path on either side is a catch-all with lower specificity
+	// than any concrete path — ordered deterministically, not a conflict.
+	if apiMatch.URI == nil || graphqlMatch.Path == nil {
+		return false
 	}
 
-	// If the GraphQLRoute has no path match, it matches all paths
-	if graphqlMatch.Path == nil {
-		return true
-	}
-
-	// Check exact-exact overlap
+	// Identical exact paths → identical specificity → true duplicate: the
+	// APIRoute would be fully shadowed by the GraphQL pipeline on that path.
 	if apiMatch.URI.Exact != "" && graphqlMatch.Path.Exact != "" {
 		return apiMatch.URI.Exact == graphqlMatch.Path.Exact
 	}
 
-	// Check prefix-prefix overlap
+	// Identical prefixes → identical specificity → true duplicate. Nested
+	// but non-identical prefixes resolve by longest-prefix specificity.
 	if apiMatch.URI.Prefix != "" && graphqlMatch.Path.Prefix != "" {
-		return strings.HasPrefix(apiMatch.URI.Prefix, graphqlMatch.Path.Prefix) ||
-			strings.HasPrefix(graphqlMatch.Path.Prefix, apiMatch.URI.Prefix)
+		return apiMatch.URI.Prefix == graphqlMatch.Path.Prefix
 	}
 
-	// Check exact-prefix overlap (APIRoute exact vs GraphQLRoute prefix)
-	if apiMatch.URI.Exact != "" && graphqlMatch.Path.Prefix != "" {
-		return strings.HasPrefix(apiMatch.URI.Exact, graphqlMatch.Path.Prefix)
-	}
-
-	// Check prefix-exact overlap (APIRoute prefix vs GraphQLRoute exact)
-	if apiMatch.URI.Prefix != "" && graphqlMatch.Path.Exact != "" {
-		return strings.HasPrefix(graphqlMatch.Path.Exact, apiMatch.URI.Prefix)
-	}
-
+	// Exact vs prefix (either direction), regex, and remaining combinations
+	// have different specificity and coexist deterministically.
 	return false
 }
 

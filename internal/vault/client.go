@@ -90,12 +90,22 @@ type vaultClient struct {
 	tokenTTL    atomic.Int64
 	tokenExpiry atomic.Int64
 
-	// Lifecycle
+	// Lifecycle. stopCh/stoppedCh belong to the CURRENT token-renewal
+	// goroutine generation and are replaced by Authenticate under mu.
+	// Goroutines never re-read these fields: they receive their own
+	// generation's channels as arguments (generation capture pattern).
 	mu             sync.RWMutex
 	closed         bool
 	stopCh         chan struct{}
 	stoppedCh      chan struct{}
-	renewalStarted bool // guards against multiple renewal goroutines
+	renewalStarted bool // current generation running and its stopCh not yet closed
+
+	// closeTimeout bounds the wait for a renewal goroutine generation to stop
+	// (Authenticate replacement wait and Close shutdown wait). It defaults to
+	// DefaultCloseTimeout and is overridable in tests (mirrors the
+	// backend/health stopTimeout seam). Set before any goroutines start; never
+	// mutated afterwards.
+	closeTimeout time.Duration
 }
 
 // ClientOption is a functional option for configuring the client.
@@ -154,11 +164,12 @@ func New(cfg *Config, logger observability.Logger, opts ...ClientOption) (Client
 	}
 
 	client := &vaultClient{
-		config:    cfg,
-		api:       api,
-		logger:    logger.With(observability.String("component", "vault")),
-		stopCh:    make(chan struct{}),
-		stoppedCh: make(chan struct{}),
+		config:       cfg,
+		api:          api,
+		logger:       logger.With(observability.String("component", "vault")),
+		stopCh:       make(chan struct{}),
+		stoppedCh:    make(chan struct{}),
+		closeTimeout: DefaultCloseTimeout,
 	}
 
 	// Apply options
@@ -187,6 +198,15 @@ func New(cfg *Config, logger observability.Logger, opts ...ClientOption) (Client
 // IsEnabled returns true if Vault is enabled.
 func (c *vaultClient) IsEnabled() bool {
 	return true
+}
+
+// closeWaitTimeout returns the bounded wait for goroutine shutdown, falling
+// back to DefaultCloseTimeout when the seam was left unset (zero value).
+func (c *vaultClient) closeWaitTimeout() time.Duration {
+	if c.closeTimeout > 0 {
+		return c.closeTimeout
+	}
+	return DefaultCloseTimeout
 }
 
 // Authenticate authenticates with Vault.
@@ -234,30 +254,51 @@ func (c *vaultClient) Authenticate(ctx context.Context) error {
 		observability.Duration("duration", duration),
 	)
 
-	// Start token renewal goroutine, stopping any previous one first
+	// Start the token renewal goroutine for a new generation, signaling the
+	// previous generation to stop first. Channels are created per generation
+	// and captured by the goroutine at spawn time (generation capture
+	// pattern), so a stranded previous goroutine only ever observes and
+	// closes its own generation's channels.
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClientClosed
+	}
 	if c.renewalStarted {
-		// Stop the previous renewal goroutine by closing its stop channel
-		// and waiting for it to finish, then create fresh channels.
+		// Signal the previous renewal goroutine to stop. Clearing
+		// renewalStarted records that this generation's stop channel has
+		// been closed, so Close() cannot close it a second time.
 		close(c.stopCh)
+		c.renewalStarted = false
+		prevStoppedCh := c.stoppedCh
 		c.mu.Unlock()
 
-		// Wait for the previous goroutine to finish
+		// Wait (bounded) for the previous goroutine to finish. Waiting on
+		// the captured channel guarantees we observe the correct generation
+		// even if it only exits after this timeout fires.
 		select {
-		case <-c.stoppedCh:
+		case <-prevStoppedCh:
 			// Previous goroutine stopped successfully
-		case <-time.After(DefaultCloseTimeout):
+		case <-time.After(c.closeWaitTimeout()):
 			c.logger.Warn("timeout waiting for previous token renewal goroutine to stop")
 		}
 
 		c.mu.Lock()
-		c.stopCh = make(chan struct{})
-		c.stoppedCh = make(chan struct{})
+		// Re-check closed: Close() may have run while we waited unlocked.
+		if c.closed {
+			c.mu.Unlock()
+			return ErrClientClosed
+		}
 	}
+	stopCh := make(chan struct{})
+	stoppedCh := make(chan struct{})
+	c.stopCh = stopCh
+	c.stoppedCh = stoppedCh
 	c.renewalStarted = true
 	c.mu.Unlock()
 
-	go c.tokenRenewalLoop() //nolint:contextcheck // Background goroutine manages its own context lifecycle
+	//nolint:contextcheck // Background goroutine manages its own context lifecycle
+	go c.tokenRenewalLoop(stopCh, stoppedCh)
 
 	return nil
 }
@@ -345,16 +386,27 @@ func (c *vaultClient) Close() error {
 		return nil
 	}
 	c.closed = true
+	// Capture the current generation's channels under the lock so the wait
+	// below targets the goroutine generation that is actually running, even
+	// if Authenticate replaced the struct fields earlier. The renewalStarted
+	// guard ensures the stop channel is closed exactly once and that Close
+	// does not wait when no renewal goroutine was ever started.
+	renewalRunning := c.renewalStarted
+	stoppedCh := c.stoppedCh
+	if renewalRunning {
+		close(c.stopCh)
+		c.renewalStarted = false
+	}
 	c.mu.Unlock()
 
-	close(c.stopCh)
-
-	// Wait for token renewal to stop
-	select {
-	case <-c.stoppedCh:
-		c.logger.Debug("token renewal goroutine stopped successfully")
-	case <-time.After(DefaultCloseTimeout):
-		c.logger.Warn("timeout waiting for token renewal to stop")
+	if renewalRunning {
+		// Wait for token renewal to stop
+		select {
+		case <-stoppedCh:
+			c.logger.Debug("token renewal goroutine stopped successfully")
+		case <-time.After(c.closeWaitTimeout()):
+			c.logger.Warn("timeout waiting for token renewal to stop")
+		}
 	}
 
 	// Stop the cache cleanup goroutine
@@ -367,10 +419,18 @@ func (c *vaultClient) Close() error {
 }
 
 // tokenRenewalLoop handles automatic token renewal.
-// It uses the internal stop channel for lifecycle management instead of the passed context
-// to prevent goroutine leaks when the original context is short-lived.
-func (c *vaultClient) tokenRenewalLoop() {
-	defer close(c.stoppedCh)
+// It uses stop-channel signaling for lifecycle management instead of a passed
+// context to prevent goroutine leaks when the original context is short-lived.
+//
+// The stop/stopped channels are captured per generation at spawn time
+// (generation capture pattern): Authenticate may replace c.stopCh/c.stoppedCh
+// with fresh channels for a newer generation while an older goroutine is still
+// draining. The older goroutine must keep selecting on its own stop channel
+// and close its own stopped channel; re-reading the struct fields here would
+// both race with the replacement and strand the goroutine on a channel that
+// will never be closed for it.
+func (c *vaultClient) tokenRenewalLoop(stopCh <-chan struct{}, stoppedCh chan<- struct{}) {
+	defer close(stoppedCh)
 
 	renewInterval := c.calculateRenewalInterval()
 	if renewInterval <= 0 {
@@ -387,7 +447,7 @@ func (c *vaultClient) tokenRenewalLoop() {
 
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			c.logger.Info("token renewal stopped")
 			return
 		case <-ticker.C:

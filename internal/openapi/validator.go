@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -158,6 +159,10 @@ type Validator struct {
 	metrics          *Metrics
 	doc              *openapi3.T
 	router           routers.Router
+
+	// loadTimeout bounds each spec load (fetch + parse + validate).
+	// It defaults to defaultSpecFetchTimeout; tests may shorten it.
+	loadTimeout time.Duration
 }
 
 // NewValidator creates a new Validator with the given options.
@@ -167,6 +172,7 @@ func NewValidator(opts ...Option) (*Validator, error) {
 		failOnError:    true,
 		validateBody:   true,
 		validateParams: true,
+		loadTimeout:    defaultSpecFetchTimeout,
 		// Headers and security validation are off by default.
 	}
 
@@ -182,7 +188,7 @@ func NewValidator(opts ...Option) (*Validator, error) {
 		v.loader = NewSpecLoader()
 	}
 
-	if err := v.loadSpec(); err != nil {
+	if err := v.loadSpecBounded(); err != nil {
 		return nil, err
 	}
 
@@ -230,10 +236,27 @@ func NewValidatorFromConfig(
 	return NewValidator(opts...)
 }
 
-// loadSpec loads the OpenAPI specification from the configured source.
-func (v *Validator) loadSpec() error {
-	ctx := context.Background()
+// loadSpecBounded loads the spec under a timeout-bounded context.
+//
+// Construction and reload are driven by gateway route building and hot-reload
+// paths that do not carry a request-scoped context, so a bounded background
+// context is the boundary here: it guarantees that a hung spec source fails
+// fast instead of stalling startup or reload indefinitely.
+func (v *Validator) loadSpecBounded() error {
+	timeout := v.loadTimeout
+	if timeout <= 0 {
+		timeout = defaultSpecFetchTimeout
+	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return v.loadSpec(ctx)
+}
+
+// loadSpec loads the OpenAPI specification from the configured source.
+// The context bounds the entire load, including any remote spec fetch.
+func (v *Validator) loadSpec(ctx context.Context) error {
 	var err error
 	switch {
 	case len(v.specData) > 0:
@@ -269,7 +292,7 @@ func (v *Validator) Reload() error {
 	default:
 		v.loader.Invalidate(v.specURL)
 	}
-	return v.loadSpec()
+	return v.loadSpecBounded()
 }
 
 // ValidateRequest validates an HTTP request against the OpenAPI specification.

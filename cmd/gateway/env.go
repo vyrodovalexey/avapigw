@@ -6,7 +6,14 @@ import (
 	"strings"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// warnInvalidEnvValue is the log message emitted when an environment variable
+// holds a value that cannot be parsed. The variable is ignored and the
+// previous (file-based or default) value is kept, but the misconfiguration is
+// surfaced instead of silently swallowed.
+const warnInvalidEnvValue = "invalid environment variable value; using default"
 
 // Redis Sentinel environment variable names.
 const (
@@ -50,8 +57,10 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 // getEnvBool returns the environment variable as a boolean or a default.
-// Accepts "true", "1", "yes" (case-insensitive) as true values.
-func getEnvBool(key string, defaultValue bool) bool {
+// Accepts "true", "1", "yes", "on" / "false", "0", "no", "off"
+// (case-insensitive). Any other non-empty value is reported with a warning
+// naming the variable and the offending value, then the default is used.
+func getEnvBool(key string, defaultValue bool, logger observability.Logger) bool {
 	value := os.Getenv(key)
 	if value == "" {
 		return defaultValue
@@ -64,8 +73,22 @@ func getEnvBool(key string, defaultValue bool) bool {
 	case "false", "0", "no", "off":
 		return false
 	default:
+		ensureEnvLogger(logger).Warn(warnInvalidEnvValue,
+			observability.String("variable", key),
+			observability.String("value", value),
+			observability.Bool("default", defaultValue),
+		)
 		return defaultValue
 	}
+}
+
+// ensureEnvLogger returns logger, falling back to the process-wide logger so
+// env parse warnings are never silently dropped by a nil injection.
+func ensureEnvLogger(logger observability.Logger) observability.Logger {
+	if logger != nil {
+		return logger
+	}
+	return observability.L()
 }
 
 // applyRedisSentinelEnv applies Redis Sentinel environment variable overrides
@@ -118,22 +141,31 @@ func applyRedisSentinelEnv(redisCfg *config.RedisCacheConfig) {
 // applyRedisFeatureEnv applies Redis feature environment variable overrides
 // (TTL jitter, hash keys, vault paths) to the given RedisCacheConfig.
 // Environment variables take priority over file-based configuration values.
-func applyRedisFeatureEnv(redisCfg *config.RedisCacheConfig) {
+// Unparsable values are reported via logger and the existing value is kept.
+func applyRedisFeatureEnv(redisCfg *config.RedisCacheConfig, logger observability.Logger) {
 	if redisCfg == nil {
 		return
 	}
+	logger = ensureEnvLogger(logger)
 
 	// TTL jitter
 	if jitterStr := os.Getenv(envRedisTTLJitter); jitterStr != "" {
-		if jitter, err := strconv.ParseFloat(jitterStr, 64); err == nil {
+		jitter, err := strconv.ParseFloat(jitterStr, 64)
+		if err != nil {
+			logger.Warn(warnInvalidEnvValue,
+				observability.String("variable", envRedisTTLJitter),
+				observability.String("value", jitterStr),
+				observability.Float64("default", redisCfg.TTLJitter),
+				observability.Error(err),
+			)
+		} else {
 			redisCfg.TTLJitter = jitter
 		}
 	}
 
-	// Hash keys
-	if hashKeysStr := os.Getenv(envRedisHashKeys); hashKeysStr != "" {
-		redisCfg.HashKeys = getEnvBool(envRedisHashKeys, redisCfg.HashKeys)
-	}
+	// Hash keys ("true"/"false"). getEnvBool keeps the current value and
+	// warns when the variable holds an invalid boolean representation.
+	redisCfg.HashKeys = getEnvBool(envRedisHashKeys, redisCfg.HashKeys, logger)
 
 	// Vault paths for passwords
 	if vaultPath := os.Getenv(envRedisPasswordVaultPath); vaultPath != "" {
@@ -157,8 +189,8 @@ func applyRedisFeatureEnv(redisCfg *config.RedisCacheConfig) {
 
 // applyRedisSentinelEnvToConfig applies Redis Sentinel environment variable overrides
 // to all Redis cache configurations in the gateway config. This includes route-level
-// cache configurations that use Redis.
-func applyRedisSentinelEnvToConfig(cfg *config.GatewayConfig) {
+// cache configurations that use Redis. Parse failures are reported via logger.
+func applyRedisSentinelEnvToConfig(cfg *config.GatewayConfig, logger observability.Logger) {
 	if cfg == nil {
 		return
 	}
@@ -168,7 +200,7 @@ func applyRedisSentinelEnvToConfig(cfg *config.GatewayConfig) {
 		route := &cfg.Spec.Routes[i]
 		if route.Cache != nil && route.Cache.Type == config.CacheTypeRedis && route.Cache.Redis != nil {
 			applyRedisSentinelEnv(route.Cache.Redis)
-			applyRedisFeatureEnv(route.Cache.Redis)
+			applyRedisFeatureEnv(route.Cache.Redis, logger)
 		}
 	}
 }

@@ -111,8 +111,10 @@ func NewManager(config *Config, opts ...ManagerOption) (*Manager, error) {
 		}
 	}
 
-	// Build initial TLS config
-	if err := m.buildTLSConfig(); err != nil {
+	// Build initial TLS config. Construction is a genuine lifecycle root
+	// without a caller context, so Background is used as the parent for the
+	// time-bounded certificate/CA loads performed during the initial build.
+	if err := m.buildTLSConfig(context.Background()); err != nil {
 		return nil, err
 	}
 
@@ -161,7 +163,9 @@ func (m *Manager) createProvider() error {
 }
 
 // buildTLSConfig builds the tls.Config from the configuration.
-func (m *Manager) buildTLSConfig() error {
+// ctx bounds the certificate/CA loads triggered while building (client-auth
+// configuration); it is supplied by the caller so cancellation propagates.
+func (m *Manager) buildTLSConfig(ctx context.Context) error {
 	mode := m.config.Mode
 	if mode == "" {
 		mode = TLSModeSimple
@@ -234,7 +238,7 @@ func (m *Manager) buildTLSConfig() error {
 	tlsConfig.SessionTicketsDisabled = m.config.SessionTicketsDisabled
 
 	// Configure client authentication
-	if err := m.configureClientAuth(tlsConfig); err != nil {
+	if err := m.configureClientAuth(ctx, tlsConfig); err != nil {
 		return err
 	}
 
@@ -249,7 +253,7 @@ func (m *Manager) buildTLSConfig() error {
 }
 
 // configureClientAuth configures client certificate authentication.
-func (m *Manager) configureClientAuth(tlsConfig *tls.Config) error {
+func (m *Manager) configureClientAuth(ctx context.Context, tlsConfig *tls.Config) error {
 	mode := m.config.Mode
 	if mode == "" {
 		mode = TLSModeSimple
@@ -261,7 +265,7 @@ func (m *Manager) configureClientAuth(tlsConfig *tls.Config) error {
 
 	case TLSModeMutual:
 		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-		if err := m.loadClientCA(tlsConfig); err != nil {
+		if err := m.loadClientCA(ctx, tlsConfig); err != nil {
 			return err
 		}
 		// Disable session tickets to ensure VerifyPeerCertificate is called on every connection.
@@ -271,7 +275,7 @@ func (m *Manager) configureClientAuth(tlsConfig *tls.Config) error {
 
 	case TLSModeOptionalMutual:
 		tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
-		if err := m.loadClientCA(tlsConfig); err != nil {
+		if err := m.loadClientCA(ctx, tlsConfig); err != nil {
 			return err
 		}
 		// Disable session tickets to ensure VerifyPeerCertificate is called on every connection.
@@ -284,8 +288,8 @@ func (m *Manager) configureClientAuth(tlsConfig *tls.Config) error {
 }
 
 // loadClientCA loads the client CA certificate pool.
-func (m *Manager) loadClientCA(tlsConfig *tls.Config) error {
-	ctx, cancel := m.createContextWithTimeout(DefaultClientCALoadTimeout)
+func (m *Manager) loadClientCA(ctx context.Context, tlsConfig *tls.Config) error {
+	ctx, cancel := m.createContextWithTimeout(ctx, DefaultClientCALoadTimeout)
 	defer cancel()
 
 	pool, err := m.provider.GetClientCA(ctx)
@@ -302,11 +306,25 @@ func (m *Manager) loadClientCA(tlsConfig *tls.Config) error {
 }
 
 // getCertificateCallback returns the GetCertificate callback for tls.Config.
+//
+// The returned callback runs once per TLS handshake, long after Manager
+// construction, so it intentionally derives its context from the in-flight
+// handshake (hello.Context()) rather than from the construction-time context.
+//
+//nolint:contextcheck // handshake-scoped context, not the constructor's
 func (m *Manager) getCertificateCallback() func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		start := time.Now()
 
-		ctx, cancel := m.createContextWithTimeout(DefaultCertificateLoadTimeout)
+		// Parent the load on the in-flight handshake context so an aborted
+		// handshake cancels the certificate lookup. A manually constructed
+		// ClientHelloInfo (e.g. in tests) carries a nil context; fall back
+		// to Background in that case.
+		parent := hello.Context()
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := m.createContextWithTimeout(parent, DefaultCertificateLoadTimeout)
 		defer cancel()
 
 		cert, err := m.provider.GetCertificate(ctx, hello)
@@ -412,14 +430,14 @@ func (m *Manager) watchCertificateEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			//nolint:contextcheck // Event handler creates its own context for operations
-			m.handleCertificateEvent(event)
+			m.handleCertificateEvent(ctx, event)
 		}
 	}
 }
 
-// handleCertificateEvent handles a certificate event.
-func (m *Manager) handleCertificateEvent(event CertificateEvent) {
+// handleCertificateEvent handles a certificate event. ctx is the watcher's
+// lifecycle context and bounds any reload work triggered by the event.
+func (m *Manager) handleCertificateEvent(ctx context.Context, event CertificateEvent) {
 	switch event.Type {
 	case CertificateEventLoaded:
 		m.logger.Info("certificate loaded", observability.String("message", event.Message))
@@ -435,7 +453,7 @@ func (m *Manager) handleCertificateEvent(event CertificateEvent) {
 			m.metrics.UpdateCertificateExpiryFromTLS(event.Certificate, "server")
 		}
 		// Rebuild TLS config with new certificate
-		if err := m.rebuildTLSConfig(); err != nil {
+		if err := m.rebuildTLSConfig(ctx); err != nil {
 			m.logger.Error("failed to rebuild TLS config after reload", observability.Error(err))
 		}
 
@@ -457,7 +475,7 @@ func (m *Manager) monitorCertificateExpiry(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Check immediately on start
-	m.checkCertificateExpiry() //nolint:contextcheck // Background check creates its own context
+	m.checkCertificateExpiry(ctx)
 
 	for {
 		select {
@@ -466,14 +484,15 @@ func (m *Manager) monitorCertificateExpiry(ctx context.Context) {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			m.checkCertificateExpiry() //nolint:contextcheck // Background check creates its own context
+			m.checkCertificateExpiry(ctx)
 		}
 	}
 }
 
-// checkCertificateExpiry checks the current certificate expiry.
-func (m *Manager) checkCertificateExpiry() {
-	ctx, cancel := m.createContextWithTimeout(DefaultCertificateLoadTimeout)
+// checkCertificateExpiry checks the current certificate expiry. ctx is the
+// monitor's lifecycle context; each check derives a bounded child from it.
+func (m *Manager) checkCertificateExpiry(ctx context.Context) {
+	ctx, cancel := m.createContextWithTimeout(ctx, DefaultCertificateLoadTimeout)
 	defer cancel()
 
 	cert, err := m.provider.GetCertificate(ctx, nil)
@@ -508,14 +527,15 @@ func (m *Manager) checkCertificateExpiry() {
 	}
 }
 
-// rebuildTLSConfig rebuilds the TLS configuration.
-func (m *Manager) rebuildTLSConfig() error {
+// rebuildTLSConfig rebuilds the TLS configuration. ctx bounds the client CA
+// reload and is supplied by the certificate-event watcher.
+func (m *Manager) rebuildTLSConfig(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Reload client CA if needed
 	if m.tlsConfig != nil && m.config.ClientValidation != nil && m.config.ClientValidation.Enabled {
-		ctx, cancel := m.createContextWithTimeout(DefaultClientCALoadTimeout)
+		ctx, cancel := m.createContextWithTimeout(ctx, DefaultClientCALoadTimeout)
 		defer cancel()
 
 		pool, err := m.provider.GetClientCA(ctx)
@@ -528,7 +548,8 @@ func (m *Manager) rebuildTLSConfig() error {
 	return nil
 }
 
-// createContextWithTimeout creates a new context with the specified timeout duration.
+// createContextWithTimeout derives a context with the specified timeout from
+// the supplied parent context.
 //
 // This helper method ensures consistent context creation across the TLS manager
 // for operations that require time-bounded execution, such as:
@@ -536,20 +557,28 @@ func (m *Manager) rebuildTLSConfig() error {
 //   - Loading client CA certificates for mTLS validation
 //   - Checking certificate expiry status
 //
+// Callers that operate within a live caller/lifecycle context pass it as the
+// parent so cancellation propagates into the bounded operation. Genuine
+// lifecycle roots without a caller context (e.g. Manager construction in
+// NewManager) pass context.Background() explicitly and document why.
+//
 // The returned cancel function must be called to release resources associated
 // with the context, typically using defer immediately after calling this method:
 //
-//	ctx, cancel := m.createContextWithTimeout(DefaultCertificateLoadTimeout)
+//	ctx, cancel := m.createContextWithTimeout(ctx, DefaultCertificateLoadTimeout)
 //	defer cancel()
 //
 // Parameters:
+//   - parent: The parent context to derive from; cancellation propagates from it.
 //   - timeout: The maximum duration for the context before it is automatically canceled.
 //
 // Returns:
 //   - context.Context: A new context that will be canceled after the timeout expires.
 //   - context.CancelFunc: A function to cancel the context early and release resources.
-func (m *Manager) createContextWithTimeout(timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), timeout)
+func (m *Manager) createContextWithTimeout(
+	parent context.Context, timeout time.Duration,
+) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, timeout)
 }
 
 // GetTLSConfig returns the current TLS configuration.

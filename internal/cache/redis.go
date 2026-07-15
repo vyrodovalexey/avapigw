@@ -6,10 +6,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
+	"net"
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -24,6 +27,35 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
+// redisBackend is the backend label used in metrics and span attributes.
+const redisBackend = "redis"
+
+// Operation label values used in metrics for redis cache operations.
+const (
+	opGet        = "get"
+	opSet        = "set"
+	opDelete     = "delete"
+	opExists     = "exists"
+	opGetWithTTL = "get_with_ttl"
+	opSetNX      = "setnx"
+	opExpire     = "expire"
+)
+
+// Initialization timeouts for redis cache construction.
+const (
+	// vaultReadTimeout bounds a single Vault KV read during password resolution.
+	vaultReadTimeout = 10 * time.Second
+
+	// redisPingTimeout bounds the connectivity check performed at start-up.
+	redisPingTimeout = 5 * time.Second
+
+	// redisInitTimeout bounds the whole redis cache initialization: up to
+	// three Vault password reads (vaultReadTimeout each) plus the
+	// connectivity ping (redisPingTimeout). It is used by the public
+	// constructor, which has no context parameter.
+	redisInitTimeout = 45 * time.Second
+)
+
 // redisRetryConfig returns the retry configuration for Redis operations.
 func redisRetryConfig() *retry.Config {
 	return &retry.Config{
@@ -34,17 +66,113 @@ func redisRetryConfig() *retry.Config {
 	}
 }
 
-// isRetryableRedisError checks if the error is retryable (network/connection errors).
+// transientRedisReplyPrefixes lists Redis server reply prefixes that describe
+// a transient server state and are therefore safe to retry:
+//
+//   - LOADING: the server is loading its dataset (start-up or failover);
+//   - READONLY: a replica rejects writes during a failover window;
+//   - CLUSTERDOWN / TRYAGAIN / MASTERDOWN: transient cluster/sentinel states;
+//   - ERR max number of clients reached: momentary server saturation.
+//
+// Every other server reply (WRONGTYPE, OOM, NOAUTH, ERR <syntax>, MOVED, ...)
+// is permanent: retrying cannot change the outcome and only adds latency.
+var transientRedisReplyPrefixes = []string{
+	"LOADING",
+	"READONLY",
+	"CLUSTERDOWN",
+	"TRYAGAIN",
+	"MASTERDOWN",
+	"ERR max number of clients reached",
+}
+
+// transientNetworkErrorSubstrings is a last-resort fallback for errors that
+// lost their concrete type through wrapping but clearly describe a transient
+// network failure.
+var transientNetworkErrorSubstrings = []string{
+	"connection refused",
+	"connection reset",
+	"broken pipe",
+	"i/o timeout",
+	"no route to host",
+	"network is unreachable",
+	"pool timeout",
+}
+
+// isRetryableRedisError reports whether err is transient and worth retrying
+// with exponential backoff.
+//
+// Retryable (transient):
+//   - network-level failures: net.Error timeouts, refused/reset connections,
+//     io.EOF / io.ErrUnexpectedEOF (connections dropped mid-flight);
+//   - transient Redis server states: LOADING, READONLY (failover window),
+//     CLUSTERDOWN, TRYAGAIN, MASTERDOWN.
+//
+// NOT retryable (permanent):
+//   - redis.Nil (cache miss) and context cancellation / deadline expiry;
+//   - permanent Redis server replies such as WRONGTYPE, OOM, NOAUTH,
+//     ERR <syntax> and MOVED.
 func isRetryableRedisError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Don't retry on cache miss or context errors
-	if errors.Is(err, redis.Nil) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// Cache misses and caller cancellation are never retryable.
+	if errors.Is(err, redis.Nil) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	// Retry on connection/network errors
-	return true
+	// Redis server replies are permanent unless they describe a transient
+	// server state (LOADING, READONLY, ...).
+	var serverErr redis.Error
+	if errors.As(err, &serverErr) {
+		return isTransientRedisReply(serverErr.Error())
+	}
+	return isTransientNetworkError(err)
+}
+
+// isTransientRedisReply reports whether a Redis server reply indicates a
+// transient server state that may succeed on a later attempt.
+func isTransientRedisReply(reply string) bool {
+	for _, prefix := range transientRedisReplyPrefixes {
+		if strings.HasPrefix(reply, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTransientNetworkError reports whether err represents a transient
+// network-level failure such as a timeout, a refused or reset connection, or
+// a connection dropped mid-flight.
+func isTransientNetworkError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// Any net.OpError (dial, read, write) is a network-level failure.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	// Dropped connections surface as EOF or syscall-level errors.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+	return matchesTransientNetworkSubstring(err.Error())
+}
+
+// matchesTransientNetworkSubstring is a fallback classification for errors
+// that lost their concrete type through wrapping.
+func matchesTransientNetworkSubstring(msg string) bool {
+	for _, substr := range transientNetworkErrorSubstrings {
+		if strings.Contains(msg, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // redisCache implements a Redis-based cache.
@@ -81,12 +209,32 @@ func applyTTLJitter(ttl time.Duration, jitterFactor float64) time.Duration {
 	return result
 }
 
+// effectiveTTL substitutes the default TTL for zero values and applies jitter
+// to spread expirations and avoid a thundering herd.
+func (c *redisCache) effectiveTTL(ttl time.Duration) time.Duration {
+	if ttl == 0 {
+		ttl = c.defaultTTL
+	}
+	return applyTTLJitter(ttl, c.ttlJitter)
+}
+
 // resolveKey applies key prefix and optional SHA256 hashing.
 func (c *redisCache) resolveKey(key string) string {
 	if c.hashKeys {
 		return c.keyPrefix + HashKey(key)
 	}
 	return c.keyPrefix + key
+}
+
+// loggableKey returns a privacy-safe representation of key for span
+// attributes and log fields. When key hashing is enabled the raw key may
+// embed sensitive request material (headers, tokens, query parameters), so
+// its SHA-256 form is recorded instead of the raw value.
+func (c *redisCache) loggableKey(key string) string {
+	if c.hashKeys {
+		return HashKey(key)
+	}
+	return key
 }
 
 // hasVaultPasswordPaths checks if any vault password paths are configured.
@@ -104,7 +252,7 @@ func hasVaultPasswordPaths(cfg *config.RedisCacheConfig) bool {
 // resolveRedisPasswords resolves Redis passwords from Vault if vault paths are configured.
 // It reads secrets from the Vault KV engine and updates the config with the retrieved passwords.
 func resolveRedisPasswords(
-	cfg *config.RedisCacheConfig, vaultClient vault.Client, logger observability.Logger,
+	ctx context.Context, cfg *config.RedisCacheConfig, vaultClient vault.Client, logger observability.Logger,
 ) error {
 	if !hasVaultPasswordPaths(cfg) {
 		return nil
@@ -117,14 +265,14 @@ func resolveRedisPasswords(
 
 	// Resolve standalone password from vault
 	if cfg.PasswordVaultPath != "" {
-		if err := resolveStandalonePassword(cfg, vaultClient, logger); err != nil {
+		if err := resolveStandalonePassword(ctx, cfg, vaultClient, logger); err != nil {
 			return err
 		}
 	}
 
 	// Resolve sentinel passwords from vault
 	if cfg.Sentinel != nil {
-		if err := resolveSentinelPasswords(cfg.Sentinel, vaultClient, logger); err != nil {
+		if err := resolveSentinelPasswords(ctx, cfg.Sentinel, vaultClient, logger); err != nil {
 			return err
 		}
 	}
@@ -134,9 +282,9 @@ func resolveRedisPasswords(
 
 // resolveStandalonePassword resolves the standalone Redis password from Vault.
 func resolveStandalonePassword(
-	cfg *config.RedisCacheConfig, vaultClient vault.Client, logger observability.Logger,
+	ctx context.Context, cfg *config.RedisCacheConfig, vaultClient vault.Client, logger observability.Logger,
 ) error {
-	pw, err := readVaultPassword(vaultClient, cfg.PasswordVaultPath)
+	pw, err := readVaultPassword(ctx, vaultClient, cfg.PasswordVaultPath)
 	if err != nil {
 		return fmt.Errorf("failed to read redis password from vault path %s: %w",
 			cfg.PasswordVaultPath, err)
@@ -151,10 +299,10 @@ func resolveStandalonePassword(
 
 // resolveSentinelPasswords resolves sentinel passwords from Vault.
 func resolveSentinelPasswords(
-	sentinel *config.RedisSentinelConfig, vaultClient vault.Client, logger observability.Logger,
+	ctx context.Context, sentinel *config.RedisSentinelConfig, vaultClient vault.Client, logger observability.Logger,
 ) error {
 	if sentinel.PasswordVaultPath != "" {
-		pw, err := readVaultPassword(vaultClient, sentinel.PasswordVaultPath)
+		pw, err := readVaultPassword(ctx, vaultClient, sentinel.PasswordVaultPath)
 		if err != nil {
 			return fmt.Errorf("failed to read redis master password from vault: %w", err)
 		}
@@ -163,7 +311,7 @@ func resolveSentinelPasswords(
 			observability.String("vaultPath", sentinel.PasswordVaultPath))
 	}
 	if sentinel.SentinelPasswordVaultPath != "" {
-		pw, err := readVaultPassword(vaultClient, sentinel.SentinelPasswordVaultPath)
+		pw, err := readVaultPassword(ctx, vaultClient, sentinel.SentinelPasswordVaultPath)
 		if err != nil {
 			return fmt.Errorf("failed to read sentinel password from vault: %w", err)
 		}
@@ -176,14 +324,16 @@ func resolveSentinelPasswords(
 
 // readVaultPassword reads a password from a Vault KV path.
 // The path format is "mount/path" and the secret must contain a "password" key.
-func readVaultPassword(vaultClient vault.Client, vaultPath string) (string, error) {
+// The read honors the caller's context and is additionally bounded by
+// vaultReadTimeout.
+func readVaultPassword(ctx context.Context, vaultClient vault.Client, vaultPath string) (string, error) {
 	parts := strings.SplitN(vaultPath, "/", 2)
 	if len(parts) != 2 {
 		return "", fmt.Errorf("invalid vault path format %q, expected mount/path", vaultPath)
 	}
 
 	mount, path := parts[0], parts[1]
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, vaultReadTimeout)
 	defer cancel()
 
 	data, err := vaultClient.KV().Read(ctx, mount, path)
@@ -222,7 +372,11 @@ func applyPasswordToRedisURL(cfg *config.RedisCacheConfig, password string) erro
 
 // newRedisCache creates a new Redis cache.
 // It dispatches between standalone and Sentinel modes based on configuration.
-func newRedisCache(cfg *config.CacheConfig, logger observability.Logger, opts *cacheOptions) (*redisCache, error) {
+// The context bounds initialization (Vault password reads and the
+// connectivity ping) and honors caller cancellation.
+func newRedisCache(
+	ctx context.Context, cfg *config.CacheConfig, logger observability.Logger, opts *cacheOptions,
+) (*redisCache, error) {
 	if cfg.Redis == nil {
 		return nil, errors.New("redis configuration is required")
 	}
@@ -232,13 +386,13 @@ func newRedisCache(cfg *config.CacheConfig, logger observability.Logger, opts *c
 	if opts != nil {
 		vaultClient = opts.vaultClient
 	}
-	if err := resolveRedisPasswords(cfg.Redis, vaultClient, logger); err != nil {
+	if err := resolveRedisPasswords(ctx, cfg.Redis, vaultClient, logger); err != nil {
 		return nil, fmt.Errorf("failed to resolve redis passwords: %w", err)
 	}
 
 	// Sentinel mode takes precedence when configured
 	if cfg.Redis.Sentinel != nil && cfg.Redis.Sentinel.MasterName != "" {
-		return newRedisSentinelCache(cfg, logger, opts)
+		return newRedisSentinelCache(ctx, cfg, logger, opts)
 	}
 
 	// Standalone mode requires a URL
@@ -246,11 +400,13 @@ func newRedisCache(cfg *config.CacheConfig, logger observability.Logger, opts *c
 		return nil, errors.New("redis URL is required for standalone mode")
 	}
 
-	return newRedisStandaloneCache(cfg, logger)
+	return newRedisStandaloneCache(ctx, cfg, logger)
 }
 
 // newRedisStandaloneCache creates a new Redis cache using standalone mode.
-func newRedisStandaloneCache(cfg *config.CacheConfig, logger observability.Logger) (*redisCache, error) {
+func newRedisStandaloneCache(
+	ctx context.Context, cfg *config.CacheConfig, logger observability.Logger,
+) (*redisCache, error) {
 	opts, err := redis.ParseURL(cfg.Redis.URL)
 	if err != nil {
 		return nil, errors.New("invalid redis URL: " + err.Error())
@@ -267,7 +423,7 @@ func newRedisStandaloneCache(cfg *config.CacheConfig, logger observability.Logge
 
 	client := redis.NewClient(opts)
 
-	if err := pingRedis(client); err != nil {
+	if err := pingRedis(ctx, client); err != nil {
 		_ = client.Close()
 		return nil, errors.New("redis connection failed: " + err.Error())
 	}
@@ -294,7 +450,7 @@ func newRedisStandaloneCache(cfg *config.CacheConfig, logger observability.Logge
 
 // newRedisSentinelCache creates a new Redis cache using Sentinel mode for high availability.
 func newRedisSentinelCache(
-	cfg *config.CacheConfig, logger observability.Logger, cacheOpts *cacheOptions,
+	ctx context.Context, cfg *config.CacheConfig, logger observability.Logger, cacheOpts *cacheOptions,
 ) (*redisCache, error) {
 	sentinel := cfg.Redis.Sentinel
 	if len(sentinel.SentinelAddrs) == 0 {
@@ -337,7 +493,7 @@ func newRedisSentinelCache(
 
 	client := redis.NewFailoverClient(opts)
 
-	if err := pingRedis(client); err != nil {
+	if err := pingRedis(ctx, client); err != nil {
 		_ = client.Close()
 		return nil, errors.New("redis sentinel connection failed: " + err.Error())
 	}
@@ -380,9 +536,10 @@ func applyRedisPoolOptions(opts *redis.Options, redisCfg *config.RedisCacheConfi
 	}
 }
 
-// pingRedis tests the Redis connection with a timeout.
-func pingRedis(client *redis.Client) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// pingRedis tests the Redis connection. It honors the caller's context and
+// is additionally bounded by redisPingTimeout.
+func pingRedis(ctx context.Context, client *redis.Client) error {
+	ctx, cancel := context.WithTimeout(ctx, redisPingTimeout)
 	defer cancel()
 	return client.Ping(ctx).Err()
 }
@@ -395,23 +552,104 @@ func resolveKeyPrefix(prefix string) string {
 	return prefix
 }
 
+// redisOpTelemetry carries the tracing, metrics and logging state of a single
+// redis cache operation so that every operation reports observability data
+// uniformly (span, duration histogram, error counter, hit/miss counters).
+type redisOpTelemetry struct {
+	cache  *redisCache
+	op     string
+	logKey string
+	span   trace.Span
+	start  time.Time
+}
+
+// beginRedisOp starts the client span and the duration timer for a redis
+// cache operation. spanName is the OpenTelemetry span name (e.g. "cache.Get")
+// and op is the Prometheus operation label (e.g. "get"). The recorded
+// cache.key span attribute uses the privacy-safe loggable key. The caller
+// must invoke finish() when the operation completes.
+func (c *redisCache) beginRedisOp(
+	ctx context.Context, spanName, op, key string, extraAttrs ...attribute.KeyValue,
+) (context.Context, *redisOpTelemetry) {
+	logKey := c.loggableKey(key)
+
+	attrs := make([]attribute.KeyValue, 0, 2+len(extraAttrs))
+	attrs = append(attrs,
+		attribute.String("cache.backend", redisBackend),
+		attribute.String("cache.key", logKey),
+	)
+	attrs = append(attrs, extraAttrs...)
+
+	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attrs...),
+	)
+
+	return ctx, &redisOpTelemetry{
+		cache:  c,
+		op:     op,
+		logKey: logKey,
+		span:   span,
+		start:  time.Now(),
+	}
+}
+
+// finish records the operation duration metric and ends the span.
+func (o *redisOpTelemetry) finish() {
+	GetCacheMetrics().operationDuration.WithLabelValues(
+		redisBackend, o.op,
+	).Observe(time.Since(o.start).Seconds())
+	o.span.End()
+}
+
+// retryOptions returns the retry options shared by redis operations:
+// transient-only error classification plus debug logging on each retry
+// attempt (using the privacy-safe key).
+func (o *redisOpTelemetry) retryOptions() *retry.Options {
+	return &retry.Options{
+		ShouldRetry: isRetryableRedisError,
+		OnRetry: func(attempt int, err error, _ time.Duration) {
+			o.cache.logger.Debug("retrying redis "+o.op,
+				observability.String("key", o.logKey),
+				observability.Int("attempt", attempt),
+				observability.Error(err))
+		},
+	}
+}
+
+// fail records the error metric, marks the span as failed and logs the error.
+func (o *redisOpTelemetry) fail(err error) {
+	GetCacheMetrics().errorsTotal.WithLabelValues(redisBackend, o.op).Inc()
+	o.span.SetStatus(codes.Error, err.Error())
+	o.span.RecordError(err)
+	o.cache.logger.Error("redis "+o.op+" failed",
+		observability.String("key", o.logKey),
+		observability.Error(err))
+}
+
+// hit records a cache hit in the package Prometheus counters, the internal
+// stats and the span attributes.
+func (o *redisOpTelemetry) hit(valueSize int) {
+	atomic.AddInt64(&o.cache.hits, 1)
+	GetCacheMetrics().hitsTotal.WithLabelValues(redisBackend).Inc()
+	o.span.SetAttributes(
+		attribute.Bool("cache.hit", true),
+		attribute.Int("cache.value_size", valueSize),
+	)
+}
+
+// miss records a cache miss in the package Prometheus counters, the internal
+// stats and the span attributes.
+func (o *redisOpTelemetry) miss() {
+	atomic.AddInt64(&o.cache.misses, 1)
+	GetCacheMetrics().missesTotal.WithLabelValues(redisBackend).Inc()
+	o.span.SetAttributes(attribute.Bool("cache.hit", false))
+}
+
 // Get retrieves a value from the cache with exponential backoff retry.
 func (c *redisCache) Get(ctx context.Context, key string) ([]byte, error) {
-	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.Get",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("cache.backend", "redis"),
-			attribute.String("cache.key", key),
-		),
-	)
-	defer span.End()
-
-	start := time.Now()
-	defer func() {
-		GetCacheMetrics().operationDuration.WithLabelValues(
-			"redis", "get",
-		).Observe(time.Since(start).Seconds())
-	}()
+	ctx, ot := c.beginRedisOp(ctx, "cache.Get", opGet, key)
+	defer ot.finish()
 
 	fullKey := c.resolveKey(key)
 
@@ -419,172 +657,82 @@ func (c *redisCache) Get(ctx context.Context, key string) ([]byte, error) {
 
 	err := retry.Do(ctx, redisRetryConfig(), func() error {
 		val, getErr := c.client.Get(ctx, fullKey).Bytes()
-		if getErr == nil {
-			result = val
-			return nil
-		}
-		if errors.Is(getErr, redis.Nil) {
-			// Cache miss is not retryable — return immediately
+		if getErr != nil {
+			// redis.Nil (cache miss) is classified as non-retryable
+			// and returned immediately by the retry helper.
 			return getErr
 		}
-		return getErr
-	}, &retry.Options{
-		ShouldRetry: isRetryableRedisError,
-		OnRetry: func(attempt int, err error, backoff time.Duration) {
-			c.logger.Debug("retrying redis get",
-				observability.String("key", key),
-				observability.Int("attempt", attempt))
-		},
-	})
+		result = val
+		return nil
+	}, ot.retryOptions())
 
 	if err == nil {
-		atomic.AddInt64(&c.hits, 1)
-		GetCacheMetrics().hitsTotal.WithLabelValues("redis").Inc()
-		span.SetAttributes(
-			attribute.Bool("cache.hit", true),
-			attribute.Int("cache.value_size", len(result)),
-		)
+		ot.hit(len(result))
 		c.logger.Debug("cache hit",
-			observability.String("key", key),
+			observability.String("key", ot.logKey),
 			observability.Int("size", len(result)))
 		return result, nil
 	}
 
 	if errors.Is(err, redis.Nil) {
-		atomic.AddInt64(&c.misses, 1)
-		GetCacheMetrics().missesTotal.WithLabelValues("redis").Inc()
-		span.SetAttributes(attribute.Bool("cache.hit", false))
+		ot.miss()
 		return nil, ErrCacheMiss
 	}
 
-	GetCacheMetrics().errorsTotal.WithLabelValues("redis", "get").Inc()
-	span.SetStatus(codes.Error, err.Error())
-	span.RecordError(err)
-	c.logger.Error("redis get failed",
-		observability.String("key", key),
-		observability.Error(err))
+	ot.fail(err)
 	return nil, err
 }
 
 // Set stores a value in the cache with exponential backoff retry.
 func (c *redisCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
-	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.Set",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("cache.backend", "redis"),
-			attribute.String("cache.key", key),
-			attribute.Int("cache.value_size", len(value)),
-		),
-	)
-	defer span.End()
+	ctx, ot := c.beginRedisOp(ctx, "cache.Set", opSet, key,
+		attribute.Int("cache.value_size", len(value)))
+	defer ot.finish()
 
-	start := time.Now()
-	defer func() {
-		GetCacheMetrics().operationDuration.WithLabelValues(
-			"redis", "set",
-		).Observe(time.Since(start).Seconds())
-	}()
-
-	if ttl == 0 {
-		ttl = c.defaultTTL
-	}
-
-	// Apply TTL jitter to prevent thundering herd
-	ttl = applyTTLJitter(ttl, c.ttlJitter)
-
+	ttl = c.effectiveTTL(ttl)
 	fullKey := c.resolveKey(key)
 
 	err := retry.Do(ctx, redisRetryConfig(), func() error {
 		return c.client.Set(ctx, fullKey, value, ttl).Err()
-	}, &retry.Options{
-		ShouldRetry: isRetryableRedisError,
-		OnRetry: func(attempt int, err error, backoff time.Duration) {
-			c.logger.Debug("retrying redis set",
-				observability.String("key", key),
-				observability.Int("attempt", attempt))
-		},
-	})
+	}, ot.retryOptions())
 
-	if err == nil {
-		c.logger.Debug("cache set",
-			observability.String("key", key),
-			observability.Duration("ttl", ttl),
-			observability.Int("size", len(value)))
-		return nil
+	if err != nil {
+		ot.fail(err)
+		return err
 	}
 
-	GetCacheMetrics().errorsTotal.WithLabelValues("redis", "set").Inc()
-	span.SetStatus(codes.Error, err.Error())
-	span.RecordError(err)
-	c.logger.Error("redis set failed",
-		observability.String("key", key),
-		observability.Error(err))
-	return err
+	c.logger.Debug("cache set",
+		observability.String("key", ot.logKey),
+		observability.Duration("ttl", ttl),
+		observability.Int("size", len(value)))
+	return nil
 }
 
 // Delete removes a value from the cache with exponential backoff retry.
 func (c *redisCache) Delete(ctx context.Context, key string) error {
-	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.Delete",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("cache.backend", "redis"),
-			attribute.String("cache.key", key),
-		),
-	)
-	defer span.End()
-
-	start := time.Now()
-	defer func() {
-		GetCacheMetrics().operationDuration.WithLabelValues(
-			"redis", "delete",
-		).Observe(time.Since(start).Seconds())
-	}()
+	ctx, ot := c.beginRedisOp(ctx, "cache.Delete", opDelete, key)
+	defer ot.finish()
 
 	fullKey := c.resolveKey(key)
 
 	err := retry.Do(ctx, redisRetryConfig(), func() error {
 		return c.client.Del(ctx, fullKey).Err()
-	}, &retry.Options{
-		ShouldRetry: isRetryableRedisError,
-		OnRetry: func(attempt int, err error, backoff time.Duration) {
-			c.logger.Debug("retrying redis delete",
-				observability.String("key", key),
-				observability.Int("attempt", attempt))
-		},
-	})
+	}, ot.retryOptions())
 
-	if err == nil {
-		c.logger.Debug("cache deleted",
-			observability.String("key", key))
-		return nil
+	if err != nil {
+		ot.fail(err)
+		return err
 	}
 
-	GetCacheMetrics().errorsTotal.WithLabelValues("redis", "delete").Inc()
-	span.SetStatus(codes.Error, err.Error())
-	span.RecordError(err)
-	c.logger.Error("redis delete failed",
-		observability.String("key", key),
-		observability.Error(err))
-	return err
+	c.logger.Debug("cache deleted",
+		observability.String("key", ot.logKey))
+	return nil
 }
 
 // Exists checks if a key exists in the cache with exponential backoff retry.
 func (c *redisCache) Exists(ctx context.Context, key string) (bool, error) {
-	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.Exists",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("cache.backend", "redis"),
-			attribute.String("cache.key", key),
-		),
-	)
-	defer span.End()
-
-	start := time.Now()
-	defer func() {
-		GetCacheMetrics().operationDuration.WithLabelValues(
-			"redis", "exists",
-		).Observe(time.Since(start).Seconds())
-	}()
+	ctx, ot := c.beginRedisOp(ctx, "cache.Exists", opExists, key)
+	defer ot.finish()
 
 	fullKey := c.resolveKey(key)
 
@@ -594,27 +742,15 @@ func (c *redisCache) Exists(ctx context.Context, key string) (bool, error) {
 		var existsErr error
 		result, existsErr = c.client.Exists(ctx, fullKey).Result()
 		return existsErr
-	}, &retry.Options{
-		ShouldRetry: isRetryableRedisError,
-		OnRetry: func(attempt int, err error, backoff time.Duration) {
-			c.logger.Debug("retrying redis exists",
-				observability.String("key", key),
-				observability.Int("attempt", attempt))
-		},
-	})
+	}, ot.retryOptions())
 
-	if err == nil {
-		span.SetAttributes(attribute.Bool("cache.exists", result > 0))
-		return result > 0, nil
+	if err != nil {
+		ot.fail(err)
+		return false, err
 	}
 
-	GetCacheMetrics().errorsTotal.WithLabelValues("redis", "exists").Inc()
-	span.SetStatus(codes.Error, err.Error())
-	span.RecordError(err)
-	c.logger.Error("redis exists failed",
-		observability.String("key", key),
-		observability.Error(err))
-	return false, err
+	ot.span.SetAttributes(attribute.Bool("cache.exists", result > 0))
+	return result > 0, nil
 }
 
 // Close closes the Redis connection.
@@ -633,14 +769,8 @@ func (c *redisCache) Stats() CacheStats {
 
 // GetWithTTL retrieves a value and its remaining TTL from the cache with retry.
 func (c *redisCache) GetWithTTL(ctx context.Context, key string) ([]byte, time.Duration, error) {
-	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.GetWithTTL",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("cache.backend", "redis"),
-			attribute.String("cache.key", key),
-		),
-	)
-	defer span.End()
+	ctx, ot := c.beginRedisOp(ctx, "cache.GetWithTTL", opGetWithTTL, key)
+	defer ot.finish()
 
 	fullKey := c.resolveKey(key)
 
@@ -669,60 +799,35 @@ func (c *redisCache) GetWithTTL(ctx context.Context, key string) ([]byte, time.D
 			ttl = 0
 		}
 		return nil
-	}, &retry.Options{
-		ShouldRetry: isRetryableRedisError,
-		OnRetry: func(attempt int, err error, backoff time.Duration) {
-			c.logger.Debug("retrying redis getWithTTL",
-				observability.String("key", key),
-				observability.Int("attempt", attempt))
-		},
-	})
+	}, ot.retryOptions())
 
 	if err == nil {
-		atomic.AddInt64(&c.hits, 1)
-		span.SetAttributes(
-			attribute.Bool("cache.hit", true),
-			attribute.Int("cache.value_size", len(value)),
-		)
+		ot.hit(len(value))
+		c.logger.Debug("cache hit",
+			observability.String("key", ot.logKey),
+			observability.Int("size", len(value)))
 		return value, ttl, nil
 	}
 
 	if errors.Is(err, redis.Nil) {
-		atomic.AddInt64(&c.misses, 1)
-		span.SetAttributes(attribute.Bool("cache.hit", false))
+		ot.miss()
 		return nil, 0, ErrCacheMiss
 	}
 
-	c.logger.Error("redis getWithTTL failed",
-		observability.String("key", key),
-		observability.Error(err))
-	span.SetStatus(codes.Error, err.Error())
-	span.RecordError(err)
+	ot.fail(err)
 	return nil, 0, err
 }
 
 // SetNX sets a value only if the key does not exist, with retry.
 func (c *redisCache) SetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
-	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.SetNX",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("cache.backend", "redis"),
-			attribute.String("cache.key", key),
-			attribute.Int("cache.value_size", len(value)),
-		),
-	)
-	defer span.End()
+	ctx, ot := c.beginRedisOp(ctx, "cache.SetNX", opSetNX, key,
+		attribute.Int("cache.value_size", len(value)))
+	defer ot.finish()
 
-	if ttl == 0 {
-		ttl = c.defaultTTL
-	}
-
-	// Apply TTL jitter to prevent thundering herd
-	ttl = applyTTLJitter(ttl, c.ttlJitter)
-
+	ttl = c.effectiveTTL(ttl)
 	fullKey := c.resolveKey(key)
 
-	var result bool
+	var acquired bool
 
 	err := retry.Do(ctx, redisRetryConfig(), func() error {
 		setErr := c.client.SetArgs(ctx, fullKey, value, redis.SetArgs{
@@ -730,72 +835,44 @@ func (c *redisCache) SetNX(ctx context.Context, key string, value []byte, ttl ti
 			TTL:  ttl,
 		}).Err()
 		if errors.Is(setErr, redis.Nil) {
-			result = false
+			acquired = false
 			return nil
 		}
 		if setErr != nil {
 			return setErr
 		}
-		result = true
+		acquired = true
 		return nil
-	}, &retry.Options{
-		ShouldRetry: isRetryableRedisError,
-		OnRetry: func(attempt int, err error, backoff time.Duration) {
-			c.logger.Debug("retrying redis setnx",
-				observability.String("key", key),
-				observability.Int("attempt", attempt))
-		},
-	})
+	}, ot.retryOptions())
 
 	if err != nil {
-		c.logger.Error("redis setnx failed",
-			observability.String("key", key),
-			observability.Error(err))
-		span.SetStatus(codes.Error, err.Error())
-		span.RecordError(err)
+		ot.fail(err)
 		return false, err
 	}
 
-	if result {
+	if acquired {
 		c.logger.Debug("cache setnx succeeded",
-			observability.String("key", key),
+			observability.String("key", ot.logKey),
 			observability.Duration("ttl", ttl))
 	}
 
-	span.SetAttributes(attribute.Bool("cache.setnx_acquired", result))
-	return result, nil
+	ot.span.SetAttributes(attribute.Bool("cache.setnx_acquired", acquired))
+	return acquired, nil
 }
 
 // Expire updates the TTL of an existing key with retry.
 func (c *redisCache) Expire(ctx context.Context, key string, ttl time.Duration) error {
-	ctx, span := otel.Tracer(cacheTracerName).Start(ctx, "cache.Expire",
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("cache.backend", "redis"),
-			attribute.String("cache.key", key),
-		),
-	)
-	defer span.End()
+	ctx, ot := c.beginRedisOp(ctx, "cache.Expire", opExpire, key)
+	defer ot.finish()
 
 	fullKey := c.resolveKey(key)
 
 	err := retry.Do(ctx, redisRetryConfig(), func() error {
 		return c.client.Expire(ctx, fullKey, ttl).Err()
-	}, &retry.Options{
-		ShouldRetry: isRetryableRedisError,
-		OnRetry: func(attempt int, err error, backoff time.Duration) {
-			c.logger.Debug("retrying redis expire",
-				observability.String("key", key),
-				observability.Int("attempt", attempt))
-		},
-	})
+	}, ot.retryOptions())
 
 	if err != nil {
-		c.logger.Error("redis expire failed",
-			observability.String("key", key),
-			observability.Error(err))
-		span.SetStatus(codes.Error, err.Error())
-		span.RecordError(err)
+		ot.fail(err)
 		return err
 	}
 

@@ -314,10 +314,10 @@ func TestClient_runHeartbeatLoop_StopChannel(t *testing.T) {
 	// Initialize stop channel
 	client.stopCh = make(chan struct{})
 
-	// Start heartbeat loop in goroutine
+	// Start heartbeat loop in goroutine, passing the generation-captured stop channel
 	done := make(chan struct{})
 	go func() {
-		client.runHeartbeatLoop(context.Background())
+		client.runHeartbeatLoop(context.Background(), client.stopCh)
 		close(done)
 	}()
 
@@ -364,7 +364,7 @@ func TestClient_runHeartbeatLoop_ContextCanceled(t *testing.T) {
 	// Start heartbeat loop - should exit immediately due to canceled context
 	done := make(chan struct{})
 	go func() {
-		client.runHeartbeatLoop(ctx)
+		client.runHeartbeatLoop(ctx, client.stopCh)
 		close(done)
 	}()
 

@@ -3,6 +3,7 @@ package apikey
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -76,7 +77,9 @@ func (m *mockKVClient) Read(_ context.Context, mount, path string) (map[string]i
 	key := mount + "/" + path
 	data, ok := m.data[key]
 	if !ok {
-		return nil, errors.New("key not found")
+		// Mirror the real KV client, which wraps vault.ErrSecretNotFound
+		// for genuine misses (transport errors are returned differently).
+		return nil, fmt.Errorf("%s: %w", key, vault.ErrSecretNotFound)
 	}
 	return data, nil
 }
@@ -242,8 +245,9 @@ func TestVaultStore_Get(t *testing.T) {
 	t.Run("key not found", func(t *testing.T) {
 		t.Parallel()
 
+		// No data set: the mock returns a wrapped vault.ErrSecretNotFound,
+		// which must map to ErrAPIKeyNotFound (a genuine miss).
 		kvClient := newMockKVClient()
-		kvClient.readErr = errors.New("not found")
 		client := &mockVaultClient{enabled: true, kv: kvClient}
 		config := &Config{
 			HashAlgorithm: "sha256",
@@ -259,6 +263,32 @@ func TestVaultStore_Get(t *testing.T) {
 
 		result, err := store.Get(context.Background(), "nonexistent")
 		assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+		assert.NotErrorIs(t, err, ErrStoreUnavailable)
+		assert.Nil(t, result)
+	})
+
+	t.Run("transport error is a store error, not a miss", func(t *testing.T) {
+		t.Parallel()
+
+		kvClient := newMockKVClient()
+		kvClient.readErr = errors.New("dial tcp 10.0.0.1:8200: connection refused")
+		client := &mockVaultClient{enabled: true, kv: kvClient}
+		config := &Config{
+			HashAlgorithm: "sha256",
+			Vault: &VaultConfig{
+				Enabled: true,
+				KVMount: "secret",
+				Path:    "api-keys",
+			},
+		}
+
+		store, err := NewVaultStore(client, config, observability.NopLogger())
+		require.NoError(t, err)
+
+		result, err := store.Get(context.Background(), "any-key")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrStoreUnavailable)
+		assert.NotErrorIs(t, err, ErrAPIKeyNotFound)
 		assert.Nil(t, result)
 	})
 
@@ -369,7 +399,6 @@ func TestVaultStore_GetByID(t *testing.T) {
 		t.Parallel()
 
 		kvClient := newMockKVClient()
-		kvClient.readErr = errors.New("not found")
 		client := &mockVaultClient{enabled: true, kv: kvClient}
 		config := &Config{
 			Vault: &VaultConfig{
@@ -384,6 +413,30 @@ func TestVaultStore_GetByID(t *testing.T) {
 
 		result, err := store.GetByID(context.Background(), "nonexistent")
 		assert.ErrorIs(t, err, ErrAPIKeyNotFound)
+		assert.Nil(t, result)
+	})
+
+	t.Run("transport error is a store error, not a miss", func(t *testing.T) {
+		t.Parallel()
+
+		kvClient := newMockKVClient()
+		kvClient.readErr = errors.New("permission denied")
+		client := &mockVaultClient{enabled: true, kv: kvClient}
+		config := &Config{
+			Vault: &VaultConfig{
+				Enabled: true,
+				KVMount: "secret",
+				Path:    "api-keys",
+			},
+		}
+
+		store, err := NewVaultStore(client, config, observability.NopLogger())
+		require.NoError(t, err)
+
+		result, err := store.GetByID(context.Background(), "some-id")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrStoreUnavailable)
+		assert.NotErrorIs(t, err, ErrAPIKeyNotFound)
 		assert.Nil(t, result)
 	})
 
@@ -631,10 +684,7 @@ func TestParseKeyFromVault_EdgeCases(t *testing.T) {
 func TestKeyCache_Concurrent(t *testing.T) {
 	t.Parallel()
 
-	cache := &keyCache{
-		entries: make(map[string]*cacheEntry),
-		ttl:     time.Minute,
-	}
+	cache := newKeyCache(time.Minute, 0)
 
 	var wg sync.WaitGroup
 	numGoroutines := 100

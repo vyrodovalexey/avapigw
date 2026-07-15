@@ -287,7 +287,7 @@ func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, avapigwv1alpha1.AddToScheme(scheme))
 
-	t.Run("APIRoute prefix overlaps GraphQLRoute exact path", func(t *testing.T) {
+	t.Run("APIRoute identical prefix as GraphQLRoute prefix rejected", func(t *testing.T) {
 		t.Parallel()
 
 		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
@@ -299,7 +299,7 @@ func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
 				Match: []avapigwv1alpha1.GraphQLRouteMatch{
 					{
 						Path: &avapigwv1alpha1.StringMatch{
-							Exact: "/graphql",
+							Prefix: "/graphql",
 						},
 					},
 				},
@@ -331,6 +331,8 @@ func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
 				Match: []avapigwv1alpha1.RouteMatch{
 					{
 						URI: &avapigwv1alpha1.URIMatch{
+							// Identical prefix → identical specificity →
+							// genuine cross-kind duplicate.
 							Prefix: "/graphql",
 						},
 					},
@@ -348,6 +350,71 @@ func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "path conflict")
 		assert.Contains(t, err.Error(), "GraphQLRoute")
+	})
+
+	t.Run("catch-all APIRoute coexists with GraphQLRoute", func(t *testing.T) {
+		t.Parallel()
+
+		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-exact",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{
+							Exact: "/graphql",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingGraphQL).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(context.Background(), fakeClient)
+		validator := &webhook.APIRouteValidator{
+			DuplicateChecker: dc,
+		}
+
+		// A catch-all APIRoute (prefix "/") serves everything except the
+		// GraphQL endpoint path; the data plane splits them
+		// deterministically, so admission must allow the combination.
+		catchAllAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-catch-all",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{
+							Prefix: "/",
+						},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "rest-backend", Port: 8080},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		_, err := validator.ValidateCreate(context.Background(), catchAllAPIRoute)
+		require.NoError(t, err,
+			"catch-all APIRoute + GraphQLRoute must coexist (data plane splits by GraphQL endpoint path)")
 	})
 
 	t.Run("APIRoute exact path matches GraphQLRoute exact path", func(t *testing.T) {
@@ -412,7 +479,7 @@ func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
 		assert.Contains(t, err.Error(), "path conflict")
 	})
 
-	t.Run("APIRoute prefix encompasses GraphQLRoute exact path", func(t *testing.T) {
+	t.Run("APIRoute prefix encompassing GraphQLRoute exact path coexists", func(t *testing.T) {
 		t.Parallel()
 
 		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
@@ -447,7 +514,7 @@ func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
 			DuplicateChecker: dc,
 		}
 
-		conflictingAPIRoute := &avapigwv1alpha1.APIRoute{
+		broadPrefixAPIRoute := &avapigwv1alpha1.APIRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "api-route-broad-prefix",
 				Namespace: "default",
@@ -469,9 +536,11 @@ func TestFunctional_Webhook_APIRouteGraphQLCrossConflict(t *testing.T) {
 			},
 		}
 
-		_, err := validator.ValidateCreate(context.Background(), conflictingAPIRoute)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "path conflict")
+		// Different specificity (prefix vs the more specific exact path) is
+		// ordered deterministically by the data plane — not a conflict.
+		_, err := validator.ValidateCreate(context.Background(), broadPrefixAPIRoute)
+		require.NoError(t, err,
+			"prefix APIRoute must coexist with a more specific GraphQLRoute exact path")
 	})
 }
 
@@ -518,9 +587,9 @@ func TestFunctional_Webhook_GraphQLRouteAPIRouteCrossConflict(t *testing.T) {
 			DuplicateChecker: dc,
 		}
 
-		conflictingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+		exactUnderPrefixGraphQL := &avapigwv1alpha1.GraphQLRoute{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "graphql-route-conflict",
+				Name:      "graphql-route-under-prefix",
 				Namespace: "default",
 			},
 			Spec: avapigwv1alpha1.GraphQLRouteSpec{
@@ -540,10 +609,11 @@ func TestFunctional_Webhook_GraphQLRouteAPIRouteCrossConflict(t *testing.T) {
 			},
 		}
 
-		_, err := validator.ValidateCreate(context.Background(), conflictingGraphQL)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "path conflict")
-		assert.Contains(t, err.Error(), "APIRoute")
+		// The exact path is MORE specific than the APIRoute prefix: the
+		// data plane orders them deterministically — not a conflict.
+		_, err := validator.ValidateCreate(context.Background(), exactUnderPrefixGraphQL)
+		require.NoError(t, err,
+			"GraphQLRoute exact path must coexist with a broader APIRoute prefix")
 	})
 
 	t.Run("GraphQLRoute prefix overlaps APIRoute prefix", func(t *testing.T) {
@@ -590,7 +660,9 @@ func TestFunctional_Webhook_GraphQLRouteAPIRouteCrossConflict(t *testing.T) {
 				Match: []avapigwv1alpha1.GraphQLRouteMatch{
 					{
 						Path: &avapigwv1alpha1.StringMatch{
-							Prefix: "/shared/graphql",
+							// Identical prefix as the existing APIRoute:
+							// identical specificity → genuine duplicate.
+							Prefix: "/shared",
 						},
 					},
 				},
@@ -620,7 +692,9 @@ func TestFunctional_Webhook_GraphQLRouteAPIRouteCrossConflict(t *testing.T) {
 				Match: []avapigwv1alpha1.RouteMatch{
 					{
 						URI: &avapigwv1alpha1.URIMatch{
-							Prefix: "/graphql",
+							// The update below moves the GraphQLRoute onto
+							// this exact path: identical specificity.
+							Exact: "/graphql",
 						},
 					},
 				},
@@ -893,7 +967,9 @@ func TestFunctional_Webhook_NoConflictDifferentPaths(t *testing.T) {
 }
 
 // TestFunctional_Webhook_CrossCRDUpdateConflict tests that updating an APIRoute
-// to create a path intersection with a GraphQLRoute is rejected (TC-CROSS-006).
+// to an identical-specificity path duplicate of a GraphQLRoute is rejected
+// (TC-CROSS-006). Only identical-specificity duplicates (same exact path or
+// same prefix) are admission conflicts; other combinations coexist.
 func TestFunctional_Webhook_CrossCRDUpdateConflict(t *testing.T) {
 	t.Parallel()
 
@@ -955,10 +1031,13 @@ func TestFunctional_Webhook_CrossCRDUpdateConflict(t *testing.T) {
 		},
 	}
 
-	// New APIRoute changes to a conflicting path
+	// New APIRoute changes to an identical exact path — identical
+	// specificity with the GraphQLRoute → genuine cross-kind duplicate that
+	// the update webhook must reject. (An exact-vs-prefix combination would
+	// coexist deterministically and be admitted.)
 	newAPIRoute := oldAPIRoute.DeepCopy()
 	newAPIRoute.Spec.Match[0].URI = &avapigwv1alpha1.URIMatch{
-		Prefix: "/graphql",
+		Exact: "/graphql",
 	}
 
 	_, err := validator.ValidateUpdate(context.Background(), oldAPIRoute, newAPIRoute)
@@ -1318,8 +1397,11 @@ func TestFunctional_Webhook_AuthorizationValidation(t *testing.T) {
 				Enabled: true,
 				Policies: []avapigwv1alpha1.ABACPolicyConfig{
 					{
-						Name:       "owner-access",
-						Expression: "request.user.id == resource.owner_id",
+						Name: "owner-access",
+						// Expressions must compile against the gateway's
+						// runtime CEL env (abac.NewCELEnv) where 'resource'
+						// is a string; subject/request are map(string, dyn).
+						Expression: "subject.id == request.user.id",
 						Resources:  []string{"/api/v1/documents/*"},
 						Actions:    []string{"GET", "PUT", "DELETE"},
 						Effect:     "allow",
@@ -1327,7 +1409,7 @@ func TestFunctional_Webhook_AuthorizationValidation(t *testing.T) {
 					},
 					{
 						Name:       "department-access",
-						Expression: "request.user.department in resource.allowed_departments",
+						Expression: "request.user.department in subject.allowed_departments",
 						Resources:  []string{"/api/v1/reports/*"},
 						Actions:    []string{"GET"},
 						Effect:     "allow",

@@ -122,10 +122,34 @@ Metrics for HTTP middleware components including rate limiting, circuit breakers
 - **Description:** Total number of requests rejected by rate limiter
 - **Example:** `gateway_middleware_rate_limit_rejected_total{route="api-v1"} 50`
 
+### gateway_middleware_redis_rate_limit_allowed_total
+- **Type:** Counter
+- **Labels:** `route`
+- **Description:** Total number of requests allowed by the redis-backed distributed rate limiter
+- **Example:** `gateway_middleware_redis_rate_limit_allowed_total{route="api-v1"} 1450`
+
+### gateway_middleware_redis_rate_limit_denied_total
+- **Type:** Counter
+- **Labels:** `route`
+- **Description:** Total number of requests denied by the redis-backed distributed rate limiter
+- **Example:** `gateway_middleware_redis_rate_limit_denied_total{route="api-v1"} 50`
+
+### gateway_middleware_redis_rate_limit_errors_total
+- **Type:** Counter
+- **Labels:** `route`, `policy`
+- **Description:** Total number of redis rate limiter errors by failure policy (`fail_open` allowed the request, `fail_closed` rejected it)
+- **Example:** `gateway_middleware_redis_rate_limit_errors_total{route="api-v1",policy="fail_open"} 3`
+
+### gateway_middleware_redis_rate_limit_duration_seconds
+- **Type:** Histogram
+- **Labels:** `route`
+- **Description:** Duration of redis rate limit decisions in seconds (bounded by the configured `readTimeout`, default 100ms)
+- **Example:** `gateway_middleware_redis_rate_limit_duration_seconds_bucket{route="api-v1",le="0.005"} 1400`
+
 ### gateway_middleware_circuit_breaker_requests_total
 - **Type:** Counter
 - **Labels:** `name`, `state`
-- **Description:** Total number of requests through circuit breaker by state
+- **Description:** Total number of requests through circuit breaker by state. The `state` label is read at execution time inside the breaker, so it accurately reflects the state that admitted the request (including half-open probes)
 - **Example:** `gateway_middleware_circuit_breaker_requests_total{name="backend-1",state="closed"} 1200`
 
 ### gateway_middleware_circuit_breaker_transitions_total
@@ -137,7 +161,7 @@ Metrics for HTTP middleware components including rate limiting, circuit breakers
 ### gateway_middleware_request_timeouts_total
 - **Type:** Counter
 - **Labels:** `route`
-- **Description:** Total number of request timeouts
+- **Description:** Total number of request timeouts. The `route` label carries the bounded route name (`unknown` when no route matched); earlier releases used the raw URL path — update dashboards/alerts that grouped by path values
 - **Example:** `gateway_middleware_request_timeouts_total{route="api-v1"} 5`
 
 ### gateway_middleware_retry_attempts_total
@@ -225,7 +249,7 @@ Metrics for caching operations including hits, misses, evictions, and performanc
 ### gateway_cache_operation_duration_seconds
 - **Type:** Histogram
 - **Labels:** `route`, `operation`
-- **Description:** Duration of cache operations (get, set, delete) per route
+- **Description:** Duration of cache operations per route. Operations: `get`, `set`, `delete`, `exists` for all backends, plus the redis-only operations `get_with_ttl`, `setnx`, and `expire`, which record duration/errors/hit-miss with the same parity as the core operations
 - **Example:** `gateway_cache_operation_duration_seconds{route="api-v1",operation="get"} 0.001`
 
 ### gateway_cache_errors_total
@@ -274,11 +298,17 @@ Metrics for authentication operations across all supported providers.
 - **Description:** Total number of JWT key refreshes from JWKS endpoint
 - **Example:** `gateway_auth_jwt_key_refreshes_total{issuer="auth.example.com",status="success"} 5`
 
-### gateway_auth_apikey_validations_total
+### gateway_apikey_validation_total
 - **Type:** Counter
-- **Labels:** `status`
-- **Description:** Total number of API key validations
-- **Example:** `gateway_auth_apikey_validations_total{status="success"} 500`
+- **Labels:** `status`, `reason`
+- **Description:** Total number of API key validation attempts. `reason` values: `valid`, `empty_key`, `not_found`, `store_error`, `invalid`, `disabled`, `expired`. A `store_error` reason indicates the backing store failed (for example a Vault outage) — alert on it separately from `not_found`, which means the presented key is unknown
+- **Example:** `gateway_apikey_validation_total{status="error",reason="store_error"} 3`
+
+### gateway_apikey_validation_duration_seconds
+- **Type:** Histogram
+- **Labels:** `status`, `reason`
+- **Description:** API key validation duration in seconds
+- **Example:** `gateway_apikey_validation_duration_seconds_bucket{status="success",reason="valid",le="0.001"} 480`
 
 ### gateway_auth_oidc_token_requests_total
 - **Type:** Counter
@@ -297,6 +327,12 @@ Metrics for authentication operations across all supported providers.
 - **Labels:** `status`
 - **Description:** Total number of mTLS certificate verifications
 - **Example:** `gateway_auth_mtls_verifications_total{status="success"} 200`
+
+### gateway_route_auth_failures_total
+- **Type:** Counter
+- **Labels:** `route`, `method`, `auth_type`, `reason`
+- **Description:** Total number of route-level authentication failures. `reason="construction_failed"` marks a route whose auth/authz middleware could not be built — the route **fails closed** with 503 (page-worthy: the route stays unavailable until a configuration reload succeeds; the gateway logs `failed to build route security middleware, failing closed`)
+- **Example:** `gateway_route_auth_failures_total{route="api-v1",method="GET",auth_type="authentication",reason="construction_failed"} 12`
 
 ## Authorization Metrics
 
@@ -500,7 +536,7 @@ Metrics for WebSocket connections and message processing.
 ### gateway_websocket_errors_total
 - **Type:** Counter
 - **Labels:** `backend`, `error_type`
-- **Description:** Total number of WebSocket errors
+- **Description:** Total number of WebSocket errors. `error_type="origin_rejected"` counts handshakes rejected by the `spec.websocket.allowedOrigins` allowlist (CSWSH protection, 403 before any backend dial)
 - **Example:** `gateway_websocket_errors_total{backend="websocket-backend",error_type="connection_failed"} 3`
 
 ### gateway_websocket_messages_total
@@ -1077,8 +1113,8 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 
 **Per-Route Middleware Chain** (applied per route configuration):
 ```
-Security Headers → CORS → Body Limit → Headers → Cache → 
-Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+OpenAPI Validation → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
 
 #### RouteMiddlewareApplier Interface Pattern

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -68,6 +69,24 @@ func DefaultRetryConfig() *RetryConfig {
 // DefaultGracefulShutdownTimeout is the default maximum time to wait for graceful shutdown.
 const DefaultGracefulShutdownTimeout = 30 * time.Second
 
+// DefaultStoreSeedTimeout is the default maximum time an initial-snapshot RPC
+// waits for the configuration store to be seeded after operator startup.
+const DefaultStoreSeedTimeout = 20 * time.Second
+
+// storeSeedDeadlineMargin is subtracted from the caller's context deadline when
+// bounding the store-seed wait so gated RPCs still return a response before the
+// client's own RPC timeout fires.
+const storeSeedDeadlineMargin = 2 * time.Second
+
+// Store-seed wait outcome reasons (logged for observability).
+const (
+	seedReasonGateDisabled = "gate_disabled"
+	seedReasonSeeded       = "seeded"
+	seedReasonRevision     = "revision_advanced"
+	seedReasonTimeout      = "timeout"
+	seedReasonCanceled     = "context_canceled"
+)
+
 // ServerConfig contains configuration for the gRPC server.
 type ServerConfig struct {
 	// Port is the port to listen on.
@@ -99,6 +118,11 @@ type ServerConfig struct {
 	// GracefulShutdownTimeout is the maximum time to wait for graceful shutdown.
 	// If zero, DefaultGracefulShutdownTimeout (30s) is used.
 	GracefulShutdownTimeout time.Duration
+
+	// StoreSeedTimeout is the maximum time an initial-snapshot RPC waits for
+	// the configuration store to be seeded when the store readiness gate is
+	// enabled. If zero, DefaultStoreSeedTimeout (20s) is used.
+	StoreSeedTimeout time.Duration
 }
 
 // Server is the gRPC configuration server.
@@ -121,7 +145,20 @@ type Server struct {
 	// Configuration change notification.
 	// configNotify is closed to broadcast a change to all waiting goroutines,
 	// then replaced with a new channel for the next broadcast cycle.
-	configNotify chan struct{}
+	// configRevision is incremented under mu on every broadcast so streaming
+	// consumers can detect changes that landed while they were not blocked on
+	// the notification channel (lost-wakeup protection).
+	configNotify   chan struct{}
+	configRevision uint64
+
+	// Store readiness gate (see EnableStoreReadinessGate). When armed, initial
+	// snapshot RPCs wait (bounded) until the store has been seeded by the
+	// controllers' initial reconcile pass, preventing an empty FULL_SYNC from
+	// wiping a connecting gateway's running configuration after operator
+	// restart. Disabled by default so embedded/test servers are unaffected.
+	storeSeedGateArmed atomic.Bool
+	storeSeededCh      chan struct{}
+	storeSeededOnce    sync.Once
 
 	// Connected gateways
 	gateways map[string]*gatewayConnection
@@ -319,6 +356,7 @@ func newServerInternal(config *ServerConfig, metrics *serverMetrics) (*Server, e
 		grpcBackends:    make(map[string][]byte),
 		graphqlBackends: make(map[string][]byte),
 		configNotify:    make(chan struct{}),
+		storeSeededCh:   make(chan struct{}),
 		gateways:        make(map[string]*gatewayConnection),
 	}
 
@@ -1134,23 +1172,168 @@ func (s *Server) GetGatewayCount() int {
 }
 
 // NotifyConfigChanged broadcasts a configuration change to all waiting streams.
-// It closes the current configNotify channel (waking all goroutines blocked on it)
-// and replaces it with a fresh channel for the next broadcast cycle.
+// It closes the current configNotify channel (waking all goroutines blocked on it),
+// replaces it with a fresh channel for the next broadcast cycle, and increments
+// the configuration revision so consumers can detect changes that occurred while
+// they were not blocked on the channel (see ConfigChangeSignal).
 // This method must be called outside of the data mutex to avoid deadlocks.
 func (s *Server) NotifyConfigChanged() {
 	s.mu.Lock()
 	ch := s.configNotify
 	s.configNotify = make(chan struct{})
+	s.configRevision++
 	s.mu.Unlock()
 	close(ch)
 }
 
 // WaitForConfigChange returns a channel that will be closed when the configuration changes.
 // Callers should select on this channel along with their context's Done channel.
+//
+// Note: consumers that perform blocking work (such as stream.Send) between
+// broadcasts should prefer ConfigChangeSignal + ConfigRevision to avoid the
+// lost-wakeup window between a broadcast and the next re-subscription.
 func (s *Server) WaitForConfigChange() <-chan struct{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.configNotify
+}
+
+// ConfigChangeSignal atomically returns the current change-notification channel
+// together with the configuration revision observed at subscription time.
+//
+// The pair provides a lost-wakeup-free subscription protocol:
+//  1. Obtain (ch, rev) BEFORE building/sending a snapshot.
+//  2. After the (potentially slow) send, compare ConfigRevision() with rev.
+//     If it advanced, a change landed during the send — its notification was
+//     delivered on ch (already closed) and would be missed by a fresh
+//     re-subscription, so the caller must rebuild immediately.
+//  3. Otherwise ch is still the live broadcast channel (no broadcast happened
+//     since the pair was read), so blocking on it cannot miss a notification.
+func (s *Server) ConfigChangeSignal() (waitCh <-chan struct{}, revision uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configNotify, s.configRevision
+}
+
+// ConfigRevision returns the current configuration revision. The revision is
+// incremented on every NotifyConfigChanged broadcast and never decreases.
+func (s *Server) ConfigRevision() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.configRevision
+}
+
+// StoreResourceCount returns the total number of resources currently held in
+// the in-memory configuration store across all resource types.
+func (s *Server) StoreResourceCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.apiRoutes) + len(s.grpcRoutes) + len(s.graphqlRoutes) +
+		len(s.backends) + len(s.grpcBackends) + len(s.graphqlBackends)
+}
+
+// EnableStoreReadinessGate arms the store readiness gate. Once armed, initial
+// snapshot RPCs (RegisterGateway, GetConfiguration, StreamConfiguration) wait
+// — bounded by StoreSeedTimeout and the caller's context deadline — until
+// MarkStoreSeeded is called or the store receives its first configuration,
+// before serving a snapshot. The operator arms the gate at startup and marks
+// the store seeded after the informer caches have synced and the controllers'
+// initial reconcile pass has populated the store.
+func (s *Server) EnableStoreReadinessGate() {
+	s.storeSeedGateArmed.Store(true)
+}
+
+// MarkStoreSeeded releases the store readiness gate, unblocking any RPCs
+// parked in WaitForStoreSeeded. It is safe to call multiple times.
+func (s *Server) MarkStoreSeeded() {
+	s.storeSeededOnce.Do(func() {
+		close(s.storeSeededCh)
+	})
+}
+
+// StoreSeeded reports whether the store is considered seeded: either the
+// readiness gate is not armed, or MarkStoreSeeded has been called.
+func (s *Server) StoreSeeded() bool {
+	if !s.storeSeedGateArmed.Load() {
+		return true
+	}
+	select {
+	case <-s.storeSeededCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// storeSeedWaitTimeout returns the configured bounded wait for store seeding.
+func (s *Server) storeSeedWaitTimeout() time.Duration {
+	if s.config != nil && s.config.StoreSeedTimeout > 0 {
+		return s.config.StoreSeedTimeout
+	}
+	return DefaultStoreSeedTimeout
+}
+
+// WaitForStoreSeeded blocks until the configuration store is considered ready
+// to serve an initial snapshot, or until the bounded wait elapses. It returns
+// whether the store is seeded and the decision reason for logging.
+//
+// When the readiness gate is armed, initial snapshots are gated STRICTLY on
+// MarkStoreSeeded (cache synced + initial reconcile pass done). An advanced
+// configuration revision alone is NOT sufficient to open the gate early: the
+// first applies of the initial reconcile pass produce PARTIAL snapshots, and
+// serving them causes reconnecting gateways to briefly apply shrunken route
+// sets (observed live as ~30s of 404s while routes dropped 25→3→11→25 during
+// an operator restart). Seeding completes within a few hundred milliseconds
+// of the first apply in practice, so waiting for the seed mark is cheap.
+//
+// The revision criterion remains only as a FALLBACK once the bounded wait
+// expires: a partial-but-growing snapshot is still safer than an empty one,
+// and the streaming loop pushes the remaining resources as they land.
+//
+// The wait is additionally capped by the caller's context deadline (minus a
+// small margin) so gated unary RPCs still respond before the client gives up.
+func (s *Server) WaitForStoreSeeded(ctx context.Context, timeout time.Duration) (seeded bool, reason string) {
+	if !s.storeSeedGateArmed.Load() {
+		return true, seedReasonGateDisabled
+	}
+	if s.StoreSeeded() {
+		return true, seedReasonSeeded
+	}
+
+	// Cap the wait by the caller's deadline minus a safety margin.
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline) - storeSeedDeadlineMargin
+		if remaining <= 0 {
+			return s.seedTimeoutFallback()
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false, seedReasonCanceled
+	case <-s.storeSeededCh:
+		return true, seedReasonSeeded
+	case <-timer.C:
+		return s.seedTimeoutFallback()
+	}
+}
+
+// seedTimeoutFallback resolves the bounded-wait expiry: if the store revision
+// advanced, at least a partial configuration exists and is served with the
+// revision_advanced reason (the stream pushes the rest as it lands); an
+// untouched store times out and the caller logs the incomplete-snapshot
+// warning.
+func (s *Server) seedTimeoutFallback() (seeded bool, reason string) {
+	if s.ConfigRevision() > 0 {
+		return true, seedReasonRevision
+	}
+	return false, seedReasonTimeout
 }
 
 // checkContextCancellation checks if the context is canceled or deadline exceeded.

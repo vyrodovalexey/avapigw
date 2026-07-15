@@ -175,7 +175,7 @@ func TestGetEnvBool_AllCases(t *testing.T) {
 				os.Setenv(tt.key, tt.envValue)
 			}
 
-			result := getEnvBool(tt.key, tt.defaultValue)
+			result := getEnvBool(tt.key, tt.defaultValue, observability.NopLogger())
 			assert.Equal(t, tt.expected, result)
 		})
 	}

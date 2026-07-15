@@ -577,13 +577,21 @@ func (b *ServiceBackend) Start(ctx context.Context) error {
 				},
 			))
 		}
-		// Use TLS for health checks if backend has TLS enabled
+		// Use TLS for health checks if backend has TLS enabled.
+		// The config is cloned and pinned to HTTP/1.1: the data-path
+		// ConnectionPool transport (ForceAttemptHTTP2) lazily mutates a
+		// shared tls.Config by prepending "h2" to NextProtos, and the
+		// plain http.Transport used here cannot speak HTTP/2 — sharing
+		// the pointer makes probes read h2 SETTINGS frames as malformed
+		// HTTP/1 responses after the first proxied request.
 		if b.tlsConfig != nil {
+			healthTLS := b.tlsConfig.Clone()
+			healthTLS.NextProtos = []string{"http/1.1"}
 			opts = append(opts,
 				WithHealthCheckClient(&http.Client{
 					Timeout: b.config.HealthCheck.Timeout.Duration(),
 					Transport: &http.Transport{
-						TLSClientConfig: b.tlsConfig,
+						TLSClientConfig: healthTLS,
 					},
 				}),
 				WithHealthCheckTLS(true),

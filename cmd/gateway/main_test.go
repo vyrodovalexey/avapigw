@@ -208,7 +208,7 @@ func TestBuildMiddlewareChain(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			result, mwErr := buildMiddlewareChain(baseHandler, tt.config, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil)
+			result, mwErr := buildMiddlewareChain(baseHandler, tt.config, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil, nil)
 			require.NoError(t, mwErr)
 
 			// Verify handler is not nil
@@ -548,7 +548,7 @@ func TestBuildMiddlewareChain_NilConfigs(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil)
+	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil, nil)
 	require.NoError(t, mwErr)
 
 	assert.NotNil(t, result.handler)
@@ -587,7 +587,7 @@ func TestBuildMiddlewareChain_PerClientRateLimiter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil)
+	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil, nil)
 	require.NoError(t, mwErr)
 
 	assert.NotNil(t, result.handler)
@@ -621,7 +621,7 @@ func TestBuildMiddlewareChain_WithMaxSessions(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil)
+	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil, nil)
 	require.NoError(t, mwErr)
 
 	assert.NotNil(t, result.handler)
@@ -654,7 +654,7 @@ func TestBuildMiddlewareChain_WithMaxSessionsDisabled(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil)
+	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil, nil)
 	require.NoError(t, mwErr)
 
 	assert.NotNil(t, result.handler)
@@ -1061,7 +1061,7 @@ func TestBuildMiddlewareChain_AllMiddlewareEnabled(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil)
+	result, mwErr := buildMiddlewareChain(baseHandler, cfg, logger, metrics, tracer, audit.NewNoopLogger(), nil, nil, nil)
 	require.NoError(t, mwErr)
 
 	assert.NotNil(t, result.handler)

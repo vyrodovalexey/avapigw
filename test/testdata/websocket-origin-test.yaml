@@ -1,0 +1,76 @@
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: websocket-origin-test-gateway
+  labels:
+    app: avapigw
+    environment: test
+spec:
+  listeners:
+    - name: http
+      port: 18095
+      protocol: HTTP
+      hosts:
+        - "*"
+      bind: 0.0.0.0
+
+  # Cross-Site WebSocket Hijacking protection: only these origins (plus
+  # same-origin requests and clients that send no Origin header) may open
+  # WebSocket connections through this gateway.
+  websocket:
+    allowedOrigins:
+      - "https://app.example.com"
+      - "trusted.example.com"
+
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods:
+            - GET
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"websocket-origin-test"}'
+        headers:
+          Content-Type: application/json
+
+    - name: websocket-route
+      match:
+        - uri:
+            prefix: /ws
+          methods:
+            - GET
+      route:
+        - destination:
+            host: 127.0.0.1
+            port: 8801
+      timeout: 0s
+
+  backends:
+    - name: backend-1
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 5s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  rateLimit:
+    enabled: false
+
+  circuitBreaker:
+    enabled: false
+
+  observability:
+    metrics:
+      enabled: false
+    logging:
+      level: debug
+      format: json

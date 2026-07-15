@@ -2,12 +2,15 @@ package apikey
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -22,6 +25,10 @@ const (
 	HashAlgBcrypt    = "bcrypt"
 	HashAlgPlaintext = "plaintext"
 )
+
+// dummyKeyBytes is the amount of random material used for the dummy key
+// that equalizes validation timing on the not-found path.
+const dummyKeyBytes = 32
 
 // Common errors for API key validation.
 var (
@@ -97,6 +104,15 @@ type validator struct {
 	store   Store
 	logger  observability.Logger
 	metrics *Metrics
+
+	// dummyKey is a random key pre-computed at construction time. It is
+	// compared against on the not-found path so that unknown keys cost the
+	// same as known-but-wrong keys, preventing timing-based key discovery.
+	dummyKey *StaticKey
+
+	// dummyCompares counts dummy comparisons performed on the not-found
+	// path. It exists for observability in tests and debugging.
+	dummyCompares atomic.Int64
 }
 
 // ValidatorOption is a functional option for the validator.
@@ -152,7 +168,37 @@ func NewValidator(config *Config, opts ...ValidatorOption) (Validator, error) {
 		v.metrics = NewMetrics("gateway")
 	}
 
+	// Warn ONCE at construction time (not on every validation) when the
+	// insecure plaintext comparison mode is configured.
+	if config.GetEffectiveHashAlgorithm() == HashAlgPlaintext {
+		v.logger.Warn("using plaintext API key comparison - not recommended for production")
+	}
+
+	// Pre-compute the random dummy key used to equalize not-found timing.
+	v.dummyKey = newDummyKey(config.GetEffectiveHashAlgorithm())
+
 	return v, nil
+}
+
+// newDummyKey generates a StaticKey with random material and a hash
+// matching the given algorithm. The dummy is generated at init time (never
+// a hard-coded constant) so it cannot collide with a real key, and it is
+// used exclusively to make the not-found validation path cost the same as
+// the found path.
+func newDummyKey(algorithm string) *StaticKey {
+	raw := make([]byte, dummyKeyBytes)
+	if _, err := rand.Read(raw); err != nil {
+		// Extremely unlikely; fall back to a time-derived value rather than
+		// failing construction. The dummy key only equalizes timing and is
+		// never used to authenticate anything.
+		raw = []byte(time.Now().Format(time.RFC3339Nano))
+	}
+
+	dummy := &StaticKey{Key: hex.EncodeToString(raw)}
+	if hash, err := HashKey(dummy.Key, algorithm); err == nil {
+		dummy.Hash = hash
+	}
+	return dummy
 }
 
 // Validate validates an API key and returns key information.
@@ -160,36 +206,31 @@ func (v *validator) Validate(ctx context.Context, key string) (*KeyInfo, error) 
 	start := time.Now()
 
 	if key == "" {
-		v.metrics.RecordValidation("error", "empty_key", time.Since(start))
+		v.metrics.RecordValidation(statusError, reasonEmptyKey, time.Since(start))
 		return nil, ErrEmptyAPIKey
 	}
 
 	// Look up the key in the store
 	storedKey, err := v.store.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, ErrAPIKeyNotFound) {
-			v.metrics.RecordValidation("error", "not_found", time.Since(start))
-			return nil, ErrAPIKeyNotFound
-		}
-		v.metrics.RecordValidation("error", "store_error", time.Since(start))
-		return nil, fmt.Errorf("failed to look up API key: %w", err)
+		return nil, v.handleLookupError(key, err, start)
 	}
 
 	// Validate the key
 	if err := v.validateKey(key, storedKey); err != nil {
-		v.metrics.RecordValidation("error", "invalid", time.Since(start))
+		v.metrics.RecordValidation(statusError, reasonInvalid, time.Since(start))
 		return nil, err
 	}
 
 	// Check if key is enabled
 	if !storedKey.Enabled {
-		v.metrics.RecordValidation("error", "disabled", time.Since(start))
+		v.metrics.RecordValidation(statusError, reasonDisabled, time.Since(start))
 		return nil, ErrAPIKeyDisabled
 	}
 
 	// Check expiration
 	if storedKey.ExpiresAt != nil && time.Now().After(*storedKey.ExpiresAt) {
-		v.metrics.RecordValidation("error", "expired", time.Since(start))
+		v.metrics.RecordValidation(statusError, reasonExpired, time.Since(start))
 		return nil, ErrAPIKeyExpired
 	}
 
@@ -202,13 +243,38 @@ func (v *validator) Validate(ctx context.Context, key string) (*KeyInfo, error) 
 		Metadata:  storedKey.Metadata,
 	}
 
-	v.metrics.RecordValidation("success", "valid", time.Since(start))
+	v.metrics.RecordValidation(statusSuccess, reasonValid, time.Since(start))
 	v.logger.Debug("API key validated",
 		observability.String("key_id", storedKey.ID),
 		observability.String("key_name", storedKey.Name),
 	)
 
 	return keyInfo, nil
+}
+
+// handleLookupError maps a store lookup failure to the outcome returned to
+// the caller and records the matching metric. Genuine not-found results
+// perform a dummy comparison so their timing matches a found-but-invalid
+// key; any other store failure (for example ErrStoreUnavailable from a
+// Vault outage) is surfaced with the "store_error" metric label instead of
+// "not_found" so operators can distinguish outages from misses.
+func (v *validator) handleLookupError(key string, err error, start time.Time) error {
+	if errors.Is(err, ErrAPIKeyNotFound) {
+		v.equalizeNotFoundTiming(key)
+		v.metrics.RecordValidation(statusError, reasonNotFound, time.Since(start))
+		return ErrAPIKeyNotFound
+	}
+
+	v.metrics.RecordValidation(statusError, reasonStoreError, time.Since(start))
+	return fmt.Errorf("failed to look up API key: %w", err)
+}
+
+// equalizeNotFoundTiming performs a comparison against the pre-computed
+// dummy key. The result is intentionally discarded: the sole purpose is to
+// make the not-found path perform the same hashing work as the found path.
+func (v *validator) equalizeNotFoundTiming(key string) {
+	v.dummyCompares.Add(1)
+	_ = v.validateKey(key, v.dummyKey)
 }
 
 // validateKey validates the provided key against the stored key.
@@ -231,39 +297,21 @@ func (v *validator) validateKey(providedKey string, storedKey *StaticKey) error 
 
 // validateSHA256 validates using SHA-256 hash comparison.
 func (v *validator) validateSHA256(providedKey string, storedKey *StaticKey) error {
-	hash := sha256.Sum256([]byte(providedKey))
-	providedHash := hex.EncodeToString(hash[:])
-
 	storedHash := storedKey.Hash
 	if storedHash == "" {
 		// If no hash is stored, hash the stored key for comparison
-		storedHashBytes := sha256.Sum256([]byte(storedKey.Key))
-		storedHash = hex.EncodeToString(storedHashBytes[:])
+		storedHash = sha256Hex(storedKey.Key)
 	}
-
-	if subtle.ConstantTimeCompare([]byte(providedHash), []byte(storedHash)) != 1 {
-		return ErrInvalidAPIKey
-	}
-
-	return nil
+	return compareHexDigests(sha256Hex(providedKey), storedHash)
 }
 
 // validateSHA512 validates using SHA-512 hash comparison.
 func (v *validator) validateSHA512(providedKey string, storedKey *StaticKey) error {
-	hash := sha512.Sum512([]byte(providedKey))
-	providedHash := hex.EncodeToString(hash[:])
-
 	storedHash := storedKey.Hash
 	if storedHash == "" {
-		storedHashBytes := sha512.Sum512([]byte(storedKey.Key))
-		storedHash = hex.EncodeToString(storedHashBytes[:])
+		storedHash = sha512Hex(storedKey.Key)
 	}
-
-	if subtle.ConstantTimeCompare([]byte(providedHash), []byte(storedHash)) != 1 {
-		return ErrInvalidAPIKey
-	}
-
-	return nil
+	return compareHexDigests(sha512Hex(providedKey), storedHash)
 }
 
 // validateBcrypt validates using bcrypt hash comparison.
@@ -280,10 +328,9 @@ func (v *validator) validateBcrypt(providedKey string, storedKey *StaticKey) err
 	return nil
 }
 
-// validatePlaintext validates using plaintext comparison (dev only).
+// validatePlaintext validates using plaintext comparison (dev only). The
+// insecurity warning is logged once at validator construction, not here.
 func (v *validator) validatePlaintext(providedKey string, storedKey *StaticKey) error {
-	v.logger.Warn("using plaintext API key comparison - not recommended for production")
-
 	if subtle.ConstantTimeCompare([]byte(providedKey), []byte(storedKey.Key)) != 1 {
 		return ErrInvalidAPIKey
 	}
@@ -291,15 +338,35 @@ func (v *validator) validatePlaintext(providedKey string, storedKey *StaticKey) 
 	return nil
 }
 
+// compareHexDigests compares two hex-encoded digests in constant time.
+// Comparison is case-insensitive because configured hashes may be
+// upper-case while computed digests are always lower-case.
+func compareHexDigests(providedHash, storedHash string) error {
+	if subtle.ConstantTimeCompare([]byte(providedHash), []byte(strings.ToLower(storedHash))) != 1 {
+		return ErrInvalidAPIKey
+	}
+	return nil
+}
+
+// sha256Hex returns the lower-case hex-encoded SHA-256 digest of value.
+func sha256Hex(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+// sha512Hex returns the lower-case hex-encoded SHA-512 digest of value.
+func sha512Hex(value string) string {
+	digest := sha512.Sum512([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
 // HashKey hashes an API key using the configured algorithm.
 func HashKey(key, algorithm string) (string, error) {
 	switch algorithm {
 	case HashAlgSHA256:
-		hash := sha256.Sum256([]byte(key))
-		return hex.EncodeToString(hash[:]), nil
+		return sha256Hex(key), nil
 	case HashAlgSHA512:
-		hash := sha512.Sum512([]byte(key))
-		return hex.EncodeToString(hash[:]), nil
+		return sha512Hex(key), nil
 	case HashAlgBcrypt:
 		hash, err := bcrypt.GenerateFromPassword([]byte(key), bcrypt.DefaultCost)
 		if err != nil {

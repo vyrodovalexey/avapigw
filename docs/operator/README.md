@@ -189,7 +189,8 @@ Status updates now use Patch instead of Update for better performance and reduce
 Prevent invalid configurations before they're applied:
 
 ```bash
-# This will be rejected by the webhook
+# This will be rejected by the webhook when another APIRoute already
+# declares the SAME prefix with overlapping methods (a true duplicate)
 kubectl apply -f - <<EOF
 apiVersion: avapigw.io/v1alpha1
 kind: APIRoute
@@ -200,8 +201,13 @@ spec:
     - uri:
         prefix: /api/v1  # Duplicate route!
 EOF
-# Error: admission webhook denied the request: duplicate route match found
+# Error: admission webhook denied the request: ... conflicts with existing route(s)
 ```
+
+Only **true duplicates** are rejected — the same match type and path with
+overlapping methods. Routes of different specificity (exact vs prefix,
+nested prefixes such as `/` and `/api`, catch-all vs specific) are allowed
+and ordered deterministically by the router.
 
 ## Quick Start
 

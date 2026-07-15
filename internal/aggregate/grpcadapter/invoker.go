@@ -2,8 +2,11 @@ package grpcadapter
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -45,7 +48,17 @@ type Invoker struct {
 	pool       ConnPool
 	logger     observability.Logger
 	fullMethod string
-	tlsCache   sync.Map // target name -> *tls.Config
+	tlsCache   sync.Map // target name -> *tlsCacheEntry (at most one per target)
+}
+
+// tlsCacheEntry pairs a built *tls.Config with the fingerprint of the
+// TLS-relevant configuration it was built from. Keeping exactly one entry per
+// target name — replaced whenever the fingerprint changes — bounds the cache
+// to the number of configured targets while still invalidating stale entries
+// after route/backend config reloads.
+type tlsCacheEntry struct {
+	fingerprint string
+	cfg         *tls.Config
 }
 
 // InvokerOption configures the gRPC aggregate Invoker.
@@ -121,24 +134,45 @@ func (i *Invoker) Invoke(
 func (i *Invoker) outgoingContext(
 	ctx context.Context, req *aggregate.Request, target *aggregate.Target,
 ) context.Context {
+	return metadata.NewOutgoingContext(ctx, outgoingMetadata(req, target))
+}
+
+// outgoingMetadata builds the outgoing gRPC metadata for a target. Keys are
+// normalized to lowercase via metadata.MD.Append/Set as required by the gRPC
+// metadata contract; writing mixed-case keys directly into the map would leave
+// entries that readers expecting lowercase keys silently miss or duplicate.
+func outgoingMetadata(req *aggregate.Request, target *aggregate.Target) metadata.MD {
 	md := metadata.MD{}
-	for k, v := range req.Headers {
-		md[k] = append(md[k], v...)
+	for k, values := range req.Headers {
+		md.Append(k, values...)
 	}
 	if key, value := authHeader(target.Auth); value != "" {
 		md.Set(key, value)
 	}
-	return metadata.NewOutgoingContext(ctx, md)
+	return md
 }
 
 // tlsConfigFor returns (and caches) the *tls.Config for a target, built from its
 // per-target BackendTLSConfig (including mTLS). Returns nil when TLS is disabled.
+//
+// The cache is keyed by target name but validated against a deterministic
+// fingerprint of the TLS-relevant config, so a route/backend reload that
+// changes the TLS settings naturally misses the stale entry and rebuilds it in
+// place (the cache never holds more than one entry per target name).
 func (i *Invoker) tlsConfigFor(target *aggregate.Target) (*tls.Config, error) {
 	if target.TLS == nil || !target.TLS.Enabled {
 		return nil, nil
 	}
+	fingerprint, err := tlsConfigFingerprint(target.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate gRPC TLS fingerprint for target %s: %w", target.Name, err)
+	}
 	if cached, ok := i.tlsCache.Load(target.Name); ok {
-		return cached.(*tls.Config), nil
+		if entry, entryOK := cached.(*tlsCacheEntry); entryOK && entry.fingerprint == fingerprint {
+			return entry.cfg, nil
+		}
+		// Fingerprint mismatch: the target's TLS config changed (config
+		// reload); fall through to rebuild and replace the stale entry.
 	}
 
 	builder := backend.NewTLSConfigBuilder(target.TLS, backend.WithTLSLogger(i.logger))
@@ -154,11 +188,24 @@ func (i *Invoker) tlsConfigFor(target *aggregate.Target) (*tls.Config, error) {
 			cfg.NextProtos = []string{"h2"}
 		}
 	}
-	actual, _ := i.tlsCache.LoadOrStore(target.Name, cfg)
-	if actual == nil {
-		return nil, nil
+	// Store replaces any stale entry for this name, bounding the cache to one
+	// entry per target. Concurrent rebuilds are benign: both goroutines build
+	// from the same immutable config and the last stored entry wins.
+	i.tlsCache.Store(target.Name, &tlsCacheEntry{fingerprint: fingerprint, cfg: cfg})
+	return cfg, nil
+}
+
+// tlsConfigFingerprint returns a deterministic hash of the TLS-relevant target
+// configuration. JSON marshaling of the config struct is deterministic (fixed
+// struct field order, no map fields), so identical configs always produce the
+// same fingerprint while any TLS config change yields a new one.
+func tlsConfigFingerprint(cfg *config.BackendTLSConfig) (string, error) {
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
 	}
-	return actual.(*tls.Config), nil
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // targetAddress builds the host:port dial address for a target.

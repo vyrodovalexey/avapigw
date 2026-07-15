@@ -1,15 +1,22 @@
 package apikey
 
 import (
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Store type constants.
 const (
 	storeTypeMemory = "memory"
 	storeTypeFile   = "file"
+	storeTypeVault  = "vault"
 )
 
 // Config represents API Key authentication configuration.
@@ -19,6 +26,7 @@ type Config struct {
 
 	// HashAlgorithm is the algorithm used to hash API keys.
 	// Supported: sha256, sha512, bcrypt, plaintext (dev only).
+	// Note: bcrypt is not supported with the vault store (see Validate).
 	HashAlgorithm string `yaml:"hashAlgorithm,omitempty" json:"hashAlgorithm,omitempty"`
 
 	// Store configures the API key store.
@@ -66,10 +74,13 @@ type StaticKey struct {
 	// ID is the unique identifier for the key.
 	ID string `yaml:"id" json:"id"`
 
-	// Key is the API key value (or hash).
+	// Key is the raw API key value. Optional when Hash is set: hash-only
+	// entries are supported for sha256, sha512 and bcrypt algorithms.
 	Key string `yaml:"key" json:"key"`
 
-	// Hash is the pre-computed hash of the key.
+	// Hash is the pre-computed hash of the key using the configured
+	// hashAlgorithm (hex-encoded digest for sha256/sha512, bcrypt string
+	// for bcrypt). Required when Key is empty.
 	Hash string `yaml:"hash,omitempty" json:"hash,omitempty"`
 
 	// Name is a human-readable name for the key.
@@ -111,7 +122,8 @@ type CacheConfig struct {
 	// TTL is the cache TTL.
 	TTL time.Duration `yaml:"ttl,omitempty" json:"ttl,omitempty"`
 
-	// MaxSize is the maximum number of entries.
+	// MaxSize is the maximum number of entries (enforced with LRU
+	// eviction). A value <= 0 disables the bound.
 	MaxSize int `yaml:"maxSize,omitempty" json:"maxSize,omitempty"`
 }
 
@@ -137,6 +149,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateStore(); err != nil {
+		return err
+	}
+	if err := c.validateStaticKeys(); err != nil {
 		return err
 	}
 	if err := c.validateExtraction(); err != nil {
@@ -176,6 +191,31 @@ func (c *Config) validateStore() error {
 	return nil
 }
 
+// validateStaticKeys rejects static key entries that could never
+// authenticate: an entry needs either a raw key value or a pre-computed
+// hash compatible with the effective hash algorithm. Previously such
+// entries were accepted at load time and silently failed every lookup.
+func (c *Config) validateStaticKeys() error {
+	if c.Store == nil {
+		return nil
+	}
+	algorithm := c.GetEffectiveHashAlgorithm()
+	for i := range c.Store.Keys {
+		key := &c.Store.Keys[i]
+		if key.Key != "" {
+			continue
+		}
+		if key.Hash == "" {
+			return fmt.Errorf("store.keys[%d] (id=%q): either key or hash must be set", i, key.ID)
+		}
+		if !isAlgorithmCompatibleHash(key.Hash, algorithm) {
+			return fmt.Errorf("store.keys[%d] (id=%q): hash is not compatible with hash algorithm %q",
+				i, key.ID, algorithm)
+		}
+	}
+	return nil
+}
+
 // validateExtraction validates the extraction configuration.
 func (c *Config) validateExtraction() error {
 	for i, src := range c.Extraction {
@@ -186,15 +226,37 @@ func (c *Config) validateExtraction() error {
 	return nil
 }
 
-// validateVault validates the Vault configuration.
+// validateVault validates the Vault configuration and its compatibility
+// with the hash algorithm.
+//
+// Strategy note (addressing design): the Vault store addresses secrets by
+// the deterministic digest of the raw key. bcrypt embeds a random salt, so
+// the hash of a presented key can never be recomputed to derive the storage
+// path — every lookup would silently miss. bcrypt is therefore rejected for
+// Vault-backed storage at load time; use sha256 or sha512 instead.
 func (c *Config) validateVault() error {
-	if c.Vault == nil || !c.Vault.Enabled {
+	if !c.usesVaultStore() {
 		return nil
 	}
-	if err := c.Vault.Validate(); err != nil {
-		return fmt.Errorf("vault: %w", err)
+	if c.GetEffectiveHashAlgorithm() == HashAlgBcrypt {
+		return errors.New(`hashAlgorithm "bcrypt" is not supported with the vault store: ` +
+			"bcrypt hashes are salted and cannot address vault paths (use sha256 or sha512)")
+	}
+	if c.Vault != nil && c.Vault.Enabled {
+		if err := c.Vault.Validate(); err != nil {
+			return fmt.Errorf("vault: %w", err)
+		}
 	}
 	return nil
+}
+
+// usesVaultStore reports whether this configuration selects Vault-backed
+// key storage, either via store.type or via an enabled vault section.
+func (c *Config) usesVaultStore() bool {
+	if c.Store != nil && c.Store.Type == storeTypeVault {
+		return true
+	}
+	return c.Vault != nil && c.Vault.Enabled
 }
 
 // validateCache validates the cache configuration.
@@ -220,7 +282,7 @@ func (c *StoreConfig) Validate() error {
 	validTypes := map[string]bool{
 		"":              true,
 		storeTypeMemory: true,
-		"vault":         true,
+		storeTypeVault:  true,
 		storeTypeFile:   true,
 	}
 	if !validTypes[c.Type] {
@@ -263,11 +325,46 @@ func validateExtractionSource(src ExtractionSource) error {
 	return nil
 }
 
+// isAlgorithmCompatibleHash reports whether a pre-computed hash can ever
+// match a presented key under the given algorithm. Incompatible hashes make
+// an entry silently unusable, so they are rejected at validation time.
+func isAlgorithmCompatibleHash(hash, algorithm string) bool {
+	switch algorithm {
+	case HashAlgSHA256:
+		return isHexDigest(hash, sha256.Size)
+	case HashAlgSHA512:
+		return isHexDigest(hash, sha512.Size)
+	case HashAlgBcrypt:
+		_, err := bcrypt.Cost([]byte(hash))
+		return err == nil
+	default:
+		// plaintext (and unknown algorithms) compare against the raw key,
+		// so a pre-computed hash alone is never usable.
+		return false
+	}
+}
+
+// isHexDigest reports whether hash is a valid hex encoding of a digest with
+// the given byte size.
+func isHexDigest(hash string, size int) bool {
+	if len(hash) != size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(hash)
+	return err == nil
+}
+
+// normalizeHexDigest lower-cases a hex-encoded digest so configured hashes
+// compare and index consistently with computed digests.
+func normalizeHexDigest(hash string) string {
+	return strings.ToLower(hash)
+}
+
 // DefaultConfig returns a default API Key configuration.
 func DefaultConfig() *Config {
 	return &Config{
 		Enabled:       false,
-		HashAlgorithm: "sha256",
+		HashAlgorithm: HashAlgSHA256,
 		Extraction: []ExtractionSource{
 			{
 				Type: "header",
@@ -287,5 +384,5 @@ func (c *Config) GetEffectiveHashAlgorithm() string {
 	if c.HashAlgorithm != "" {
 		return c.HashAlgorithm
 	}
-	return "sha256"
+	return HashAlgSHA256
 }

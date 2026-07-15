@@ -602,6 +602,29 @@ make perf-generate-charts
 
 ## Performance Benchmarks
 
+### PT Matrix Results (July 2026)
+
+The most recent full run covers the six PT scenario groups (~180 s steady
+state each, scenarios per group run concurrently) against a locally built
+gateway container attached to the compose network, with monitoring-metric
+verification in VictoriaMetrics after every group. See the full report at
+[`test/performance/results/perftest-report_pt-local-docker_20260715_071500.md`](../test/performance/results/perftest-report_pt-local-docker_20260715_071500.md).
+
+| Group | Scenario set | Window | Σ RPS achieved | Errors (excl. deliberate 429) |
+|-------|--------------|--------|----------------|-------------------------------|
+| PT-01 | gRPC & streaming, plaintext :9000 (unary/streams + OIDC + backend-mTLS) | 184 s | 13,477 | <0.01% |
+| PT-02 | TLS gRPC & streaming :9443 | 184 s | 10,143 | <0.01% |
+| PT-03 | HTTP & WS :8080 (auth, sentinel ratelimit/cache, transform, encoding, CORS, OpenAPI) | 187 s | 4,295 + 3×WS | 0 × 5xx |
+| PT-04 | HTTPS & WSS :8443 (same stack over TLS) | 188 s | 4,497 + 3×WSS | 0 × 5xx |
+| PT-05 | GraphQL & WS :8080 | 185 s | 3,599 + WS | 0 |
+| PT-06 | TLS GraphQL & WSS :8443 | 185 s | 3,600 + WSS | 0 |
+
+Gateway container: 0 restarts during load windows, RSS 92–153 MiB across
+groups. Environment note: compose sentinels announce the master at its
+docker-bridge IP, which is unreachable from a macOS host — Redis Sentinel
+scenarios must run the gateway inside the compose network (in-network
+patterns), otherwise the redis limiter silently fails open.
+
 ### Scenario-Based Performance Results (March 2026)
 
 The following results were obtained from comprehensive performance testing across 6 scenarios, each running for 3 minutes with full feature sets enabled:

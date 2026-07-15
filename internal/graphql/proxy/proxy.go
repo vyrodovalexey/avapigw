@@ -94,6 +94,51 @@ const defaultTimeout = 30 * time.Second
 // defaultMaxBodySize is the default maximum request body size (10MB).
 const defaultMaxBodySize = 10 * 1024 * 1024
 
+// Default transport pooling. Mirrors the HTTP reverse proxy's plaintext
+// pooled transport (internal/proxy): the previous 10 idle connections per
+// host forced per-request dials at load, churning ephemeral ports.
+const (
+	// defaultMaxIdleConns caps idle connections across all GraphQL backends.
+	defaultMaxIdleConns = 512
+
+	// defaultMaxIdleConnsPerHost keeps enough warm connections per backend
+	// host to avoid per-request dials at load.
+	defaultMaxIdleConnsPerHost = 100
+
+	// defaultIdleConnTimeout matches the backend pool convention.
+	defaultIdleConnTimeout = 90 * time.Second
+
+	// defaultDialTimeout bounds backend TCP connection establishment.
+	defaultDialTimeout = 30 * time.Second
+
+	// defaultDialKeepAlive is the TCP keep-alive probe interval.
+	defaultDialKeepAlive = 30 * time.Second
+
+	// defaultTLSHandshakeTimeout bounds TLS handshakes.
+	defaultTLSHandshakeTimeout = 10 * time.Second
+
+	// defaultExpectContinueTimeout matches http.DefaultTransport.
+	defaultExpectContinueTimeout = 1 * time.Second
+)
+
+// newDefaultTransport builds the pooled transport used when no custom
+// transport is injected via WithTransport.
+func newDefaultTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   defaultDialTimeout,
+			KeepAlive: defaultDialKeepAlive,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          defaultMaxIdleConns,
+		MaxIdleConnsPerHost:   defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:       defaultIdleConnTimeout,
+		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+		ExpectContinueTimeout: defaultExpectContinueTimeout,
+	}
+}
+
 // New creates a new GraphQL reverse proxy.
 func New(opts ...Option) *Proxy {
 	p := &Proxy{
@@ -108,18 +153,16 @@ func New(opts ...Option) *Proxy {
 	}
 
 	if p.transport == nil {
-		p.transport = &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     90 * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-		}
+		p.transport = newDefaultTransport()
 	}
 
 	return p
+}
+
+// Transport returns the proxy's HTTP transport. Exposed for configuration
+// assertions in tests.
+func (p *Proxy) Transport() http.RoundTripper {
+	return p.transport
 }
 
 // UpdateBackends updates the backend targets for the proxy.

@@ -11,6 +11,27 @@ import (
 // subsystemAPIKey is the Prometheus subsystem name for API key metrics.
 const subsystemAPIKey = "apikey"
 
+// Label values for the validation metrics "status" label.
+const (
+	statusSuccess = "success"
+	statusError   = "error"
+)
+
+// Label values for the validation metrics "reason" label.
+//
+// reasonStoreError is recorded when the backing store fails (for example a
+// Vault transport or permission error), as opposed to reasonNotFound which
+// is recorded only for genuine misses.
+const (
+	reasonValid      = "valid"
+	reasonEmptyKey   = "empty_key"
+	reasonNotFound   = "not_found"
+	reasonStoreError = "store_error"
+	reasonInvalid    = "invalid"
+	reasonDisabled   = "disabled"
+	reasonExpired    = "expired"
+)
+
 // Metrics holds Prometheus metrics for API key operations.
 type Metrics struct {
 	validationTotal    *prometheus.CounterVec
@@ -39,10 +60,10 @@ func GetSharedMetrics() *Metrics {
 // least once. This method is idempotent and safe to call multiple times.
 func (m *Metrics) Init() {
 	reasons := []string{
-		"valid", "empty_key", "not_found",
-		"store_error", "invalid", "disabled", "expired",
+		reasonValid, reasonEmptyKey, reasonNotFound,
+		reasonStoreError, reasonInvalid, reasonDisabled, reasonExpired,
 	}
-	for _, status := range []string{"success", "error"} {
+	for _, status := range []string{statusSuccess, statusError} {
 		for _, reason := range reasons {
 			m.validationTotal.WithLabelValues(status, reason)
 			m.validationDuration.WithLabelValues(status, reason)

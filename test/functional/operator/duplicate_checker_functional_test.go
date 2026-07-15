@@ -204,7 +204,7 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, avapigwv1alpha1.AddToScheme(scheme))
 
-	t.Run("APIRoute prefix conflicts with GraphQLRoute exact path", func(t *testing.T) {
+	t.Run("APIRoute exact path conflicts with GraphQLRoute exact path", func(t *testing.T) {
 		t.Parallel()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -238,9 +238,68 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		dc := webhook.NewDuplicateCheckerWithContext(ctx, fakeClient)
 		defer dc.Stop()
 
+		// Identical exact path → identical specificity → genuine
+		// cross-kind duplicate.
 		apiRoute := &avapigwv1alpha1.APIRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "api-route-conflict",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{Exact: "/graphql"},
+					},
+				},
+			},
+		}
+
+		err := dc.CheckAPIRouteCrossConflictsWithGraphQL(ctx, apiRoute)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+		assert.Contains(t, err.Error(), "GraphQLRoute")
+	})
+
+	t.Run("APIRoute prefix coexists with GraphQLRoute exact path", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		existingGraphQL := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-exact-owned",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
+					},
+				},
+				Route: []avapigwv1alpha1.RouteDestination{
+					{
+						Destination: avapigwv1alpha1.Destination{Host: "graphql-backend", Port: 8821},
+						Weight:      100,
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingGraphQL).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(ctx, fakeClient)
+		defer dc.Stop()
+
+		// Exact vs prefix have different specificity: the GraphQL pipeline
+		// exclusively owns its endpoint path while the APIRoute prefix
+		// serves everything else — deterministic, not an admission conflict.
+		apiRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-prefix-coexists",
 				Namespace: "default",
 			},
 			Spec: avapigwv1alpha1.APIRouteSpec{
@@ -253,12 +312,11 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		}
 
 		err := dc.CheckAPIRouteCrossConflictsWithGraphQL(ctx, apiRoute)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "path conflict")
-		assert.Contains(t, err.Error(), "GraphQLRoute")
+		assert.NoError(t, err,
+			"exact-vs-prefix cross-kind paths must coexist (data plane splits deterministically)")
 	})
 
-	t.Run("GraphQLRoute exact path conflicts with APIRoute prefix", func(t *testing.T) {
+	t.Run("GraphQLRoute identical prefix conflicts with APIRoute prefix", func(t *testing.T) {
 		t.Parallel()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -286,9 +344,62 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		dc := webhook.NewDuplicateCheckerWithContext(ctx, fakeClient)
 		defer dc.Stop()
 
+		// Identical prefix → identical specificity → genuine cross-kind
+		// duplicate in the GraphQLRoute→APIRoute check direction.
 		graphqlRoute := &avapigwv1alpha1.GraphQLRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "graphql-route-conflict",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{
+						Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"},
+					},
+				},
+			},
+		}
+
+		err := dc.CheckGraphQLRouteCrossConflictsWithAPIRoute(ctx, graphqlRoute)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "path conflict")
+		assert.Contains(t, err.Error(), "APIRoute")
+	})
+
+	t.Run("GraphQLRoute exact path under APIRoute prefix coexists", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		existingAPIRoute := &avapigwv1alpha1.APIRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "api-route-prefix-owner",
+				Namespace: "default",
+			},
+			Spec: avapigwv1alpha1.APIRouteSpec{
+				Match: []avapigwv1alpha1.RouteMatch{
+					{
+						URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"},
+					},
+				},
+			},
+		}
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingAPIRoute).
+			Build()
+
+		dc := webhook.NewDuplicateCheckerWithContext(ctx, fakeClient)
+		defer dc.Stop()
+
+		// A GraphQL endpoint nested under a REST prefix has different
+		// specificity: the GraphQL pipeline owns exactly /api/graphql and
+		// the APIRoute serves the rest of /api — no admission conflict.
+		graphqlRoute := &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "graphql-route-nested",
 				Namespace: "default",
 			},
 			Spec: avapigwv1alpha1.GraphQLRouteSpec{
@@ -301,9 +412,8 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		}
 
 		err := dc.CheckGraphQLRouteCrossConflictsWithAPIRoute(ctx, graphqlRoute)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "path conflict")
-		assert.Contains(t, err.Error(), "APIRoute")
+		assert.NoError(t, err,
+			"GraphQL exact path under a REST prefix must coexist (different specificity)")
 	})
 
 	t.Run("no conflict with different paths", func(t *testing.T) {
@@ -396,7 +506,8 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		)
 		defer dc.Stop()
 
-		// APIRoute in namespace "ns-b" with conflicting path
+		// APIRoute in namespace "ns-b" with an identical exact path — a
+		// genuine cross-kind duplicate that cluster scope must surface.
 		apiRoute := &avapigwv1alpha1.APIRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "api-route-ns-b",
@@ -405,7 +516,7 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 			Spec: avapigwv1alpha1.APIRouteSpec{
 				Match: []avapigwv1alpha1.RouteMatch{
 					{
-						URI: &avapigwv1alpha1.URIMatch{Prefix: "/graphql"},
+						URI: &avapigwv1alpha1.URIMatch{Exact: "/graphql"},
 					},
 				},
 			},
@@ -454,7 +565,9 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		)
 		defer dc.Stop()
 
-		// APIRoute in namespace "ns-b" — different namespace, so no conflict
+		// APIRoute in namespace "ns-b" with the same exact path — would be a
+		// duplicate under cluster scope, but namespace scoping must not see
+		// the GraphQLRoute in "ns-a".
 		apiRoute := &avapigwv1alpha1.APIRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "api-route-ns-b",
@@ -463,7 +576,7 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 			Spec: avapigwv1alpha1.APIRouteSpec{
 				Match: []avapigwv1alpha1.RouteMatch{
 					{
-						URI: &avapigwv1alpha1.URIMatch{Prefix: "/graphql"},
+						URI: &avapigwv1alpha1.URIMatch{Exact: "/graphql"},
 					},
 				},
 			},
@@ -516,7 +629,7 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("catch-all APIRoute conflicts with any GraphQLRoute", func(t *testing.T) {
+	t.Run("catch-all APIRoute coexists with any GraphQLRoute", func(t *testing.T) {
 		t.Parallel()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -550,7 +663,9 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		dc := webhook.NewDuplicateCheckerWithContext(ctx, fakeClient)
 		defer dc.Stop()
 
-		// APIRoute with empty match (catch-all)
+		// APIRoute with empty match (catch-all). A match-less catch-all has
+		// lower specificity than any concrete GraphQL path and the data
+		// plane splits the two deterministically — never a conflict.
 		catchAllAPIRoute := &avapigwv1alpha1.APIRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "api-route-catch-all",
@@ -562,8 +677,8 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		}
 
 		err := dc.CheckAPIRouteCrossConflictsWithGraphQL(ctx, catchAllAPIRoute)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "path conflict")
+		assert.NoError(t, err,
+			"catch-all APIRoute must coexist with GraphQLRoutes (GraphQL owns only its endpoint path)")
 	})
 
 	t.Run("with cache enabled detects conflicts", func(t *testing.T) {
@@ -603,6 +718,8 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 		)
 		defer dc.Stop()
 
+		// Identical exact path → genuine duplicate, detectable through the
+		// cache-backed lookup path as well.
 		apiRoute := &avapigwv1alpha1.APIRoute{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "api-route-cached-conflict",
@@ -611,7 +728,7 @@ func TestFunctional_DuplicateChecker_CrossCRDRouteConflict(t *testing.T) {
 			Spec: avapigwv1alpha1.APIRouteSpec{
 				Match: []avapigwv1alpha1.RouteMatch{
 					{
-						URI: &avapigwv1alpha1.URIMatch{Prefix: "/graphql"},
+						URI: &avapigwv1alpha1.URIMatch{Exact: "/graphql"},
 					},
 				},
 			},

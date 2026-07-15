@@ -94,6 +94,10 @@ func runOperatorMode(flags cliFlags, logger observability.Logger) {
 		operator.WithMetricsRegistry(app.metrics.Registry()),
 		operator.WithConfigUpdateHandler(opApp.configHandler.HandleUpdate),
 		operator.WithSnapshotHandler(opApp.configHandler.HandleSnapshot),
+		// Arm the post-reconnect snapshot regression window so partial
+		// snapshots from a restarting operator cannot shrink the running
+		// route set (see ConfigHandler.MarkReconnected).
+		operator.WithReconnectListener(opApp.configHandler.MarkReconnected),
 	)
 	if err != nil {
 		fatalWithSync(logger, "failed to create operator client", observability.Error(err))

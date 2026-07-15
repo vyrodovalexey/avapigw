@@ -159,9 +159,22 @@ spec:
       vaultPath: secret/backend-auth/basic
       usernameKey: username
       passwordKey: password
+  # Response cache backed by the docker-compose Redis Sentinel cluster
+  # (host.docker.internal:26379-26381, master "mymaster", master password "password").
   cache:
     enabled: true
     ttl: 60s
+    type: redis
+    keyComponents:
+      - path
+      - query
+    sentinel:
+      masterName: mymaster
+      sentinelAddrs:
+        - host.docker.internal:26379
+        - host.docker.internal:26380
+        - host.docker.internal:26381
+      password: password
 
 ---
 # =============================================================================
@@ -327,8 +340,12 @@ spec:
       Content-Type: application/json
 
 ---
-# Route 2: Items API with Redis Sentinel Cache and Rate Limiting
-# Features: 50/50 load balancing, Redis Sentinel cache (TTL 60s), rate limit (50 RPS, burst 100)
+# Route 2: Items API with response cache and Rate Limiting
+# Features: 50/50 load balancing, route-level response cache (TTL 60s),
+#           rate limit (50 RPS, burst 100).
+# NOTE: Served on the dedicated /api/v1/cache/ prefix (with rewrite) because
+# /api/v1/items is intentionally owned by do04-aggregate-route (higher match
+# priority) for the aggregate fan-out e2e scenarios.
 apiVersion: avapigw.io/v1alpha1
 kind: APIRoute
 metadata:
@@ -337,7 +354,7 @@ metadata:
 spec:
   match:
     - uri:
-        prefix: /api/v1/items
+        prefix: /api/v1/cache/
       methods:
         - GET
         - POST
@@ -352,7 +369,13 @@ spec:
         host: host.docker.internal
         port: 8802
       weight: 50
+  rewrite:
+    uri: /api/v1/items
   timeout: 30s
+  # Route-level response cache backed by the docker-compose Redis Sentinel
+  # cluster (reachable from pods at host.docker.internal:26379-26381, master
+  # "mymaster"). The master password is resolved from Vault KV
+  # (secret/backend-auth/redis, key "password") via the gateway's K8s auth.
   cache:
     enabled: true
     ttl: 60s
@@ -361,11 +384,65 @@ spec:
       - method
       - query
     staleWhileRevalidate: 30s
+    type: redis
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        passwordVaultPath: secret/backend-auth/redis
+      keyPrefix: "k8s:cache:"
+      ttlJitter: 0.2
+      hashKeys: false
   rateLimit:
     enabled: true
     requestsPerSecond: 50
     burst: 100
     perClient: false
+
+---
+# Route 2b: Items API with DISTRIBUTED rate limiting (Redis Sentinel store)
+# Features: rateLimit.store=redis shares one token bucket across gateway
+# replicas through the sentinel-managed master (5 rps, burst 5, per-route
+# scope). failOpen=true keeps traffic flowing if Redis becomes unavailable.
+# Served on the dedicated /api/v1/rl/ prefix (with rewrite) so burst tests
+# do not interfere with the cached route above.
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: items-api-redis-rl
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/rl/
+      methods:
+        - GET
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5
+    burst: 5
+    perClient: false
+    store: redis
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        passwordVaultPath: secret/backend-auth/redis
+      keyPrefix: "k8s:rl:"
+      failOpen: true
 
 ---
 # Route 3: Keycloak JWT Authentication
@@ -1187,7 +1264,9 @@ spec:
 # GRAPHQL BACKENDS
 # =============================================================================
 
-# GraphQLBackend 1 - REST backend on port 8801 (serves /graphql, no auth)
+# GraphQLBackend 1 - in-cluster GraphQL mock (no auth)
+# NOTE: The docker-compose REST backends do NOT serve /graphql; GraphQL routes
+# are verified against the in-cluster mock from test/k8s/graphql-mock.yaml.
 apiVersion: avapigw.io/v1alpha1
 kind: GraphQLBackend
 metadata:
@@ -1195,8 +1274,8 @@ metadata:
   namespace: avapigw-test
 spec:
   hosts:
-    - address: host.docker.internal
-      port: 8801
+    - address: graphql-mock.avapigw-test.svc.cluster.local
+      port: 8080
       weight: 1
   healthCheck:
     path: /health
@@ -1208,7 +1287,7 @@ spec:
     algorithm: roundRobin
 
 ---
-# GraphQLBackend 2 - REST backend on port 8802 (serves /graphql, no auth)
+# GraphQLBackend 2 - in-cluster GraphQL mock (no auth, LB pair for 50/50 tests)
 apiVersion: avapigw.io/v1alpha1
 kind: GraphQLBackend
 metadata:
@@ -1216,8 +1295,8 @@ metadata:
   namespace: avapigw-test
 spec:
   hosts:
-    - address: host.docker.internal
-      port: 8802
+    - address: graphql-mock.avapigw-test.svc.cluster.local
+      port: 8080
       weight: 1
   healthCheck:
     path: /health
@@ -1247,11 +1326,11 @@ spec:
   route:
     - destination:
         host: graphql-backend-noauth-1
-        port: 8801
+        port: 8080
       weight: 50
     - destination:
         host: graphql-backend-noauth-2
-        port: 8802
+        port: 8080
       weight: 50
   timeout: 30s
   depthLimit: 10
@@ -1291,7 +1370,9 @@ spec:
     enabled: true
     specConfigMapRef:
       name: items-openapi-spec
-      key: openapi.yaml
+      # Key must match the canonical ConfigMap source:
+      # test/performance/operator/openapi-spec-configmap.yaml (data key: items-api.yaml)
+      key: items-api.yaml
     failOnError: true
     validateRequestBody: true
     validateRequestParams: true

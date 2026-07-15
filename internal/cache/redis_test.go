@@ -200,7 +200,7 @@ func TestNewRedisCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, err := newRedisCache(tt.cfg, observability.NopLogger(), nil)
+			cache, err := newRedisCache(context.Background(), tt.cfg, observability.NopLogger(), nil)
 
 			if tt.expectErr {
 				assert.Error(t, err)
@@ -230,7 +230,7 @@ func TestRedisCache_Get(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -290,7 +290,7 @@ func TestRedisCache_Get_ContextCanceled(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -315,7 +315,7 @@ func TestRedisCache_Set(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -373,7 +373,7 @@ func TestRedisCache_Set_ContextCanceled(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -398,7 +398,7 @@ func TestRedisCache_Delete(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -434,7 +434,7 @@ func TestRedisCache_Delete_ContextCanceled(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -459,7 +459,7 @@ func TestRedisCache_Exists(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -493,7 +493,7 @@ func TestRedisCache_Exists_ContextCanceled(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -518,7 +518,7 @@ func TestRedisCache_Stats(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -554,7 +554,7 @@ func TestRedisCache_GetWithTTL(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -589,7 +589,7 @@ func TestRedisCache_GetWithTTL_ContextCanceled(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -614,7 +614,7 @@ func TestRedisCache_SetNX(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -649,7 +649,7 @@ func TestRedisCache_SetNX_ZeroTTL(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -674,7 +674,7 @@ func TestRedisCache_SetNX_ContextCanceled(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -699,7 +699,7 @@ func TestRedisCache_Expire(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -732,7 +732,7 @@ func TestRedisCache_Expire_ContextCanceled(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -756,7 +756,7 @@ func TestRedisCache_Close(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	err = cache.Close()
@@ -777,7 +777,7 @@ func TestRedisCache_DefaultKeyPrefix(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 	defer func() { _ = cache.Close() }()
 
@@ -822,19 +822,24 @@ func TestIsRetryableError(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "generic error is retryable",
+			name:     "connection refused text is retryable",
 			err:      errors.New("connection refused"),
 			expected: true,
 		},
 		{
-			name:     "network error is retryable",
+			name:     "dial error text is retryable",
 			err:      errors.New("dial tcp: connection refused"),
 			expected: true,
 		},
 		{
-			name:     "timeout error is retryable",
+			name:     "i/o timeout text is retryable",
 			err:      errors.New("i/o timeout"),
 			expected: true,
+		},
+		{
+			name:     "unrelated generic error is not retryable",
+			err:      errors.New("some unrelated failure"),
+			expected: false,
 		},
 	}
 
@@ -908,7 +913,7 @@ func TestNewRedisCache_DispatchesToSentinel(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err)
 	assert.Nil(t, cache)
 	assert.Contains(t, err.Error(), "at least one sentinel address is required")
@@ -927,7 +932,7 @@ func TestNewRedisCache_DispatchesToStandalone(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, cache)
 	if cache != nil {
@@ -946,7 +951,7 @@ func TestNewRedisCache_ErrorWhenNeitherURLNorSentinel(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err)
 	assert.Nil(t, cache)
 	assert.Contains(t, err.Error(), "redis URL is required for standalone mode")
@@ -959,7 +964,7 @@ func TestNewRedisCache_NilRedisConfig(t *testing.T) {
 		Redis:   nil,
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err)
 	assert.Nil(t, cache)
 	assert.Contains(t, err.Error(), "redis configuration is required")
@@ -978,7 +983,7 @@ func TestNewRedisSentinelCache_NoAddresses(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisSentinelCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisSentinelCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err)
 	assert.Nil(t, cache)
 	assert.Contains(t, err.Error(), "at least one sentinel address is required")
@@ -997,7 +1002,7 @@ func TestNewRedisSentinelCache_NilAddresses(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisSentinelCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisSentinelCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err)
 	assert.Nil(t, cache)
 	assert.Contains(t, err.Error(), "at least one sentinel address is required")
@@ -1018,7 +1023,7 @@ func TestNewRedisSentinelCache_ConnectionFailed(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisSentinelCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisSentinelCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err)
 	assert.Nil(t, cache)
 	assert.Contains(t, err.Error(), "redis sentinel connection failed")
@@ -1047,7 +1052,7 @@ func TestNewRedisSentinelCache_WithPoolAndTimeoutOverrides(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisSentinelCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisSentinelCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err) // Can't connect to sentinel
 	assert.Nil(t, cache)
 }
@@ -1070,7 +1075,7 @@ func TestNewRedisSentinelCache_WithTLS(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisSentinelCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisSentinelCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err) // Can't connect
 	assert.Nil(t, cache)
 }
@@ -1091,7 +1096,7 @@ func TestNewRedisCache_SentinelTakesPrecedenceOverURL(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.Error(t, err)
 	assert.Nil(t, cache)
 	assert.Contains(t, err.Error(), "at least one sentinel address is required")
@@ -1114,7 +1119,7 @@ func TestNewRedisCache_SentinelWithEmptyMasterNameFallsToStandalone(t *testing.T
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, cache)
 	if cache != nil {
@@ -1247,7 +1252,7 @@ func TestNewRedisStandaloneCache_WithTLS(t *testing.T) {
 	}
 
 	// This may or may not fail depending on miniredis behavior with TLS
-	cache, err := newRedisStandaloneCache(cfg, observability.NopLogger())
+	cache, err := newRedisStandaloneCache(context.Background(), cfg, observability.NopLogger())
 	if err != nil {
 		assert.Nil(t, cache)
 	} else if cache != nil {
@@ -1539,7 +1544,7 @@ func TestResolveRedisPasswords_NoVaultPaths(t *testing.T) {
 	}
 
 	err := resolveRedisPasswords(
-		cfg, nil, observability.NopLogger(),
+		context.Background(), cfg, nil, observability.NopLogger(),
 	)
 	assert.NoError(t, err)
 	assert.Equal(t, "redis://localhost:6379", cfg.URL)
@@ -1554,7 +1559,7 @@ func TestResolveRedisPasswords_NilVaultClient(t *testing.T) {
 	}
 
 	err := resolveRedisPasswords(
-		cfg, nil, observability.NopLogger(),
+		context.Background(), cfg, nil, observability.NopLogger(),
 	)
 	assert.NoError(t, err,
 		"nil vault client should return nil error")
@@ -1571,7 +1576,7 @@ func TestResolveRedisPasswords_DisabledVaultClient(t *testing.T) {
 	client := &mockVaultClient{enabled: false, kv: nil}
 
 	err := resolveRedisPasswords(
-		cfg, client, observability.NopLogger(),
+		context.Background(), cfg, client, observability.NopLogger(),
 	)
 	assert.NoError(t, err,
 		"disabled vault client should return nil error")
@@ -1595,7 +1600,7 @@ func TestResolveRedisPasswords_StandalonePasswordResolved(t *testing.T) {
 	client := &mockVaultClient{enabled: true, kv: kvClient}
 
 	err := resolveRedisPasswords(
-		cfg, client, observability.NopLogger(),
+		context.Background(), cfg, client, observability.NopLogger(),
 	)
 	require.NoError(t, err)
 	assert.Contains(t, cfg.URL, "s3cret",
@@ -1622,7 +1627,7 @@ func TestResolveRedisPasswords_SentinelPasswordResolved(t *testing.T) {
 	client := &mockVaultClient{enabled: true, kv: kvClient}
 
 	err := resolveRedisPasswords(
-		cfg, client, observability.NopLogger(),
+		context.Background(), cfg, client, observability.NopLogger(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "master-pw", cfg.Sentinel.Password)
@@ -1648,7 +1653,7 @@ func TestResolveRedisPasswords_SentinelSentinelPasswordResolved(t *testing.T) {
 	client := &mockVaultClient{enabled: true, kv: kvClient}
 
 	err := resolveRedisPasswords(
-		cfg, client, observability.NopLogger(),
+		context.Background(), cfg, client, observability.NopLogger(),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "sentinel-pw", cfg.Sentinel.SentinelPassword)
@@ -1668,7 +1673,7 @@ func TestResolveRedisPasswords_VaultReadError(t *testing.T) {
 	client := &mockVaultClient{enabled: true, kv: kvClient}
 
 	err := resolveRedisPasswords(
-		cfg, client, observability.NopLogger(),
+		context.Background(), cfg, client, observability.NopLogger(),
 	)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to read redis password")
@@ -1692,7 +1697,7 @@ func TestResolveRedisPasswords_MissingPasswordKey(t *testing.T) {
 	client := &mockVaultClient{enabled: true, kv: kvClient}
 
 	err := resolveRedisPasswords(
-		cfg, client, observability.NopLogger(),
+		context.Background(), cfg, client, observability.NopLogger(),
 	)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(),
@@ -1774,7 +1779,7 @@ func TestReadVaultPassword(t *testing.T) {
 				kv:      kvClient,
 			}
 
-			pw, err := readVaultPassword(client, tt.vaultPath)
+			pw, err := readVaultPassword(context.Background(), client, tt.vaultPath)
 
 			if tt.expectErr {
 				assert.Error(t, err)

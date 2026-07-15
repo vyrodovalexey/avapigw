@@ -106,8 +106,10 @@ metadata:
     component: graphql-backend
 spec:
   hosts:
-    - address: host.docker.internal
-      port: 8801
+    # The docker-compose REST backends do NOT serve /graphql; use the
+    # in-cluster GraphQL mock (test/k8s/graphql-mock.yaml) instead.
+    - address: graphql-mock.avapigw-test.svc.cluster.local
+      port: 8080
       weight: 1
   healthCheck:
     path: /health
@@ -250,9 +252,11 @@ spec:
     - path:
         exact: /graphql
       operationType: query
+  # GraphQL routes reference backends by NAME (resolved via GraphQLBackend CRDs),
+  # not a literal host:port. do04-graphql-backend-1 -> host.docker.internal:8801.
   route:
     - destination:
-        host: host.docker.internal
-        port: 8801
+        host: do04-graphql-backend-1
+        port: 8080
       weight: 100
   timeout: 30s

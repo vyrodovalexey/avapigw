@@ -2,11 +2,8 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -27,12 +24,6 @@ import (
 	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
-
-// jsonKeyErrors is the JSON key for error responses.
-const jsonKeyErrors = "errors"
-
-// jsonKeyMessage is the JSON key for message fields.
-const jsonKeyMessage = "message"
 
 // configField is an atomic pointer for lock-free config access.
 // It eliminates the race condition where readers calling Config()
@@ -106,9 +97,11 @@ type Gateway struct {
 	grpcAggregator      grpcproxy.GRPCAggregateHandler
 
 	// GraphQL components
-	graphqlRouter     *graphqlrouter.Router
-	graphqlProxy      *graphqlproxy.Proxy
-	graphqlAggregator GraphQLAggregateHandler
+	graphqlRouter          *graphqlrouter.Router
+	graphqlProxy           *graphqlproxy.Proxy
+	graphqlAggregator      GraphQLAggregateHandler
+	graphqlRouteMiddleware GraphQLRouteMiddleware
+	graphqlHandler         *GraphQLHandler
 }
 
 // GraphQLAggregateHandler executes a GraphQL aggregate (fan-out) request for a
@@ -243,6 +236,16 @@ func WithGraphQLAggregateHandler(h GraphQLAggregateHandler) Option {
 	}
 }
 
+// WithGraphQLRouteMiddleware sets the per-route middleware applier for the
+// gateway-registered GraphQL endpoint, so GraphQL routes enforce the same
+// route-level middleware (auth, authz, rate limiting, CORS, security
+// headers, cache, header manipulation) as HTTP routes.
+func WithGraphQLRouteMiddleware(rm GraphQLRouteMiddleware) Option {
+	return func(g *Gateway) {
+		g.graphqlRouteMiddleware = rm
+	}
+}
+
 // New creates a new Gateway instance.
 func New(cfg *config.GatewayConfig, opts ...Option) (*Gateway, error) {
 	if cfg == nil {
@@ -282,7 +285,7 @@ func (g *Gateway) Start(ctx context.Context) error {
 	g.setupRoutes()
 
 	// Create listeners
-	if err := g.createListeners(); err != nil { //nolint:contextcheck // Listener creation doesn't need context
+	if err := g.createListeners(ctx); err != nil {
 		g.state.Store(int32(StateStopped))
 		return fmt.Errorf("failed to create listeners: %w", err)
 	}
@@ -338,6 +341,12 @@ func (g *Gateway) Stop(ctx context.Context) error {
 
 	// Stop all listeners
 	g.stopListeners(ctx)
+
+	// Close active GraphQL subscription relays owned by the gateway's
+	// embedded GraphQL handler (production wiring owns its own handler).
+	if g.graphqlHandler != nil {
+		g.graphqlHandler.Close()
+	}
 
 	g.state.Store(int32(StateStopped))
 
@@ -417,22 +426,56 @@ const defaultGraphQLMaxBodySize = 10 * 1024 * 1024
 func (g *Gateway) setupRoutes() {
 	g.engine.Use(gin.Recovery())
 
-	// Register GraphQL handler if router and proxy are configured.
-	// This must be registered BEFORE the NoRoute catch-all so that
-	// /graphql requests are handled by the GraphQL handler, not the
-	// HTTP reverse proxy.
+	// Register the GraphQL handler if router and proxy are configured
+	// directly on the gateway (embedded mode). This must be registered
+	// BEFORE the NoRoute catch-all so that GraphQL endpoint requests are
+	// handled by the GraphQL pipeline, not the HTTP reverse proxy.
+	//
+	// NOTE: production wiring (cmd/gateway) does NOT use this path — it
+	// composes the same GraphQLHandler inside the global middleware chain
+	// via NewGraphQLPathDispatcher so /graphql passes global middleware.
 	if g.graphqlRouter != nil && g.graphqlProxy != nil {
-		path := g.getGraphQLPath()
-		g.engine.POST(path, g.handleGraphQL)
-		g.engine.GET(path, g.handleGraphQL)
-		g.logger.Info("GraphQL handler registered",
-			observability.String("path", path),
-		)
+		handler, err := g.buildGraphQLHandler()
+		if err != nil {
+			g.logger.Error("failed to build GraphQL handler; GraphQL endpoint not registered",
+				observability.Error(err),
+			)
+		} else {
+			g.graphqlHandler = handler
+			path := g.getGraphQLPath()
+			ginHandler := gin.WrapH(handler)
+			g.engine.POST(path, ginHandler)
+			g.engine.GET(path, ginHandler)
+			g.engine.OPTIONS(path, ginHandler)
+			g.logger.Info("GraphQL handler registered",
+				observability.String("path", path),
+			)
+		}
 	}
 
 	if g.routeHandler != nil {
 		g.engine.NoRoute(gin.WrapH(g.routeHandler))
 	}
+}
+
+// buildGraphQLHandler constructs the shared GraphQL endpoint handler from
+// the gateway's configured GraphQL components.
+func (g *Gateway) buildGraphQLHandler() (*GraphQLHandler, error) {
+	opts := []GraphQLHandlerOption{
+		WithGraphQLHandlerLogger(g.logger),
+		WithGraphQLHandlerMaxBodySize(g.getGraphQLMaxBodySize()),
+	}
+	if g.graphqlAggregator != nil {
+		opts = append(opts, WithGraphQLHandlerAggregator(g.graphqlAggregator))
+	}
+	if g.graphqlRouteMiddleware != nil {
+		opts = append(opts, WithGraphQLHandlerRouteMiddleware(g.graphqlRouteMiddleware))
+	}
+	cfg := g.config.Load()
+	if cfg.Spec.WebSocket != nil && len(cfg.Spec.WebSocket.AllowedOrigins) > 0 {
+		opts = append(opts, WithGraphQLHandlerSubscriptionOrigins(cfg.Spec.WebSocket.AllowedOrigins))
+	}
+	return NewGraphQLHandler(g.graphqlRouter, g.graphqlProxy, opts...)
 }
 
 // getGraphQLPath returns the configured GraphQL endpoint path or the default "/graphql".
@@ -453,134 +496,33 @@ func (g *Gateway) getGraphQLMaxBodySize() int64 {
 	return defaultGraphQLMaxBodySize
 }
 
-// handleGraphQL handles GraphQL requests by parsing the GraphQL body,
-// matching against configured routes, and forwarding to the appropriate backend.
-func (g *Gateway) handleGraphQL(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	// Read body with size limit to prevent DoS via oversized payloads.
-	maxSize := g.getGraphQLMaxBodySize()
-	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, maxSize+1))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			jsonKeyErrors: []gin.H{{jsonKeyMessage: "failed to read request body"}},
-		})
-		return
-	}
-	if int64(len(bodyBytes)) > maxSize {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-			jsonKeyErrors: []gin.H{{jsonKeyMessage: "request body too large"}},
-		})
-		return
-	}
-
-	// Parse GraphQL request
-	var gqlReq graphqlrouter.GraphQLRequest
-	if err := json.Unmarshal(bodyBytes, &gqlReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			jsonKeyErrors: []gin.H{{jsonKeyMessage: fmt.Sprintf("invalid GraphQL request: %s", err.Error())}},
-		})
-		return
-	}
-	if gqlReq.Query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			jsonKeyErrors: []gin.H{{jsonKeyMessage: "GraphQL query is empty"}},
-		})
-		return
-	}
-
-	// Restore body for proxy forwarding (single restore, after parsing)
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-	// Match route
-	match := g.graphqlRouter.Match(c.Request, &gqlReq)
-	if match == nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			jsonKeyErrors: []gin.H{{jsonKeyMessage: "no matching GraphQL route"}},
-		})
-		return
-	}
-
-	// Handle aggregate (fan-out) mirroring when configured and enabled for the
-	// matched route. The aggregate handler deep-merges data/extensions and
-	// concatenates errors across all targets.
-	if g.handleGraphQLAggregate(c, match) {
-		return
-	}
-
-	// Forward to backend
-	resp, err := g.graphqlProxy.Forward(ctx, match.BackendName, c.Request)
-	if err != nil {
-		g.logger.Error("GraphQL proxy error",
-			observability.String("backend", match.BackendName),
-			observability.Error(err),
-		)
-		c.JSON(http.StatusBadGateway, gin.H{
-			jsonKeyErrors: []gin.H{{jsonKeyMessage: fmt.Sprintf("backend error: %s", err.Error())}},
-		})
-		return
-	}
-	defer resp.Body.Close()
-
-	// Copy response headers using Add to preserve multi-value headers (e.g., Set-Cookie).
-	for key, values := range resp.Header {
-		for _, value := range values {
-			c.Writer.Header().Add(key, value)
-		}
-	}
-	c.Status(resp.StatusCode)
-	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
-		g.logger.Debug("failed to copy response body",
-			observability.Error(err),
-			observability.String("backend", match.BackendName),
-		)
-	}
-}
-
-// handleGraphQLAggregate fans the GraphQL request out to multiple backends when
-// the matched route declares an enabled aggregate config and a GraphQL aggregate
-// handler is injected. It returns true when the request was handled (success or
-// terminal error), false when aggregation does not apply and normal forwarding
-// must proceed.
-func (g *Gateway) handleGraphQLAggregate(c *gin.Context, match *graphqlrouter.MatchResult) bool {
-	if g.graphqlAggregator == nil || match == nil || match.Route == nil {
-		return false
-	}
-	if !match.Route.Aggregate.IsEnabled() {
-		return false
-	}
-
-	if err := g.graphqlAggregator.ServeAggregate(c.Writer, c.Request, match.Route.Aggregate); err != nil {
-		g.logger.Warn("GraphQL aggregate fan-out failed",
-			observability.String("route", match.Route.Name),
-			observability.Error(err),
-		)
-		c.JSON(http.StatusBadGateway, gin.H{
-			jsonKeyErrors: []gin.H{{jsonKeyMessage: fmt.Sprintf("aggregate error: %s", err.Error())}},
-		})
-	}
-	return true
-}
-
 // createListeners creates listeners from configuration.
-// If any listener fails to create, all previously created listeners are cleaned up.
-func (g *Gateway) createListeners() error {
+// If any listener fails to create, all previously created listeners are
+// cleaned up using the caller's context so cancellation propagates into the
+// rollback path.
+func (g *Gateway) createListeners(ctx context.Context) error {
 	cfg := g.config.Load()
 	listeners := make([]*Listener, 0, len(cfg.Spec.Listeners))
 	grpcListeners := make([]*GRPCListener, 0)
 
+	// The listener constructors below are a context-free chain by design
+	// (they build state; TLS manager construction is a documented lifecycle
+	// root). ctx is threaded through createListeners solely so the rollback
+	// path (cleanupListenersOnError) honors caller cancellation.
 	for _, listenerCfg := range cfg.Spec.Listeners {
 		if listenerCfg.Protocol == config.ProtocolGRPC {
+			//nolint:contextcheck // constructor chain is context-free by design
 			grpcListener, err := g.createGRPCListener(listenerCfg, cfg.Spec.GRPCRoutes)
 			if err != nil {
-				g.cleanupListenersOnError(listeners, grpcListeners)
+				g.cleanupListenersOnError(ctx, listeners, grpcListeners)
 				return err
 			}
 			grpcListeners = append(grpcListeners, grpcListener)
 		} else {
+			//nolint:contextcheck // constructor chain is context-free by design
 			listener, err := g.createHTTPListener(listenerCfg)
 			if err != nil {
-				g.cleanupListenersOnError(listeners, grpcListeners)
+				g.cleanupListenersOnError(ctx, listeners, grpcListeners)
 				return err
 			}
 			listeners = append(listeners, listener)
@@ -717,9 +659,12 @@ func (g *Gateway) getOrCreateGRPCMetrics() *grpcmiddleware.GRPCMetrics {
 }
 
 // cleanupListenersOnError closes all already-created listeners when a subsequent creation fails.
-func (g *Gateway) cleanupListenersOnError(listeners []*Listener, grpcListeners []*GRPCListener) {
+// The caller's context is used so that cancellation and deadlines propagate
+// into the listener Stop calls instead of detaching the rollback from the
+// request lifecycle.
+func (g *Gateway) cleanupListenersOnError(ctx context.Context, listeners []*Listener, grpcListeners []*GRPCListener) {
 	for _, l := range listeners {
-		if err := l.Stop(context.Background()); err != nil {
+		if err := l.Stop(ctx); err != nil {
 			g.logger.Error("failed to cleanup listener during rollback",
 				observability.String("name", l.Name()),
 				observability.Error(err),
@@ -727,7 +672,7 @@ func (g *Gateway) cleanupListenersOnError(listeners []*Listener, grpcListeners [
 		}
 	}
 	for _, l := range grpcListeners {
-		if err := l.Stop(context.Background()); err != nil {
+		if err := l.Stop(ctx); err != nil {
 			g.logger.Error("failed to cleanup gRPC listener during rollback",
 				observability.String("name", l.Name()),
 				observability.Error(err),

@@ -23,6 +23,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -384,8 +385,122 @@ func setupOperatorComponents(
 	}
 
 	startGRPCServerBackground(ctx, grpcServer)
+	startStoreSeedingBackground(ctx, grpcServer, mgr)
 
 	return caInjector, nil
+}
+
+// Store seeding constants for the gRPC configuration store readiness gate.
+const (
+	// storeSeedReconcileTimeout bounds the wait for the controllers' initial
+	// reconcile pass to populate the gRPC store after the caches have synced.
+	storeSeedReconcileTimeout = 30 * time.Second
+
+	// storeSeedPollInterval is the poll interval while waiting for the store
+	// to reach the expected resource count.
+	storeSeedPollInterval = 100 * time.Millisecond
+)
+
+// cacheSyncWaiter is the subset of the manager cache used for store seeding.
+// It is satisfied by cache.Cache and can be mocked in tests.
+type cacheSyncWaiter interface {
+	WaitForCacheSync(ctx context.Context) bool
+}
+
+// startStoreSeedingBackground launches a goroutine that marks the gRPC
+// configuration store as seeded once the manager's informer caches have
+// synced and the controllers' initial reconcile pass has populated the store
+// (bounded wait). Until then, the gRPC server parks initial-snapshot RPCs so
+// a gateway connecting right after an operator restart does not receive an
+// empty FULL_SYNC that would wipe its running configuration.
+func startStoreSeedingBackground(ctx context.Context, grpcServer *operatorgrpc.Server, mgr ctrl.Manager) {
+	if grpcServer == nil {
+		return
+	}
+	go seedGRPCStore(ctx, grpcServer, mgr.GetCache(), mgr.GetClient())
+}
+
+// seedGRPCStore waits for cache sync and the initial reconcile pass, then
+// releases the gRPC store readiness gate. The reconcile-pass wait is bounded:
+// on timeout the store is marked seeded anyway (with a logged decision) so
+// gateways are never blocked indefinitely by resources that cannot reconcile.
+func seedGRPCStore(
+	ctx context.Context,
+	grpcServer *operatorgrpc.Server,
+	cacheSync cacheSyncWaiter,
+	reader client.Reader,
+) {
+	if !cacheSync.WaitForCacheSync(ctx) {
+		setupLog.Info("cache sync canceled before gRPC store seeding; skipping seed mark")
+		return
+	}
+
+	expected := countExpectedConfigResources(ctx, reader)
+	reached := waitForStoreCount(ctx, grpcServer, expected)
+
+	grpcServer.MarkStoreSeeded()
+	setupLog.Info("gRPC configuration store marked seeded",
+		"expected_resources", expected,
+		"store_resources", grpcServer.StoreResourceCount(),
+		"initial_reconcile_complete", reached,
+	)
+}
+
+// countExpectedConfigResources counts all avapigw configuration resources
+// visible in the (synced) cache. List errors are logged and treated as zero
+// for that resource type so seeding is never blocked by a transient failure.
+func countExpectedConfigResources(ctx context.Context, reader client.Reader) int {
+	total := 0
+
+	countList := func(name string, list client.ObjectList, lenFn func() int) {
+		if err := reader.List(ctx, list); err != nil {
+			setupLog.Error(err, "failed to list resources for store seeding", "resource", name)
+			return
+		}
+		total += lenFn()
+	}
+
+	apiRoutes := &avapigwv1alpha1.APIRouteList{}
+	countList("APIRoute", apiRoutes, func() int { return len(apiRoutes.Items) })
+	grpcRoutes := &avapigwv1alpha1.GRPCRouteList{}
+	countList("GRPCRoute", grpcRoutes, func() int { return len(grpcRoutes.Items) })
+	graphqlRoutes := &avapigwv1alpha1.GraphQLRouteList{}
+	countList("GraphQLRoute", graphqlRoutes, func() int { return len(graphqlRoutes.Items) })
+	backends := &avapigwv1alpha1.BackendList{}
+	countList("Backend", backends, func() int { return len(backends.Items) })
+	grpcBackends := &avapigwv1alpha1.GRPCBackendList{}
+	countList("GRPCBackend", grpcBackends, func() int { return len(grpcBackends.Items) })
+	graphqlBackends := &avapigwv1alpha1.GraphQLBackendList{}
+	countList("GraphQLBackend", graphqlBackends, func() int { return len(graphqlBackends.Items) })
+
+	return total
+}
+
+// waitForStoreCount polls until the gRPC store holds at least the expected
+// number of resources, the bounded timeout elapses, or the context is
+// canceled. It returns whether the expected count was reached.
+func waitForStoreCount(ctx context.Context, grpcServer *operatorgrpc.Server, expected int) bool {
+	if expected <= 0 {
+		return true
+	}
+
+	deadline := time.NewTimer(storeSeedReconcileTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(storeSeedPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if grpcServer.StoreResourceCount() >= expected {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-ticker.C:
+		}
+	}
 }
 
 // setupTracingIfEnabled sets up tracing if enabled and returns a shutdown function.
@@ -945,6 +1060,11 @@ func setupGRPCServer(ctx context.Context, cfg *Config, certManager cert.Manager)
 	if err != nil {
 		return nil, err
 	}
+	// Arm the store readiness gate: initial-snapshot RPCs are parked (bounded)
+	// until the controllers' initial reconcile pass seeds the store, preventing
+	// empty FULL_SYNC responses right after operator restart (the gate is
+	// released by seedGRPCStore once the manager caches have synced).
+	server.EnableStoreReadinessGate()
 	operatorgrpc.InitServerVecMetrics()
 	return server, nil
 }

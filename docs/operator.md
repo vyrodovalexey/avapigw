@@ -88,12 +88,16 @@ graph TB
 - **Event Recording** - Annotation update failures now record Warning events for better observability
 - **Deterministic Cleanup** - Cleanup operations iterate through resources in sorted order for consistency
 
+**Deterministic Retry Cadence:**
+- **RequeueAfter on Transient Failures** - Reconcilers return `(Result{RequeueAfter}, nil)` for transient failures (reconcile, status update, cleanup) instead of returning the error, giving a deterministic retry cadence rather than controller-runtime's exponential backoff
+
 #### 2. Enhanced Admission Webhooks
 - **Validating Webhooks** - Validate CRD specifications before creation/update
-- **Cross-Route Intersection Prevention** - Prevent path conflicts between APIRoute and GraphQLRoute CRDs
+- **Cross-Route Intersection Prevention** - Prevent path conflicts between APIRoute and GraphQLRoute CRDs (only true duplicates — identical match type and path with overlapping methods — are rejected; exact-vs-prefix and nested prefixes coexist by router precedence)
 - **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations
 - **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
 - **Cross-Reference Validation** - Ensure referenced backends exist
+- **ABAC CEL Compilation** - CEL expressions are validated against the runtime evaluation environment at admission time
 
 **Shared DuplicateChecker Pattern (TASK-007):**
 - **Single Instance** - One shared DuplicateChecker across all webhooks for consistency
@@ -434,6 +438,8 @@ service ConfigurationService {
    - Operator pushes configuration updates in real-time
    - Updates include resource additions, modifications, deletions
    - Full sync capability for recovery scenarios
+   - Configuration pushes cannot be lost while a previous send is in flight:
+     pending updates wake the stream again after the current send completes
 
 3. **Heartbeat Maintenance**
    - Gateway sends periodic heartbeats (default: 30s)
@@ -444,6 +450,22 @@ service ConfigurationService {
    - Gateway acknowledges successful configuration application
    - Reports any errors or application duration
    - Enables operator to track configuration state
+
+### Snapshot Reliability
+
+Two safeguards prevent configuration loss around operator restarts:
+
+- **Store seeding gate (operator side)** — after an operator restart, initial
+  snapshot RPCs wait (bounded) until the configuration store has been seeded
+  from the cluster, so a reconnecting gateway never receives an
+  incomplete/empty snapshot from a cold store. The operator logs
+  `configuration store ready for initial snapshot` when the gate opens.
+- **Last-known-good retention (gateway side)** — a gateway that is already
+  running a non-empty configuration ignores an **empty** snapshot and keeps
+  serving its last-known-good configuration, logging a warning. This
+  deliberately prefers availability over consistency: deleting the *last*
+  remaining CR is not propagated to running gateways until the next
+  non-empty snapshot or a gateway restart.
 
 ### OpenTelemetry Tracing
 

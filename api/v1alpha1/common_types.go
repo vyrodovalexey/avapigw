@@ -235,6 +235,74 @@ type RateLimitConfig struct {
 	// PerClient enables per-client rate limiting.
 	// +optional
 	PerClient bool `json:"perClient,omitempty"`
+
+	// Store is the rate limiter state store (memory, redis).
+	// "memory" keeps token buckets local to each gateway instance;
+	// "redis" shares token buckets across gateway instances through
+	// Redis (standalone or Sentinel) for distributed rate limiting.
+	// +kubebuilder:validation:Enum=memory;redis
+	// +kubebuilder:default=memory
+	// +optional
+	Store string `json:"store,omitempty"`
+
+	// Redis contains Redis connection configuration for the distributed
+	// rate limiter. Required when Store is "redis"; must be omitted otherwise.
+	// +optional
+	Redis *RateLimitRedisSpec `json:"redis,omitempty"`
+}
+
+// RateLimitRedisSpec configures the Redis connection used by the
+// distributed rate limiter. Either URL (standalone) or Sentinel must be
+// configured; the two modes are mutually exclusive.
+type RateLimitRedisSpec struct {
+	// URL is the Redis connection URL for standalone mode.
+	// Format: redis://[user:password@]host:port[/db]
+	// Mutually exclusive with Sentinel configuration.
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// Sentinel configures Redis Sentinel connection for high availability.
+	// Mutually exclusive with standalone Redis URL.
+	// +optional
+	Sentinel *RedisSentinelSpec `json:"sentinel,omitempty"`
+
+	// PoolSize is the maximum number of connections in the pool.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	PoolSize int `json:"poolSize,omitempty"`
+
+	// ConnectTimeout is the timeout for establishing connections.
+	// +optional
+	ConnectTimeout Duration `json:"connectTimeout,omitempty"`
+
+	// ReadTimeout is the timeout for read operations. It also bounds a
+	// single rate limit decision so Redis latency never adds unbounded
+	// delay to requests (default 100ms).
+	// +optional
+	ReadTimeout Duration `json:"readTimeout,omitempty"`
+
+	// WriteTimeout is the timeout for write operations.
+	// +optional
+	WriteTimeout Duration `json:"writeTimeout,omitempty"`
+
+	// KeyPrefix is a prefix added to all rate limiter keys.
+	// +optional
+	KeyPrefix string `json:"keyPrefix,omitempty"`
+
+	// PasswordVaultPath is the Vault path for the Redis password (standalone mode).
+	// The secret should have a "password" key. Format: mount/path.
+	// +optional
+	PasswordVaultPath string `json:"passwordVaultPath,omitempty"`
+
+	// Retry contains retry configuration for the initial connection.
+	// +optional
+	Retry *RedisRetrySpec `json:"retry,omitempty"`
+
+	// FailOpen controls the behavior when Redis is unavailable.
+	// When true (default), requests are allowed through and a failure
+	// metric is incremented; when false, requests are rejected with 429.
+	// +optional
+	FailOpen *bool `json:"failOpen,omitempty"`
 }
 
 // CORSConfig represents CORS configuration.
@@ -917,7 +985,90 @@ type RedisSentinelSpec struct {
 	SentinelPasswordVaultPath string `json:"sentinelPasswordVaultPath,omitempty"`
 }
 
+// RedisCacheSpec configures the Redis backend for route-level caching.
+// Either URL (standalone) or Sentinel must be configured; the two modes
+// are mutually exclusive.
+type RedisCacheSpec struct {
+	// URL is the Redis connection URL for standalone mode.
+	// Format: redis://[user:password@]host:port[/db]
+	// Mutually exclusive with Sentinel configuration.
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// Sentinel configures Redis Sentinel connection for high availability.
+	// Mutually exclusive with standalone Redis URL.
+	// +optional
+	Sentinel *RedisSentinelSpec `json:"sentinel,omitempty"`
+
+	// PoolSize is the maximum number of connections in the pool.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	PoolSize int `json:"poolSize,omitempty"`
+
+	// ConnectTimeout is the timeout for establishing connections.
+	// +optional
+	ConnectTimeout Duration `json:"connectTimeout,omitempty"`
+
+	// ReadTimeout is the timeout for read operations.
+	// +optional
+	ReadTimeout Duration `json:"readTimeout,omitempty"`
+
+	// WriteTimeout is the timeout for write operations.
+	// +optional
+	WriteTimeout Duration `json:"writeTimeout,omitempty"`
+
+	// KeyPrefix is a prefix added to all cache keys.
+	// +optional
+	KeyPrefix string `json:"keyPrefix,omitempty"`
+
+	// TTLJitter is the maximum percentage of jitter to add to TTL values (0.0 to 1.0).
+	// For example, 0.1 means ±10% jitter. Default is 0 (no jitter).
+	// +optional
+	TTLJitter *float64 `json:"ttlJitter,omitempty"`
+
+	// HashKeys when true, SHA256-hashes cache keys before storing in Redis.
+	// This is useful for long keys that might exceed Redis key length limits.
+	// +optional
+	HashKeys *bool `json:"hashKeys,omitempty"`
+
+	// PasswordVaultPath is the Vault path for the Redis password (standalone mode).
+	// The secret should have a "password" key. Format: mount/path.
+	// +optional
+	PasswordVaultPath string `json:"passwordVaultPath,omitempty"`
+
+	// Retry contains retry configuration for the initial connection.
+	// +optional
+	Retry *RedisRetrySpec `json:"retry,omitempty"`
+}
+
+// RedisRetrySpec contains retry configuration for Redis connections.
+type RedisRetrySpec struct {
+	// MaxRetries is the maximum number of retry attempts for the initial
+	// connection. Default is 3.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxRetries int `json:"maxRetries,omitempty"`
+
+	// InitialBackoff is the initial backoff duration between retries.
+	// Default is 100ms.
+	// +optional
+	InitialBackoff Duration `json:"initialBackoff,omitempty"`
+
+	// MaxBackoff is the maximum backoff duration between retries.
+	// Default is 30s.
+	// +optional
+	MaxBackoff Duration `json:"maxBackoff,omitempty"`
+}
+
 // BackendCacheConfig represents backend caching configuration.
+//
+// NOTE: This configuration is currently RESERVED. The gateway data path
+// does not implement backend-level response caching yet; the operator
+// forwards the backend spec to the gateway, which has no corresponding
+// backend cache field and therefore ignores it. Setting it produces an
+// admission warning (not a rejection) so existing manifests keep working.
+// Use route-level caching (APIRoute/GRPCRoute/GraphQLRoute spec.cache)
+// for response caching, including Redis and Redis Sentinel backends.
 type BackendCacheConfig struct {
 	// Enabled enables caching.
 	// +kubebuilder:default=false

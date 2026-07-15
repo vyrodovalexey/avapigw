@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -17,6 +19,15 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	operatorv1alpha1 "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1"
 )
+
+// snapshotRegressionWindow is the post-(re)connect stabilization window
+// during which FULL_SYNC snapshots whose resource count REGRESSES versus the
+// running configuration are deferred instead of applied. Right after an
+// operator restart the store may still be mid-seed, and applying its partial
+// snapshots shrinks the route set (observed live as ~30s of 404s while
+// routes dropped 25→3→11→25). Growing snapshots are always applied, and a
+// genuine shrink is honored once the window has passed.
+const snapshotRegressionWindow = 30 * time.Second
 
 // ConfigApplier is the interface for applying configuration changes.
 type ConfigApplier interface {
@@ -48,6 +59,11 @@ type ConfigHandler struct {
 	logger           observability.Logger
 	tracer           trace.Tracer
 	cacheInvalidator CacheInvalidator
+
+	// reconnectedAt holds the UnixNano timestamp of the most recent operator
+	// (re)connect (see MarkReconnected). Zero means no reconnect was ever
+	// signaled, which disables the snapshot regression window entirely.
+	reconnectedAt atomic.Int64
 
 	// Current state tracking
 	mu              sync.RWMutex
@@ -529,6 +545,48 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 		observability.Int("total_resources", int(snapshot.TotalResources)),
 	)
 
+	// Defensive safeguard: never wipe a non-empty running configuration in
+	// favor of an EMPTY snapshot. An empty FULL_SYNC is almost always the
+	// result of an operator restart whose store has not been re-seeded by the
+	// controllers yet (the proto carries no "intentionally empty" flag to
+	// distinguish the two cases). Keep serving the last-known-good
+	// configuration; the operator pushes a fresh FULL_SYNC as soon as its
+	// store is populated, which is applied normally. Trade-off: deleting the
+	// very last resource in the cluster is also skipped until the next
+	// non-empty snapshot or a gateway restart — a deliberate
+	// availability-over-consistency choice for the data plane.
+	if snapshotIsEmpty(snapshot) && h.hasRunningConfig() {
+		h.logger.Warn("received empty configuration snapshot while running configuration is non-empty; "+
+			"keeping last-known-good configuration",
+			observability.String("version", snapshot.Version),
+			observability.String("checksum", snapshot.Checksum),
+		)
+		span.AddEvent("empty snapshot skipped: last-known-good configuration retained")
+		return nil
+	}
+
+	// Post-reconnect regression guard: right after an operator restart the
+	// operator's store may still be mid-seed, and its FULL_SYNC snapshots
+	// carry PARTIAL (shrinking) resource sets. Defer applying any snapshot
+	// whose resource count regresses versus the running configuration while
+	// inside the stabilization window; the operator pushes a complete
+	// snapshot as soon as its store finishes seeding, which grows the count
+	// again and is applied normally. Trade-off (mirroring the empty-snapshot
+	// guard above): a GENUINE shrink pushed within the window is deferred
+	// until the next FULL_SYNC after the window — availability over
+	// consistency for the data plane.
+	if newCount, runningCount, deferred := h.shouldDeferRegressingSnapshot(snapshot); deferred {
+		h.logger.Warn("received regressing configuration snapshot within post-reconnect window; "+
+			"keeping last-known-good configuration",
+			observability.String("version", snapshot.Version),
+			observability.String("checksum", snapshot.Checksum),
+			observability.Int("snapshot_resources", newCount),
+			observability.Int("running_resources", runningCount),
+		)
+		span.AddEvent("regressing snapshot deferred: last-known-good configuration retained")
+		return nil
+	}
+
 	// Clear existing state
 	h.mu.Lock()
 	h.routes = make(map[string]*config.Route)
@@ -790,6 +848,80 @@ func (h *ConfigHandler) collectGraphQLBackends() []config.GraphQLBackend {
 		backends = append(backends, *b)
 	}
 	return backends
+}
+
+// snapshotIsEmpty reports whether the snapshot carries no resources of any
+// type. Resource slices are checked directly instead of trusting the
+// TotalResources counter so a miscounted snapshot cannot bypass the
+// empty-snapshot safeguard.
+func snapshotIsEmpty(snapshot *operatorv1alpha1.ConfigurationSnapshot) bool {
+	return len(snapshot.ApiRoutes) == 0 &&
+		len(snapshot.Backends) == 0 &&
+		len(snapshot.GrpcRoutes) == 0 &&
+		len(snapshot.GrpcBackends) == 0 &&
+		len(snapshot.GraphqlRoutes) == 0 &&
+		len(snapshot.GraphqlBackends) == 0
+}
+
+// hasRunningConfig reports whether the handler currently tracks any resources.
+func (h *ConfigHandler) hasRunningConfig() bool {
+	return h.runningResourceCount() > 0
+}
+
+// runningResourceCount returns the total number of resources currently
+// tracked by the handler across all resource types. Incremental updates keep
+// the maps current, so this is always the size of the running configuration.
+func (h *ConfigHandler) runningResourceCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.routes) + len(h.backends) +
+		len(h.grpcRoutes) + len(h.grpcBackends) +
+		len(h.graphqlRoutes) + len(h.graphqlBackends)
+}
+
+// countSnapshotResources counts the resources carried by a snapshot across
+// all resource types. Resource slices are counted directly instead of
+// trusting the TotalResources field, mirroring snapshotIsEmpty.
+func countSnapshotResources(snapshot *operatorv1alpha1.ConfigurationSnapshot) int {
+	return len(snapshot.ApiRoutes) + len(snapshot.Backends) +
+		len(snapshot.GrpcRoutes) + len(snapshot.GrpcBackends) +
+		len(snapshot.GraphqlRoutes) + len(snapshot.GraphqlBackends)
+}
+
+// MarkReconnected records an operator (re)connect and arms the snapshot
+// regression window (see snapshotRegressionWindow). It is wired to the
+// operator client's reconnect listener so both the initial connect and every
+// stream re-establishment restart the window.
+func (h *ConfigHandler) MarkReconnected() {
+	h.reconnectedAt.Store(time.Now().UnixNano())
+	h.logger.Debug("operator (re)connect recorded; snapshot regression window armed",
+		observability.Duration("window", snapshotRegressionWindow),
+	)
+}
+
+// withinReconnectWindow reports whether the handler is inside the
+// post-(re)connect stabilization window. A zero timestamp (no reconnect ever
+// signaled, e.g. embedded use without the listener wiring) keeps the window
+// permanently inactive so snapshots always apply.
+func (h *ConfigHandler) withinReconnectWindow() bool {
+	markedAt := h.reconnectedAt.Load()
+	if markedAt == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, markedAt)) <= snapshotRegressionWindow
+}
+
+// shouldDeferRegressingSnapshot reports whether a FULL_SYNC snapshot must be
+// deferred because its resource count regresses versus the running
+// configuration while inside the post-reconnect stabilization window. The
+// returned counts are exposed for logging.
+func (h *ConfigHandler) shouldDeferRegressingSnapshot(
+	snapshot *operatorv1alpha1.ConfigurationSnapshot,
+) (newCount, runningCount int, deferred bool) {
+	newCount = countSnapshotResources(snapshot)
+	runningCount = h.runningResourceCount()
+	deferred = newCount < runningCount && h.withinReconnectWindow()
+	return newCount, runningCount, deferred
 }
 
 // invalidateCache calls the cache invalidation callback if configured.

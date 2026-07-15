@@ -54,16 +54,15 @@ func TestBuildAuthMiddleware_EnabledNoMethods(t *testing.T) {
 	}
 }
 
-func TestBuildAuthMiddleware_WithJWT_InvalidKey(t *testing.T) {
-	// JWT with a plain string secret fails because parseStaticKey
-	// expects JWK or PEM format. This exercises the error path in
-	// buildAuthMiddleware where auth.NewAuthenticator returns an error.
+func TestBuildAuthMiddleware_WithJWT_HMACSecret(t *testing.T) {
+	// JWT with a plain HS256 shared secret is a valid configuration: the
+	// secret is parsed as a symmetric key, so the middleware is built.
 	logger := observability.NopLogger()
 	authCfg := &config.AuthenticationConfig{
 		Enabled: true,
 		JWT: &config.JWTAuthConfig{
 			Enabled:   true,
-			Secret:    "plain-text-secret-not-jwk-or-pem",
+			Secret:    "plain-text-hmac-shared-secret",
 			Algorithm: "HS256",
 			Issuer:    "test-issuer",
 		},
@@ -72,7 +71,29 @@ func TestBuildAuthMiddleware_WithJWT_InvalidKey(t *testing.T) {
 	metrics := auth.NewMetrics("test")
 
 	mw, err := buildAuthMiddleware(authCfg, metrics, logger)
-	// Should fail because the secret is not in JWK or PEM format
+	assert.NoError(t, err)
+	assert.NotNil(t, mw)
+}
+
+func TestBuildAuthMiddleware_WithJWT_InvalidKey(t *testing.T) {
+	// RS256 requires a JWK or PEM public key, so a raw non-key string
+	// exercises the error path in buildAuthMiddleware where
+	// auth.NewAuthenticator returns an error.
+	logger := observability.NopLogger()
+	authCfg := &config.AuthenticationConfig{
+		Enabled: true,
+		JWT: &config.JWTAuthConfig{
+			Enabled:   true,
+			PublicKey: "plain-text-not-jwk-or-pem",
+			Algorithm: "RS256",
+			Issuer:    "test-issuer",
+		},
+	}
+
+	metrics := auth.NewMetrics("test")
+
+	mw, err := buildAuthMiddleware(authCfg, metrics, logger)
+	// Should fail because the public key is not in JWK or PEM format
 	assert.Error(t, err)
 	assert.Nil(t, mw)
 	assert.Contains(t, err.Error(), "failed to create authenticator")
@@ -84,8 +105,8 @@ func TestBuildAuthMiddleware_WithJWT_NilMetrics_InvalidKey(t *testing.T) {
 		Enabled: true,
 		JWT: &config.JWTAuthConfig{
 			Enabled:   true,
-			Secret:    "plain-text-secret",
-			Algorithm: "HS256",
+			PublicKey: "plain-text-not-a-key",
+			Algorithm: "RS256",
 		},
 	}
 
@@ -189,7 +210,7 @@ func TestBuildMiddlewareChain_WithAuthEnabled_JWKSUrl(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	result, err := buildMiddlewareChain(inner, cfg, logger, metrics, tracer, nil, authCfg, authMetrics)
+	result, err := buildMiddlewareChain(inner, cfg, logger, metrics, tracer, nil, authCfg, authMetrics, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, result.handler)
 }
@@ -201,13 +222,14 @@ func TestBuildMiddlewareChain_WithAuthError_InvalidKey(t *testing.T) {
 	tracer, err := observability.NewTracer(observability.TracerConfig{Enabled: false})
 	assert.NoError(t, err)
 
-	// JWT with invalid key format should cause an error
+	// JWT with an invalid key format should cause an error: RS256 requires
+	// a JWK or PEM public key (HMAC algorithms accept raw shared secrets).
 	authCfg := &config.AuthenticationConfig{
 		Enabled: true,
 		JWT: &config.JWTAuthConfig{
 			Enabled:   true,
-			Secret:    "not-a-valid-jwk-or-pem-key",
-			Algorithm: "HS256",
+			PublicKey: "not-a-valid-jwk-or-pem-key",
+			Algorithm: "RS256",
 		},
 	}
 
@@ -215,7 +237,7 @@ func TestBuildMiddlewareChain_WithAuthError_InvalidKey(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	_, err = buildMiddlewareChain(inner, cfg, logger, metrics, tracer, nil, authCfg, nil)
+	_, err = buildMiddlewareChain(inner, cfg, logger, metrics, tracer, nil, authCfg, nil, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "auth middleware initialization failed")
 }

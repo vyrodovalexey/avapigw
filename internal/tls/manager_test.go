@@ -1209,7 +1209,7 @@ func TestManager_HandleCertificateEvent(t *testing.T) {
 	defer manager.Close()
 
 	// Test CertificateEventLoaded
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:        CertificateEventLoaded,
 		Certificate: &cert,
 		Message:     "certificate loaded",
@@ -1217,7 +1217,7 @@ func TestManager_HandleCertificateEvent(t *testing.T) {
 	assert.Equal(t, 1, metrics.certReloadSuccessCount)
 
 	// Test CertificateEventReloaded
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:        CertificateEventReloaded,
 		Certificate: &cert,
 		Message:     "certificate reloaded",
@@ -1225,14 +1225,14 @@ func TestManager_HandleCertificateEvent(t *testing.T) {
 	assert.Equal(t, 2, metrics.certReloadSuccessCount)
 
 	// Test CertificateEventExpiring
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:    CertificateEventExpiring,
 		Message: "certificate expiring",
 	})
 	// No metric change for expiring
 
 	// Test CertificateEventError
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:    CertificateEventError,
 		Error:   assert.AnError,
 		Message: "certificate error",
@@ -1274,7 +1274,7 @@ func TestManager_RebuildTLSConfig(t *testing.T) {
 	require.NotNil(t, manager)
 	defer manager.Close()
 
-	err = manager.rebuildTLSConfig()
+	err = manager.rebuildTLSConfig(context.Background())
 	require.NoError(t, err)
 }
 
@@ -1504,7 +1504,7 @@ func TestManager_CheckCertificateExpiry(t *testing.T) {
 	defer manager.Close()
 
 	// Call checkCertificateExpiry
-	manager.checkCertificateExpiry()
+	manager.checkCertificateExpiry(context.Background())
 
 	assert.Equal(t, 1, metrics.certExpiryCount)
 }
@@ -1537,7 +1537,7 @@ func TestManager_CheckCertificateExpiry_NoCert(t *testing.T) {
 	defer manager.Close()
 
 	// Call checkCertificateExpiry - should not panic
-	manager.checkCertificateExpiry()
+	manager.checkCertificateExpiry(context.Background())
 
 	assert.Equal(t, 0, metrics.certExpiryCount)
 }
@@ -1570,7 +1570,7 @@ func TestManager_CheckCertificateExpiry_Error(t *testing.T) {
 	defer manager.Close()
 
 	// Call checkCertificateExpiry - should not panic
-	manager.checkCertificateExpiry()
+	manager.checkCertificateExpiry(context.Background())
 
 	assert.Equal(t, 0, metrics.certExpiryCount)
 }
@@ -1931,7 +1931,7 @@ func TestNewManager_HandleCertificateEvent_LoadedWithCert(t *testing.T) {
 	defer manager.Close()
 
 	// Test CertificateEventLoaded with certificate - should update expiry
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:        CertificateEventLoaded,
 		Certificate: &cert,
 		Message:     "certificate loaded",
@@ -1940,7 +1940,7 @@ func TestNewManager_HandleCertificateEvent_LoadedWithCert(t *testing.T) {
 	assert.Equal(t, 1, metrics.getCertExpiryCount())
 
 	// Test CertificateEventLoaded with nil certificate - should not update expiry
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:    CertificateEventLoaded,
 		Message: "certificate loaded without cert",
 	})
@@ -1948,7 +1948,7 @@ func TestNewManager_HandleCertificateEvent_LoadedWithCert(t *testing.T) {
 	assert.Equal(t, 1, metrics.getCertExpiryCount()) // unchanged
 
 	// Test CertificateEventReloaded with certificate - should update expiry
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:        CertificateEventReloaded,
 		Certificate: &cert,
 		Message:     "certificate reloaded",
@@ -1957,7 +1957,7 @@ func TestNewManager_HandleCertificateEvent_LoadedWithCert(t *testing.T) {
 	assert.Equal(t, 2, metrics.getCertExpiryCount())
 
 	// Test CertificateEventReloaded with nil certificate - should not update expiry
-	manager.handleCertificateEvent(CertificateEvent{
+	manager.handleCertificateEvent(context.Background(), CertificateEvent{
 		Type:    CertificateEventReloaded,
 		Message: "certificate reloaded without cert",
 	})

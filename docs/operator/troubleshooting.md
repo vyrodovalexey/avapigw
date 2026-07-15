@@ -290,8 +290,16 @@ kubectl logs -n avapigw-system -l app.kubernetes.io/name=avapigw-operator | grep
 ### Issue: Duplicate Resource Detection
 
 **Symptoms:**
-- "duplicate route match found" errors
+- "conflicts with existing route(s) ...: overlapping path/method combination" errors
 - Resources with similar configurations being rejected
+
+**Note:** only **true duplicates** are rejected — the same match type and
+path with overlapping methods. Exact-vs-prefix combinations, nested prefixes
+(e.g. `/` and `/api`), and catch-all routes coexist with specific routes
+(the router orders them by specificity), and updating a resource never
+conflicts with its own previous version. If a legitimate combination is
+rejected, verify the two routes really do declare an identical match
+type + path.
 
 **Diagnosis:**
 ```bash
@@ -311,6 +319,49 @@ kubectl get apiroutes --all-namespaces -o custom-columns=NAME:.metadata.name,NAM
 kubectl patch apiroute conflicting-route -n namespace \
   --type='merge' \
   -p='{"spec":{"match":[{"uri":{"prefix":"/api/v2"},"methods":["GET"]}]}}'
+```
+
+### Issue: Route Returns 503 for Every Request (Fail-Closed Security)
+
+**Symptoms:**
+- A route configured with authentication/authorization returns 503 Service Unavailable for all requests
+- Gateway ERROR log: `failed to build route security middleware, failing closed`
+- `gateway_route_auth_failures_total{reason="construction_failed"}` increasing
+
+**Cause:** the route's authentication or authorization middleware could not
+be constructed (for example an invalid JWT/OIDC configuration or an
+unreachable dependency at build time). A route configured **with** a security
+control never serves traffic without it, so a rejecting fallback is
+installed. Treat this alert as page-worthy: the route is intentionally
+unavailable.
+
+**Solutions:**
+```bash
+# Find the construction error in gateway logs
+kubectl logs -n <gateway-namespace> -l app=avapigw | grep "failing closed"
+
+# Fix the route's authentication/authorization configuration; the route
+# recovers on the next configuration reload that yields a constructible
+# middleware. Other routes keep serving normally.
+```
+
+### Issue: Deleted Last CR Not Propagated to Gateways
+
+**Symptoms:**
+- After deleting the last APIRoute/Backend/etc., running gateways keep serving the old configuration
+- Gateway WARN log about keeping last-known-good configuration on an empty snapshot
+
+**Cause:** a gateway running a non-empty configuration deliberately ignores
+an **empty** snapshot (availability over consistency) — an empty snapshot is
+indistinguishable from an operator that lost its store. The operator also
+gates initial snapshots on store seeding after a restart (log:
+`configuration store ready for initial snapshot`).
+
+**Solutions:**
+```bash
+# The deletion propagates with the next NON-EMPTY snapshot (e.g. any other
+# CR create/update) or a gateway restart:
+kubectl rollout restart deployment/avapigw -n <gateway-namespace>
 ```
 
 ## gRPC Communication Issues

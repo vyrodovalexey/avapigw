@@ -125,7 +125,7 @@ func (f *fakeOperatorClient) Start(_ context.Context) error {
 	return nil
 }
 
-func (f *fakeOperatorClient) Stop() error      { return nil }
+func (f *fakeOperatorClient) Stop() error       { return nil }
 func (f *fakeOperatorClient) SessionID() string { return "session" }
 
 // TestStartOperatorClientWithRetry_RecoversAfterTransientFailures proves the

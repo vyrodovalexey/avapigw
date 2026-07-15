@@ -89,21 +89,25 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 Applied to specific routes based on configuration:
 
 ```
-Security Headers → CORS → Body Limit → Headers → Cache → 
-Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+OpenAPI Validation → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
 
 **Implementation**: `internal/gateway/route_middleware.go`
 
 #### Middleware Descriptions
 
-1. **Security Headers** - Security header injection (X-Frame-Options, CSP, etc.)
-2. **CORS** - Route-specific CORS configuration (overrides global)
-3. **Body Limit** - Request body size limits (route-specific)
-4. **Headers** - Request/response header manipulation
-5. **Cache** - Per-route HTTP response caching
-6. **Transform** - Request/response transformation
-7. **Encoding** - Content negotiation and encoding
+1. **Auth** - Route-level authentication (JWT, API Key, mTLS, OIDC); construction errors **fail closed** (route returns 503 instead of serving unauthenticated, `gateway_route_auth_failures_total{reason="construction_failed"}`)
+2. **Authz** - Route-level authorization (RBAC, ABAC, external); same fail-closed behavior
+3. **RateLimit** - Route-level rate limiting (memory or distributed redis store); runs after auth so unauthenticated requests get 401 before 429
+4. **Security Headers** - Security header injection (X-Frame-Options, CSP, etc.)
+5. **CORS** - Route-specific CORS configuration (overrides global)
+6. **Body Limit** - Request body size limits (route-specific)
+7. **OpenAPI Validation** - Request validation against the route's OpenAPI spec
+8. **Headers** - Request/response header manipulation
+9. **Cache** - Per-route HTTP response caching
+10. **Transform** - Request/response transformation
+11. **Encoding** - Content negotiation and encoding
 
 ## Middleware Components
 
@@ -117,6 +121,8 @@ Transform → Encoding → [proxy to backend]
 - **Cache-Control**: Respects `no-store` and `no-cache` directives
 - **Per-Route Isolation**: Each route gets its own cache namespace
 - **Thread Safety**: Atomic operations and proper locking
+- **Per-Request Header Stripping**: CORS headers, `Set-Cookie`, and hop-by-hop headers are stripped from cached entries; live middleware headers win on replay, closing the cache-poisoning surface
+- **Decoupled Cache Fill**: cache writes are detached from the client's request context and bounded to 5 seconds
 
 **Configuration**:
 ```yaml

@@ -3,11 +3,10 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -205,55 +204,64 @@ func (sp *SubscriptionProxy) HandleSubscription(
 }
 
 // relayMessages relays WebSocket messages between client and backend.
+//
+// It uses the close-on-ctx.Done pattern (mirroring internal/proxy/websocket_proxy.go):
+// a single watcher goroutine closes both connections when the subscription context
+// is canceled, which unblocks the blocking ReadMessage calls in both relay
+// directions. gorilla/websocket read errors are sticky (a repeated read on a
+// failed connection eventually panics inside the library), so the relay loops
+// must never retry a failed read; closing the connections is the only reliable
+// way to interrupt them.
 func (sp *SubscriptionProxy) relayMessages(ctx context.Context, connID string, conn *subscriptionConn) {
+	// Defense-in-depth: relayMessages runs in a detached goroutine, so an
+	// uncaught panic here would crash the whole process. Registered BEFORE
+	// cleanupConnection so cleanup still runs during panic unwinding (defers
+	// execute in LIFO order) and the recover handler fires last.
+	defer sp.recoverRelayPanic(connID, conn.backendName, "relay")
 	defer sp.cleanupConnection(connID, conn)
 
-	// Relay client -> backend in a separate goroutine
+	// Single watcher goroutine: on context cancellation, close both
+	// connections to unblock the blocking reads in both relay directions.
+	// It always terminates because cleanupConnection cancels the context.
 	go func() {
-		defer conn.cancel()
-		sp.relayDirection(ctx, connID, conn.clientConn, conn.backendConn, "client", "backend")
+		<-ctx.Done()
+		_ = conn.clientConn.Close()
+		_ = conn.backendConn.Close()
 	}()
 
-	// Relay backend -> client in the current goroutine
-	sp.relayDirection(ctx, connID, conn.backendConn, conn.clientConn, "backend", "client")
+	// Relay client -> backend in a separate goroutine.
+	go func() {
+		defer sp.recoverRelayPanic(connID, conn.backendName, "client_to_backend")
+		defer conn.cancel()
+		sp.relayDirection(connID, conn.backendName, conn.clientConn, conn.backendConn, "client", "backend")
+	}()
+
+	// Relay backend -> client in the current goroutine.
+	sp.relayDirection(connID, conn.backendName, conn.backendConn, conn.clientConn, "backend", "client")
 }
 
-// relayDirection relays WebSocket messages from source to destination.
-// It uses a short read deadline so that context cancellation is detected promptly.
+// relayDirection relays WebSocket messages from src to dst until an error occurs.
+//
+// The loop blocks in src.ReadMessage; the ctx watcher in relayMessages closes
+// both connections on cancellation to unblock it. gorilla/websocket read errors
+// are sticky, so the loop terminates on ANY read or write error — it must never
+// continue after a failed read (doing so busy-loops and eventually panics
+// inside gorilla/websocket).
 func (sp *SubscriptionProxy) relayDirection(
-	ctx context.Context, connID string,
+	connID, backendName string,
 	src, dst *websocket.Conn,
 	srcName, dstName string,
 ) {
-	const readDeadlineInterval = 500 * time.Millisecond
+	// Defense-in-depth: relayDirection runs in detached relay goroutines.
+	defer sp.recoverRelayPanic(connID, backendName, srcName+"_to_"+dstName)
 
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		// Set a short read deadline so we can periodically check context cancellation.
-		_ = src.SetReadDeadline(time.Now().Add(readDeadlineInterval))
-
 		msgType, msg, err := src.ReadMessage()
 		if err != nil {
-			// If the context was canceled, exit silently.
-			if ctx.Err() != nil {
-				return
-			}
-			// If it's a timeout, loop back to check context and retry.
-			if websocket.IsUnexpectedCloseError(err) {
-				sp.logger.Debug(srcName+" connection closed",
-					observability.String("conn_id", connID),
-					observability.Error(err),
-				)
-				return
-			}
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				continue
-			}
-			sp.logger.Debug(srcName+" read error",
+			// Sticky read error: terminate this direction. This also covers
+			// context cancellation, because the watcher goroutine closes both
+			// connections, which fails this blocking read.
+			sp.logger.Debug(srcName+" read ended",
 				observability.String("conn_id", connID),
 				observability.Error(err),
 			)
@@ -267,6 +275,32 @@ func (sp *SubscriptionProxy) relayDirection(
 			)
 			return
 		}
+	}
+}
+
+// recoverRelayPanic recovers from a panic in a subscription relay goroutine.
+// Relay goroutines are detached from any HTTP request lifecycle (and from the
+// gateway's HTTP recovery middleware), so without this handler a panic would
+// crash the entire process. On recovery it logs the panic with a stack trace
+// and records a "panic_recovered" error metric.
+//
+// It must be invoked directly via defer for recover() to take effect.
+func (sp *SubscriptionProxy) recoverRelayPanic(connID, backendName, stage string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+
+	sp.logger.Error("panic recovered in subscription relay",
+		observability.String("conn_id", connID),
+		observability.String("backend", backendName),
+		observability.String("stage", stage),
+		observability.Any("panic", r),
+		observability.String("stack", string(debug.Stack())),
+	)
+
+	if sp.metrics != nil {
+		sp.metrics.RecordError(backendName, "subscription", "panic_recovered")
 	}
 }
 

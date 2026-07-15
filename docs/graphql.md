@@ -43,6 +43,13 @@ The AV API Gateway provides comprehensive GraphQL support with advanced features
 6. **Proxying**: Requests are forwarded to the selected backend with optional transformation
 7. **Response Processing**: Responses are processed through middleware chain and returned to client
 
+> **Behavior change:** the matched route's middleware (authentication, rate
+> limiting, CORS, transforms) is now enforced for `/graphql` requests. In
+> earlier releases the gateway-level GraphQL handler bypassed route
+> middleware, so clients that relied on that bypass — for example sending
+> unauthenticated requests to a GraphQL route with
+> `authentication.enabled: true` — are now rejected.
+
 ## Configuration Guide
 
 ### Global GraphQL Configuration
@@ -437,10 +444,19 @@ spec:
 
 ### WebSocket Security Configuration
 
-For enhanced security, you can configure allowed origins for GraphQL WebSocket subscriptions:
+The gateway-level WebSocket origin allowlist (`spec.websocket.allowedOrigins`)
+also protects GraphQL subscription upgrades against cross-site WebSocket
+hijacking:
 
 ```yaml
 spec:
+  # Gateway-level origin allowlist — applies to proxied WebSocket routes
+  # AND GraphQL subscription (graphql-ws) upgrades
+  websocket:
+    allowedOrigins:
+      - "https://app.example.com"     # scheme://host[:port] entry
+      - "admin.example.com"           # bare host[:port] entry (any scheme)
+  
   graphqlRoutes:
     - name: subscription-route
       match:
@@ -451,15 +467,15 @@ spec:
         - destination:
             host: subscription-backend
             port: 4000
-      # Configure allowed origins for WebSocket connections
-      websocket:
-        allowedOrigins:
-          - "https://app.example.com"
-          - "https://admin.example.com"
-          - "https://*.trusted-domain.com"
 ```
 
-This prevents unauthorized domains from establishing WebSocket connections to your GraphQL subscriptions.
+An empty/omitted allowlist keeps the permissive legacy behavior (one warning
+logged at startup); a non-empty list rejects other origins with 403 during
+the handshake, before any backend connection. Wildcard hosts (e.g.
+`*.trusted-domain.com`) are not supported — only the standalone `"*"` entry
+allows all origins. The matched GraphQL route's middleware chain
+(authentication, rate limiting, CORS) also runs on the upgrade request
+before the connection is hijacked.
 
 ### Subscription Example
 
@@ -521,17 +537,18 @@ spec:
 ### Available Metrics
 
 #### Request Metrics
-- `graphql_requests_total{operation_type, operation_name, route, status}` - Total GraphQL requests
-- `graphql_request_duration_seconds{operation_type, operation_name, route}` - Request duration histogram
-- `graphql_errors_total{operation_type, error_type, route}` - GraphQL error count
+- `avapigw_graphql_requests_total{backend, operation_type, status_code}` - Total GraphQL requests (recorded for every request on the GraphQL endpoint, including middleware rejections such as 401/429)
+- `avapigw_graphql_request_duration_seconds{backend, operation_type}` - Request duration histogram
+- `avapigw_graphql_errors_total{backend, operation_type, error_type}` - GraphQL error count (`route_not_found`, `transport_error`, `aggregate_error`, `subscription_error`)
 
-> **Known limitation (pre-existing, not a Go 1.26.5 regression):** `/graphql` query and
-> mutation requests are served correctly with valid data, but the gateway-level GraphQL
-> handler currently **bypasses the metrics/middleware chain**, so the
-> `avapigw_graphql_*` / `gateway_requests_*` counters above are **not** incremented for
-> those requests. GraphQL **subscription** proxying (over WebSocket) **does** record
-> metrics (see [Subscription Metrics](#subscription-metrics)). Track this as an
-> observability follow-up.
+> **Behavior change:** `/graphql` requests now flow through the matched
+> route's middleware chain, so route-level authentication, rate limiting,
+> CORS, and transforms configured on GraphQL routes are enforced and the
+> request counters above are incremented. This is **breaking** for clients
+> that relied on the previous bypass: GraphQL routes with
+> `authentication.enabled: true` now reject unauthenticated requests that
+> formerly passed through. GraphQL **subscription** proxying (over WebSocket)
+> records metrics as before (see [Subscription Metrics](#subscription-metrics)).
 
 #### Query Analysis Metrics
 - `graphql_query_depth{route}` - Query depth distribution
@@ -645,6 +662,14 @@ spec:
     requestsPerSecond: 100
     burst: 200
 ```
+
+> **Note:** GraphQL routes reuse the shared per-route middleware chain, so
+> `rateLimit.store: redis` (distributed rate limiting) is enforced on
+> GraphQLRoute exactly as on HTTP routes. `cache.type: redis` attaches the
+> shared cache middleware, but only GET requests are cached — POST-based
+> GraphQL operations are not. The admission webhook currently emits a
+> conservative forward-compatibility warning when either redis option is set
+> on a GraphQLRoute.
 
 ### GraphQLBackend CRD
 

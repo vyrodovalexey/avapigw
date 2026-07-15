@@ -52,6 +52,13 @@ type ConfigUpdateHandler func(ctx context.Context, update *operatorv1alpha1.Conf
 // SnapshotHandler is a callback function for handling configuration snapshots.
 type SnapshotHandler func(ctx context.Context, snapshot *operatorv1alpha1.ConfigurationSnapshot) error
 
+// ReconnectListener is invoked after every successful gateway registration
+// with the operator — the initial connect and every stream re-establishment.
+// It runs BEFORE the registration's initial snapshot is applied so listeners
+// (e.g. the ConfigHandler's snapshot regression window) can arm themselves
+// against the snapshots that follow the (re)connect.
+type ReconnectListener func()
+
 // Client is the operator client that connects to the avapigw operator.
 type Client struct {
 	config *Config
@@ -71,22 +78,43 @@ type Client struct {
 	mu                  sync.RWMutex
 	connected           atomic.Bool
 	started             atomic.Bool
-	stopCh              chan struct{}
-	stoppedCh           chan struct{}
-	wg                  sync.WaitGroup // WaitGroup for goroutine coordination
-	reconnectAttempts   int
 
-	// bgCtx is the long-lived context that governs the background streaming
-	// and heartbeat goroutines. It is intentionally decoupled from the
-	// (potentially short-lived) context passed to Start so that a bounded
-	// initial connect/register retry deadline cannot cancel the steady-state
-	// loops once Start succeeds. It is canceled by Stop via bgCancel.
-	bgCtx    context.Context
+	// stopCh/stoppedCh/wg belong to the CURRENT background-goroutine
+	// generation and are replaced by Start under mu. Long-lived goroutines
+	// never re-read these fields: they receive their own generation's stop
+	// channel as an argument (generation capture pattern), so a goroutine
+	// stranded by a timed-out Stop still exits on ITS OWN closed channel
+	// instead of blocking on a newer, open one. The WaitGroup is
+	// per-generation as well, so a new Start never calls Add concurrently
+	// with a stale Stop waiter's Wait.
+	stopCh    chan struct{}
+	stoppedCh chan struct{}
+	wg        *sync.WaitGroup
+
+	// reconnectAttempts is atomic because a goroutine stranded past a
+	// timed-out Stop may still be draining its reconnect loop while the new
+	// generation's stream loop also reconnects.
+	reconnectAttempts atomic.Int64
+
+	// bgCancel cancels the long-lived background context that governs the
+	// background streaming and heartbeat goroutines. That context is
+	// intentionally decoupled from the (potentially short-lived) context
+	// passed to Start so that a bounded initial connect/register retry
+	// deadline cannot cancel the steady-state loops once Start succeeds.
+	// Like the fields above it is per-generation, replaced by Start under mu
+	// and invoked by Stop.
 	bgCancel context.CancelFunc
+
+	// stopTimeout bounds Stop's wait for background goroutines to drain. Zero
+	// means clientStopTimeout; overridable in tests (mirrors the
+	// backend/health stopTimeout seam). Set before Start; never mutated
+	// afterwards.
+	stopTimeout time.Duration
 
 	// Callbacks
 	onConfigUpdate ConfigUpdateHandler
 	onSnapshot     SnapshotHandler
+	onReconnect    ReconnectListener
 
 	// Status provider for heartbeats
 	statusProvider StatusProvider
@@ -133,6 +161,14 @@ func WithSnapshotHandler(handler SnapshotHandler) Option {
 	}
 }
 
+// WithReconnectListener sets the listener invoked after every successful
+// gateway registration (initial connect and reconnects).
+func WithReconnectListener(listener ReconnectListener) Option {
+	return func(c *Client) {
+		c.onReconnect = listener
+	}
+}
+
 // WithStatusProvider sets the status provider for heartbeats.
 func WithStatusProvider(provider StatusProvider) Option {
 	return func(c *Client) {
@@ -164,6 +200,7 @@ func NewClient(config *Config, opts ...Option) (*Client, error) {
 		heartbeatInterval: config.GetHeartbeatInterval(),
 		stopCh:            make(chan struct{}),
 		stoppedCh:         make(chan struct{}),
+		wg:                &sync.WaitGroup{},
 	}
 
 	for _, opt := range opts {
@@ -290,10 +327,13 @@ func (c *Client) buildTLSConfig() (*tls.Config, error) {
 
 // Start starts the client (registration, streaming, heartbeat).
 //
-// stream/heartbeat loops under a fresh context.Background()-rooted context
-// (c.bgCtx) rather than inheriting the caller's (potentially short-lived)
-// ctx. Inheriting it would cancel the steady-state loops the moment the
-// caller's initial-connect retry deadline fires. See the comment on c.bgCtx.
+// The stream/heartbeat loops run under a fresh context.Background()-rooted
+// context rather than inheriting the caller's (potentially short-lived) ctx.
+// Inheriting it would cancel the steady-state loops the moment the caller's
+// initial-connect retry deadline fires. See the comment on c.bgCancel.
+//
+// Start and Stop are lifecycle methods intended to be invoked sequentially
+// by a single owner; they must not be called concurrently with each other.
 //
 //nolint:contextcheck // Start intentionally launches its long-lived background
 func (c *Client) Start(ctx context.Context) error {
@@ -303,10 +343,6 @@ func (c *Client) Start(ctx context.Context) error {
 
 	ctx, span := c.tracer.Start(ctx, "operator.Start")
 	defer span.End()
-
-	c.startTime = time.Now()
-	c.stopCh = make(chan struct{})
-	c.stoppedCh = make(chan struct{})
 
 	// The initial connect + register RPCs run under the caller-provided ctx,
 	// which may carry a bounded startup-retry deadline. That is correct: the
@@ -319,12 +355,32 @@ func (c *Client) Start(ctx context.Context) error {
 	// them under a dedicated background context that lives until Stop() is
 	// called (via bgCancel). It is deliberately rooted at context.Background()
 	// so it is independent of the initial-retry cancellation.
-	c.bgCtx, c.bgCancel = context.WithCancel(context.Background())
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+
+	// Create fresh lifecycle primitives for this generation and publish them
+	// under mu. The goroutines below capture the locals (generation capture
+	// pattern) and never re-read the struct fields, so a goroutine left
+	// behind by a previous timed-out Stop keeps observing its own (already
+	// closed) stop channel and exits, instead of being stranded on the new,
+	// open one.
+	stopCh := make(chan struct{})
+	stoppedCh := make(chan struct{})
+	wg := &sync.WaitGroup{}
+	c.mu.Lock()
+	c.startTime = time.Now()
+	c.stopCh = stopCh
+	c.stoppedCh = stoppedCh
+	c.wg = wg
+	c.bgCancel = bgCancel
+	c.mu.Unlock()
 
 	// Connect if not already connected
-	if c.conn == nil {
+	c.mu.RLock()
+	hasConn := c.conn != nil
+	c.mu.RUnlock()
+	if !hasConn {
 		if err := c.Connect(ctx); err != nil {
-			c.bgCancel()
+			bgCancel()
 			c.started.Store(false)
 			span.RecordError(err)
 			return err
@@ -333,7 +389,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Register with operator
 	if err := c.register(ctx); err != nil {
-		c.bgCancel()
+		bgCancel()
 		c.started.Store(false)
 		span.RecordError(err)
 		return err
@@ -342,15 +398,14 @@ func (c *Client) Start(ctx context.Context) error {
 	// Start background goroutines with WaitGroup coordination. They run under
 	// the long-lived bgCtx so they survive after Start returns and are only
 	// canceled by Stop().
-	bgCtx := c.bgCtx
-	c.wg.Add(2)
+	wg.Add(2)
 	go func() {
-		defer c.wg.Done()
-		c.runStreamLoop(bgCtx)
+		defer wg.Done()
+		c.runStreamLoop(bgCtx, stopCh)
 	}()
 	go func() {
-		defer c.wg.Done()
-		c.runHeartbeatLoop(bgCtx)
+		defer wg.Done()
+		c.runHeartbeatLoop(bgCtx, stopCh)
 	}()
 
 	c.logger.Info("operator client started",
@@ -362,6 +417,15 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 
+// stopWaitTimeout returns the bounded wait for background-goroutine shutdown,
+// falling back to clientStopTimeout when the seam was left unset (zero value).
+func (c *Client) stopWaitTimeout() time.Duration {
+	if c.stopTimeout > 0 {
+		return c.stopTimeout
+	}
+	return clientStopTimeout
+}
+
 // Stop gracefully stops the client.
 func (c *Client) Stop() error {
 	if !c.started.CompareAndSwap(true, false) {
@@ -370,18 +434,30 @@ func (c *Client) Stop() error {
 
 	c.logger.Info("stopping operator client")
 
+	// Capture the current generation's lifecycle primitives under mu so this
+	// Stop signals and waits on the same generation it observed, even if a
+	// concurrent Start later replaces the struct fields.
+	c.mu.RLock()
+	stopCh := c.stopCh
+	stoppedCh := c.stoppedCh
+	wg := c.wg
+	bgCancel := c.bgCancel
+	c.mu.RUnlock()
+
 	// Signal stop: close stopCh for select-based loop exits and cancel the
 	// long-lived background context so any in-flight streaming/heartbeat RPCs
 	// (which are bound to bgCtx, not stopCh) unblock promptly.
-	close(c.stopCh)
-	if c.bgCancel != nil {
-		c.bgCancel()
+	close(stopCh)
+	if bgCancel != nil {
+		bgCancel()
 	}
 
-	// Wait for goroutines to finish with timeout using WaitGroup
+	// Wait for this generation's goroutines to finish with timeout. The
+	// WaitGroup is per-generation, so a stale waiter from a timed-out Stop
+	// can never race a newer Start's Add against its Wait.
 	done := make(chan struct{})
 	go func() {
-		c.wg.Wait()
+		wg.Wait()
 		close(done)
 	}()
 
@@ -389,16 +465,16 @@ func (c *Client) Stop() error {
 	case <-done:
 		// All goroutines stopped cleanly
 		c.logger.Debug("all operator client goroutines stopped")
-	case <-time.After(clientStopTimeout):
+	case <-time.After(c.stopWaitTimeout()):
 		c.logger.Warn("timeout waiting for operator client goroutines to stop")
 	}
 
 	// Signal stoppedCh for any external waiters
 	select {
-	case <-c.stoppedCh:
+	case <-stoppedCh:
 		// Already closed
 	default:
-		close(c.stoppedCh)
+		close(stoppedCh)
 	}
 
 	// Close connection
@@ -446,6 +522,18 @@ func (c *Client) SetSnapshotHandler(handler SnapshotHandler) {
 	c.onSnapshot = handler
 }
 
+// serviceClient returns the current gRPC service client under the read lock.
+// Background goroutines must use this accessor instead of reading c.client
+// directly: Stop() nils the field under mu while a goroutine stranded past a
+// timed-out Stop may still be draining, and a subsequent Start/Connect may
+// concurrently replace it. Callers must handle a nil result (no active
+// connection).
+func (c *Client) serviceClient() operatorv1alpha1.ConfigurationServiceClient {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client
+}
+
 // register registers the gateway with the operator.
 func (c *Client) register(ctx context.Context) error {
 	// Apply timeout for registration RPC call
@@ -484,7 +572,14 @@ func (c *Client) register(ctx context.Context) error {
 		},
 	}
 
-	resp, err := c.client.RegisterGateway(ctx, req)
+	cli := c.serviceClient()
+	if cli == nil {
+		c.metrics.incRegistrationErrors()
+		span.RecordError(ErrNotConnected)
+		return fmt.Errorf("%w: %w", ErrRegistrationFailed, ErrNotConnected)
+	}
+
+	resp, err := cli.RegisterGateway(ctx, req)
 	if err != nil {
 		c.metrics.incRegistrationErrors()
 		span.RecordError(err)
@@ -509,6 +604,7 @@ func (c *Client) register(ctx context.Context) error {
 	if resp.HeartbeatInterval != nil {
 		c.heartbeatInterval = resp.HeartbeatInterval.AsDuration()
 	}
+	heartbeatInterval := c.heartbeatInterval
 	c.mu.Unlock()
 
 	c.connected.Store(true)
@@ -518,8 +614,19 @@ func (c *Client) register(ctx context.Context) error {
 
 	c.logger.Info("gateway registered successfully",
 		observability.String("session_id", resp.SessionId),
-		observability.Duration("heartbeat_interval", c.heartbeatInterval),
+		observability.Duration("heartbeat_interval", heartbeatInterval),
 	)
+
+	// Signal the (re)connect BEFORE applying the registration's initial
+	// snapshot so listeners can arm the post-reconnect snapshot regression
+	// window covering it. Read under the lock: register runs from both the
+	// Start path and reconnect goroutines.
+	c.mu.RLock()
+	onReconnect := c.onReconnect
+	c.mu.RUnlock()
+	if onReconnect != nil {
+		onReconnect()
+	}
 
 	// Apply initial configuration if provided
 	if resp.InitialConfig != nil {
@@ -535,18 +642,23 @@ func (c *Client) register(ctx context.Context) error {
 }
 
 // runStreamLoop runs the configuration streaming loop with reconnection.
-func (c *Client) runStreamLoop(ctx context.Context) {
+//
+// stopCh is the goroutine's own generation stop channel, captured at spawn
+// time (generation capture pattern). It must never be re-read from the
+// struct: Start may replace c.stopCh for a newer generation while this
+// goroutine is still draining after a timed-out Stop.
+func (c *Client) runStreamLoop(ctx context.Context, stopCh <-chan struct{}) {
 	// Note: WaitGroup.Done() is called by the parent goroutine wrapper in Start()
 	// stoppedCh is now managed by Stop() method for proper coordination
 
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return
 		default:
 		}
 
-		if err := c.streamConfiguration(ctx); err != nil {
+		if err := c.streamConfiguration(ctx, stopCh); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -559,7 +671,7 @@ func (c *Client) runStreamLoop(ctx context.Context) {
 			c.metrics.setConnected(false)
 
 			// Reconnect with backoff
-			if !c.reconnectWithBackoff(ctx) {
+			if !c.reconnectWithBackoff(ctx, stopCh) {
 				return
 			}
 		}
@@ -567,7 +679,8 @@ func (c *Client) runStreamLoop(ctx context.Context) {
 }
 
 // streamConfiguration establishes and handles the configuration stream.
-func (c *Client) streamConfiguration(ctx context.Context) error {
+// stopCh is the calling goroutine's generation stop channel (see runStreamLoop).
+func (c *Client) streamConfiguration(ctx context.Context, stopCh <-chan struct{}) error {
 	ctx, span := c.tracer.Start(ctx, "operator.StreamConfiguration")
 	defer span.End()
 
@@ -591,7 +704,13 @@ func (c *Client) streamConfiguration(ctx context.Context) error {
 		Namespaces:        c.config.Namespaces,
 	}
 
-	stream, err := c.client.StreamConfiguration(ctx, req)
+	cli := c.serviceClient()
+	if cli == nil {
+		span.RecordError(ErrNotConnected)
+		return fmt.Errorf("failed to start configuration stream: %w", ErrNotConnected)
+	}
+
+	stream, err := cli.StreamConfiguration(ctx, req)
 	if err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("failed to start configuration stream: %w", err)
@@ -603,7 +722,7 @@ func (c *Client) streamConfiguration(ctx context.Context) error {
 
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return nil
 		default:
 		}
@@ -768,7 +887,15 @@ func (c *Client) sendAcknowledgment(
 		ApplyDuration: durationpb.New(duration),
 	}
 
-	_, err := c.client.AcknowledgeConfiguration(ctx, req)
+	cli := c.serviceClient()
+	if cli == nil {
+		c.logger.Warn("skipping configuration acknowledgment: no active connection",
+			observability.String("version", version),
+		)
+		return
+	}
+
+	_, err := cli.AcknowledgeConfiguration(ctx, req)
 	if err != nil {
 		c.logger.Warn("failed to send configuration acknowledgment",
 			observability.Error(err),
@@ -777,14 +904,26 @@ func (c *Client) sendAcknowledgment(
 	}
 }
 
+// getHeartbeatInterval returns the heartbeat interval under the read lock.
+// register() may update the interval from the server response while an older
+// generation's goroutine is still draining, so lock-free reads would race.
+func (c *Client) getHeartbeatInterval() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.heartbeatInterval
+}
+
 // runHeartbeatLoop runs the heartbeat loop.
-func (c *Client) runHeartbeatLoop(ctx context.Context) {
-	ticker := time.NewTicker(c.heartbeatInterval)
+//
+// stopCh is the goroutine's own generation stop channel, captured at spawn
+// time (generation capture pattern); see runStreamLoop for details.
+func (c *Client) runHeartbeatLoop(ctx context.Context, stopCh <-chan struct{}) {
+	ticker := time.NewTicker(c.getHeartbeatInterval())
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			if c.connected.Load() {
@@ -819,7 +958,13 @@ func (c *Client) sendHeartbeat(ctx context.Context) {
 		LastAppliedVersion: lastVersion,
 	}
 
-	resp, err := c.client.Heartbeat(ctx, req)
+	cli := c.serviceClient()
+	if cli == nil {
+		c.logger.Warn("skipping heartbeat: no active connection")
+		return
+	}
+
+	resp, err := cli.Heartbeat(ctx, req)
 	if err != nil {
 		c.logger.Warn("heartbeat failed",
 			observability.Error(err),
@@ -849,9 +994,13 @@ func (c *Client) sendHeartbeat(ctx context.Context) {
 
 // buildGatewayStatus builds the gateway status for heartbeats.
 func (c *Client) buildGatewayStatus(lastConfigApplied time.Time) *operatorv1alpha1.GatewayStatus {
+	c.mu.RLock()
+	startTime := c.startTime
+	c.mu.RUnlock()
+
 	status := &operatorv1alpha1.GatewayStatus{
 		Health: operatorv1alpha1.HealthState_HEALTH_STATE_HEALTHY,
-		Uptime: durationpb.New(time.Since(c.startTime)),
+		Uptime: durationpb.New(time.Since(startTime)),
 	}
 
 	if !lastConfigApplied.IsZero() {
@@ -874,7 +1023,10 @@ func (c *Client) buildGatewayStatus(lastConfigApplied time.Time) *operatorv1alph
 }
 
 // reconnectWithBackoff attempts to reconnect with exponential backoff.
-func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
+//
+// stopCh is the calling goroutine's generation stop channel, captured at
+// spawn time (generation capture pattern); see runStreamLoop for details.
+func (c *Client) reconnectWithBackoff(ctx context.Context, stopCh <-chan struct{}) bool {
 	backoffCfg := c.config.ReconnectBackoff
 	maxRetries := backoffCfg.GetMaxRetries()
 
@@ -885,7 +1037,7 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 
 	go func() {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			reconnectCancel()
 		case <-reconnectCtx.Done():
 			// Context already canceled; nothing to do.
@@ -894,34 +1046,34 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 
 	for {
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return false
 		default:
 		}
 
-		c.reconnectAttempts++
+		attempt := int(c.reconnectAttempts.Add(1))
 		c.metrics.incReconnects()
 
 		// Check max retries (0 = unlimited)
-		if maxRetries > 0 && c.reconnectAttempts > maxRetries {
+		if maxRetries > 0 && attempt > maxRetries {
 			c.logger.Error("max reconnection attempts reached",
-				observability.Int("attempts", c.reconnectAttempts),
+				observability.Int("attempts", attempt),
 				observability.Int("max_retries", maxRetries),
 			)
 			return false
 		}
 
 		// Calculate backoff
-		backoff := c.calculateBackoff()
+		backoff := c.calculateBackoff(attempt)
 
 		c.logger.Info("reconnecting to operator",
-			observability.Int("attempt", c.reconnectAttempts),
+			observability.Int("attempt", attempt),
 			observability.Duration("backoff", backoff),
 		)
 
 		// Wait for backoff
 		select {
-		case <-c.stopCh:
+		case <-stopCh:
 			return false
 		case <-time.After(backoff):
 		}
@@ -930,7 +1082,7 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 		if err := c.Connect(reconnectCtx); err != nil {
 			c.logger.Error("reconnection failed",
 				observability.Error(err),
-				observability.Int("attempt", c.reconnectAttempts),
+				observability.Int("attempt", attempt),
 			)
 			continue
 		}
@@ -943,27 +1095,29 @@ func (c *Client) reconnectWithBackoff(ctx context.Context) bool {
 			}
 			c.logger.Error("re-registration failed",
 				observability.Error(err),
-				observability.Int("attempt", c.reconnectAttempts),
+				observability.Int("attempt", attempt),
 			)
 			continue
 		}
 
 		// Success
-		c.reconnectAttempts = 0
+		c.reconnectAttempts.Store(0)
 		c.logger.Info("reconnected to operator successfully")
 		return true
 	}
 }
 
-// calculateBackoff calculates the backoff duration for the current attempt.
-func (c *Client) calculateBackoff() time.Duration {
+// calculateBackoff calculates the backoff duration for the given attempt.
+// The attempt number is passed explicitly so concurrent reconnect loops from
+// different goroutine generations never share intermediate state.
+func (c *Client) calculateBackoff(attempt int) time.Duration {
 	backoffCfg := c.config.ReconnectBackoff
 	initial := backoffCfg.GetInitialInterval()
 	maxBackoff := backoffCfg.GetMaxInterval()
 	multiplier := backoffCfg.GetMultiplier()
 
 	// Exponential backoff: initial * multiplier^attempt
-	backoff := float64(initial) * math.Pow(multiplier, float64(c.reconnectAttempts-1))
+	backoff := float64(initial) * math.Pow(multiplier, float64(attempt-1))
 
 	// Cap at max
 	if backoff > float64(maxBackoff) {
@@ -995,7 +1149,13 @@ func (c *Client) GetConfiguration(ctx context.Context) (*operatorv1alpha1.Config
 		Namespaces: c.config.Namespaces,
 	}
 
-	resp, err := c.client.GetConfiguration(ctx, req)
+	cli := c.serviceClient()
+	if cli == nil {
+		span.RecordError(ErrNotConnected)
+		return nil, ErrNotConnected
+	}
+
+	resp, err := cli.GetConfiguration(ctx, req)
 	if err != nil {
 		span.RecordError(err)
 		return nil, fmt.Errorf("failed to get configuration: %w", err)

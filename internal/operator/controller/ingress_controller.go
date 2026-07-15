@@ -87,12 +87,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Handle deletion
 	if !ingress.ObjectMeta.DeletionTimestamp.IsZero() {
 		result, err := r.handleDeletion(ctx, ingress)
-		if err != nil {
-			timer.RecordError()
-		} else {
-			metrics.DeleteResourceConditionMetrics(ingressResourceKind, ingress.Name, ingress.Namespace)
-			timer.RecordSuccess()
-		}
+		recordDeletionOutcome(timer, metrics, result, err, ingressResourceKind, ingress)
 		return result, err
 	}
 
@@ -128,7 +123,12 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		metrics.SetResourceCondition(ingressResourceKind, ingress.Name, ingress.Namespace, "Ready", 0)
 		metrics.RecordIngressProcessed(ResultError)
 		timer.RecordError()
-		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, err
+		// Return a fixed-delay requeue with a nil error: controller-runtime
+		// ignores the Result and falls back to exponential backoff when the
+		// returned error is non-nil. The failure is already surfaced via the
+		// log, Warning event, and error metrics above, so a deterministic
+		// retry cadence is preferred (see BaseReconcile for the same pattern).
+		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, nil
 	}
 
 	// Update Ingress LoadBalancer status
@@ -180,6 +180,9 @@ func (r *IngressReconciler) matchesIngressClass(ingress *networkingv1.Ingress) b
 
 // handleDeletion handles the deletion of an Ingress resource.
 // It removes all applied routes and backends from the gRPC server and removes the finalizer.
+// It returns a fixed-delay requeue (with a nil error) when cleanup fails, so the
+// deletion is retried at a deterministic cadence, and (Result{}, err) when the
+// finalizer patch fails, so the workqueue applies exponential backoff.
 func (r *IngressReconciler) handleDeletion(
 	ctx context.Context,
 	ingress *networkingv1.Ingress,
@@ -192,7 +195,10 @@ func (r *IngressReconciler) handleDeletion(
 		if err := r.cleanupIngress(ctx, ingress); err != nil {
 			logger.Error(err, "failed to cleanup Ingress")
 			r.Recorder.Event(ingress, "Warning", EventReasonIngressCleanupFailed, err.Error())
-			return ctrl.Result{RequeueAfter: RequeueAfterCleanupFailure}, err
+			// Fixed-delay requeue with a nil error: returning the error
+			// alongside a non-empty Result would make controller-runtime
+			// discard the scheduled delay (see baseHandleDeletion).
+			return ctrl.Result{RequeueAfter: RequeueAfterCleanupFailure}, nil
 		}
 
 		// Remove finalizer

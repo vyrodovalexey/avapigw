@@ -137,7 +137,14 @@ func New(cfg *config.CacheConfig, logger observability.Logger, opts ...CacheOpti
 	case config.CacheTypeMemory, "":
 		return newMemoryCache(cfg, logger)
 	case config.CacheTypeRedis:
-		return newRedisCache(cfg, logger, options)
+		// The public constructor deliberately has no context parameter
+		// (changing its signature would break external callers), so redis
+		// initialization — Vault password resolution and the connectivity
+		// ping — is bounded by a local timeout here instead. The internal
+		// constructors accept the context and honor its cancellation.
+		ctx, cancel := context.WithTimeout(context.Background(), redisInitTimeout)
+		defer cancel()
+		return newRedisCache(ctx, cfg, logger, options)
 	default:
 		return nil, errors.New("unknown cache type: " + cfg.Type)
 	}

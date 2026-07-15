@@ -103,8 +103,8 @@ func TestCleanupListenersOnError_EmptyLists(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should not panic with empty lists
-	gw.cleanupListenersOnError(nil, nil)
-	gw.cleanupListenersOnError([]*Listener{}, []*GRPCListener{})
+	gw.cleanupListenersOnError(context.Background(), nil, nil)
+	gw.cleanupListenersOnError(context.Background(), []*Listener{}, []*GRPCListener{})
 }
 
 // ============================================================================

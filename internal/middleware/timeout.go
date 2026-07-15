@@ -125,21 +125,27 @@ func writeTimeoutResponse(
 	timeout time.Duration,
 	logger observability.Logger,
 ) {
+	// The log keeps the raw path (log cardinality is acceptable); the
+	// metrics below use the bounded route name instead.
 	logger.Warn("request timeout",
 		observability.String("path", r.URL.Path),
 		observability.String("method", r.Method),
 		observability.Duration("timeout", timeout),
 	)
 
-	GetMiddlewareMetrics().timeoutsTotal.WithLabelValues(
-		r.URL.Path,
-	).Inc()
-
-	// Record route-level timeout
+	// Use the route name from context for bounded Prometheus label
+	// cardinality. Raw URL paths would create unbounded cardinality
+	// (a label-explosion DoS vector).
 	routeName := util.RouteFromContext(r.Context())
 	if routeName == "" {
 		routeName = unknownRoute
 	}
+
+	GetMiddlewareMetrics().timeoutsTotal.WithLabelValues(
+		routeName,
+	).Inc()
+
+	// Record route-level timeout
 	routepkg.GetRouteMetrics().RecordTimeout(
 		routeName, r.Method, "upstream",
 	)

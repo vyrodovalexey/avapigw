@@ -6,9 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/cel-go/cel"
-
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
+	"github.com/vyrodovalexey/avapigw/internal/authz/abac"
 )
 
 // Policy constants.
@@ -82,16 +81,176 @@ func validateDuration(d string) error {
 
 // validateRateLimit validates rate limit configuration.
 func validateRateLimit(rl *avapigwv1alpha1.RateLimitConfig) error {
-	if !rl.Enabled {
+	if rl.Enabled {
+		if rl.RequestsPerSecond < 1 {
+			return fmt.Errorf("rateLimit.requestsPerSecond must be at least 1")
+		}
+
+		if rl.Burst < 1 {
+			return fmt.Errorf("rateLimit.burst must be at least 1")
+		}
+	}
+
+	// Store selection is validated even when rate limiting is disabled so
+	// configuration errors surface before the limiter is switched on.
+	return validateRateLimitStore(rl)
+}
+
+// validateRateLimitStore validates the rate limiter store selection and the
+// Redis connection configuration of the distributed rate limiter, mirroring
+// the gateway's own configuration validation rules.
+func validateRateLimitStore(rl *avapigwv1alpha1.RateLimitConfig) error {
+	switch rl.Store {
+	case "", CacheTypeMemory:
+		if rl.Redis != nil {
+			return fmt.Errorf("rateLimit.redis is only valid when rateLimit.store is 'redis'")
+		}
+		return nil
+	case CacheTypeRedis:
+		// Valid store; connection configuration is validated below.
+	default:
+		return fmt.Errorf("rateLimit.store must be 'memory' or 'redis'")
+	}
+
+	if rl.Redis == nil {
+		return fmt.Errorf("rateLimit.redis is required when rateLimit.store is 'redis'")
+	}
+
+	return validateRedisConnectionSpec(redisConnectionSpec{
+		fieldPath:      "rateLimit.redis",
+		url:            rl.Redis.URL,
+		sentinel:       rl.Redis.Sentinel,
+		connectTimeout: rl.Redis.ConnectTimeout,
+		readTimeout:    rl.Redis.ReadTimeout,
+		writeTimeout:   rl.Redis.WriteTimeout,
+		retry:          rl.Redis.Retry,
+	})
+}
+
+// redisConnectionSpec carries the connection fields shared by the route
+// cache and rate limiter Redis specifications for common validation.
+type redisConnectionSpec struct {
+	fieldPath      string
+	url            string
+	sentinel       *avapigwv1alpha1.RedisSentinelSpec
+	connectTimeout avapigwv1alpha1.Duration
+	readTimeout    avapigwv1alpha1.Duration
+	writeTimeout   avapigwv1alpha1.Duration
+	retry          *avapigwv1alpha1.RedisRetrySpec
+}
+
+// validateRedisConnectionSpec validates the shared standalone-vs-sentinel
+// Redis connection rules: url and sentinel are mutually exclusive, at least
+// one must be configured, and sentinel requires masterName plus addresses.
+func validateRedisConnectionSpec(spec redisConnectionSpec) error {
+	hasURL := spec.url != ""
+	hasSentinel := spec.sentinel != nil
+
+	if hasURL && hasSentinel {
+		return fmt.Errorf("%s.url and %s.sentinel are mutually exclusive", spec.fieldPath, spec.fieldPath)
+	}
+	if !hasURL && !hasSentinel {
+		return fmt.Errorf("%s requires either url or sentinel", spec.fieldPath)
+	}
+
+	if err := validateRedisSentinelSpec(spec.sentinel, spec.fieldPath+".sentinel"); err != nil {
+		return err
+	}
+
+	durations := map[string]avapigwv1alpha1.Duration{
+		"connectTimeout": spec.connectTimeout,
+		"readTimeout":    spec.readTimeout,
+		"writeTimeout":   spec.writeTimeout,
+	}
+	if err := validateDurationFields(spec.fieldPath, durations); err != nil {
+		return err
+	}
+
+	return validateRedisRetrySpec(spec.retry, spec.fieldPath+".retry")
+}
+
+// validateDurationFields validates a set of named duration fields.
+func validateDurationFields(fieldPath string, durations map[string]avapigwv1alpha1.Duration) error {
+	for name, d := range durations {
+		if d == "" {
+			continue
+		}
+		if err := validateDuration(string(d)); err != nil {
+			return fmt.Errorf("%s.%s is invalid: %w", fieldPath, name, err)
+		}
+	}
+	return nil
+}
+
+// validateRedisRetrySpec validates Redis connection retry configuration.
+func validateRedisRetrySpec(retrySpec *avapigwv1alpha1.RedisRetrySpec, fieldPath string) error {
+	if retrySpec == nil {
 		return nil
 	}
 
-	if rl.RequestsPerSecond < 1 {
-		return fmt.Errorf("rateLimit.requestsPerSecond must be at least 1")
+	if retrySpec.MaxRetries < 0 {
+		return fmt.Errorf("%s.maxRetries must be non-negative", fieldPath)
 	}
 
-	if rl.Burst < 1 {
-		return fmt.Errorf("rateLimit.burst must be at least 1")
+	return validateDurationFields(fieldPath, map[string]avapigwv1alpha1.Duration{
+		"initialBackoff": retrySpec.InitialBackoff,
+		"maxBackoff":     retrySpec.MaxBackoff,
+	})
+}
+
+// validateRouteCacheConfig validates route-level cache configuration shared
+// by the APIRoute, GRPCRoute and GraphQLRoute webhooks, mirroring the
+// gateway's own configuration validation rules.
+func validateRouteCacheConfig(cache *avapigwv1alpha1.CacheConfig) error {
+	if cache.TTL != "" {
+		if err := validateDuration(string(cache.TTL)); err != nil {
+			return fmt.Errorf("cache.ttl is invalid: %w", err)
+		}
+	}
+
+	if cache.StaleWhileRevalidate != "" {
+		if err := validateDuration(string(cache.StaleWhileRevalidate)); err != nil {
+			return fmt.Errorf("cache.staleWhileRevalidate is invalid: %w", err)
+		}
+	}
+
+	if err := validateCacheType(cache.Type, "cache"); err != nil {
+		return err
+	}
+
+	return validateRouteCacheRedis(cache)
+}
+
+// validateRouteCacheRedis validates the Redis backend selection rules of a
+// route-level cache: the redis block is required (and only valid) for
+// type=redis, url and sentinel are mutually exclusive, and jitter stays
+// within [0.0, 1.0].
+func validateRouteCacheRedis(cache *avapigwv1alpha1.CacheConfig) error {
+	if cache.Type != CacheTypeRedis {
+		if cache.Redis != nil {
+			return fmt.Errorf("cache.redis is only valid when cache.type is 'redis'")
+		}
+		return nil
+	}
+
+	if cache.Redis == nil {
+		return fmt.Errorf("cache.redis is required when cache.type is 'redis'")
+	}
+
+	if err := validateRedisConnectionSpec(redisConnectionSpec{
+		fieldPath:      "cache.redis",
+		url:            cache.Redis.URL,
+		sentinel:       cache.Redis.Sentinel,
+		connectTimeout: cache.Redis.ConnectTimeout,
+		readTimeout:    cache.Redis.ReadTimeout,
+		writeTimeout:   cache.Redis.WriteTimeout,
+		retry:          cache.Redis.Retry,
+	}); err != nil {
+		return err
+	}
+
+	if cache.Redis.TTLJitter != nil && (*cache.Redis.TTLJitter < 0.0 || *cache.Redis.TTLJitter > 1.0) {
+		return fmt.Errorf("cache.redis.ttlJitter must be between 0.0 and 1.0")
 	}
 
 	return nil
@@ -585,12 +744,14 @@ func validateRouteAPIKeyAuth(apiKey *avapigwv1alpha1.APIKeyAuthConfig) error {
 }
 
 // validateRouteMTLSAuth validates route-level mTLS authentication configuration.
+//
+// A missing caFile is intentionally NOT an error: the gateway accepts an mTLS
+// config whose CA comes from a gateway-level source (Vault-managed PKI or an
+// inline CA cert — see internal/auth/mtls.Config.hasCASource), and the CRD
+// carries no field for those sources, so the webhook cannot know whether a
+// gateway-level CA is in play. warnMTLSMissingCAFile surfaces the situation
+// as an admission WARNING instead.
 func validateRouteMTLSAuth(mtls *avapigwv1alpha1.MTLSAuthConfig) error {
-	// CA file is required for mTLS
-	if mtls.CAFile == "" {
-		return fmt.Errorf("authentication.mtls.caFile is required when mTLS is enabled")
-	}
-
 	// Validate extract identity if specified
 	if mtls.ExtractIdentity != "" {
 		validMethods := map[string]bool{
@@ -738,20 +899,14 @@ func validateABACConfig(abac *avapigwv1alpha1.ABACConfig) error {
 }
 
 // validateCELExpression validates a CEL expression for ABAC policies.
-// It creates a CEL environment with the standard variables available in ABAC policies
-// and compiles the expression to check for syntax errors.
-// The environment provides:
-// - request: map containing request attributes (user, method, path, headers, etc.)
-// - identity: map containing identity attributes (roles, groups, claims, etc.)
-// - resource: map containing resource attributes (owner, type, name, etc.)
-// - action: string representing the action being performed
+// It compiles the expression against the SAME CEL environment the gateway's
+// ABAC engine evaluates policies with (see internal/authz/abac.NewCELEnv), so
+// admission-time validation exactly mirrors runtime compilation. The shared
+// environment declares: subject (map), request (map), resource (string),
+// action (string), environment (map), now (timestamp), and the custom
+// functions ip_in_range and has_role.
 func validateCELExpression(expr string) error {
-	env, err := cel.NewEnv(
-		cel.Variable("request", cel.MapType(cel.StringType, cel.DynType)),
-		cel.Variable("identity", cel.MapType(cel.StringType, cel.DynType)),
-		cel.Variable("resource", cel.MapType(cel.StringType, cel.DynType)),
-		cel.Variable("action", cel.StringType),
-	)
+	env, err := abac.NewCELEnv()
 	if err != nil {
 		return fmt.Errorf("failed to create CEL environment: %w", err)
 	}
@@ -1042,6 +1197,21 @@ func warnPlaintextAuthSecrets(auth *avapigwv1alpha1.AuthenticationConfig) []stri
 	return warnings
 }
 
+// warnMTLSMissingCAFile returns a warning when route-level mTLS is enabled
+// without a caFile. The configuration is valid when the gateway resolves the
+// client CA from a gateway-level source (e.g. Vault-managed PKI), which the
+// webhook cannot observe — so this is a warning rather than a rejection.
+func warnMTLSMissingCAFile(auth *avapigwv1alpha1.AuthenticationConfig) []string {
+	if auth == nil || auth.MTLS == nil || !auth.MTLS.Enabled || auth.MTLS.CAFile != "" {
+		return nil
+	}
+	return []string{
+		"authentication.mtls is enabled without caFile: client certificate validation will rely on a " +
+			"gateway-level CA source (e.g. Vault-managed PKI). If no gateway-level CA is configured, " +
+			"mTLS authentication will fail at runtime.",
+	}
+}
+
 // warnPlaintextBackendAuthSecrets returns warnings for plaintext secrets found in
 // backend authentication configuration.
 func warnPlaintextBackendAuthSecrets(auth *avapigwv1alpha1.BackendAuthConfig) []string {
@@ -1064,6 +1234,92 @@ func warnPlaintextBackendAuthSecrets(auth *avapigwv1alpha1.BackendAuthConfig) []
 	}
 
 	return warnings
+}
+
+// warnRouteCacheSentinelSecrets returns plaintext-secret warnings for the
+// route-level cache Redis Sentinel configuration.
+func warnRouteCacheSentinelSecrets(cache *avapigwv1alpha1.CacheConfig) []string {
+	if cache == nil || cache.Redis == nil || cache.Redis.Sentinel == nil {
+		return nil
+	}
+	return warnPlaintextSentinelSecrets(cache.Redis.Sentinel)
+}
+
+// warnRateLimitSentinelSecrets returns plaintext-secret warnings for the
+// rate limiter Redis Sentinel configuration.
+func warnRateLimitSentinelSecrets(rl *avapigwv1alpha1.RateLimitConfig) []string {
+	if rl == nil || rl.Redis == nil || rl.Redis.Sentinel == nil {
+		return nil
+	}
+	return warnPlaintextSentinelSecrets(rl.Redis.Sentinel)
+}
+
+// warnBackendCacheReserved returns a warning when the reserved backend
+// cache configuration is set. The gateway data path does not implement
+// backend-level response caching; the setting is accepted for forward
+// compatibility but currently has no effect.
+func warnBackendCacheReserved(cache *avapigwv1alpha1.BackendCacheConfig) []string {
+	if cache == nil || !cache.Enabled {
+		return nil
+	}
+	return []string{
+		"spec.cache is RESERVED and currently has no effect: the gateway does not implement " +
+			"backend-level response caching yet. Use route-level caching " +
+			"(APIRoute/GRPCRoute/GraphQLRoute spec.cache) instead.",
+	}
+}
+
+// warnRateLimitRedisStoreUnapplied returns a warning when rateLimit.store
+// is set to "redis" on a resource whose data path does not use the
+// distributed limiter yet (gRPC routes use an in-memory per-route limiter;
+// backends do not enforce this limiter). GraphQL routes are NOT warned:
+// their requests run through the shared route middleware chain
+// (gateway.RouteMiddlewareManager via GraphQLRoute.ToMiddlewareRoute), which
+// enforces the configured store, including redis-backed distributed limiting.
+func warnRateLimitRedisStoreUnapplied(rl *avapigwv1alpha1.RateLimitConfig, kind string) []string {
+	if rl == nil || rl.Store != CacheTypeRedis {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"rateLimit.store=redis is not applied for %s yet; distributed rate limiting is currently "+
+			"enforced for the gateway-level rate limit, HTTP APIRoutes, and GraphQL routes. The "+
+			"configuration is accepted for forward compatibility.", kind),
+	}
+}
+
+// warnRouteCacheRedisTypeUnapplied returns a warning when cache.type is set
+// to "redis" on a route kind whose data path does not implement response
+// caching yet (gRPC routes). GraphQL routes use the dedicated
+// warnGraphQLRouteCacheIneffective warning instead: their middleware chain
+// does build the cache, but GET-only caching semantics make it ineffective.
+func warnRouteCacheRedisTypeUnapplied(cache *avapigwv1alpha1.CacheConfig, kind string) []string {
+	if cache == nil || cache.Type != CacheTypeRedis {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"cache.type=redis is not applied for %s yet; response caching (memory and redis) is "+
+			"currently enforced for HTTP APIRoutes. The configuration is accepted for forward "+
+			"compatibility.", kind),
+	}
+}
+
+// warnGraphQLRouteCacheIneffective returns a warning when cache.type is set
+// to "redis" on a GraphQLRoute. Unlike gRPC routes, the GraphQL data path
+// DOES build the configured cache middleware (the shared route middleware
+// chain is applied via GraphQLRoute.ToMiddlewareRoute), but response caching
+// only serves GET requests while GraphQL operations are sent as POST
+// requests with a JSON body to the GraphQL endpoint — so cached responses
+// are never stored or served for GraphQL operations in practice.
+func warnGraphQLRouteCacheIneffective(cache *avapigwv1alpha1.CacheConfig) []string {
+	if cache == nil || cache.Type != CacheTypeRedis {
+		return nil
+	}
+	return []string{
+		"cache.type=redis on GraphQLRoute currently has no effect: the route middleware chain " +
+			"builds the redis cache, but response caching applies to GET requests only and GraphQL " +
+			"operations are POST requests, so GraphQL responses are never cached. The configuration " +
+			"is accepted for forward compatibility.",
+	}
 }
 
 // warnPlaintextSentinelSecrets returns warnings for plaintext secrets found in

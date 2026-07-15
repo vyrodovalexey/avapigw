@@ -424,8 +424,10 @@ func TestFunctional_GRPCRoute_Authorization(t *testing.T) {
 					Enabled: true,
 					Policies: []avapigwv1alpha1.ABACPolicyConfig{
 						{
-							Name:       "tenant-policy",
-							Expression: "request.metadata['x-tenant-id'] == resource.tenant_id",
+							Name: "tenant-policy",
+							// Runtime CEL env: 'resource' is a string, tenant
+							// attributes live on the subject map.
+							Expression: "request.metadata['x-tenant-id'] == subject.tenant_id",
 							Effect:     "allow",
 						},
 					},

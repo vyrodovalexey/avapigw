@@ -99,6 +99,11 @@ func TestSafeIntToUint32(t *testing.T) {
 			input:    int(^uint32(0)),
 			expected: ^uint32(0),
 		},
+		{
+			name:     "overflow clamps to max uint32",
+			input:    int(^uint32(0)) + 1,
+			expected: ^uint32(0),
+		},
 	}
 
 	for _, tt := range tests {
@@ -188,6 +193,39 @@ func TestCircuitBreakerMiddleware_OpenState(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
 	assert.Contains(t, rec.Body.String(), "circuit breaker open")
+}
+
+func TestCircuitBreakerMiddleware_WebSocketUpgradeBypass(t *testing.T) {
+	t.Parallel()
+
+	// Trip the breaker open: regular requests would be rejected, but
+	// WebSocket upgrades must bypass the breaker entirely because they
+	// need direct access to the underlying connection (http.Hijacker).
+	cb := NewCircuitBreaker("test-cb-ws-bypass", 2, 30*time.Second)
+	for i := 0; i < 10; i++ {
+		_, _ = cb.Execute(func() (interface{}, error) {
+			return nil, assert.AnError
+		})
+	}
+	assert.Equal(t, gobreaker.StateOpen, cb.State())
+
+	middleware := CircuitBreakerMiddleware(cb)
+
+	handlerRan := false
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerRan = true
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.True(t, handlerRan, "WebSocket upgrade must bypass an open circuit breaker")
+	assert.Equal(t, http.StatusSwitchingProtocols, rec.Code)
 }
 
 func TestStatusCapturingResponseWriter_WriteHeader(t *testing.T) {

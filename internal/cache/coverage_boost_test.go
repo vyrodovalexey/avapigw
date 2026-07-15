@@ -347,12 +347,13 @@ func TestMemoryCache_CleanupLoop_StopChannel(t *testing.T) {
 }
 
 // ============================================================
-// redis.go: Retry paths for Get/Set/Delete/Exists
-// Close miniredis mid-operation to trigger retryable errors
-// and cover the retry loop, backoff, and error logging paths.
+// redis.go: Error propagation paths for Get/Set/Delete/Exists.
+// "ERR forced error" is a permanent server reply, so it is NOT
+// retried (single attempt) and must surface via the error path
+// (errorsTotal metric, span status, error log).
 // ============================================================
 
-func TestRedisCache_Get_RetryOnError(t *testing.T) {
+func TestRedisCache_Get_ServerErrorPropagates(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
@@ -367,15 +368,14 @@ func TestRedisCache_Get_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	// Use SetError to make commands fail with a retryable error
+	// "ERR ..." is a permanent server reply: it fails without retries
 	mr.SetError("ERR forced error")
 
 	ctx := context.Background()
 	_, err = cache.Get(ctx, "key")
-	// Should fail after retries
 	assert.Error(t, err)
 	assert.NotErrorIs(t, err, ErrCacheMiss)
 
@@ -383,7 +383,7 @@ func TestRedisCache_Get_RetryOnError(t *testing.T) {
 	_ = cache.Close()
 }
 
-func TestRedisCache_Set_RetryOnError(t *testing.T) {
+func TestRedisCache_Set_ServerErrorPropagates(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
@@ -398,22 +398,21 @@ func TestRedisCache_Set_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	// Use SetError to make commands fail with a retryable error
+	// "ERR ..." is a permanent server reply: it fails without retries
 	mr.SetError("ERR forced error")
 
 	ctx := context.Background()
 	err = cache.Set(ctx, "key", []byte("value"), time.Minute)
-	// Should fail after retries
 	assert.Error(t, err)
 
 	mr.SetError("")
 	_ = cache.Close()
 }
 
-func TestRedisCache_Delete_RetryOnError(t *testing.T) {
+func TestRedisCache_Delete_ServerErrorPropagates(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
@@ -428,22 +427,21 @@ func TestRedisCache_Delete_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	// Use SetError to make commands fail with a retryable error
+	// "ERR ..." is a permanent server reply: it fails without retries
 	mr.SetError("ERR forced error")
 
 	ctx := context.Background()
 	err = cache.Delete(ctx, "key")
-	// Should fail after retries
 	assert.Error(t, err)
 
 	mr.SetError("")
 	_ = cache.Close()
 }
 
-func TestRedisCache_Exists_RetryOnError(t *testing.T) {
+func TestRedisCache_Exists_ServerErrorPropagates(t *testing.T) {
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
 	defer mr.Close()
@@ -458,15 +456,14 @@ func TestRedisCache_Exists_RetryOnError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	// Use SetError to make commands fail with a retryable error
+	// "ERR ..." is a permanent server reply: it fails without retries
 	mr.SetError("ERR forced error")
 
 	ctx := context.Background()
 	_, err = cache.Exists(ctx, "key")
-	// Should fail after retries
 	assert.Error(t, err)
 
 	mr.SetError("")
@@ -474,10 +471,17 @@ func TestRedisCache_Exists_RetryOnError(t *testing.T) {
 }
 
 // ============================================================
-// redis.go: Non-retryable error break path in retry loops
-// Use a context that gets canceled during the Redis operation
-// (not during backoff) to trigger the !isRetryableRedisError break.
+// redis.go: Non-retryable error break path in retry loops.
+// "ERR forced error" is a permanent server reply, so
+// isRetryableRedisError returns false and the operation fails on
+// the first attempt, well before a full retry cycle (three
+// backoffs, >= 700ms) would complete.
 // ============================================================
+
+// nonRetryableBreakThreshold is well below the minimum duration of a full
+// retry cycle (100+200+400ms of backoff), proving that no retry occurred,
+// while leaving generous headroom for slow CI machines.
+const nonRetryableBreakThreshold = 500 * time.Millisecond
 
 func TestRedisCache_Get_NonRetryableErrorBreak(t *testing.T) {
 	mr, err := miniredis.Run()
@@ -494,25 +498,21 @@ func TestRedisCache_Get_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	// First attempt: SetError to trigger retryable error
-	// Then clear error and cancel context so the second attempt
-	// gets context.Canceled (non-retryable) from the Redis client.
+	// A permanent server reply must break out of the retry loop immediately.
 	mr.SetError("ERR forced error")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel after enough time for first attempt + start of backoff
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		mr.SetError("") // Clear error
-		cancel()        // Cancel context
-	}()
+	start := time.Now()
+	_, err = cache.Get(context.Background(), "key")
+	elapsed := time.Since(start)
 
-	_, err = cache.Get(ctx, "key")
 	assert.Error(t, err)
+	assert.Less(t, elapsed, nonRetryableBreakThreshold,
+		"permanent server replies must not be retried")
 
+	mr.SetError("")
 	_ = cache.Close()
 }
 
@@ -531,21 +531,21 @@ func TestRedisCache_Set_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
+	// A permanent server reply must break out of the retry loop immediately.
 	mr.SetError("ERR forced error")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		mr.SetError("")
-		cancel()
-	}()
+	start := time.Now()
+	err = cache.Set(context.Background(), "key", []byte("value"), time.Minute)
+	elapsed := time.Since(start)
 
-	err = cache.Set(ctx, "key", []byte("value"), time.Minute)
 	assert.Error(t, err)
+	assert.Less(t, elapsed, nonRetryableBreakThreshold,
+		"permanent server replies must not be retried")
 
+	mr.SetError("")
 	_ = cache.Close()
 }
 
@@ -564,21 +564,21 @@ func TestRedisCache_Delete_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
+	// A permanent server reply must break out of the retry loop immediately.
 	mr.SetError("ERR forced error")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		mr.SetError("")
-		cancel()
-	}()
+	start := time.Now()
+	err = cache.Delete(context.Background(), "key")
+	elapsed := time.Since(start)
 
-	err = cache.Delete(ctx, "key")
 	assert.Error(t, err)
+	assert.Less(t, elapsed, nonRetryableBreakThreshold,
+		"permanent server replies must not be retried")
 
+	mr.SetError("")
 	_ = cache.Close()
 }
 
@@ -597,27 +597,29 @@ func TestRedisCache_Exists_NonRetryableErrorBreak(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
+	// A permanent server reply must break out of the retry loop immediately.
 	mr.SetError("ERR forced error")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		mr.SetError("")
-		cancel()
-	}()
+	start := time.Now()
+	_, err = cache.Exists(context.Background(), "key")
+	elapsed := time.Since(start)
 
-	_, err = cache.Exists(ctx, "key")
 	assert.Error(t, err)
+	assert.Less(t, elapsed, nonRetryableBreakThreshold,
+		"permanent server replies must not be retried")
 
+	mr.SetError("")
 	_ = cache.Close()
 }
 
 // ============================================================
-// redis.go: Retry with context cancellation during backoff
-// Tests the ctx.Done() path inside the retry loop.
+// redis.go: Retry with context cancellation during backoff.
+// "LOADING ..." is a transient server reply, so the operation
+// enters the retry/backoff path; canceling the context must
+// abort the retries promptly.
 // ============================================================
 
 func TestRedisCache_Get_ContextCanceledDuringRetry(t *testing.T) {
@@ -635,14 +637,14 @@ func TestRedisCache_Get_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	// Use SetError to make commands fail with a retryable error (fast, no timeout)
-	mr.SetError("ERR forced error")
+	// LOADING is a transient server state, so the Get enters the retry path
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
-	// Cancel context after a short delay — the first attempt fails instantly,
-	// then during the 100ms retry backoff the context gets canceled.
+	// Cancel context after a short delay — the first attempt fails with a
+	// retryable error, then the cancellation aborts the retry loop.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -671,10 +673,10 @@ func TestRedisCache_Set_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	mr.SetError("ERR forced error")
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -704,10 +706,10 @@ func TestRedisCache_Delete_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	mr.SetError("ERR forced error")
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -737,10 +739,10 @@ func TestRedisCache_Exists_ContextCanceledDuringRetry(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
-	mr.SetError("ERR forced error")
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -774,7 +776,7 @@ func TestRedisCache_GetWithTTL_PipelineError(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to trigger pipeline error
@@ -807,7 +809,7 @@ func TestRedisCache_SetNX_Error(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to trigger error
@@ -840,7 +842,7 @@ func TestRedisCache_Expire_Error(t *testing.T) {
 		},
 	}
 
-	cache, err := newRedisCache(cfg, observability.NopLogger(), nil)
+	cache, err := newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	require.NoError(t, err)
 
 	// Use SetError to trigger error
@@ -881,7 +883,7 @@ func TestNewRedisCache_WithTLS(t *testing.T) {
 
 	// This will fail at Ping because miniredis doesn't support TLS,
 	// but the TLS config code path (lines 91-96) is exercised.
-	_, err = newRedisCache(cfg, observability.NopLogger(), nil)
+	_, err = newRedisCache(context.Background(), cfg, observability.NopLogger(), nil)
 	// May or may not error depending on miniredis behavior with TLS
 	// The important thing is the TLS config code path is covered.
 	_ = err

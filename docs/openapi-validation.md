@@ -85,6 +85,18 @@ spec:
 
 **Note**: Only one of `specFile` or `specURL` should be specified. If both are provided, `specFile` takes precedence.
 
+#### Spec Loading Safeguards
+
+- **Fetch timeout**: `specURL` fetches are bounded to 30 seconds.
+- **External `$ref` denied (SSRF guard)**: references to locations other than
+  the spec's own root URI are rejected unless the loader is explicitly
+  configured to allow external references, protecting against SSRF and
+  local-file reads via `$ref` in untrusted documents. A denied reference
+  fails the load with `encountered disallowed external reference`.
+- **Per-load byte cache**: fetched spec bytes are cached only for the
+  duration of one load, so invalidating/reloading a spec genuinely refetches
+  it instead of serving stale bytes.
+
 ## gRPC Proto Validation
 
 For gRPC routes, use proto descriptor-based validation:
@@ -508,15 +520,16 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 
 ### Per-Route Middleware Chain
 ```
-Security Headers → CORS → Body Limit → **OpenAPI Validation** → 
-Headers → Cache → Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+**OpenAPI Validation** → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
 
 This positioning ensures that:
 1. **Authentication/Authorization** happens before validation
-2. **Request limits** are enforced before processing large payloads
-3. **Validation** occurs before expensive operations like caching and transformation
-4. **Header manipulation** can modify requests after validation
+2. **Rate limiting** sheds load before body/validation work (401 before 429 for unauthenticated requests)
+3. **Request limits** are enforced before processing large payloads
+4. **Validation** occurs before expensive operations like caching and transformation
+5. **Header manipulation** can modify requests after validation
 
 ## Prometheus Metrics
 

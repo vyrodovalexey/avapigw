@@ -236,6 +236,14 @@ func (v *GraphQLBackendValidator) validate(graphqlBackend *avapigwv1alpha1.Graph
 		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Cache.Sentinel)...)
 	}
 
+	// Backend-level caching is reserved: warn so users reach for
+	// route-level caching instead of a silently ignored setting.
+	warnings = append(warnings, warnBackendCacheReserved(spec.Cache)...)
+
+	// Distributed rate limiting is not enforced in the backend data path.
+	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
+	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, "GraphQLBackend")...)
+
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
 	}

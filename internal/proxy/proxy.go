@@ -38,6 +38,58 @@ import (
 // Using the shared httputil package for a single source of truth (RFC 2616/7230).
 var hopHeaders = avahttputil.HopByHopHeaders
 
+// Plaintext backend connection-pool sizing. TLS-enabled backends use the
+// per-backend ConnectionPool transport (see internal/backend); plaintext
+// backends previously fell back to http.DefaultTransport, whose 2 idle
+// connections per host cause connection churn and ephemeral-port exhaustion
+// under load. The shared pooled transport below mirrors the TLS path's
+// dialer/H2 conventions while sizing idle reuse for gateway-class fan-in.
+const (
+	// defaultProxyMaxIdleConns caps idle connections across all plaintext
+	// backends served by the shared transport.
+	defaultProxyMaxIdleConns = 512
+
+	// defaultProxyMaxIdleConnsPerHost keeps enough warm connections per
+	// backend host to avoid per-request dials at load.
+	defaultProxyMaxIdleConnsPerHost = 100
+
+	// defaultProxyIdleConnTimeout matches the backend pool convention.
+	defaultProxyIdleConnTimeout = 90 * time.Second
+
+	// defaultProxyDialTimeout bounds backend TCP connection establishment.
+	defaultProxyDialTimeout = 30 * time.Second
+
+	// defaultProxyDialKeepAlive is the TCP keep-alive probe interval.
+	defaultProxyDialKeepAlive = 30 * time.Second
+
+	// defaultProxyTLSHandshakeTimeout bounds TLS handshakes for the rare
+	// https target reached through the shared transport.
+	defaultProxyTLSHandshakeTimeout = 10 * time.Second
+
+	// defaultProxyExpectContinueTimeout matches http.DefaultTransport.
+	defaultProxyExpectContinueTimeout = 1 * time.Second
+)
+
+// newDefaultPooledTransport builds the shared pooled transport used for
+// plaintext backends. It intentionally leaves ResponseHeaderTimeout unset so
+// long-lived streaming responses (SSE, long polling) keep working exactly as
+// they did with http.DefaultTransport.
+func newDefaultPooledTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   defaultProxyDialTimeout,
+			KeepAlive: defaultProxyDialKeepAlive,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          defaultProxyMaxIdleConns,
+		MaxIdleConnsPerHost:   defaultProxyMaxIdleConnsPerHost,
+		IdleConnTimeout:       defaultProxyIdleConnTimeout,
+		TLSHandshakeTimeout:   defaultProxyTLSHandshakeTimeout,
+		ExpectContinueTimeout: defaultProxyExpectContinueTimeout,
+	}
+}
+
 // RouteMiddlewareApplier applies per-route middleware to a handler.
 // This interface decouples the proxy from the gateway package to avoid
 // import cycles.
@@ -74,6 +126,8 @@ type ReverseProxy struct {
 	metricsRegistry       *prometheus.Registry
 	routeMiddleware       RouteMiddlewareApplier
 	aggregateHandler      AggregateHandler
+	websocketConfig       *config.WebSocketConfig
+	wsOriginPolicy        *wsOriginPolicy
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -156,6 +210,16 @@ func WithAggregateHandler(h AggregateHandler) ProxyOption {
 	}
 }
 
+// WithWebSocketConfig sets the WebSocket configuration used to build the
+// origin allowlist enforced during upgrade handshakes. When cfg is nil or
+// its allowedOrigins list is empty, the proxy keeps the backward-compatible
+// permissive behavior and logs a single startup warning.
+func WithWebSocketConfig(cfg *config.WebSocketConfig) ProxyOption {
+	return func(p *ReverseProxy) {
+		p.websocketConfig = cfg
+	}
+}
+
 // NewReverseProxy creates a new reverse proxy.
 func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...ProxyOption) *ReverseProxy {
 	p := &ReverseProxy{
@@ -168,6 +232,19 @@ func NewReverseProxy(r *router.Router, registry *backend.Registry, opts ...Proxy
 	for _, opt := range opts {
 		opt(p)
 	}
+
+	// Give plaintext backends a pooled transport equivalent to the TLS
+	// path's per-backend connection pool. Leaving this nil would hand
+	// httputil.ReverseProxy http.DefaultTransport (2 idle conns per host),
+	// which exhausts ephemeral ports under load.
+	if p.transport == nil {
+		p.transport = newDefaultPooledTransport()
+	}
+
+	// Build the WebSocket origin policy after options are applied so it
+	// uses the configured logger; an empty allowlist keeps the permissive
+	// legacy behavior and warns once at startup.
+	p.wsOriginPolicy = newWSOriginPolicy(p.websocketConfig, p.logger)
 
 	// Initialize proxy and WebSocket metrics with the configured
 	// registry so they appear on the gateway's /metrics endpoint.
@@ -221,6 +298,16 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle aggregate (fan-out) mirroring when configured and enabled.
+	//
+	// NOTE: the fan-out runs BEFORE applyRewrite (which is applied in doProxy
+	// for single-destination proxying only), so a route-level spec.rewrite has
+	// NO effect on the paths sent to the fan-out targets. Each AggregateTarget
+	// resolves its own path from the aggregate configuration verbatim, and
+	// AggregateTarget currently offers no per-target path override. If
+	// rewrite-aware fan-out is ever needed, the rewrite must be applied to the
+	// request before ServeAggregate (or a path override added to
+	// AggregateTarget) — do not reorder this call after doProxy's rewrite, as
+	// aggregate routes intentionally bypass destination selection.
 	if p.handleAggregate(w, r, route) {
 		return
 	}
@@ -237,6 +324,11 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // validation, rate-limit) is applied around the fan-out exactly as it is for
 // single-destination proxying, so aggregate routes co-operate with the same
 // cross-cutting features.
+//
+// Route-level rewrite (spec.rewrite) is NOT applied to the fan-out: it lives
+// in doProxy on the single-destination path, which aggregate routes never
+// reach. Fan-out target paths come exclusively from the aggregate target
+// configuration (AggregateTarget has no path override field).
 func (p *ReverseProxy) handleAggregate(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -608,7 +700,7 @@ func (p *ReverseProxy) executeWebSocket(
 	)
 
 	// Use message-level WebSocket proxy for metrics tracking
-	wp := &websocketProxy{logger: p.logger}
+	wp := &websocketProxy{logger: p.logger, originPolicy: p.wsOriginPolicy}
 	sent, received, wsErr := wp.proxyWebSocket(w, r, target, p.transport)
 
 	// Record message metrics (old metrics)
@@ -637,10 +729,11 @@ func (p *ReverseProxy) executeWebSocket(
 	)
 
 	if wsErr != nil {
-		wsMetrics.errorsTotal.WithLabelValues(backendName, "proxy_error").Inc()
+		errType := wsErrorType(wsErr)
+		wsMetrics.errorsTotal.WithLabelValues(backendName, errType).Inc()
 		// Record streaming-level WebSocket error
 		wsStreamMetrics.RecordError(
-			routeName, backendName, "proxy_error",
+			routeName, backendName, errType,
 		)
 		// Only log at debug level - WebSocket close is normal
 		p.logger.Debug("websocket proxy completed",
@@ -650,6 +743,15 @@ func (p *ReverseProxy) executeWebSocket(
 			observability.Int64("messages_received", received),
 		)
 	}
+}
+
+// wsErrorType classifies a WebSocket proxy error into a bounded metric
+// label value.
+func wsErrorType(err error) string {
+	if errors.Is(err, ErrWSOriginNotAllowed) {
+		return wsErrorTypeOriginRejected
+	}
+	return wsErrorTypeProxy
 }
 
 // isWebSocketRequest checks if the request is a WebSocket upgrade request.
@@ -1025,4 +1127,11 @@ func classifyProxyError(err error) string {
 // Handler returns an http.Handler for the proxy.
 func (p *ReverseProxy) Handler() http.Handler {
 	return p
+}
+
+// Transport returns the transport used for plaintext backends. TLS-enabled
+// backends override it per request with their pooled backend transport (see
+// createReverseProxy). Exposed for configuration assertions in tests.
+func (p *ReverseProxy) Transport() http.RoundTripper {
+	return p.transport
 }

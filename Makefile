@@ -831,15 +831,15 @@ test-env-verify:
 	@$(TEST_ENV_DIR)/scripts/setup-vault.sh --verify
 	@$(TEST_ENV_DIR)/scripts/setup-keycloak.sh --verify
 	@echo "==> Checking service health..."
-	@echo -n "  Vault:          " && (curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
-	@echo -n "  Keycloak:       " && (curl -sf http://127.0.0.1:8090/realms/master > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
-	@echo -n "  REST API 1:     " && (curl -sf http://127.0.0.1:8801/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
-	@echo -n "  REST API 2:     " && (curl -sf http://127.0.0.1:8802/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
-	@echo -n "  REST API 3 (OIDC): " && (curl -sf http://127.0.0.1:8803/health > /dev/null 2>&1 && echo "✓ healthy" || echo "⚠ may require OIDC token")
-	@echo -n "  REST API 5 (basic): " && (curl -sf http://127.0.0.1:8805/health > /dev/null 2>&1 && echo "✓ healthy" || echo "⚠ may require auth")
-	@echo -n "  gRPC 1:         " && (curl -sf http://127.0.0.1:9091/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
-	@echo -n "  gRPC 2:         " && (curl -sf http://127.0.0.1:9092/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
-	@echo -n "  Redis:          " && (docker exec redis redis-cli -a password ping 2>/dev/null | grep -q PONG && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  Vault:          " && (curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  Keycloak:       " && (curl -sf http://127.0.0.1:8090/realms/master > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  REST API 1:     " && (curl -sf http://127.0.0.1:8801/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  REST API 2:     " && (curl -sf http://127.0.0.1:8802/health > /dev/null && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  REST API 3 (OIDC): " && (curl -sf http://127.0.0.1:8803/health > /dev/null 2>&1 && echo "✓ healthy" || echo "⚠ may require OIDC token")
+	@printf '%s' "  REST API 5 (basic): " && (curl -sf http://127.0.0.1:8805/health > /dev/null 2>&1 && echo "✓ healthy" || echo "⚠ may require auth")
+	@printf '%s' "  gRPC 1:         " && (curl -sf http://127.0.0.1:9091/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  gRPC 2:         " && (curl -sf http://127.0.0.1:9092/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  Redis:          " && (docker exec redis redis-cli -a password ping 2>/dev/null | grep -q PONG && echo "✓ healthy" || echo "✗ unavailable")
 	@echo "==> Verification complete"
 
 # ==============================================================================

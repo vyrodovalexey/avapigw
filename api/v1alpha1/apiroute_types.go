@@ -305,6 +305,17 @@ type CacheConfig struct {
 	// StaleWhileRevalidate allows serving stale content while revalidating.
 	// +optional
 	StaleWhileRevalidate Duration `json:"staleWhileRevalidate,omitempty"`
+
+	// Type is the cache backend type (memory, redis).
+	// +kubebuilder:validation:Enum=memory;redis
+	// +kubebuilder:default=memory
+	// +optional
+	Type string `json:"type,omitempty"`
+
+	// Redis contains Redis-specific cache configuration.
+	// Required when Type is "redis"; must be omitted otherwise.
+	// +optional
+	Redis *RedisCacheSpec `json:"redis,omitempty"`
 }
 
 // EncodingConfig represents encoding configuration.

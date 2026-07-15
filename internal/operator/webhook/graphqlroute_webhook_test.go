@@ -1319,7 +1319,9 @@ func TestGraphQLRouteValidator_ValidateCreate_CrossConflictWithAPIRoute(t *testi
 		Spec: avapigwv1alpha1.GraphQLRouteSpec{
 			Match: []avapigwv1alpha1.GraphQLRouteMatch{
 				{
-					Path: &avapigwv1alpha1.StringMatch{Exact: "/api/graphql"},
+					// Identical prefix as the existing APIRoute: identical
+					// specificity → genuine cross-kind duplicate.
+					Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"},
 				},
 			},
 			Route: []avapigwv1alpha1.RouteDestination{
@@ -1385,7 +1387,9 @@ func TestGraphQLRouteValidator_ValidateUpdate_CrossConflictWithAPIRoute(t *testi
 		Spec: avapigwv1alpha1.GraphQLRouteSpec{
 			Match: []avapigwv1alpha1.GraphQLRouteMatch{
 				{
-					Path: &avapigwv1alpha1.StringMatch{Exact: "/api/graphql"},
+					// Identical prefix as the existing APIRoute: identical
+					// specificity → genuine cross-kind duplicate.
+					Path: &avapigwv1alpha1.StringMatch{Prefix: "/api"},
 				},
 			},
 			Route: []avapigwv1alpha1.RouteDestination{

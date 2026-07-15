@@ -256,7 +256,7 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 
 	// Validate cache configuration
 	if spec.Cache != nil {
-		if err := v.validateCache(spec.Cache); err != nil {
+		if err := validateRouteCacheConfig(spec.Cache); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -303,15 +303,23 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		}
 	}
 
-	// Security warnings for plaintext secrets in authentication config
+	// Security warnings for plaintext secrets in authentication config,
+	// plus a warning when mTLS is enabled without an explicit caFile
+	// (valid only with a gateway-level CA source such as Vault-managed PKI).
 	if spec.Authentication != nil {
 		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+		warnings = append(warnings, warnMTLSMissingCAFile(spec.Authentication)...)
 	}
 
 	// Security warnings for plaintext secrets in authorization cache sentinel config
 	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
 		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
 	}
+
+	// Security warnings for plaintext secrets in route cache and rate limiter
+	// Redis Sentinel configurations
+	warnings = append(warnings, warnRouteCacheSentinelSecrets(spec.Cache)...)
+	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
 
 	// Check for conflicting configurations
 	if spec.Redirect != nil && len(spec.Route) > 0 {
@@ -497,23 +505,6 @@ func (v *APIRouteValidator) validateFaultInjection(fault *avapigwv1alpha1.FaultI
 		}
 		if fault.Abort.Percentage < 0 || fault.Abort.Percentage > 100 {
 			return fmt.Errorf("fault.abort.percentage must be between 0 and 100")
-		}
-	}
-
-	return nil
-}
-
-// validateCache validates cache configuration.
-func (v *APIRouteValidator) validateCache(cache *avapigwv1alpha1.CacheConfig) error {
-	if cache.TTL != "" {
-		if err := validateDuration(string(cache.TTL)); err != nil {
-			return fmt.Errorf("cache.ttl is invalid: %w", err)
-		}
-	}
-
-	if cache.StaleWhileRevalidate != "" {
-		if err := validateDuration(string(cache.StaleWhileRevalidate)); err != nil {
-			return fmt.Errorf("cache.staleWhileRevalidate is invalid: %w", err)
 		}
 	}
 

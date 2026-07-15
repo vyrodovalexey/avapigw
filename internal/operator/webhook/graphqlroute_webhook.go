@@ -191,7 +191,7 @@ func (v *GraphQLRouteValidator) validate(graphqlRoute *avapigwv1alpha1.GraphQLRo
 
 	// Validate cache configuration
 	if spec.Cache != nil {
-		if err := v.validateCache(spec.Cache); err != nil {
+		if err := validateRouteCacheConfig(spec.Cache); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -259,15 +259,31 @@ func (v *GraphQLRouteValidator) validate(graphqlRoute *avapigwv1alpha1.GraphQLRo
 		}
 	}
 
-	// Security warnings for plaintext secrets in authentication config
+	// Security warnings for plaintext secrets in authentication config,
+	// plus a warning when mTLS is enabled without an explicit caFile
+	// (valid only with a gateway-level CA source such as Vault-managed PKI).
 	if spec.Authentication != nil {
 		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+		warnings = append(warnings, warnMTLSMissingCAFile(spec.Authentication)...)
 	}
 
 	// Security warnings for plaintext secrets in authorization cache sentinel config
 	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
 		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
 	}
+
+	// Security warnings for plaintext secrets in route cache and rate limiter
+	// Redis Sentinel configurations
+	warnings = append(warnings, warnRouteCacheSentinelSecrets(spec.Cache)...)
+	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
+
+	// Transparency warning for the redis cache: the GraphQL data path runs
+	// the shared route middleware chain (which enforces rate limiting with
+	// the configured store, including redis-backed distributed limiting, so
+	// no rateLimit.store=redis warning is emitted), but response caching is
+	// GET-only and GraphQL operations are POST requests — the cache never
+	// takes effect.
+	warnings = append(warnings, warnGraphQLRouteCacheIneffective(spec.Cache)...)
 
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
@@ -374,23 +390,6 @@ func (v *GraphQLRouteValidator) validateRetryPolicy(policy *avapigwv1alpha1.Retr
 	if policy.PerTryTimeout != "" {
 		if err := validateDuration(string(policy.PerTryTimeout)); err != nil {
 			return fmt.Errorf("retries.perTryTimeout is invalid: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// validateCache validates cache configuration.
-func (v *GraphQLRouteValidator) validateCache(cache *avapigwv1alpha1.CacheConfig) error {
-	if cache.TTL != "" {
-		if err := validateDuration(string(cache.TTL)); err != nil {
-			return fmt.Errorf("cache.ttl is invalid: %w", err)
-		}
-	}
-
-	if cache.StaleWhileRevalidate != "" {
-		if err := validateDuration(string(cache.StaleWhileRevalidate)); err != nil {
-			return fmt.Errorf("cache.staleWhileRevalidate is invalid: %w", err)
 		}
 	}
 

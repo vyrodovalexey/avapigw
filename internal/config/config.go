@@ -46,6 +46,11 @@ type GatewaySpec struct {
 	GraphQL *GraphQLConfig `yaml:"graphql,omitempty" json:"graphql,omitempty"`
 	// OpenAPIValidation configures global OpenAPI request validation.
 	OpenAPIValidation *OpenAPIValidationConfig `yaml:"openAPIValidation,omitempty" json:"openAPIValidation,omitempty"`
+	// WebSocket configures WebSocket proxying behavior such as the origin
+	// allowlist enforced during the upgrade handshake. When nil or when
+	// allowedOrigins is empty, every origin is accepted (backward
+	// compatible) and a warning is logged once at startup.
+	WebSocket *WebSocketConfig `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 }
 
 // GraphQLConfig contains GraphQL-specific gateway configuration.

@@ -1185,6 +1185,8 @@ func TestRouterDirector_AuthenticateRoute_ConfigError(t *testing.T) {
 	// Create a route with JWT auth that has an invalid static key format.
 	// This causes NewGRPCAuthenticator to fail during JWT validator creation,
 	// which triggers the Internal error path in authenticateRoute.
+	// RS256 requires a JWK or PEM public key, so a raw non-key string fails
+	// parsing (HMAC algorithms accept raw shared secrets and would succeed).
 	route := &router.CompiledGRPCRoute{
 		Name: "bad-auth-route",
 		Config: config.GRPCRoute{
@@ -1193,9 +1195,9 @@ func TestRouterDirector_AuthenticateRoute_ConfigError(t *testing.T) {
 				Enabled: true,
 				JWT: &config.JWTAuthConfig{
 					Enabled:   true,
-					Algorithm: "HS256",
-					// This secret will be converted to a StaticKey that fails parsing
-					Secret: "not-a-valid-key-format",
+					Algorithm: "RS256",
+					// This public key will be converted to a StaticKey that fails parsing
+					PublicKey: "not-a-valid-key-format",
 				},
 			},
 		},

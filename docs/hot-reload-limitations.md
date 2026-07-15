@@ -82,6 +82,11 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 - Global, route-level, and backend-level rate limiting
 - Thresholds, burst sizes, per-client configuration
 - Updated via `rateLimiter.UpdateConfig()` (reload.go:214-217)
+- Redis (distributed) limiter: `requestsPerSecond`/`burst`/`perClient` are
+  hot-reloaded; **connection settings** (`store`, `url`, `sentinel`, pool,
+  timeouts, `failOpen`) are intentionally not hot-swapped and require a
+  restart. Invalid updates (rps or burst < 1) are rejected with a logged
+  error and the previous configuration stays in effect
 
 ✅ **Max Sessions Limiter**
 - Global, route-level, and backend-level max sessions

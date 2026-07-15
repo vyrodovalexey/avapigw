@@ -127,17 +127,30 @@ func kubectl(ctx context.Context, stdin string, args ...string) (string, error) 
 }
 
 // liveClusterReachable reports whether the deployed aggregate route exists in
-// the target namespace. It is the single gate for the entire live suite.
+// the target namespace AND the gateway Service is actually backed by ready
+// pods. It is the single gate for the entire live suite.
+//
+// Checking only the APIRoute CR is not enough: CRs (and their last-written
+// status) survive an undeploy of the operator/gateway, which would let the
+// suite run against a cluster with stale resources and no data plane. The
+// endpoints check guarantees a live deployment behind svc/<gateway>.
 func liveClusterReachable(ctx context.Context) bool {
 	if !kubectlAvailable() {
 		return false
 	}
 	out, err := kubectl(ctx, "", "get", "apiroute", liveAggregateRoute(),
 		"-n", liveNamespace(), "-o", "jsonpath={.metadata.name}")
+	if err != nil || strings.TrimSpace(out) != liveAggregateRoute() {
+		return false
+	}
+	// The gateway Service must have at least one ready endpoint address;
+	// otherwise port-forwards and Ready-condition waits can only fail.
+	out, err = kubectl(ctx, "", "get", "endpoints", liveGatewayService(),
+		"-n", liveNamespace(), "-o", "jsonpath={.subsets[*].addresses[*].ip}")
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(out) == liveAggregateRoute()
+	return strings.TrimSpace(out) != ""
 }
 
 // skipUnlessLive skips the test unless the live operator-mode deployment with
@@ -149,9 +162,9 @@ func skipUnlessLive(t *testing.T, ctx context.Context) {
 	}
 	if !liveClusterReachable(ctx) {
 		t.Skipf("live operator-mode deployment not reachable "+
-			"(kubectl get apiroute/%s -n %s failed); skipping live aggregate e2e. "+
-			"Set up via DevOps DO-04 (crds-do04-aggregate.yaml).",
-			liveAggregateRoute(), liveNamespace())
+			"(apiroute/%s missing or svc/%s has no ready endpoints in -n %s); "+
+			"skipping live aggregate e2e. Set up via DevOps DO-04 (crds-do04-aggregate.yaml).",
+			liveAggregateRoute(), liveGatewayService(), liveNamespace())
 	}
 }
 

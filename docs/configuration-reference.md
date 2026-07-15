@@ -683,6 +683,36 @@ spec:
           - "/api/v1/secure/metrics"
 ```
 
+#### HMAC Shared-Secret JWT (HS256/HS384/HS512)
+
+For HMAC algorithms, configure a shared secret instead of a JWKS URL. The
+`secret` value may be a raw string or a symmetric (`oct`) JWK:
+
+```yaml
+spec:
+  routes:
+    - name: hmac-api
+      match:
+        - uri:
+            prefix: /api/v1/hmac
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          algorithm: "HS256"            # HS256, HS384, or HS512
+          secret: "shared-hmac-secret"  # Raw secret or oct JWK
+          issuer: "https://auth.example.com"
+```
+
+- Tokens without a `kid` header fall back to the single configured HMAC key;
+  tokens with a `kid` must match the configured key ID.
+- Algorithm-confusion protection: asymmetric public keys are never accepted
+  as HMAC secrets, so tokens re-signed with a public key under an `HS*`
+  algorithm are rejected.
+- JWKS-based validation is resilient to identity provider outages: refreshes
+  are coalesced (singleflight) and bounded to 30 seconds, so one slow IdP
+  cannot stall gateway-wide authentication.
+
 ### API Key Authentication
 
 ```yaml
@@ -698,9 +728,32 @@ spec:
           enabled: true
           header: "X-API-Key"           # Header name for API key
           query: "api_key"              # Alternative: query parameter
-          hashAlgorithm: "sha256"       # Hash algorithm for stored keys
+          hashAlgorithm: "sha256"       # sha256 (default), sha512, bcrypt, plaintext (dev only)
           vaultPath: "secret/api-keys"  # Vault path for key storage
 ```
+
+API key validation rules:
+
+- **Hash-only static keys** (gateway-level `authentication.apiKey.store.keys`)
+  may omit the raw `key` and carry only a pre-computed `hash`: a 64-hex SHA-256
+  digest, a 128-hex SHA-512 digest (both case-insensitive), or a bcrypt hash
+  (looked up by key `id` and verified against the presented key).
+- **Load-time validation**: entries with neither a usable `key` nor a hash
+  compatible with the configured `hashAlgorithm` are rejected when the
+  configuration is loaded (previously they were accepted and silently failed
+  every lookup).
+- **Vault store matrix**: the Vault store addresses secrets by the
+  deterministic digest of the presented key, so it supports `sha256` and
+  `sha512` only; `hashAlgorithm: bcrypt` combined with the Vault store is
+  rejected at load time (bcrypt hashes are salted and cannot address Vault
+  paths).
+- **Store outages vs. unknown keys**: Vault outages during validation surface
+  as `gateway_apikey_validation_total{reason="store_error"}` (previously
+  reported as `not_found`) — alert on `store_error` separately from
+  genuine key misses.
+- **Cache bound**: the validation cache honors `cache.maxSize` with LRU
+  eviction; with `hashAlgorithm: plaintext` a warning is logged once at
+  startup.
 
 ### mTLS Authentication
 
@@ -965,7 +1018,15 @@ spec:
 
 ## Backend Caching
 
-Backend caching improves performance by caching responses at the backend level.
+Response caching is configured at the **route level** (`routes[].cache`,
+`grpcRoutes[].cache`, `graphqlRoutes[].cache` in gateway configuration, or
+`spec.cache` on the corresponding CRDs). The redis examples in this section
+show the cache schema, which is identical across those route kinds.
+
+> **Note:** backend-level caching (CRD `Backend`/`GRPCBackend` `spec.cache`)
+> is RESERVED — it is accepted with an admission warning but is not wired to
+> the gateway data path. The gateway's file-based `backends[]` section has no
+> `cache` field. Use route-level caching instead.
 
 ### Redis Cache Features
 
@@ -982,6 +1043,7 @@ The gateway provides advanced Redis caching features for improved performance an
 - Prevents key length issues with Redis key size limits
 - Provides privacy by obscuring cache key contents
 - Maintains cache key uniqueness while reducing storage overhead
+- With `hashKeys: true`, trace span attributes and logs record the hashed key instead of the raw key, so sensitive key components (e.g. Authorization-derived values) never leak into telemetry
 
 **Vault Password Integration**
 - Secure password management using HashiCorp Vault KV secrets
@@ -990,89 +1052,99 @@ The gateway provides advanced Redis caching features for improved performance an
 - Vault path format: `mount/path` (e.g., `secret/redis`)
 - Secret must contain a `password` key
 
-### HTTP Backend Caching
+### HTTP Route Caching
 
 ```yaml
 spec:
-  backends:
-    - name: cached-backend
-      hosts:
-        - address: api.internal
-          port: 8080
+  routes:
+    - name: cached-route
+      match:
+        - uri:
+            prefix: /api/v1
+      route:
+        - destination:
+            host: api.internal
+            port: 8080
       cache:
         enabled: true
         ttl: "10m"                     # Cache for 10 minutes
-        keyComponents:
-          - "path"                     # Include request path
-          - "query"                    # Include query parameters
-          - "headers.Authorization"    # Include auth header
-          - "headers.X-Tenant-ID"      # Include tenant header
-          - "headers.Accept-Language"  # Include language header
+        keyConfig:
+          includeMethod: true          # Include HTTP method
+          includePath: true            # Include request path
+          includeQueryParams:          # Query parameters to include
+            - "page"
+            - "limit"
+          includeHeaders:              # Headers to include
+            - "Authorization"
+            - "X-Tenant-ID"
+            - "Accept-Language"
         staleWhileRevalidate: "2m"     # Serve stale for 2 minutes while revalidating
         type: "memory"                 # Use in-memory cache
+        maxEntries: 10000              # Bound for the memory cache
 ```
 
-### Redis Backend Caching
+### Redis Route Caching
 
 #### Redis Standalone Configuration
 
 ```yaml
 spec:
-  backends:
-    - name: redis-cached-backend
-      hosts:
-        - address: api.internal
-          port: 8080
+  routes:
+    - name: redis-cached-route
+      match:
+        - uri:
+            prefix: /api/v1
+      route:
+        - destination:
+            host: api.internal
+            port: 8080
       cache:
         enabled: true
         ttl: "1h"
-        keyComponents:
-          - "path"
-          - "query"
-          - "headers.Authorization"
         staleWhileRevalidate: "5m"
         type: "redis"
-          redis:
-            address: "redis.cache.svc.cluster.local:6379"
-            password: "redis-password"
-            # Vault password integration
-            passwordVaultPath: "secret/redis"
-            db: 0
+        redis:
+          url: "redis://redis.cache.svc.cluster.local:6379/0"
+          # Vault password integration
+          passwordVaultPath: "secret/redis"
+          poolSize: 10
+          keyPrefix: "avapigw:cache:"
+          # TTL jitter to prevent thundering herd
+          ttlJitter: 0.1  # ±10% jitter on TTL values
+          # Hash cache keys for privacy and length control
+          hashKeys: true
+          retry:
             maxRetries: 3
-            poolSize: 10
-            keyPrefix: "avapigw:cache:"
-            # TTL jitter to prevent thundering herd
-            ttlJitter: 0.1  # ±10% jitter on TTL values
-            # Hash cache keys for privacy and length control
-            hashKeys: true
-            tls:
-              enabled: true
-              caFile: "/etc/ssl/certs/redis-ca.crt"
-              certFile: "/etc/ssl/certs/redis-client.crt"
-              keyFile: "/etc/ssl/private/redis-client.key"
-              insecureSkipVerify: false
+            initialBackoff: "100ms"
+            maxBackoff: "30s"
+          tls:
+            enabled: true
+            caFile: "/etc/ssl/certs/redis-ca.crt"
+            certFile: "/etc/ssl/certs/redis-client.crt"
+            keyFile: "/etc/ssl/private/redis-client.key"
+            insecureSkipVerify: false
 ```
 
 #### Redis Sentinel Configuration
 
 ```yaml
 spec:
-  backends:
-    - name: redis-sentinel-cached-backend
-      hosts:
-        - address: api.internal
-          port: 8080
+  routes:
+    - name: redis-sentinel-cached-route
+      match:
+        - uri:
+            prefix: /api/v1
+      route:
+        - destination:
+            host: api.internal
+            port: 8080
       cache:
         enabled: true
         ttl: "1h"
-        keyComponents:
-          - "path"
-          - "query"
-          - "headers.Authorization"
         staleWhileRevalidate: "5m"
         type: "redis"
         redis:
-          # Redis Sentinel configuration takes precedence over standalone
+          # Sentinel mode is mutually exclusive with the standalone url
           sentinel:
             masterName: "mymaster"
             sentinelAddrs:
@@ -1086,13 +1158,16 @@ spec:
             passwordVaultPath: "secret/redis-master"
             db: 0
           # Connection pool settings
-          maxRetries: 3
           poolSize: 10
           keyPrefix: "avapigw:cache:"
           # TTL jitter to prevent thundering herd
           ttlJitter: 0.1  # ±10% jitter on TTL values
           # Hash cache keys for privacy and length control
           hashKeys: true
+          retry:
+            maxRetries: 3
+            initialBackoff: "100ms"
+            maxBackoff: "30s"
           # TLS configuration for Redis connections
           tls:
             enabled: true
@@ -1186,27 +1261,29 @@ spec:
             insecureSkipVerify: false
 ```
 
-### gRPC Backend Caching
+### gRPC Route Caching
 
 ```yaml
 spec:
-  grpcBackends:
-    - name: grpc-cached-backend
-      hosts:
-        - address: grpc-service.internal
-          port: 9000
+  grpcRoutes:
+    - name: grpc-cached-route
+      match:
+        - service:
+            exact: "api.v1.UserService"
+      route:
+        - destination:
+            host: grpc-service.internal
+            port: 9000
       cache:
         enabled: true
         ttl: "5m"
-        keyComponents:
-          - "service"                  # gRPC service name
-          - "method"                   # gRPC method name
-          - "metadata.x-tenant-id"     # Tenant metadata
-          - "metadata.authorization"   # Auth metadata
-          - "request.user_id"          # Request field
         staleWhileRevalidate: "1m"
         type: "memory"
 ```
+
+> On GRPCRoute/GraphQLRoute CRDs, `cache.type: redis` is accepted for
+> forward compatibility and produces an admission warning — redis-backed
+> route caching is currently applied in the HTTP (APIRoute) data path.
 
 ## Backend Encoding
 
@@ -1404,6 +1481,37 @@ kubectl logs -l app=avapigw | grep "unsafe redirect"
 # Monitor redirect-related errors
 curl http://localhost:9090/metrics | grep redirect
 ```
+
+### WebSocket Origin Allowlist
+
+`spec.websocket.allowedOrigins` protects WebSocket routes against cross-site
+WebSocket hijacking (CSWSH) by restricting which browser origins may complete
+the upgrade handshake:
+
+```yaml
+spec:
+  websocket:
+    allowedOrigins:
+      - "https://app.example.com"   # scheme://host[:port] entry
+      - "internal.example.com"      # bare host[:port] entry (any scheme)
+      # - "*"                       # explicit allow-all
+```
+
+#### Origin Matching Rules
+
+| Configuration | Behavior |
+|---------------|----------|
+| Omitted / empty list | Every origin accepted (backward compatible); one warning logged at startup |
+| Non-empty list | Only listed origins **and same-origin requests** accepted; others rejected with **403** during the handshake, before any backend connection |
+| `"*"` entry | Explicitly allow every origin (no startup warning) |
+| No `Origin` header | Always allowed (non-browser clients) |
+
+Entries take the form `scheme://host[:port]` or bare `host[:port]`; `ws`/`wss`
+schemes are normalized to `http`/`https` (browsers send the page origin during
+the handshake). Wildcard hosts (e.g. `*.example.com`) are not supported —
+entries with a wildcard in the host are rejected by configuration validation;
+only the standalone `"*"` entry allows all origins. The allowlist applies to
+both proxied WebSocket routes and GraphQL subscription (graphql-ws) upgrades.
 
 ## GraphQL Configuration
 
@@ -2314,8 +2422,22 @@ spec:
   rateLimit:
     enabled: true
     requestsPerSecond: 1000
-    burst: 2000
+    burst: 2000                    # Must be >= 1 when enabled
     perClient: true
+    # Distributed rate limiting: share token buckets across gateway
+    # instances through Redis standalone or Redis Sentinel.
+    # store: redis                 # memory (default) | redis
+    # redis:
+    #   url: "redis://redis.cache.svc:6379/0"     # or sentinel: {...}
+    #   readTimeout: 100ms         # Bounds each rate limit decision
+    #   keyPrefix: "avapigw:"
+    #   failOpen: true             # true (default): allow on Redis outage;
+    #                              # false: reject with 429, fail hard at
+    #                              # startup if Redis is unreachable
+    #   retry:
+    #     maxRetries: 3
+    #     initialBackoff: 100ms
+    #     maxBackoff: 30s
   
   # Circuit breaker (global middleware chain)
   circuitBreaker:
@@ -2367,6 +2489,14 @@ spec:
       cors:
         allowOrigins: ["https://app.example.com"]
         allowMethods: ["GET", "POST"]
+      
+      # Rate limiting (per-route middleware; enforced for HTTP routes,
+      # supports store: memory (default) or redis for distributed limiting)
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+        perClient: true
       
       # Request limits (per-route middleware)
       requestLimits:
@@ -2439,9 +2569,20 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 
 #### Per-Route Middleware Chain
 ```
-Security Headers → CORS → Body Limit → Headers → Cache → 
-Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+OpenAPI Validation → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
+
+Authentication runs first (closest to the client), authorization needs the
+identity from context, and rate limiting runs after auth so unauthenticated
+requests get 401 before 429. If a route's authentication or authorization
+middleware cannot be constructed, the route **fails closed**: every request
+receives 503 Service Unavailable,
+`gateway_route_auth_failures_total{reason="construction_failed"}` increments,
+and the ERROR log `failed to build route security middleware, failing closed`
+is emitted (treat it as page-worthy — the route stays unavailable until a
+configuration reload yields a constructible middleware). Other routes keep
+serving normally.
 
 ### Middleware Features and Limits
 
@@ -2451,6 +2592,16 @@ Transform → Encoding → [proxy to backend]
 - **Cache-Control**: Respects Cache-Control headers (no-store, no-cache)
 - **Per-Route Isolation**: Each route gets its own cache namespace
 - **Thread Safety**: Thread-safe cache factory with lazy initialization
+- **Per-Request Header Stripping**: CORS headers (`Access-Control-*`), `Set-Cookie`, and hop-by-hop headers are stripped from cached entries; the live middleware headers win on replay, so a cache entry filled by one request never leaks another request's CORS grants or cookies
+- **Decoupled Cache Fill**: the cache write is detached from the client's request context and bounded to 5 seconds, so a client disconnect cannot abort or poison the fill
+
+#### Rate Limit Middleware
+- **Token Bucket**: `requestsPerSecond` refill rate with `burst` capacity (`burst` must be >= 1)
+- **Per-Client Buckets**: `perClient: true` keys buckets by client IP
+- **Stores**: `memory` (per-instance, default) or `redis` (atomic Lua token bucket shared across gateway instances via Redis standalone or Sentinel)
+- **Failure Policy**: `redis.failOpen: true` (default) allows requests on Redis outage with a rate-limited WARN and `gateway_middleware_redis_rate_limit_errors_total{policy="fail_open"}`; `failOpen: false` rejects with 429 and fails construction hard when Redis is unreachable at startup
+- **Decision Bound**: each redis rate limit decision is bounded by `redis.readTimeout` (default 100ms)
+- **Enforcement Scope**: the redis store applies to the gateway-level limit and HTTP/GraphQL route-level limits (GraphQL routes reuse the shared per-route chain); gRPC routes keep the in-memory limiter
 
 #### Transform Middleware
 - **Body Size Limit**: 10MB maximum request/response body size for transformation

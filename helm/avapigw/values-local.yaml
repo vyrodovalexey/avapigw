@@ -236,7 +236,9 @@ gateway:
     tracing:
       enabled: true
       samplingRate: 1.0
-      otlpEndpoint: "otel-collector.avapigw-test.svc:4317"
+      # OTLP gRPC endpoint of the otel-collector deployed by Phase 7b in the
+      # dedicated "monitoring" namespace (traces are forwarded to Tempo).
+      otlpEndpoint: "otel-collector.monitoring.svc:4317"
       serviceName: avapigw
     logging:
       level: info
@@ -284,8 +286,8 @@ vault:
 #
 # Prerequisites:
 #   - CRDs are automatically installed from helm/avapigw/crds/
-#   - Build operator image: make operator-docker-build
-#   - Tag for local use: docker tag avapigw-operator:latest avapigw-operator:latest
+#   - Build operator image for local use (matches image.repository/tag below):
+#       docker build -f Dockerfile.operator -t avapigw-operator:latest .
 #
 # Usage:
 #   helm upgrade --install avapigw helm/avapigw/ -f helm/avapigw/values-local.yaml -n avapigw-test --create-namespace

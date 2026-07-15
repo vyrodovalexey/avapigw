@@ -62,7 +62,12 @@ func TestConfig_Validate(t *testing.T) {
 					Store: &apikey.StoreConfig{
 						Type: "memory",
 						Keys: []apikey.StaticKey{
-							{ID: "key1", Hash: "hash1"},
+							// Hash-only entries must carry an
+							// algorithm-compatible hash (sha256 hex here).
+							{
+								ID:   "key1",
+								Hash: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+							},
 						},
 					},
 				},

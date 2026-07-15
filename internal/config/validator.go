@@ -180,6 +180,22 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	if spec.OpenAPIValidation != nil {
 		v.validateOpenAPIValidationConfig(spec.OpenAPIValidation, "spec.openAPIValidation")
 	}
+
+	if spec.WebSocket != nil {
+		v.validateWebSocket(spec.WebSocket, "spec.websocket")
+	}
+}
+
+// validateWebSocket validates WebSocket configuration.
+func (v *Validator) validateWebSocket(ws *WebSocketConfig, path string) {
+	for i, origin := range ws.AllowedOrigins {
+		if strings.TrimSpace(origin) == WSOriginWildcard {
+			continue
+		}
+		if _, _, err := ParseWSOrigin(origin); err != nil {
+			v.addError(fmt.Sprintf("%s.allowedOrigins[%d]", path, i), err.Error())
+		}
+	}
 }
 
 // validateListeners validates listener configurations.
@@ -391,6 +407,10 @@ func (v *Validator) validateRouteOptions(route *Route, path string) {
 
 	if route.RateLimit != nil {
 		v.validateRateLimit(route.RateLimit, path+".rateLimit")
+	}
+
+	if route.Cache != nil {
+		v.validateCacheConfig(route.Cache, path+".cache")
 	}
 
 	if route.MaxSessions != nil {
@@ -636,15 +656,110 @@ func (v *Validator) validateDirectResponse(dr *DirectResponseConfig, path string
 }
 
 // validateRateLimit validates rate limit configuration.
+// Burst must be at least 1 when rate limiting is enabled, aligned with the
+// operator webhook validation: a zero burst means the token bucket starts
+// empty and — with the redis store in particular — every request is
+// silently denied.
 func (v *Validator) validateRateLimit(rl *RateLimitConfig, path string) {
 	if rl.Enabled {
 		if rl.RequestsPerSecond <= 0 {
 			v.addError(path+".requestsPerSecond", "requestsPerSecond must be positive when enabled")
 		}
 
-		if rl.Burst < 0 {
-			v.addError(path+".burst", "burst cannot be negative")
+		if rl.Burst < 1 {
+			v.addError(path+".burst", "burst must be at least 1 when enabled")
 		}
+	}
+
+	v.validateRateLimitStore(rl, path)
+}
+
+// validateRateLimitStore validates the rate limiter store selection and the
+// Redis connection configuration of the distributed rate limiter.
+func (v *Validator) validateRateLimitStore(rl *RateLimitConfig, path string) {
+	switch rl.Store {
+	case "", RateLimitStoreMemory:
+		if rl.Redis != nil {
+			v.addError(path+".redis", "redis configuration is only valid when store is 'redis'")
+		}
+		return
+	case RateLimitStoreRedis:
+		// Valid store; connection configuration is validated below.
+	default:
+		v.addError(path+".store", fmt.Sprintf("invalid store: %s (must be 'memory' or 'redis')", rl.Store))
+		return
+	}
+
+	if rl.Redis == nil || (rl.Redis.URL == "" && rl.Redis.Sentinel == nil) {
+		v.addError(path+".redis", "redis configuration with url or sentinel is required when store is 'redis'")
+		return
+	}
+
+	v.validateRedisConnection(rl.Redis.URL, rl.Redis.Sentinel, path+".redis")
+
+	if rl.Redis.ReadTimeout.Duration() < 0 {
+		v.addError(path+".redis.readTimeout", "readTimeout cannot be negative")
+	}
+}
+
+// validateRedisConnection validates the shared standalone-vs-sentinel Redis
+// connection rules used by cache and rate limit configurations:
+// url and sentinel are mutually exclusive, and sentinel requires a master
+// name plus at least one sentinel address.
+func (v *Validator) validateRedisConnection(url string, sentinel *RedisSentinelConfig, path string) {
+	hasURL := url != ""
+	hasSentinel := !sentinel.IsEmpty()
+
+	if hasURL && hasSentinel {
+		v.addError(path, "url and sentinel are mutually exclusive")
+	}
+
+	if sentinel == nil {
+		return
+	}
+
+	if sentinel.MasterName == "" {
+		v.addError(path+".sentinel.masterName", "masterName is required for sentinel mode")
+	}
+	if len(sentinel.SentinelAddrs) == 0 {
+		v.addError(path+".sentinel.sentinelAddrs", "at least one sentinel address is required")
+	}
+	for i, addr := range sentinel.SentinelAddrs {
+		if addr == "" {
+			v.addError(fmt.Sprintf("%s.sentinel.sentinelAddrs[%d]", path, i), "sentinel address cannot be empty")
+		}
+	}
+}
+
+// validateCacheConfig validates route-level cache configuration, including
+// the Redis backend selection rules.
+func (v *Validator) validateCacheConfig(cache *CacheConfig, path string) {
+	if cache.TTL.Duration() < 0 {
+		v.addError(path+".ttl", "ttl cannot be negative")
+	}
+
+	switch cache.Type {
+	case "", CacheTypeMemory:
+		if cache.Redis != nil {
+			v.addError(path+".redis", "redis configuration is only valid when type is 'redis'")
+		}
+		return
+	case CacheTypeRedis:
+		// Valid type; connection configuration is validated below.
+	default:
+		v.addError(path+".type", fmt.Sprintf("invalid type: %s (must be 'memory' or 'redis')", cache.Type))
+		return
+	}
+
+	if cache.Redis == nil || (cache.Redis.URL == "" && cache.Redis.Sentinel == nil) {
+		v.addError(path+".redis", "redis configuration with url or sentinel is required when type is 'redis'")
+		return
+	}
+
+	v.validateRedisConnection(cache.Redis.URL, cache.Redis.Sentinel, path+".redis")
+
+	if cache.Redis.TTLJitter < 0 || cache.Redis.TTLJitter > 1 {
+		v.addError(path+".redis.ttlJitter", "ttlJitter must be between 0.0 and 1.0")
 	}
 }
 

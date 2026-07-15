@@ -187,7 +187,8 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.listeners.grpc.tls.mode` | gRPC TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE) | `SIMPLE` |
 | `gateway.rateLimit.enabled` | Enable rate limiting | `true` |
 | `gateway.rateLimit.requestsPerSecond` | Requests per second | `100` |
-| `gateway.rateLimit.burst` | Burst size | `200` |
+| `gateway.rateLimit.burst` | Burst size (must be >= 1) | `200` |
+| `gateway.rateLimit.perClient` | Per-client (IP) rate limiting | `true` |
 | `gateway.circuitBreaker.enabled` | Enable circuit breaker | `true` |
 | `gateway.circuitBreaker.threshold` | Failure threshold | `5` |
 | `gateway.maxSessions.enabled` | Enable max sessions limiting | `false` |
@@ -687,6 +688,17 @@ spec:
         port: 8080
   timeout: 30s
 ```
+
+The CRDs shipped with the chart (`helm/avapigw/crds/`) also support
+distributed rate limiting (`spec.rateLimit.store: redis` with a
+`spec.rateLimit.redis` connection block — standalone URL or Redis Sentinel,
+`failOpen` policy, Vault password paths) and redis-backed route caching
+(`spec.cache.type: redis` with `spec.cache.redis`). Distributed rate limiting
+is enforced for APIRoutes and GraphQLRoutes (gRPC routes keep the in-memory
+limiter); redis route caching is wired for the HTTP APIRoute data path. The
+admission webhook emits a conservative forward-compatibility warning for
+these redis options on kinds other than APIRoute. See the
+[CRD reference](../../docs/crd-reference.md) for the full schema.
 
 ```yaml
 # Example Backend CRD

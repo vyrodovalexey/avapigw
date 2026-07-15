@@ -8,6 +8,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// WebSocket error-type metric label values (bounded cardinality).
+const (
+	// wsErrorTypeProxy labels generic WebSocket proxying errors.
+	wsErrorTypeProxy = "proxy_error"
+
+	// wsErrorTypeOriginRejected labels handshakes rejected by the
+	// origin allowlist (CSWSH protection).
+	wsErrorTypeOriginRejected = "origin_rejected"
+)
+
 // webSocketMetrics contains Prometheus metrics for WebSocket connections.
 type webSocketMetrics struct {
 	connectionsTotal      *prometheus.CounterVec
@@ -102,6 +112,8 @@ func initWebSocketVecMetrics() {
 		"connection_closed",
 		"read_error",
 		"write_error",
+		wsErrorTypeProxy,
+		wsErrorTypeOriginRejected,
 	}
 	for _, et := range errorTypes {
 		m.errorsTotal.WithLabelValues("default", et)

@@ -86,6 +86,29 @@ func (r *GraphQLRoute) GetEffectiveSNIHosts() []string {
 	return r.TLS.SNIHosts
 }
 
+// ToMiddlewareRoute projects the GraphQL route's cross-cutting middleware
+// configuration (authentication, authorization, rate limiting, CORS,
+// security headers, caching, header manipulation) onto a Route view so the
+// shared per-route middleware machinery (gateway.RouteMiddlewareManager)
+// serves GraphQL routes with exactly the same middleware chain semantics as
+// HTTP routes. Routing-only fields (Match, Route, Aggregate, GraphQL
+// execution limits) are intentionally NOT projected: routing stays in the
+// GraphQL router, and the view is consumed for middleware construction only.
+func (r *GraphQLRoute) ToMiddlewareRoute() *Route {
+	return &Route{
+		Name:           r.Name,
+		Timeout:        r.Timeout,
+		Retries:        r.Retries,
+		Headers:        r.Headers,
+		RateLimit:      r.RateLimit,
+		Cache:          r.Cache,
+		CORS:           r.CORS,
+		Security:       r.Security,
+		Authentication: r.Authentication,
+		Authorization:  r.Authorization,
+	}
+}
+
 // GraphQLRouteMatch represents matching conditions for a GraphQL route.
 type GraphQLRouteMatch struct {
 	// Path matches the HTTP path for the GraphQL endpoint.

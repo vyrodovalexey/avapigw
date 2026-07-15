@@ -79,6 +79,11 @@ func (svc *configurationServiceImpl) RegisterGateway(
 	sessionID := uuid.New().String()
 	svc.server.RegisterGateway(gw.GetName(), gw.GetNamespace())
 
+	// Wait (bounded by the RPC deadline) for the store to be seeded so the
+	// initial configuration returned to a freshly connecting gateway is not
+	// empty right after an operator restart.
+	svc.awaitStoreSeeded(ctx, "RegisterGateway")
+
 	snapshot, err := svc.buildSnapshot(ctx)
 	if err != nil {
 		svc.server.metrics.requestsTotal.WithLabelValues("RegisterGateway", "error").Inc()
@@ -127,6 +132,10 @@ func (svc *configurationServiceImpl) GetConfiguration(
 			attribute.String("gateway.namespace", req.GetGateway().GetNamespace()),
 		)
 	}
+
+	// Wait (bounded by the RPC deadline) for the store to be seeded so pull
+	// requests do not observe an empty snapshot right after operator restart.
+	svc.awaitStoreSeeded(ctx, "GetConfiguration")
 
 	snapshot, err := svc.buildSnapshot(ctx)
 	if err != nil {
@@ -234,11 +243,63 @@ func (svc *configurationServiceImpl) StreamConfiguration(
 
 	svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "started").Inc()
 
-	// Send initial full sync
+	// Park the stream until the store is seeded (bounded) so a gateway
+	// connecting right after an operator restart does not receive an empty
+	// FULL_SYNC that would wipe its running configuration.
+	svc.awaitStoreSeeded(ctx, "StreamConfiguration")
+
+	// Push loop with lost-wakeup protection. The subscription (waitCh, rev)
+	// is obtained BEFORE building/sending each snapshot; after a send, if the
+	// store revision advanced during the (potentially slow) Send, the loop
+	// rebuilds immediately instead of blocking — the notification for that
+	// change was delivered on waitCh (already closed) and would otherwise be
+	// lost by re-subscribing to a fresh channel. See Server.ConfigChangeSignal.
+	initial := true
+	for {
+		waitCh, rev := svc.server.ConfigChangeSignal()
+
+		if err := svc.buildAndSendUpdate(ctx, stream, initial); err != nil {
+			return err
+		}
+		initial = false
+
+		// A change landed while the snapshot was being built/sent — loop
+		// immediately so it is pushed without waiting for another change.
+		if svc.server.ConfigRevision() != rev {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "completed").Inc()
+			svc.server.logger.Info("configuration stream closed",
+				observability.String("session_id", req.GetSessionId()),
+			)
+			return nil
+		case <-waitCh:
+			// Configuration changed — next iteration builds and sends it.
+		}
+	}
+}
+
+// buildAndSendUpdate builds a FULL_SYNC configuration update and sends it on
+// the stream. Build failures are fatal for the initial snapshot and logged
+// (non-fatal) for subsequent updates; send failures are always fatal.
+func (svc *configurationServiceImpl) buildAndSendUpdate(
+	ctx context.Context,
+	stream grpc.ServerStreamingServer[operatorv1alpha1.ConfigurationUpdate],
+	initial bool,
+) error {
 	snapshot, err := svc.buildSnapshot(ctx)
 	if err != nil {
-		svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "error").Inc()
-		return fmt.Errorf("failed to build initial snapshot: %w", err)
+		if initial {
+			svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "error").Inc()
+			return fmt.Errorf("failed to build initial snapshot: %w", err)
+		}
+		// Non-fatal for updates: keep the stream alive and retry on the next
+		// change notification (or immediately, if the revision advanced).
+		svc.server.logger.Error("failed to build snapshot for stream update", observability.Error(err))
+		return nil
 	}
 
 	version := fmt.Sprintf("%d", svc.configVersion.Add(1))
@@ -251,48 +312,42 @@ func (svc *configurationServiceImpl) StreamConfiguration(
 
 	if err := stream.Send(update); err != nil {
 		svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "send_error").Inc()
-		return fmt.Errorf("failed to send initial snapshot: %w", err)
+		if initial {
+			return fmt.Errorf("failed to send initial snapshot: %w", err)
+		}
+		return fmt.Errorf("failed to send configuration update: %w", err)
 	}
 
-	// Watch for configuration changes and push updates to the stream.
-	// The broadcast pattern uses a channel that is closed on each config change,
-	// waking all waiting goroutines. A new channel is created for the next cycle.
-	for {
-		waitCh := svc.server.WaitForConfigChange()
-		select {
-		case <-ctx.Done():
-			svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "completed").Inc()
-			svc.server.logger.Info("configuration stream closed",
-				observability.String("session_id", req.GetSessionId()),
-			)
-			return nil
-		case <-waitCh:
-			// Configuration changed, build and send a new snapshot
-			snapshot, err = svc.buildSnapshot(ctx)
-			if err != nil {
-				svc.server.logger.Error("failed to build snapshot for stream update", observability.Error(err))
-				continue
-			}
+	if !initial {
+		svc.server.logger.Info("configuration update sent to gateway",
+			observability.String("version", version),
+			observability.Int("total_resources", int(snapshot.TotalResources)),
+		)
+	}
 
-			version = fmt.Sprintf("%d", svc.configVersion.Add(1))
-			update = &operatorv1alpha1.ConfigurationUpdate{
-				Type:      operatorv1alpha1.UpdateType_UPDATE_TYPE_FULL_SYNC,
-				Version:   version,
-				Timestamp: timestamppb.Now(),
-				Snapshot:  snapshot,
-			}
+	return nil
+}
 
-			if err := stream.Send(update); err != nil {
-				svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "send_error").Inc()
-				return fmt.Errorf("failed to send configuration update: %w", err)
-			}
-
-			svc.server.logger.Info("configuration update sent to gateway",
-				observability.String("version", version),
-				observability.Int("total_resources", int(snapshot.TotalResources)),
+// awaitStoreSeeded waits (bounded) for the configuration store to be seeded
+// before an initial snapshot is served, logging the decision either way.
+// The RPC always proceeds afterwards: the wait only reduces the window where
+// an empty snapshot could be served right after operator startup.
+func (svc *configurationServiceImpl) awaitStoreSeeded(ctx context.Context, rpc string) {
+	seeded, reason := svc.server.WaitForStoreSeeded(ctx, svc.server.storeSeedWaitTimeout())
+	if seeded {
+		if reason != seedReasonGateDisabled {
+			svc.server.logger.Info("configuration store ready for initial snapshot",
+				observability.String("rpc", rpc),
+				observability.String("reason", reason),
 			)
 		}
+		return
 	}
+	svc.server.logger.Warn("configuration store not seeded; serving potentially incomplete snapshot",
+		observability.String("rpc", rpc),
+		observability.String("reason", reason),
+		observability.Int("store_resources", svc.server.StoreResourceCount()),
+	)
 }
 
 // buildSnapshot builds a ConfigurationSnapshot from the server's in-memory maps.

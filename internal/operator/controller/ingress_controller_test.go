@@ -1171,11 +1171,13 @@ func TestIngressReconciler_Reconcile_ReconcileError(t *testing.T) {
 	}
 
 	result, err := reconciler.Reconcile(context.Background(), req)
-	if err == nil {
-		t.Error("Reconcile() should return error for invalid ingress")
+	// Reconcile failures schedule a fixed-delay requeue with a nil error so
+	// controller-runtime honors the Result instead of applying backoff.
+	if err != nil {
+		t.Errorf("Reconcile() error = %v, want nil (reconcile failure should requeue with fixed delay)", err)
 	}
-	if result.RequeueAfter == 0 {
-		t.Error("Reconcile() should requeue after reconcile failure")
+	if result.RequeueAfter != RequeueAfterReconcileFailure {
+		t.Errorf("Reconcile() RequeueAfter = %v, want %v", result.RequeueAfter, RequeueAfterReconcileFailure)
 	}
 
 	// Verify warning event was recorded

@@ -38,6 +38,11 @@ const (
 	// DefaultUnhealthyThreshold is the default number of consecutive failures
 	// required to mark a host as unhealthy.
 	DefaultUnhealthyThreshold = 3
+
+	// DefaultHealthCheckStopTimeout is the default maximum time Stop waits
+	// for the health check loop to acknowledge shutdown. It matches the
+	// stop-timeout used by the vault and operator clients.
+	DefaultHealthCheckStopTimeout = 5 * time.Second
 )
 
 // HealthChecker performs periodic health checks on backend hosts.
@@ -48,6 +53,7 @@ type HealthChecker struct {
 	logger             observability.Logger
 	stopCh             chan struct{}
 	stoppedCh          chan struct{}
+	stopTimeout        time.Duration
 	running            bool
 	mu                 sync.Mutex
 	healthyThreshold   int
@@ -136,6 +142,7 @@ func NewHealthChecker(hosts []*Host, cfg config.HealthCheck, opts ...HealthCheck
 		logger:             observability.NopLogger(),
 		stopCh:             make(chan struct{}),
 		stoppedCh:          make(chan struct{}),
+		stopTimeout:        DefaultHealthCheckStopTimeout,
 		healthyThreshold:   cfg.HealthyThreshold,
 		unhealthyThreshold: cfg.UnhealthyThreshold,
 		healthyCounts:      make(map[*Host]int),
@@ -164,36 +171,103 @@ func NewHealthChecker(hosts []*Host, cfg config.HealthCheck, opts ...HealthCheck
 }
 
 // Start starts the health checker.
+//
+// Start is safe to call again after Stop has returned (or after the run
+// loop exited because its context was canceled): each Start creates a
+// fresh generation of stop/stopped channels, so a restart never reuses
+// closed channels and can never panic with "close of closed channel".
+// Calling Start while the checker is already running is a no-op.
 func (hc *HealthChecker) Start(ctx context.Context) {
 	hc.mu.Lock()
 	if hc.running {
 		hc.mu.Unlock()
 		return
 	}
+	// Recreate the lifecycle channels for this generation so a
+	// Stop -> Start sequence never observes already-closed channels.
+	hc.stopCh = make(chan struct{})
+	hc.stoppedCh = make(chan struct{})
 	hc.running = true
+	// Capture this generation's channels for the run goroutine; it must
+	// never re-read the struct fields because a later Start replaces them.
+	stopCh := hc.stopCh
+	stoppedCh := hc.stoppedCh
 	hc.mu.Unlock()
 
-	go hc.run(ctx)
+	go hc.run(ctx, stopCh, stoppedCh)
 }
 
-// Stop stops the health checker.
+// Stop stops the health checker and closes pooled gRPC connections.
+//
+// Stop is safe to call multiple times and before Start: when the checker
+// is not running (never started, already stopped, or the run loop exited
+// on context cancellation), Stop only performs idempotent connection
+// cleanup and returns promptly. The wait for the run loop to acknowledge
+// shutdown is bounded by stopTimeout; on expiry a warning is logged
+// instead of blocking the caller forever.
 func (hc *HealthChecker) Stop() {
 	hc.mu.Lock()
 	if !hc.running {
 		hc.mu.Unlock()
+		// Not running: still release pooled connections so a checker
+		// whose loop already exited via context cancellation does not
+		// leak gRPC connections. closeAllGRPCConns is idempotent.
+		hc.closeAllGRPCConns()
 		return
 	}
 	hc.running = false
+	// Capture the current generation's channels: a concurrent Start may
+	// replace the struct fields right after the mutex is released.
+	stopCh := hc.stopCh
+	stoppedCh := hc.stoppedCh
+	stopTimeout := hc.stopTimeout
 	hc.mu.Unlock()
 
-	close(hc.stopCh)
-	<-hc.stoppedCh
+	if stopTimeout <= 0 {
+		stopTimeout = DefaultHealthCheckStopTimeout
+	}
+
+	close(stopCh)
+
+	select {
+	case <-stoppedCh:
+		// Run loop acknowledged shutdown.
+	case <-time.After(stopTimeout):
+		hc.logger.Warn(
+			"timeout waiting for health check loop to stop",
+			observability.String("backend", hc.backendName),
+			observability.Duration("timeout", stopTimeout),
+		)
+	}
+
 	hc.closeAllGRPCConns()
 }
 
-// run is the main health check loop.
-func (hc *HealthChecker) run(ctx context.Context) {
-	defer close(hc.stoppedCh)
+// run is the main health check loop for one Start generation.
+//
+// stopCh and stoppedCh are the channels created by the Start call that
+// spawned this goroutine. They are passed as parameters (instead of
+// re-reading the struct fields) so that a subsequent Start replacing the
+// fields can never strand this goroutine on another generation's channels.
+func (hc *HealthChecker) run(
+	ctx context.Context,
+	stopCh <-chan struct{},
+	stoppedCh chan struct{},
+) {
+	defer func() {
+		// Reset the running flag so the state machine stays consistent
+		// even when the loop exits on its own (context cancellation)
+		// rather than via Stop. Only reset it if this goroutine still
+		// belongs to the current generation: a Stop -> Start pair may
+		// already have spawned a newer loop whose state must not be
+		// clobbered.
+		hc.mu.Lock()
+		if hc.stoppedCh == stoppedCh {
+			hc.running = false
+		}
+		hc.mu.Unlock()
+		close(stoppedCh)
+	}()
 
 	interval := hc.config.Interval.Duration()
 	if interval == 0 {
@@ -210,7 +284,7 @@ func (hc *HealthChecker) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-hc.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			hc.checkAll(ctx)

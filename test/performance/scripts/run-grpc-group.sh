@@ -11,6 +11,13 @@ GRPC_TARGET="${GRPC_TARGET:-127.0.0.1:19443}"  # GAP-P2: default to PF port (svc
 DUR="${PERF_DURATION:-180s}"
 CONC="${PERF_CONC:-50}"
 CONNS="${PERF_CONNS:-10}"
+# GRPC_INSECURE=1 targets a PLAINTEXT gRPC listener (ghz --insecure);
+# default targets a TLS listener with skipped verification (ghz --skipTLS).
+if [ "${GRPC_INSECURE:-0}" = "1" ]; then
+  TLS_FLAG="--insecure"
+else
+  TLS_FLAG="--skipTLS"
+fi
 OUTDIR="$1"; GROUP="$2"
 mkdir -p "$OUTDIR"
 TOK_LH="$(cat /tmp/tok_lh.txt 2>/dev/null)"
@@ -18,8 +25,8 @@ TOK_LH="$(cat /tmp/tok_lh.txt 2>/dev/null)"
 # ghz wrapper. $1=name $2=call $3=data $4=metadata-json [extra...]
 run() {
   local name="$1" call="$2" data="$3" meta="$4"; shift 4
-  echo ">>> [$GROUP/$name] ghz $call dur=$DUR conc=$CONC"
-  ghz --skipTLS --proto "$PROTO" --call "$call" \
+  echo ">>> [$GROUP/$name] ghz $call dur=$DUR conc=$CONC tls=$TLS_FLAG"
+  ghz "$TLS_FLAG" --proto "$PROTO" --call "$call" \
     -m "$meta" -d "$data" -z "$DUR" -c "$CONC" --connections "$CONNS" \
     -O json -o "$OUTDIR/${name}.json" "$@" "$GRPC_TARGET" 2>"$OUTDIR/${name}.err" || true
   # compact line

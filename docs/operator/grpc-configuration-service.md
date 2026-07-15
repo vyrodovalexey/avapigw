@@ -101,6 +101,15 @@ Registers a new gateway instance and returns the initial configuration.
 - Initial configuration snapshot
 - Heartbeat interval recommendation
 
+**Reliability:** after an operator restart, initial snapshot RPCs wait
+(bounded) until the configuration store has been seeded from the cluster —
+the operator logs `configuration store ready for initial snapshot` when the
+gate opens — so a reconnecting gateway never receives an incomplete snapshot
+from a cold store. On the gateway side, a running gateway with a non-empty
+configuration ignores an **empty** snapshot and keeps its last-known-good
+configuration (warning logged; the deletion of the last remaining CR
+propagates with the next non-empty snapshot or a gateway restart).
+
 **Usage:**
 ```go
 resp, err := client.RegisterGateway(ctx, &operatorv1alpha1.RegisterGatewayRequest{
@@ -128,6 +137,8 @@ Establishes a server-side streaming connection for real-time updates.
 - Resumable streams with version tracking
 - Namespace and resource type filtering
 - Ordered delivery with sequence numbers
+- Lossless wakeup: a configuration push that arrives while a previous send
+  is still in flight re-arms the stream, so updates are never dropped
 
 **Usage:**
 ```go

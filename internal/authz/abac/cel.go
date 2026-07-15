@@ -128,6 +128,27 @@ func NewEngine(config *Config, opts ...EngineOption) (Engine, error) {
 
 // createCELEnvironment creates the CEL environment with standard variables and functions.
 func (e *celEngine) createCELEnvironment() (*cel.Env, error) {
+	return NewCELEnv()
+}
+
+// NewCELEnv creates the canonical ABAC CEL environment with the standard
+// variable declarations and custom functions used at policy evaluation time.
+//
+// It is exported so admission-time validators (the operator's webhooks)
+// compile expressions against EXACTLY the same declarations the gateway
+// evaluates them with — any divergence causes valid policies to be rejected
+// at admission or invalid ones to fail only at runtime.
+//
+// Declared variables:
+//   - subject     map(string, dyn) — authenticated subject attributes
+//   - request     map(string, dyn) — request attributes (method, path, …)
+//   - resource    string           — resource being accessed
+//   - action      string           — action being performed
+//   - environment map(string, dyn) — environment attributes
+//   - now         timestamp        — evaluation time
+//
+// Declared functions: ip_in_range(string, string) bool, has_role(string) bool.
+func NewCELEnv() (*cel.Env, error) {
 	return cel.NewEnv(
 		// Subject attributes
 		cel.Variable("subject", cel.MapType(cel.StringType, cel.DynType)),
