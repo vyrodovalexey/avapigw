@@ -384,8 +384,11 @@ func setupOperatorComponents(
 		return nil, err
 	}
 
-	startGRPCServerBackground(ctx, grpcServer)
+	// Wire the store readiness gate (leadership signal + seeding goroutine)
+	// BEFORE the gRPC server starts serving, so no early RPC can observe the
+	// gate without its leadership signal.
 	startStoreSeedingBackground(ctx, grpcServer, mgr)
+	startGRPCServerBackground(ctx, grpcServer)
 
 	return caInjector, nil
 }
@@ -407,29 +410,61 @@ type cacheSyncWaiter interface {
 	WaitForCacheSync(ctx context.Context) bool
 }
 
-// startStoreSeedingBackground launches a goroutine that marks the gRPC
-// configuration store as seeded once the manager's informer caches have
-// synced and the controllers' initial reconcile pass has populated the store
-// (bounded wait). Until then, the gRPC server parks initial-snapshot RPCs so
-// a gateway connecting right after an operator restart does not receive an
-// empty FULL_SYNC that would wipe its running configuration.
+// startStoreSeedingBackground wires the manager's leader-election signal into
+// the gRPC server's store readiness gate and launches a goroutine that marks
+// the gRPC configuration store as seeded once this replica has been ELECTED
+// LEADER, the manager's informer caches have synced, and the controllers'
+// initial reconcile pass has populated the store (bounded wait). Until then,
+// the gRPC server parks initial-snapshot RPCs so a gateway connecting right
+// after an operator restart does not receive an empty FULL_SYNC that would
+// wipe its running configuration.
+//
+// Multi-replica behavior: controllers only run on the elected leader, so a
+// NON-LEADER replica's store stays empty for its whole lifetime. Gating both
+// the seed mark and the server-side seed-timeout clock on mgr.Elected()
+// guarantees non-leaders never open the gate (and never hit the timeout
+// fallback) with an empty store — connecting gateways park or retry until
+// they reach the leader. With leader election disabled, Elected() closes as
+// soon as the manager starts, preserving single-replica behavior.
+//
+// Leadership loss/regain: controller-runtime managers never un-elect — on
+// leadership loss the manager terminates and the process restarts, so the
+// elected → seeded transition happens at most once per process and needs no
+// reset handling. See Server.SetLeadershipSignal.
 func startStoreSeedingBackground(ctx context.Context, grpcServer *operatorgrpc.Server, mgr ctrl.Manager) {
 	if grpcServer == nil {
 		return
 	}
-	go seedGRPCStore(ctx, grpcServer, mgr.GetCache(), mgr.GetClient())
+	elected := mgr.Elected()
+	grpcServer.SetLeadershipSignal(elected)
+	go seedGRPCStore(ctx, grpcServer, elected, mgr.GetCache(), mgr.GetClient())
 }
 
-// seedGRPCStore waits for cache sync and the initial reconcile pass, then
-// releases the gRPC store readiness gate. The reconcile-pass wait is bounded:
-// on timeout the store is marked seeded anyway (with a logged decision) so
-// gateways are never blocked indefinitely by resources that cannot reconcile.
+// seedGRPCStore waits for leader election, cache sync, and the initial
+// reconcile pass, then releases the gRPC store readiness gate. The
+// reconcile-pass wait is bounded: on timeout the store is marked seeded
+// anyway (with a logged decision) so gateways are never blocked indefinitely
+// by resources that cannot reconcile. The timeout clock starts at election —
+// a replica that is never elected parks here and never marks the (empty)
+// store seeded. On shutdown the seed mark is skipped entirely.
 func seedGRPCStore(
 	ctx context.Context,
 	grpcServer *operatorgrpc.Server,
+	elected <-chan struct{},
 	cacheSync cacheSyncWaiter,
 	reader client.Reader,
 ) {
+	// Leadership gate: park until this replica is elected leader (immediate
+	// when leader election is disabled). Controllers never run on
+	// non-leaders, so proceeding here would time out against a permanently
+	// empty store and open the gate for empty snapshots.
+	select {
+	case <-ctx.Done():
+		setupLog.Info("shutdown before leader election; skipping gRPC store seed mark")
+		return
+	case <-elected:
+	}
+
 	if !cacheSync.WaitForCacheSync(ctx) {
 		setupLog.Info("cache sync canceled before gRPC store seeding; skipping seed mark")
 		return
@@ -437,6 +472,10 @@ func seedGRPCStore(
 
 	expected := countExpectedConfigResources(ctx, reader)
 	reached := waitForStoreCount(ctx, grpcServer, expected)
+	if !reached && ctx.Err() != nil {
+		setupLog.Info("shutdown while waiting for initial reconcile; skipping gRPC store seed mark")
+		return
+	}
 
 	grpcServer.MarkStoreSeeded()
 	setupLog.Info("gRPC configuration store marked seeded",

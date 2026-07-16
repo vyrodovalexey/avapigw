@@ -10,53 +10,52 @@ This document provides a comprehensive reference for configuring Vault PKI integ
 
 ## Vault Configuration
 
-### Global Vault Settings
+### Vault Client Connection (Environment Variables Only)
 
-```yaml
-apiVersion: gateway.avapigw.io/v1
-kind: Gateway
-metadata:
-  name: vault-gateway
-spec:
-  vault:
-    # Vault server configuration
-    address: "https://vault.example.com:8200"
-    authMethod: kubernetes  # kubernetes, token, approle, aws, gcp
-    role: gateway-role
-    
-    # Optional: Static token (development only)
-    token: "hvs.CAESIJ..."
-    
-    # Optional: AppRole authentication
-    appRole:
-      roleId: "role-id"
-      secretId: "secret-id"
-    
-    # Optional: AWS authentication
-    aws:
-      role: "vault-role"
-      region: "us-west-2"
-    
-    # Optional: GCP authentication
-    gcp:
-      role: "vault-role"
-      serviceAccount: "gateway@project.iam.gserviceaccount.com"
-    
-    # TLS configuration for Vault connection
-    tls:
-      enabled: true
-      caFile: "/etc/ssl/certs/vault-ca.crt"
-      certFile: "/etc/ssl/certs/vault-client.crt"
-      keyFile: "/etc/ssl/private/vault-client.key"
-      serverName: "vault.example.com"
-      insecureSkipVerify: false
-    
-    # Connection settings
-    timeout: 30s
-    retries: 3
-    retryDelay: 1s
-    maxRetryDelay: 30s
+The gateway configures its Vault **client connection** exclusively through
+environment variables — there is **no `spec.vault` section** in the gateway
+configuration file. The YAML configuration only contains the per-listener,
+per-route, and per-backend `tls.vault` PKI blocks documented below; the client
+that serves those blocks is initialized from the environment at startup
+(see `cmd/gateway/vault.go`).
+
+The Vault client is initialized when `VAULT_ADDR` is set or when any
+listener/route enables Vault TLS.
+
+| Environment Variable | Default | Description |
+|-----------------------|---------|-------------|
+| `VAULT_ADDR` | - | Vault server address (e.g. `https://vault.example.com:8200`). Setting it enables Vault client initialization |
+| `VAULT_AUTH_METHOD` | `token` | Authentication method: `token`, `kubernetes`, or `approle` |
+| `VAULT_TOKEN` | - | Static token for `token` auth (development only) |
+| `VAULT_NAMESPACE` | - | Vault Enterprise namespace |
+| `VAULT_CACERT` | - | Path to a CA certificate file for verifying the Vault server |
+| `VAULT_CAPATH` | - | Path to a directory of CA certificates |
+| `VAULT_CLIENT_CERT` | - | Client certificate for TLS authentication to Vault |
+| `VAULT_CLIENT_KEY` | - | Client key for TLS authentication to Vault |
+| `VAULT_SKIP_VERIFY` | `false` | Skip TLS verification of the Vault server (not recommended) |
+| `VAULT_K8S_ROLE` | - | Vault role for `kubernetes` auth |
+| `VAULT_K8S_MOUNT_PATH` | `kubernetes` | Mount path of the Kubernetes auth method |
+| `VAULT_K8S_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Service account token path for `kubernetes` auth |
+| `VAULT_APPROLE_ROLE_ID` | - | Role ID for `approle` auth |
+| `VAULT_APPROLE_SECRET_ID` | - | Secret ID for `approle` auth |
+| `VAULT_APPROLE_MOUNT_PATH` | `approle` | Mount path of the AppRole auth method |
+
+Example (Kubernetes deployment):
+
+```bash
+export VAULT_ADDR="https://vault.example.com:8200"
+export VAULT_AUTH_METHOD=kubernetes
+export VAULT_K8S_ROLE=gateway-role
 ```
+
+Vault authentication is retried with exponential backoff at startup (3
+retries, 1s–10s backoff, 30s overall timeout), so a briefly unavailable Vault
+does not fail gateway startup immediately.
+
+> **Note:** The Helm chart's `vault.*` values control the injection of these
+> environment variables into the gateway deployment — they are not passed
+> through to the gateway configuration file. See
+> [Helm Values Reference](#helm-values-reference).
 
 ## Listener-Level TLS Configuration
 
@@ -80,15 +79,11 @@ spec:
           pkiMount: "pki"                    # PKI secrets engine mount path
           role: "gateway-server"             # PKI role name
           commonName: "gateway.example.com"  # Certificate common name
-          altNames:                          # Subject Alternative Names
+          altNames:                          # Subject Alternative Names (DNS)
             - "api.example.com"
             - "www.example.com"
             - "*.api.example.com"
-          ipSans:                            # IP Subject Alternative Names
-            - "10.0.1.100"
-            - "192.168.1.100"
           ttl: "24h"                         # Certificate TTL
-          renewBefore: "1h"                  # Renew before expiry
           
         # Optional: Custom cipher suites
         cipherSuites:
@@ -128,27 +123,15 @@ spec:
             - "api.example.com"
             - "admin.example.com"
           ttl: "12h"
-          renewBefore: "30m"
-          
-          # Optional: Custom certificate parameters
-          excludeCnFromSans: false
-          format: "pem"
-          privateKeyFormat: "pkcs8"
-          
-        # Client certificate validation
-        clientValidation:
-          enabled: true
-          vault:
-            enabled: true
-            pkiMount: "pki-client"
-            role: "client-ca"
-          requireClientCert: true
-          allowedCNs:
-            - "client.example.com"
-            - "admin.example.com"
-          allowedSANs:
-            - "*.client.example.com"
+
+        # Client certificate validation (MUTUAL mode)
+        caFile: "/etc/ssl/certs/client-ca.crt"
+        requireClientCert: true
 ```
+
+> **Note:** per-CN/SAN client filtering (`clientValidation` with
+> `allowedCNs`/`allowedSANs`) is available at the **route** level — see
+> [Route-Level TLS Configuration](#route-level-tls-configuration).
 
 ## Route-Level TLS Configuration
 
@@ -177,7 +160,6 @@ spec:
             - "api.tenant-a.example.com"
             - "www.tenant-a.example.com"
           ttl: "24h"
-          renewBefore: "2h"
         
         # SNI hostnames for certificate selection
         sniHosts:
@@ -236,10 +218,7 @@ spec:
         minVersion: "1.3"
         clientValidation:
           enabled: true
-          vault:
-            enabled: true
-            pkiMount: "pki-client"
-            role: "tenant-a-clients"
+          caFile: "/etc/ssl/certs/tenant-a-client-ca.crt"
           requireClientCert: true
           allowedCNs:
             - "client.tenant-a.example.com"
@@ -260,7 +239,6 @@ spec:
           role: "web-server"
           commonName: "tenant-b.example.com"
           ttl: "6h"
-          renewBefore: "30m"
         sniHosts:
           - "tenant-b.example.com"
         minVersion: "1.2"
@@ -324,7 +302,6 @@ spec:
             - "gateway.internal"
             - "client.gateway.internal"
           ttl: "24h"
-          renewBefore: "1h"
         
         # Server verification
         serverName: "secure-api.example.com"
@@ -375,36 +352,20 @@ spec:
 
 ## VaultTLSConfig Reference
 
+The same `vault` block shape is accepted under listener `tls`, gRPC listener
+`tls`, route `tls`, and backend `tls` sections.
+
 ### Complete Configuration Schema
 
 ```yaml
 vault:
-  enabled: boolean                    # Enable Vault PKI integration
-  pkiMount: string                    # PKI secrets engine mount path
-  role: string                        # PKI role name
-  commonName: string                  # Certificate common name
-  altNames: []string                  # Subject Alternative Names (DNS)
-  ipSans: []string                    # IP Subject Alternative Names
-  uriSans: []string                   # URI Subject Alternative Names
-  otherSans: []string                 # Other Subject Alternative Names
-  ttl: duration                       # Certificate TTL (e.g., "24h", "720h")
-  renewBefore: duration               # Renew before expiry (e.g., "1h", "30m")
-  format: string                      # Certificate format ("pem", "der", "pem_bundle")
-  privateKeyFormat: string            # Private key format ("der", "pkcs8")
-  excludeCnFromSans: boolean          # Exclude CN from SANs
-  
-  # Advanced options
-  serialNumber: string                # Certificate serial number
-  keyType: string                     # Key type ("rsa", "ec", "ed25519")
-  keyBits: integer                    # Key size in bits (for RSA)
-  keyUsage: []string                  # Key usage extensions
-  extKeyUsage: []string               # Extended key usage
-  
-  # Renewal settings
-  autoRenew: boolean                  # Enable automatic renewal (default: true)
-  renewJitter: duration               # Random jitter for renewal timing
-  maxRetries: integer                 # Max renewal retry attempts
-  retryDelay: duration                # Delay between retry attempts
+  enabled: true                       # Enable Vault PKI integration
+  pkiMount: "pki"                     # PKI secrets engine mount path
+  role: "gateway-server"              # PKI role name
+  commonName: "gateway.example.com"   # Certificate common name
+  altNames:                           # Subject Alternative Names (DNS)
+    - "api.example.com"
+  ttl: "24h"                          # Certificate TTL (e.g., "24h", "720h")
 ```
 
 ### Field Descriptions
@@ -416,20 +377,20 @@ vault:
 | `role` | string | Yes | - | PKI role name for certificate issuance |
 | `commonName` | string | Yes | - | Certificate common name (CN) |
 | `altNames` | []string | No | [] | DNS Subject Alternative Names |
-| `ipSans` | []string | No | [] | IP Subject Alternative Names |
-| `uriSans` | []string | No | [] | URI Subject Alternative Names |
-| `otherSans` | []string | No | [] | Other Subject Alternative Names |
-| `ttl` | duration | No | 24h | Certificate time-to-live |
-| `renewBefore` | duration | No | 1h | Renew certificate before expiry |
-| `format` | string | No | pem | Certificate format |
-| `privateKeyFormat` | string | No | pkcs8 | Private key format |
-| `excludeCnFromSans` | boolean | No | false | Exclude CN from SANs |
-| `autoRenew` | boolean | No | true | Enable automatic renewal |
-| `renewJitter` | duration | No | 5m | Random jitter for renewal |
-| `maxRetries` | integer | No | 3 | Max renewal retry attempts |
-| `retryDelay` | duration | No | 30s | Delay between retries |
+| `ttl` | duration string | No | provider default | Certificate time-to-live |
+
+Certificate renewal is automatic: the Vault provider renews certificates
+before expiry (10 minutes before expiry by default, with exponential backoff
+on renewal failures) and the listener hot-reloads the renewed certificate
+without a restart. Key type and SAN policy beyond `altNames` are controlled
+by the **Vault PKI role**, not by gateway configuration.
 
 ## Helm Values Reference
+
+The Helm chart's `vault.*` values control **environment variable injection**
+into the gateway deployment (`VAULT_ADDR`, `VAULT_AUTH_METHOD`,
+`VAULT_K8S_ROLE`, ...) plus the Vault PKI blocks rendered into the generated
+gateway configuration.
 
 ### Complete Vault PKI Configuration
 
@@ -437,16 +398,17 @@ vault:
 # values.yaml
 vault:
   enabled: true
-  address: "https://vault.example.com:8200"
-  authMethod: kubernetes
-  role: gateway-role
-  
+  address: "https://vault.example.com:8200"   # -> VAULT_ADDR
+  authMethod: kubernetes                      # -> VAULT_AUTH_METHOD
+  role: gateway-role                          # -> VAULT_K8S_ROLE
+  kubernetesMountPath: kubernetes             # -> VAULT_K8S_MOUNT_PATH
+
   # TLS for Vault connection
   tls:
     enabled: true
     caSecretName: vault-ca-cert
-    skipVerify: false
-  
+    skipVerify: false                         # -> VAULT_SKIP_VERIFY
+
   # Vault PKI for listener TLS
   pki:
     enabled: true
@@ -458,27 +420,15 @@ vault:
       - "*.api.example.com"
     ttl: "24h"
     renewBefore: "1h"
-    format: "pem"
-    privateKeyFormat: "pkcs8"
-    autoRenew: true
-    renewJitter: "5m"
-    maxRetries: 3
-    retryDelay: "30s"
+    # gRPC listener PKI overrides (inherit from vault.pki.* when empty)
+    grpc:
+      pkiMount: ""
+      role: ""
+      commonName: ""
+      altNames: []
+      ttl: ""
 
 gateway:
-  listeners:
-    https:
-      enabled: true
-      port: 8443
-      tls:
-        enabled: true
-        vault:
-          enabled: true
-        minVersion: "1.2"
-        hsts:
-          enabled: true
-          maxAge: 31536000
-
   routes:
     - name: tenant-a
       match:
@@ -497,7 +447,6 @@ gateway:
           altNames:
             - api.tenant-a.example.com
           ttl: 24h
-          renewBefore: 2h
         sniHosts:
           - tenant-a.example.com
           - api.tenant-a.example.com
@@ -542,9 +491,6 @@ vault:
       - "*.api.prod.example.com"
     ttl: "24h"
     renewBefore: "2h"
-    autoRenew: true
-    maxRetries: 5
-    retryDelay: "1m"
     grpc:
       enabled: true
       pkiMount: "pki-grpc-prod"
@@ -559,9 +505,7 @@ vault:
 
 - `commonName`: Must be a valid DNS name or IP address
 - `altNames`: Each entry must be a valid DNS name
-- `ipSans`: Each entry must be a valid IP address
 - `ttl`: Must be a valid duration string (e.g., "24h", "30m")
-- `renewBefore`: Must be less than `ttl`
 
 ### TLS Version Validation
 
@@ -2112,7 +2056,9 @@ spec:
       # TLS metrics configuration
       tls:
         enabled: true
-        handshakes: true       # TLS handshake metrics
+        handshakes: true       # TLS handshake metrics: connections total and
+                               # gateway_tls_handshake_duration_seconds, recorded
+                               # for HTTPS listener AND gRPC TLS listener handshakes
         certificates: true     # Certificate lifecycle metrics
         
       # Vault metrics configuration

@@ -114,9 +114,12 @@ func NewSigner(config *Config, opts ...SignerOption) (Signer, error) {
 		opt(s)
 	}
 
-	// Initialize metrics if not provided
+	// Initialize metrics if not provided. Default to the process-wide
+	// shared singleton (registered with the gateway /metrics registry);
+	// a fresh NewMetrics instance would record onto an invisible private
+	// registry.
 	if s.metrics == nil {
-		s.metrics = NewMetrics("gateway")
+		s.metrics = GetSharedMetrics()
 	}
 
 	// Validate configuration

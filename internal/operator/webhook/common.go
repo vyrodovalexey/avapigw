@@ -22,6 +22,15 @@ const (
 	tlsVersion13 = "TLS13"
 )
 
+// defaultGRPCHealthCheckHTTPPath mirrors the CRD schema default for
+// GRPCBackend spec.healthCheck.httpPath (+kubebuilder:default="/healthz" in
+// api/v1alpha1/grpcbackend_types.go). The API server applies structural
+// defaulting BEFORE validating webhooks run, so every GRPCBackend with a
+// healthCheck block reaches the webhook with this value populated even when
+// the user never set it. It must therefore be tolerated when useHTTP is
+// false, where it is inert.
+const defaultGRPCHealthCheckHTTPPath = "/healthz"
+
 // Validation boundary constants for webhook validation.
 const (
 	// MinPort is the minimum valid port number.
@@ -507,6 +516,12 @@ func validateGRPCHealthCheck(hc *avapigwv1alpha1.GRPCHealthCheckConfig) error {
 		return fmt.Errorf("healthCheck.unhealthyThreshold must be non-negative")
 	}
 
+	return validateGRPCHealthCheckHTTPMode(hc)
+}
+
+// validateGRPCHealthCheckHTTPMode validates the HTTP-mode fields of a gRPC
+// health check (httpPath/httpPort) against the useHTTP toggle.
+func validateGRPCHealthCheckHTTPMode(hc *avapigwv1alpha1.GRPCHealthCheckConfig) error {
 	if hc.UseHTTP {
 		if hc.HTTPPath != "" && !strings.HasPrefix(hc.HTTPPath, "/") {
 			return fmt.Errorf("healthCheck.httpPath must start with '/'")
@@ -519,18 +534,23 @@ func validateGRPCHealthCheck(hc *avapigwv1alpha1.GRPCHealthCheckConfig) error {
 				MinPort, MaxPort,
 			)
 		}
-	} else {
-		if hc.HTTPPath != "" {
-			return fmt.Errorf(
-				"healthCheck.httpPath must not be set when useHTTP is false",
-			)
-		}
 
-		if hc.HTTPPort != 0 {
-			return fmt.Errorf(
-				"healthCheck.httpPort must not be set when useHTTP is false",
-			)
-		}
+		return nil
+	}
+
+	// Tolerate the CRD schema default: the API server defaults httpPath to
+	// "/healthz" before this webhook runs, so only an explicit non-default
+	// path signals user misconfiguration.
+	if hc.HTTPPath != "" && hc.HTTPPath != defaultGRPCHealthCheckHTTPPath {
+		return fmt.Errorf(
+			"healthCheck.httpPath must not be set when useHTTP is false",
+		)
+	}
+
+	if hc.HTTPPort != 0 {
+		return fmt.Errorf(
+			"healthCheck.httpPort must not be set when useHTTP is false",
+		)
 	}
 
 	return nil

@@ -204,10 +204,20 @@ EOF
 # Error: admission webhook denied the request: ... conflicts with existing route(s)
 ```
 
-Only **true duplicates** are rejected — the same match type and path with
-overlapping methods. Routes of different specificity (exact vs prefix,
-nested prefixes such as `/` and `/api`, catch-all vs specific) are allowed
-and ordered deterministically by the router.
+Only **true duplicates** are rejected — match conditions with identical
+specificity and overlapping values that the router cannot order
+deterministically. Routes of different specificity (exact vs prefix, nested
+prefixes such as `/` and `/api`, catch-all vs specific) are allowed and
+ordered deterministically by the router. The same principle applies to
+GRPCRoute (identical service/method prefixes or exacts conflict; nested
+prefixes are resolved by longest-prefix priority) and GraphQLRoute (identical
+specificity plus overlapping match values; see the
+[specificity formula](webhook-validation.md#graphql-route-conflicts)).
+
+Deletion is never blocked by validation: updates on objects being deleted are
+always admitted (finalizer removal cannot wedge), metadata-only updates skip
+conflict checks, and resources being deleted are excluded from conflict
+evaluation. See [Admission Lifecycle](webhook-validation.md#admission-lifecycle).
 
 ## Quick Start
 
@@ -378,6 +388,22 @@ All communication is secured using mutual TLS (mTLS):
 - **Encryption** - All traffic is encrypted in transit
 - **Certificate Management** - Automated certificate provisioning and rotation
 
+### Reliability
+
+- **Leadership-gated seeding** - on multi-replica deployments only the
+  elected leader seeds the configuration store and serves initial snapshots;
+  non-leader replicas park initial-snapshot RPCs (`awaiting_leadership`)
+  until elected, and clients retry until they reach the leader. Leadership
+  loss restarts the operator process (controller-runtime semantics)
+- **Authoritative snapshots** - FULL_SYNC snapshots are authoritative per
+  resource type: an empty resource type clears the corresponding gateway
+  router/registry, while an all-empty snapshot and count-regressing
+  snapshots within 30s of a reconnect are held back to protect restart
+  scenarios (see [gRPC ConfigurationService](grpc-configuration-service.md))
+- **Deterministic snapshots** - snapshot resources are listed in sorted
+  (namespace/name) order, so identical store contents always produce
+  identical snapshots and checksums
+
 ## Security
 
 ### RBAC
@@ -513,8 +539,8 @@ curl http://operator:8081/readyz
 Complete examples are available in the repository:
 
 - [Basic Examples](../../test/crd-samples/) - Simple configuration examples
-- [Advanced Examples](../../examples/operator/) - Complex multi-service configurations
-- [Production Examples](../../examples/production/) - Production-ready configurations
+- [Advanced Examples](../../test/k8s/crds-full-test.yaml) - Complex multi-service configurations exercising all CRD kinds
+- [Operator-Mode Fixtures](../../test/performance/operator/) - CRD sets used by the e2e and performance suites
 
 ## Support
 

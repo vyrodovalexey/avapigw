@@ -26,6 +26,13 @@ import (
 // defaults) and shell out to `kubectl` because the deployment lifecycle is
 // owned by the DevOps DO-04 subtask, not the test process.
 //
+// Namespaces: the gateway/operator DEPLOYMENT lives in the deployment
+// namespace (default `avapigw-test`), while the DO-04 perf FIXTURES
+// (crds-do04-aggregate.yaml) live in a dedicated fixture namespace (default
+// `avapigw-perf`) so the namespace-scoped admission duplicate checker never
+// rejects them against the avapigw-test suites. The operator watches all
+// namespaces, so fixture CRs still reconcile and reach the gateway.
+//
 // Gating: the whole live suite is skipped unless the live cluster is reachable
 // and the deployed aggregate CRD is present. This keeps `make test-e2e` green
 // in environments where the cluster is not provisioned.
@@ -36,10 +43,18 @@ import (
 // approach the existing e2e/integration suites rely on for in-cluster access).
 
 const (
-	// envLiveNamespace selects the namespace under test.
+	// envLiveNamespace selects the deployment namespace under test (gateway +
+	// operator workloads and their Services).
 	envLiveNamespace = "AVAPIGW_E2E_NAMESPACE"
-	// defaultLiveNamespace is the operator-mode namespace per the DO-04 deploy.
+	// defaultLiveNamespace is the operator-mode deployment namespace per the
+	// DO-04 deploy.
 	defaultLiveNamespace = "avapigw-test"
+
+	// envLiveFixtureNamespace selects the namespace holding the DO-04 perf
+	// fixture CRs (crds-do04-aggregate.yaml and siblings).
+	envLiveFixtureNamespace = "AVAPIGW_E2E_FIXTURE_NAMESPACE"
+	// defaultLiveFixtureNamespace is the dedicated DO-04 fixture namespace.
+	defaultLiveFixtureNamespace = "avapigw-perf"
 
 	// envAggregateRoute selects the deployed aggregate APIRoute name.
 	envAggregateRoute = "AVAPIGW_E2E_AGGREGATE_ROUTE"
@@ -48,8 +63,12 @@ const (
 
 	// envAggregatePath selects the client-facing aggregate route prefix.
 	envAggregatePath = "AVAPIGW_E2E_AGGREGATE_PATH"
-	// defaultAggregatePath matches the deployed aggregate route prefix.
-	defaultAggregatePath = "/api/v1/aggregate"
+	// defaultAggregatePath matches the deployed aggregate route prefix that
+	// the fan-out targets actually serve: the aggregate handler forwards the
+	// inbound path VERBATIM to every target, and the REST test backends
+	// serve /api/v1/items (they 404 the alternative /api/v1/aggregate match,
+	// which yields a labeled-envelope response instead of a deep merge).
+	defaultAggregatePath = "/api/v1/items"
 
 	// envVMURL selects the VictoriaMetrics base URL.
 	envVMURL = "AVAPIGW_E2E_VM_URL"
@@ -66,12 +85,22 @@ const (
 	liveCtxTimeout = 30 * time.Second
 )
 
-// liveNamespace returns the namespace under test (ENV override, no hardcode).
+// liveNamespace returns the deployment namespace under test (ENV override, no
+// hardcode).
 func liveNamespace() string {
 	if v := os.Getenv(envLiveNamespace); v != "" {
 		return v
 	}
 	return defaultLiveNamespace
+}
+
+// liveFixtureNamespace returns the namespace holding the DO-04 perf fixture
+// CRs (ENV override, no hardcode).
+func liveFixtureNamespace() string {
+	if v := os.Getenv(envLiveFixtureNamespace); v != "" {
+		return v
+	}
+	return defaultLiveFixtureNamespace
 }
 
 // liveAggregateRoute returns the deployed aggregate APIRoute name.
@@ -127,8 +156,9 @@ func kubectl(ctx context.Context, stdin string, args ...string) (string, error) 
 }
 
 // liveClusterReachable reports whether the deployed aggregate route exists in
-// the target namespace AND the gateway Service is actually backed by ready
-// pods. It is the single gate for the entire live suite.
+// the fixture namespace AND the gateway Service is actually backed by ready
+// pods in the deployment namespace. It is the single gate for the entire live
+// suite.
 //
 // Checking only the APIRoute CR is not enough: CRs (and their last-written
 // status) survive an undeploy of the operator/gateway, which would let the
@@ -139,7 +169,7 @@ func liveClusterReachable(ctx context.Context) bool {
 		return false
 	}
 	out, err := kubectl(ctx, "", "get", "apiroute", liveAggregateRoute(),
-		"-n", liveNamespace(), "-o", "jsonpath={.metadata.name}")
+		"-n", liveFixtureNamespace(), "-o", "jsonpath={.metadata.name}")
 	if err != nil || strings.TrimSpace(out) != liveAggregateRoute() {
 		return false
 	}
@@ -162,9 +192,9 @@ func skipUnlessLive(t *testing.T, ctx context.Context) {
 	}
 	if !liveClusterReachable(ctx) {
 		t.Skipf("live operator-mode deployment not reachable "+
-			"(apiroute/%s missing or svc/%s has no ready endpoints in -n %s); "+
+			"(apiroute/%s missing in -n %s or svc/%s has no ready endpoints in -n %s); "+
 			"skipping live aggregate e2e. Set up via DevOps DO-04 (crds-do04-aggregate.yaml).",
-			liveAggregateRoute(), liveGatewayService(), liveNamespace())
+			liveAggregateRoute(), liveFixtureNamespace(), liveGatewayService(), liveNamespace())
 	}
 }
 

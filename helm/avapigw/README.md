@@ -625,6 +625,21 @@ helm upgrade --install avapigw helm/avapigw/ \
 make perf-test-k8s
 ```
 
+Notes on `values-local.yaml`:
+
+- The **operator and its validating webhook are enabled by default**
+  (`operator.webhook.enabled: true`, self-signed TLS), matching the
+  production posture — CR creates/updates are validated locally exactly as
+  they would be in production. Since the admission-lifecycle fix, the webhook
+  never blocks finalizer removal, so it is safe to keep enabled during local
+  CR churn.
+- The Vault PKI listener certificates request a `host.docker.internal`
+  altName. The PKI `test-role` created by
+  `test/performance/scripts/setup-vault-k8s.sh --setup-pki` (and kept in sync
+  by `test/docker-compose/scripts/setup-vault.sh`) must therefore keep
+  `docker.internal` in its allowed domains — see the sync-contract comments
+  in both scripts.
+
 ### Enable Operator with CRD-based Configuration
 
 ```yaml

@@ -20,7 +20,7 @@ The gateway exposes **130+ Prometheus metrics** across all components:
 - **Cache**: Memory and Redis cache performance with per-route isolation
 - **Authentication**: JWT, API Key, OIDC, mTLS validation (global middleware chain)
 - **Authorization**: RBAC, ABAC, external authorization
-- **TLS**: Handshakes, certificate lifecycle
+- **TLS**: Connections, handshake duration (recorded for HTTPS and gRPC TLS listener handshakes), handshake errors, certificate lifecycle
 - **Vault**: API requests, authentication, secret retrieval
 - **Backend Auth**: Backend authentication operations
 - **Proxy**: Backend communication, errors, duration

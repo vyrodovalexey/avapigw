@@ -244,11 +244,24 @@ func (h *GraphQLHandler) handleRequest(w http.ResponseWriter, r *http.Request) (
 		h.writeError(w, http.StatusNotFound, "no matching GraphQL route")
 		return "", graphqlOpUnknown
 	}
+	r = withGraphQLRouteContext(r, match.Route)
 
 	terminal := h.terminalHandler(match)
 	h.applyRouteMiddleware(terminal, match.Route).ServeHTTP(w, r)
 
 	return match.BackendName, match.OperationType
+}
+
+// withGraphQLRouteContext stamps the matched GraphQL route name (namespaced
+// with the graphql chain scope, mirroring the middleware chain cache keys)
+// into the request context. Downstream middleware and the upstream metrics
+// middleware's RouteHolder thereby label by matched route instead of
+// "unmatched"/"unknown".
+func withGraphQLRouteContext(r *http.Request, route *config.GraphQLRoute) *http.Request {
+	if route == nil || route.Name == "" {
+		return r
+	}
+	return r.WithContext(util.ContextWithRoute(r.Context(), graphqlChainScope+route.Name))
 }
 
 // parseRequest reads (bounded), validates, and restores the GraphQL request
@@ -348,6 +361,7 @@ func (h *GraphQLHandler) servePreflight(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, http.StatusNotFound, "no matching GraphQL route")
 		return
 	}
+	r = withGraphQLRouteContext(r, match.Route)
 
 	terminal := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Reached only when the route has no CORS middleware configured to
@@ -372,6 +386,7 @@ func (h *GraphQLHandler) serveSubscription(w http.ResponseWriter, r *http.Reques
 		h.writeError(w, http.StatusNotFound, "no matching GraphQL route")
 		return
 	}
+	r = withGraphQLRouteContext(r, match.Route)
 
 	terminal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hw := newHijackTrackingResponseWriter(w)

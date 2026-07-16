@@ -179,7 +179,7 @@ spec:
 		var cond *liveAggregateCondition
 		deadline := time.Now().Add(40 * time.Second)
 		for time.Now().Before(deadline) {
-			cond = readyCondition(getAPIRouteJSON(ctx, t, name))
+			cond = readyCondition(getAPIRouteJSON(ctx, t, liveNamespace(), name))
 			if cond != nil && cond.Status == "True" {
 				break
 			}
@@ -189,7 +189,7 @@ spec:
 		assert.Equal(t, "True", cond.Status, "NDJSON aggregate route reconciled to Ready")
 
 		// The NDJSON merge surface round-tripped through the CRD.
-		obj := getAPIRouteJSON(ctx, t, name)
+		obj := getAPIRouteJSON(ctx, t, liveNamespace(), name)
 		spec := obj["spec"].(map[string]interface{})
 		agg := spec["aggregate"].(map[string]interface{})
 		merge := agg["merge"].(map[string]interface{})

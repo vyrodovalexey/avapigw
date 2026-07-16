@@ -812,8 +812,18 @@ func TestDuplicateChecker_GRPCMatchConditionsOverlap_PrefixService(t *testing.T)
 		Service: &avapigwv1alpha1.StringMatch{Prefix: "service.v1.User"},
 	}
 
-	if !checker.grpcMatchConditionsOverlap(a, b) {
-		t.Error("grpcMatchConditionsOverlap() should return true for overlapping service prefixes")
+	// Nested but non-identical prefixes resolve deterministically by
+	// longest-prefix specificity in the gRPC router — not a conflict.
+	if checker.grpcMatchConditionsOverlap(a, b) {
+		t.Error("grpcMatchConditionsOverlap() should return false for nested service prefixes")
+	}
+
+	// Identical prefixes have identical specificity — a true duplicate.
+	same := &avapigwv1alpha1.GRPCRouteMatch{
+		Service: &avapigwv1alpha1.StringMatch{Prefix: "service.v1"},
+	}
+	if !checker.grpcMatchConditionsOverlap(a, same) {
+		t.Error("grpcMatchConditionsOverlap() should return true for identical service prefixes")
 	}
 }
 
@@ -2396,48 +2406,39 @@ func TestDuplicateChecker_CheckGraphQLRouteDuplicate_NoDuplicates(t *testing.T) 
 	}
 }
 
-func TestDuplicateChecker_CheckGraphQLRouteDuplicate_OverlappingPath(t *testing.T) {
+func TestDuplicateChecker_CheckGraphQLRouteDuplicate_PrefixSpecificity(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = avapigwv1alpha1.AddToScheme(scheme)
 
-	existingRoute := &avapigwv1alpha1.GraphQLRoute{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-route",
-			Namespace: "default",
-		},
-		Spec: avapigwv1alpha1.GraphQLRouteSpec{
-			Match: []avapigwv1alpha1.GraphQLRouteMatch{
-				{
-					Path: &avapigwv1alpha1.StringMatch{Prefix: "/graphql"},
+	prefixRoute := func(name, prefix string) *avapigwv1alpha1.GraphQLRoute {
+		return &avapigwv1alpha1.GraphQLRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: avapigwv1alpha1.GraphQLRouteSpec{
+				Match: []avapigwv1alpha1.GraphQLRouteMatch{
+					{Path: &avapigwv1alpha1.StringMatch{Prefix: prefix}},
 				},
 			},
-		},
+		}
 	}
 
 	client := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(existingRoute).
+		WithObjects(prefixRoute("existing-route", "/graphql")).
 		Build()
 
 	checker := NewDuplicateChecker(client)
 
-	newRoute := &avapigwv1alpha1.GraphQLRoute{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "new-route",
-			Namespace: "default",
-		},
-		Spec: avapigwv1alpha1.GraphQLRouteSpec{
-			Match: []avapigwv1alpha1.GraphQLRouteMatch{
-				{
-					Path: &avapigwv1alpha1.StringMatch{Prefix: "/graphql/v2"},
-				},
-			},
-		},
+	// Nested but non-identical prefixes have different specificity
+	// (500+len) and resolve deterministically in the router — admitted.
+	if err := checker.CheckGraphQLRouteDuplicate(
+		context.Background(), prefixRoute("nested-route", "/graphql/v2")); err != nil {
+		t.Errorf("CheckGraphQLRouteDuplicate() should admit nested prefix paths, got %v", err)
 	}
 
-	err := checker.CheckGraphQLRouteDuplicate(context.Background(), newRoute)
-	if err == nil {
-		t.Error("CheckGraphQLRouteDuplicate() should return error for overlapping prefix paths")
+	// Identical prefixes have identical specificity — true duplicates.
+	if err := checker.CheckGraphQLRouteDuplicate(
+		context.Background(), prefixRoute("duplicate-route", "/graphql")); err == nil {
+		t.Error("CheckGraphQLRouteDuplicate() should return error for identical prefix paths")
 	}
 }
 
@@ -2462,7 +2463,9 @@ func TestDuplicateChecker_CheckGraphQLRouteDuplicate_CatchAll(t *testing.T) {
 
 	checker := NewDuplicateChecker(client)
 
-	newRoute := &avapigwv1alpha1.GraphQLRoute{
+	// Catch-all (specificity 0) vs a path-specific route (1000): the
+	// sorted router resolves this deterministically — admitted.
+	specificRoute := &avapigwv1alpha1.GraphQLRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "new-route",
 			Namespace: "default",
@@ -2475,10 +2478,20 @@ func TestDuplicateChecker_CheckGraphQLRouteDuplicate_CatchAll(t *testing.T) {
 			},
 		},
 	}
+	if err := checker.CheckGraphQLRouteDuplicate(context.Background(), specificRoute); err != nil {
+		t.Errorf("CheckGraphQLRouteDuplicate() should admit specific route alongside catch-all, got %v", err)
+	}
 
-	err := checker.CheckGraphQLRouteDuplicate(context.Background(), newRoute)
-	if err == nil {
-		t.Error("CheckGraphQLRouteDuplicate() should return error when existing has empty match (catch-all)")
+	// A second catch-all has identical zero specificity — true duplicate.
+	secondCatchAll := &avapigwv1alpha1.GraphQLRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "second-catch-all",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GraphQLRouteSpec{},
+	}
+	if err := checker.CheckGraphQLRouteDuplicate(context.Background(), secondCatchAll); err == nil {
+		t.Error("CheckGraphQLRouteDuplicate() should return error for a second catch-all route")
 	}
 }
 
@@ -2633,6 +2646,8 @@ func TestDuplicateChecker_CheckGraphQLRouteDuplicate_WithCache(t *testing.T) {
 	)
 	t.Cleanup(func() { checker.Stop() })
 
+	// Identical prefix — a true duplicate under the specificity semantics,
+	// so both the uncached and cached calls must detect the conflict.
 	newRoute := &avapigwv1alpha1.GraphQLRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "new-route",
@@ -2641,7 +2656,7 @@ func TestDuplicateChecker_CheckGraphQLRouteDuplicate_WithCache(t *testing.T) {
 		Spec: avapigwv1alpha1.GraphQLRouteSpec{
 			Match: []avapigwv1alpha1.GraphQLRouteMatch{
 				{
-					Path: &avapigwv1alpha1.StringMatch{Prefix: "/graphql/v2"},
+					Path: &avapigwv1alpha1.StringMatch{Prefix: "/graphql"},
 				},
 			},
 		},
@@ -2929,12 +2944,15 @@ func TestDuplicateChecker_CheckGraphQLBackendDuplicate_ClusterScoped(t *testing.
 }
 
 // ============================================================================
-// GraphQL Path Overlap Tests
+// GraphQL String-Match Value Overlap Tests
 // ============================================================================
 
-func TestDuplicateChecker_GraphqlPathsOverlap(t *testing.T) {
-	checker := &DuplicateChecker{}
-
+// TestDuplicateChecker_GraphqlStringMatchValuesOverlap exercises the value
+// dimension of the GraphQL duplicate predicate (used for both path and
+// operationName): whether two StringMatch conditions can cover the same
+// value. Specificity gating is layered on top in
+// graphqlMatchConditionsOverlap and tested separately.
+func TestDuplicateChecker_GraphqlStringMatchValuesOverlap(t *testing.T) {
 	tests := []struct {
 		name     string
 		a        *avapigwv1alpha1.StringMatch
@@ -3013,13 +3031,19 @@ func TestDuplicateChecker_GraphqlPathsOverlap(t *testing.T) {
 			b:        &avapigwv1alpha1.StringMatch{Regex: "^/api.*"},
 			expected: false,
 		},
+		{
+			name:     "empty string match is a catch-all",
+			a:        &avapigwv1alpha1.StringMatch{},
+			b:        &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := checker.graphqlPathsOverlap(tt.a, tt.b)
+			result := graphqlStringMatchValuesOverlap(tt.a, tt.b)
 			if result != tt.expected {
-				t.Errorf("graphqlPathsOverlap() = %v, want %v", result, tt.expected)
+				t.Errorf("graphqlStringMatchValuesOverlap() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
@@ -3071,17 +3095,21 @@ func TestDuplicateChecker_GraphqlMatchConditionsOverlap(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "nil path overlaps with any",
+			// Specificity 0 vs 1000: the router orders these
+			// deterministically — no longer an admission conflict.
+			name: "nil path vs exact path resolved by specificity",
 			a: &avapigwv1alpha1.GraphQLRouteMatch{
 				Path: nil,
 			},
 			b: &avapigwv1alpha1.GraphQLRouteMatch{
 				Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
 			},
-			expected: true,
+			expected: false,
 		},
 		{
-			name: "empty operation type overlaps with any",
+			// Specificity 1000 vs 1200: the operationType-specific block
+			// deterministically outranks the generic one — admitted.
+			name: "generic vs operationType-specific resolved by specificity",
 			a: &avapigwv1alpha1.GraphQLRouteMatch{
 				Path:          &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
 				OperationType: "",
@@ -3090,7 +3118,7 @@ func TestDuplicateChecker_GraphqlMatchConditionsOverlap(t *testing.T) {
 				Path:          &avapigwv1alpha1.StringMatch{Exact: "/graphql"},
 				OperationType: "query",
 			},
-			expected: true,
+			expected: false,
 		},
 		{
 			name: "both empty operation types overlap",
@@ -3140,7 +3168,9 @@ func TestDuplicateChecker_GraphqlRoutesOverlap(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "a empty match (catch-all)",
+			// Catch-all (specificity 0) vs path-specific (1000): ordered
+			// deterministically by the router — no longer a conflict.
+			name: "a empty match (catch-all) vs specific route admitted",
 			a: &avapigwv1alpha1.GraphQLRoute{
 				Spec: avapigwv1alpha1.GraphQLRouteSpec{
 					Match: []avapigwv1alpha1.GraphQLRouteMatch{},
@@ -3151,6 +3181,20 @@ func TestDuplicateChecker_GraphqlRoutesOverlap(t *testing.T) {
 					Match: []avapigwv1alpha1.GraphQLRouteMatch{
 						{Path: &avapigwv1alpha1.StringMatch{Exact: "/graphql"}},
 					},
+				},
+			},
+			expected: false,
+		},
+		{
+			// An explicit empty match BLOCK is also a zero-specificity
+			// catch-all — two of them are true duplicates.
+			name: "match-less route vs route with one empty match block",
+			a: &avapigwv1alpha1.GraphQLRoute{
+				Spec: avapigwv1alpha1.GraphQLRouteSpec{},
+			},
+			b: &avapigwv1alpha1.GraphQLRoute{
+				Spec: avapigwv1alpha1.GraphQLRouteSpec{
+					Match: []avapigwv1alpha1.GraphQLRouteMatch{{}},
 				},
 			},
 			expected: true,

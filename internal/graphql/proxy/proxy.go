@@ -185,6 +185,13 @@ func (p *Proxy) UpdateBackends(backends []config.GraphQLBackend) {
 }
 
 // Forward forwards a GraphQL request to the appropriate backend.
+//
+// The returned response's Body MUST be closed by the caller. The per-request
+// timeout context stays alive until the body is closed: canceling it earlier
+// (the previous `defer cancel()`) made net/http's read loop observe
+// ctx.Done() before the caller finished reading the body, so every pooled
+// connection was torn down instead of returned to the idle pool — a dial per
+// request that exhausted ephemeral ports under load (PT-05/06 Finding 1).
 func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request) (*http.Response, error) {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "graphql.proxy.forward",
@@ -216,8 +223,11 @@ func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request
 		}
 	}
 
+	// The cancel func is deliberately NOT deferred: it is invoked on every
+	// error path below and otherwise handed to cancelOnCloseBody so the
+	// context (and its timer) is released when the caller closes the body.
+	// The timeout thereby bounds the WHOLE exchange including body streaming.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	// Build the target URL
 	targetURL := p.buildTargetURL(target)
@@ -226,6 +236,7 @@ func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request
 	// Create the proxied request
 	proxyReq, err := p.createProxyRequest(ctx, r, targetURL)
 	if err != nil {
+		cancel()
 		if p.metrics != nil {
 			p.metrics.RecordError(backendName, "forward", "request_creation_failed")
 		}
@@ -236,11 +247,22 @@ func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request
 	// Execute the request
 	resp, err := p.transport.RoundTrip(proxyReq)
 	if err != nil {
+		cancel()
 		if p.metrics != nil {
 			p.metrics.RecordError(backendName, "forward", "transport_error")
 		}
 		span.RecordError(err)
 		return nil, fmt.Errorf("failed to forward request to %s: %w", backendName, err)
+	}
+
+	// Tie the context lifetime to the response body so the pooled
+	// connection is recycled after the caller drains and closes it.
+	if resp.Body != nil {
+		resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	} else {
+		// Defensive: RoundTrippers must return a non-nil Body, but test
+		// doubles may not; release the context immediately in that case.
+		cancel()
 	}
 
 	duration := time.Since(start)
@@ -336,6 +358,23 @@ func (p *Proxy) createProxyRequest(
 	}
 
 	return req, nil
+}
+
+// cancelOnCloseBody ties a per-request timeout context's cancel func to the
+// response body lifecycle. net/http only returns a connection to the idle
+// pool once the body is fully read AND the request context is still alive;
+// canceling before Close tears the connection down (forcing a dial per
+// request). Close is safe to call multiple times: CancelFunc is idempotent.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+// Close closes the underlying body, then releases the request context.
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // copyHeaders copies headers from src to dst, excluding hop-by-hop headers.

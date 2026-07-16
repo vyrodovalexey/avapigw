@@ -321,10 +321,11 @@ operator:
       selfsigned:
         validity: 8760h
 
-  # Webhook configuration - disabled for local testing.
-  # Enable if you want to test webhook validation.
+  # Webhook configuration - ENABLED (matches the production posture).
+  # The validating webhook is safe to run locally since the finalizer-deadlock
+  # fix; it validates APIRoute/Backend/GRPCRoute/GRPCBackend/GraphQL* CRs.
   webhook:
-    enabled: false
+    enabled: true
     port: 9443
     tls:
       mode: selfsigned

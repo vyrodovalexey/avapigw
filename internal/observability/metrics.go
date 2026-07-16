@@ -307,9 +307,13 @@ func (m *Metrics) MustRegisterCollector(c prometheus.Collector) {
 }
 
 // MetricsMiddleware returns a middleware that records metrics.
-// It extracts the route name from context (set by the proxy/router)
-// instead of using the raw request path, preventing metrics
-// cardinality explosion from dynamic path segments.
+// It labels by the matched route name (bounded set from configuration)
+// instead of the raw request path, preventing metrics cardinality
+// explosion from dynamic path segments. Because the router/proxy matches
+// the route DOWNSTREAM of this middleware (context values do not flow
+// back up), a RouteHolder is installed before serving: ContextWithRoute
+// records the matched name into it, and requests that never match any
+// route are labeled "unmatched".
 func MetricsMiddleware(
 	metrics *Metrics,
 ) func(http.Handler) http.Handler {
@@ -318,6 +322,12 @@ func MetricsMiddleware(
 			func(w http.ResponseWriter, r *http.Request) {
 				start := time.Now()
 				method := r.Method
+
+				// Observe the route matched by downstream handlers.
+				holder := &util.RouteHolder{}
+				r = r.WithContext(
+					util.ContextWithRouteHolder(r.Context(), holder),
+				)
 
 				rw := &metricsResponseWriter{
 					ResponseWriter: w,
@@ -335,7 +345,7 @@ func MetricsMiddleware(
 					method, inFlightRoute,
 				).Dec()
 
-				route := routeFromRequest(r)
+				route := routeFromRequest(r, holder)
 				duration := time.Since(start)
 
 				metrics.RecordRequest(
@@ -356,14 +366,17 @@ func MetricsMiddleware(
 	}
 }
 
-// routeFromRequest extracts the route name from the request
-// context. Returns unmatchedRoute if no route is set.
-func routeFromRequest(r *http.Request) string {
-	route := util.RouteFromContext(r.Context())
-	if route == "" {
-		return unmatchedRoute
+// routeFromRequest resolves the route label: the holder captures matches
+// made downstream (proxy/router), the request context covers routes set
+// upstream, and unmatchedRoute labels requests that matched no route.
+func routeFromRequest(r *http.Request, holder *util.RouteHolder) string {
+	if route := holder.Get(); route != "" {
+		return route
 	}
-	return route
+	if route := util.RouteFromContext(r.Context()); route != "" {
+		return route
+	}
+	return unmatchedRoute
 }
 
 // metricsResponseWriter wraps http.ResponseWriter to capture

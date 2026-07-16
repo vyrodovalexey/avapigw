@@ -249,7 +249,21 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to operator: %w", err)
 	}
 
+	// Swap in the new connection and close the previous one (if any) under
+	// the same critical section. Reconnect attempts call Connect repeatedly;
+	// without closing, every attempt leaked a grpc.ClientConn along with its
+	// transport goroutines and sockets. Closing under c.mu guarantees each
+	// ClientConn is closed exactly once: Connect closes only the connection
+	// it replaces, while Stop closes the CURRENT c.conn and nils the field —
+	// so the two paths can never double-close the same connection.
 	c.mu.Lock()
+	if c.conn != nil {
+		if closeErr := c.conn.Close(); closeErr != nil {
+			c.logger.Warn("failed to close previous operator connection",
+				observability.Error(closeErr),
+			)
+		}
+	}
 	c.conn = conn
 	c.client = operatorv1alpha1.NewConfigurationServiceClient(conn)
 	c.mu.Unlock()

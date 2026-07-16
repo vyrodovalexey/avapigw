@@ -889,9 +889,18 @@ func TestDuplicateChecker_GRPCMethodsOverlap(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "prefix overlap",
+			// Nested prefixes resolve deterministically by longest-prefix
+			// specificity in the gRPC router — no longer a conflict.
+			name:     "nested prefixes admitted (specificity ordering)",
 			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
 			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "GetUser"}},
+			expected: false,
+		},
+		{
+			// Identical prefixes have identical specificity — true duplicate.
+			name:     "identical prefixes rejected",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
 			expected: true,
 		},
 		{

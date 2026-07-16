@@ -43,15 +43,13 @@ import (
 //   E-5 Vault kubernetes-auth path used by gateway+operator; backends healthy
 //   E-6 webhook/admission rejects an invalid aggregate CRD in-cluster
 //
-// Documented environment limitation (verified during authoring):
-//   The deployed gateway image wires the proxy WITHOUT an aggregate handler
-//   (cmd/gateway/app.go calls proxy.NewReverseProxy but not
-//   proxy.WithAggregateHandler), so the data plane returns 404 for the
-//   aggregate route and emits no gateway_aggregate_* metrics. The CRD surface
-//   (kubebuilder validation) and operator reconciliation ARE fully deployed.
-//   E-2 and the aggregate-series part of E-4 therefore assert what the
-//   environment supports and SKIP the data-plane fan-out assertion with a
-//   precise reason rather than producing a false pass.
+// Data-plane note: cmd/gateway/app.go wires proxy.WithAggregateHandler, so
+// current images DO execute fan-out. Two response shapes prove it (see E-2):
+// a deep-merged JSON object when every target returns JSON, or the labeled
+// per-target envelope ARRAY ([{"target","status","payload"}, ...]) when
+// merging is not possible (e.g. targets 404 a path they do not serve). E-2
+// skips only when the deployed image predates the aggregate wiring — i.e.
+// the response carries NEITHER shape.
 
 // liveAggregateCondition is a minimal projection of an APIRoute status condition.
 type liveAggregateCondition struct {
@@ -62,11 +60,13 @@ type liveAggregateCondition struct {
 	ObservedGeneration int64  `json:"observedGeneration"`
 }
 
-// getAPIRouteJSON fetches an APIRoute as a generic JSON map.
-func getAPIRouteJSON(ctx context.Context, t *testing.T, name string) map[string]interface{} {
+// getAPIRouteJSON fetches an APIRoute in the given namespace as a generic
+// JSON map. The DO-04 fixture routes live in liveFixtureNamespace(); routes
+// created by the tests themselves live in liveNamespace().
+func getAPIRouteJSON(ctx context.Context, t *testing.T, namespace, name string) map[string]interface{} {
 	t.Helper()
-	out, err := kubectl(ctx, "", "get", "apiroute", name, "-n", liveNamespace(), "-o", "json")
-	require.NoError(t, err, "kubectl get apiroute %s: %s", name, out)
+	out, err := kubectl(ctx, "", "get", "apiroute", name, "-n", namespace, "-o", "json")
+	require.NoError(t, err, "kubectl get apiroute %s -n %s: %s", name, namespace, out)
 	var obj map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(out), &obj), "unmarshal apiroute json")
 	return obj
@@ -123,7 +123,7 @@ func TestE2E_Aggregate_E1_CRDReconciledAndEffective(t *testing.T) {
 	route := liveAggregateRoute()
 
 	t.Run("aggregate config present in CRD spec (config-as-CRD only)", func(t *testing.T) {
-		obj := getAPIRouteJSON(ctx, t, route)
+		obj := getAPIRouteJSON(ctx, t, liveFixtureNamespace(), route)
 		spec, ok := obj["spec"].(map[string]interface{})
 		require.True(t, ok, "apiroute has spec")
 		agg, ok := spec["aggregate"].(map[string]interface{})
@@ -146,7 +146,7 @@ func TestE2E_Aggregate_E1_CRDReconciledAndEffective(t *testing.T) {
 		var cond *liveAggregateCondition
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
-			cond = readyCondition(getAPIRouteJSON(ctx, t, route))
+			cond = readyCondition(getAPIRouteJSON(ctx, t, liveFixtureNamespace(), route))
 			if cond != nil && cond.Status == "True" {
 				break
 			}
@@ -189,12 +189,16 @@ func TestE2E_Aggregate_E1_CRDReconciledAndEffective(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 // TestE2E_Aggregate_E2_FanOutMerge drives the aggregate route through the
-// deployed gateway and asserts a merged response from both backends.
+// deployed gateway and asserts the data plane fanned out to both backends.
 //
-// If the deployed gateway data plane does not execute fan-out (the aggregate
-// handler is not injected into the runtime proxy — see file header), this test
-// SKIPS with a precise reason after proving the route is reachable, rather than
-// asserting behavior the deployed image cannot exhibit.
+// Fan-out proof accepts BOTH aggregate response shapes:
+//   - a deep-merged JSON object (targets returned mergeable JSON), or
+//   - the labeled per-target envelope ARRAY (fan-out ran, but bodies were
+//     not mergeable — e.g. targets 404 a path they do not serve).
+//
+// It SKIPS only when the response carries neither shape, which indicates a
+// deployed image predating the aggregate data-plane wiring
+// (proxy.WithAggregateHandler in cmd/gateway/app.go).
 func TestE2E_Aggregate_E2_FanOutMerge(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -213,9 +217,7 @@ func TestE2E_Aggregate_E2_FanOutMerge(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	// Detect whether the data plane actually fanned out. Two robust signals:
-	//   1. a 2xx merged JSON body, OR
-	//   2. gateway_aggregate_* metrics incremented (checked via /metrics).
+	// Fan-out signal 1: deep-merged JSON object from both targets.
 	if resp.StatusCode == http.StatusOK && looksLikeJSONObject(body) {
 		var merged map[string]interface{}
 		require.NoError(t, json.Unmarshal(body, &merged),
@@ -226,21 +228,55 @@ func TestE2E_Aggregate_E2_FanOutMerge(t *testing.T) {
 		return
 	}
 
+	// Fan-out signal 2: labeled per-target envelope (the merger's fallback
+	// when target bodies are not mergeable). The envelope itself proves the
+	// fan-out executed: it names every configured target with its status.
+	if envelopes, ok := parseAggregateEnvelope(body); resp.StatusCode == http.StatusOK && ok {
+		assert.GreaterOrEqual(t, len(envelopes), 2,
+			"aggregate envelope must carry one entry per fan-out target")
+		t.Logf("E-2: deployed gateway returned per-target aggregate envelope "+
+			"(%d targets; fan-out executed): %s",
+			len(envelopes), truncate(string(body), 300))
+		return
+	}
+
 	// Confirm the route is at least live before documenting the skip.
 	require.NotEmpty(t, resp.Header.Get("X-Request-Id"),
 		"gateway handled the aggregate request (request id present)")
 
-	t.Skipf("E-2 SKIP (documented): deployed gateway image does not execute "+
-		"aggregate fan-out at the data plane. The aggregate path %s returned "+
-		"HTTP %d (body=%q). Root cause: the runtime proxy in cmd/gateway/app.go "+
-		"is built WITHOUT proxy.WithAggregateHandler, so route.Config.Aggregate "+
-		"is never served (handleAggregate is a no-op). The CRD surface and "+
-		"operator reconciliation (E-1/E-3/E-6) are fully deployed; fan-out/merge "+
-		"requires the AGG-09 data-plane wiring to be present in the gateway "+
-		"binary and redeployed (DevOps DO-04). Functional/integration coverage "+
-		"for fan-out+merge lives in test/functional/aggregate_test.go and "+
-		"test/integration/aggregate_test.go.",
+	t.Skipf("E-2 SKIP (documented): the aggregate path %s returned HTTP %d "+
+		"with neither a merged JSON object nor a per-target envelope "+
+		"(body=%q). This indicates the deployed gateway image predates the "+
+		"aggregate data-plane wiring (proxy.WithAggregateHandler in "+
+		"cmd/gateway/app.go) and must be rebuilt/redeployed (DevOps DO-04). "+
+		"Functional/integration coverage for fan-out+merge lives in "+
+		"test/functional/aggregate_test.go and test/integration/aggregate_test.go.",
 		liveAggregatePath(), resp.StatusCode, truncate(strings.TrimSpace(string(body)), 120))
+}
+
+// aggregateEnvelopeEntry mirrors the merger's labeled-envelope unit
+// ({"target","status","payload"}, see internal/aggregate merge.Envelope).
+type aggregateEnvelopeEntry struct {
+	Target string `json:"target"`
+	Status int    `json:"status"`
+}
+
+// parseAggregateEnvelope reports whether body is the aggregate per-target
+// envelope array; every entry must name a target.
+func parseAggregateEnvelope(body []byte) ([]aggregateEnvelopeEntry, bool) {
+	if !strings.HasPrefix(strings.TrimSpace(string(body)), "[") {
+		return nil, false
+	}
+	var envelopes []aggregateEnvelopeEntry
+	if err := json.Unmarshal(body, &envelopes); err != nil || len(envelopes) == 0 {
+		return nil, false
+	}
+	for _, e := range envelopes {
+		if e.Target == "" {
+			return nil, false
+		}
+	}
+	return envelopes, true
 }
 
 // -----------------------------------------------------------------------------
@@ -319,7 +355,7 @@ spec:
 	var cond *liveAggregateCondition
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		cond = readyCondition(getAPIRouteJSON(ctx, t, name))
+		cond = readyCondition(getAPIRouteJSON(ctx, t, liveNamespace(), name))
 		if cond != nil && cond.Status == "True" {
 			break
 		}
@@ -329,7 +365,7 @@ spec:
 	assert.Equal(t, "True", cond.Status, "redis-sentinel spool route reconciled to Ready")
 
 	// Verify the large-body spool configuration round-tripped through the CRD.
-	obj := getAPIRouteJSON(ctx, t, name)
+	obj := getAPIRouteJSON(ctx, t, liveNamespace(), name)
 	spec := obj["spec"].(map[string]interface{})
 	agg := spec["aggregate"].(map[string]interface{})
 	spool, ok := agg["spool"].(map[string]interface{})
@@ -471,16 +507,17 @@ func TestE2E_Aggregate_E5_VaultAuthAndBackends(t *testing.T) {
 
 	t.Run("aggregate fan-out backends are healthy (Backend CRD status)", func(t *testing.T) {
 		// The deployed aggregate route targets are backed by Backend CRDs
-		// do04-http-backend-1/2 (host.docker.internal:8801/8802). Health is
-		// reflected by the Healthy condition + healthyHosts in the CRD status.
+		// do04-http-backend-1/2 (host.docker.internal:8801/8802) in the DO-04
+		// fixture namespace. Health is reflected by the Healthy condition +
+		// healthyHosts in the CRD status.
 		for _, b := range []string{"do04-http-backend-1", "do04-http-backend-2"} {
-			out, err := kubectl(ctx, "", "get", "backend", b, "-n", liveNamespace(),
+			out, err := kubectl(ctx, "", "get", "backend", b, "-n", liveFixtureNamespace(),
 				"-o", "jsonpath={.status.conditions[?(@.type=='Healthy')].status}")
 			require.NoError(t, err, "get backend %s Healthy condition: %s", b, out)
 			healthy := strings.TrimSpace(out)
 			assert.Equal(t, "True", healthy, "backend %s Healthy condition is True", b)
 
-			hostsOut, err := kubectl(ctx, "", "get", "backend", b, "-n", liveNamespace(),
+			hostsOut, err := kubectl(ctx, "", "get", "backend", b, "-n", liveFixtureNamespace(),
 				"-o", "jsonpath={.status.healthyHosts}")
 			require.NoError(t, err, "get backend %s healthyHosts: %s", b, hostsOut)
 			assert.NotEqual(t, "0", strings.TrimSpace(hostsOut),

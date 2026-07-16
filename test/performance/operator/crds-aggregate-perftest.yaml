@@ -7,8 +7,13 @@
 #
 # All options are driven exclusively through apigw-operator CRDs.
 #
-# Apply with:
-#   kubectl apply -f test/performance/operator/crds-aggregate-perftest.yaml -n avapigw-test
+# NAMESPACE: DO-04 perf fixtures live in the dedicated `avapigw-perf`
+# namespace (see crds-do04-aggregate.yaml, which creates it). Apply the DO-04
+# baseline first; this file updates the do04-grpc-route / do04-graphql-route
+# resources it created.
+#
+# Apply with (namespace is embedded in every manifest):
+#   kubectl apply -f test/performance/operator/crds-aggregate-perftest.yaml
 #
 # Backends (docker-compose test ENV exposed on host):
 #   REST   : host.docker.internal:8801,8802  (also serve /graphql)
@@ -30,7 +35,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: GRPCRoute
 metadata:
   name: do04-grpc-route
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: grpc-route
@@ -73,7 +78,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: GraphQLRoute
 metadata:
   name: do04-graphql-route
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: graphql-route

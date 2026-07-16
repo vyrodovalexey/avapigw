@@ -378,29 +378,48 @@ Metrics for authorization operations including RBAC, ABAC, and external authoriz
 
 Metrics for TLS operations including handshakes and certificate management.
 
-### gateway_tls_handshakes_total
+### gateway_tls_connections_total
 - **Type:** Counter
-- **Labels:** `listener`, `status`
-- **Description:** Total number of TLS handshakes
-- **Example:** `gateway_tls_handshakes_total{listener="https",status="success"} 1500`
+- **Labels:** `version`, `cipher`, `mode`
+- **Description:** Total number of TLS connections by version, cipher suite, and mode
+- **Example:** `gateway_tls_connections_total{version="1.3",cipher="TLS_AES_128_GCM_SHA256",mode="SIMPLE"} 1500`
 
 ### gateway_tls_handshake_duration_seconds
 - **Type:** Histogram
-- **Labels:** `listener`
-- **Description:** Duration of TLS handshakes
-- **Example:** `gateway_tls_handshake_duration_seconds{listener="https"} 0.050`
+- **Labels:** `version`, `mode`
+- **Description:** Duration of successful TLS handshakes, measured server-side
+  from ClientHello receipt to completed connection verification. Recorded for
+  **HTTPS listener** and **gRPC TLS listener** handshakes. Handshakes that
+  fail connection verification are counted in
+  `gateway_tls_handshake_errors_total{reason="verify_connection_failed"}`
+  instead of being duration-sampled; handshakes aborted before verification
+  (for example a rejected client certificate in MUTUAL mode) are not sampled
+  here and are covered by the existing error metrics at their source
+- **Example:** `gateway_tls_handshake_duration_seconds_bucket{version="1.3",mode="SIMPLE",le="0.05"} 1480`
+
+### gateway_tls_handshake_errors_total
+- **Type:** Counter
+- **Labels:** `reason` (bounded set, e.g. `verify_connection_failed`, `timeout`, `protocol_error`, `certificate_error`)
+- **Description:** Total number of TLS handshake errors by reason
+- **Example:** `gateway_tls_handshake_errors_total{reason="verify_connection_failed"} 3`
 
 ### gateway_tls_certificate_expiry_seconds
 - **Type:** Gauge
-- **Labels:** `listener`, `cert_type`
+- **Labels:** `subject`, `type`
 - **Description:** Time until certificate expiry in seconds
-- **Example:** `gateway_tls_certificate_expiry_seconds{listener="https",cert_type="server"} 2592000`
+- **Example:** `gateway_tls_certificate_expiry_seconds{subject="gateway.example.com",type="server"} 2592000`
 
-### gateway_tls_certificate_renewals_total
+### gateway_tls_certificate_reload_total
 - **Type:** Counter
-- **Labels:** `listener`, `status`
-- **Description:** Total number of certificate renewals
-- **Example:** `gateway_tls_certificate_renewals_total{listener="https",status="success"} 3`
+- **Labels:** `status` (`success`, `failure`)
+- **Description:** Total number of certificate reload attempts by status
+- **Example:** `gateway_tls_certificate_reload_total{status="success"} 3`
+
+### gateway_tls_client_cert_validation_total
+- **Type:** Counter
+- **Labels:** `result` (`success` or a failure reason such as `failure`, `expired`, `revoked`)
+- **Description:** Total number of client certificate validations by result
+- **Example:** `gateway_tls_client_cert_validation_total{result="success"} 120`
 
 ## Vault Metrics
 

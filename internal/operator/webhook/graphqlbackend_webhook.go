@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -99,15 +100,35 @@ func (v *GraphQLBackendValidator) ValidateCreate(
 }
 
 // ValidateUpdate implements admission.CustomValidator.
+//
+// Two lifecycle short-circuits prevent the webhook/finalizer deadlock:
+// deleting objects are admitted unconditionally, and metadata-only updates
+// (semantically unchanged spec) run local spec validation only, skipping
+// duplicate and cross-kind conflict checks.
 func (v *GraphQLBackendValidator) ValidateUpdate(
 	ctx context.Context,
-	_, newObj *avapigwv1alpha1.GraphQLBackend,
+	oldObj, newObj *avapigwv1alpha1.GraphQLBackend,
 ) (admission.Warnings, error) {
+	// The object is being deleted; admit so metadata updates (for example
+	// finalizer removal) always proceed.
+	if newObj.GetDeletionTimestamp() != nil {
+		return nil, nil
+	}
+
 	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
 		GetWebhookMetrics().RecordValidation("GraphQLBackend", "update", "rejected", time.Since(start), len(warnings))
 		return warnings, err
+	}
+
+	// Metadata-only update: the spec is unchanged, so this update cannot
+	// introduce new duplicate or cross-kind conflicts. Local spec
+	// validation (above) still applies.
+	if apiequality.Semantic.DeepEqual(oldObj.Spec, newObj.Spec) {
+		GetWebhookMetrics().RecordValidation(
+			"GraphQLBackend", "update", "allowed", time.Since(start), len(warnings))
+		return warnings, nil
 	}
 
 	if v.DuplicateChecker != nil {

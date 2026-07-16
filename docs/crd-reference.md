@@ -767,6 +767,26 @@ spec:
     unhealthyThreshold: 3
 ```
 
+HTTP-mode health checks (`useHTTP: true`) probe an HTTP endpoint instead of
+`grpc.health.v1.Health/Check` — useful for backends that require
+authentication on gRPC but expose an unauthenticated HTTP monitoring port:
+
+```yaml
+spec:
+  healthCheck:
+    enabled: true
+    useHTTP: true
+    httpPath: "/monitoring/health"      # Must start with "/"
+    httpPort: 8080                      # Optional; defaults to the backend port
+    interval: "10s"
+    timeout: "5s"
+```
+
+> **Note:** the CRD schema defaults `httpPath` to `/healthz`. This default is
+> applied by the API server even when `useHTTP` is false, and the validating
+> webhook tolerates it in that case (it is inert). An **explicit** non-default
+> `httpPath` — or any `httpPort` — with `useHTTP: false` is rejected.
+
 #### gRPC Connection Settings
 
 ```yaml
@@ -1311,8 +1331,13 @@ The operator performs comprehensive cross-reference validation to ensure configu
 
 1. **Backend References**: All route destinations must reference existing Backend or GRPCBackend resources
 2. **Namespace Validation**: Cross-namespace references are validated based on RBAC permissions
-3. **Duplicate Detection**: Rejects only **true duplicates** — the same match type and path with overlapping methods. Exact-vs-prefix combinations and nested prefixes (e.g. `/` and `/api`) are allowed; the router resolves them by precedence (exact = 1000 > prefix = 500 + prefix length > regex = 100), so a catch-all route coexists with specific routes. Overlap checks also apply across route kinds sharing the HTTP data path (APIRoute ↔ GraphQLRoute), and updating a resource never conflicts with its own previous version
+3. **Duplicate Detection**: Rejects only **true duplicates** — match conditions with identical specificity and overlapping values that the data-plane router cannot order deterministically:
+   - **APIRoute**: same match type and path with overlapping methods. Exact-vs-prefix combinations and nested prefixes (e.g. `/` and `/api`) are allowed; the router resolves them by precedence (exact = 1000 > prefix = 500 + prefix length > regex = 100), so a catch-all route coexists with specific routes
+   - **GRPCRoute**: conflicts only for identical-specificity pairs — identical `service`/`method` prefixes or identical exacts (a match-less catch-all still conflicts with any gRPC route). Nested prefixes (e.g. `com.example` and `com.example.user`) are admitted and resolved by the gRPC router's longest-prefix priority
+   - **GraphQLRoute**: conflicts only when two match blocks have identical specificity AND overlapping match values (specificity: path exact = 1000 / prefix = 500 + length / regex = 100; operationName exact = 500 / prefix = 250 + length / regex = 50; operationType set = +200; +10 per header condition; catch-all = 0). Equal-specificity regex pairs are admitted (intersection is undecidable) and ordered deterministically by name
+   - Overlap checks also apply across route kinds sharing the HTTP data path (APIRoute ↔ GraphQLRoute), and updating a resource never conflicts with its own previous version
 4. **Resource Dependencies**: Ensures dependent resources exist before applying configuration
+5. **Admission Lifecycle**: Objects with a `deletionTimestamp` are always admitted (finalizer removal is never blocked), metadata-only updates (spec unchanged) skip duplicate/cross-kind conflict checks while still running local spec validation, and terminating resources are excluded from conflict evaluation
 
 ### Admission Warnings
 

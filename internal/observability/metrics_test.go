@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vyrodovalexey/avapigw/internal/util"
@@ -335,10 +336,63 @@ func TestRouteFromRequest(t *testing.T) {
 			)
 			req = req.WithContext(ctx)
 
-			result := routeFromRequest(req)
+			result := routeFromRequest(req, &util.RouteHolder{})
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestRouteFromRequest_HolderWins verifies the holder (recording matches
+// made DOWNSTREAM of the metrics middleware) takes precedence over the
+// request context and over the unmatched fallback.
+func TestRouteFromRequest_HolderWins(t *testing.T) {
+	t.Parallel()
+
+	holder := &util.RouteHolder{}
+	holder.Set("matched-downstream")
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	assert.Equal(t, "matched-downstream", routeFromRequest(req, holder))
+}
+
+// TestMetricsMiddleware_LabelsDownstreamMatchedRoute is the regression test
+// for the route="unmatched" mislabeling: a route matched by a DOWNSTREAM
+// handler (the reverse proxy calling util.ContextWithRoute on a derived
+// context) must be observed by the metrics middleware via the installed
+// RouteHolder.
+func TestMetricsMiddleware_LabelsDownstreamMatchedRoute(t *testing.T) {
+	t.Parallel()
+
+	metrics := NewMetrics("test_holder_label")
+	middleware := MetricsMiddleware(metrics)
+
+	// Mimic the proxy: derive a context with the matched route; the
+	// derived request never propagates back to the middleware.
+	handler := middleware(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			derived := r.WithContext(
+				util.ContextWithRoute(r.Context(), "orders-route"),
+			)
+			_ = derived // downstream handlers would use the derived request
+			w.WriteHeader(http.StatusOK)
+		},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/orders/42", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	count := testutil.CollectAndCount(
+		metrics.requestsTotal, "test_holder_label_requests_total",
+	)
+	require.Positive(t, count)
+
+	value := testutil.ToFloat64(metrics.requestsTotal.WithLabelValues(
+		http.MethodGet, "orders-route", "200",
+	))
+	assert.Equal(t, 1.0, value,
+		"request must be labeled with the downstream-matched route, not unmatched")
 }
 
 func TestMetricsResponseWriter_WriteHeader(t *testing.T) {

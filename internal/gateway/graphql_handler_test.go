@@ -200,7 +200,11 @@ func TestGraphQLHandler_RouteRateLimit_MemoryStore(t *testing.T) {
 	backend := okBackend(t, nil)
 
 	routes := []config.GraphQLRoute{gqlRoute("rl-mem-route", func(r *config.GraphQLRoute) {
-		r.RateLimit = &config.RateLimitConfig{Enabled: true, RequestsPerSecond: 100, Burst: 2}
+		// 1 rps refills a token only after a full second: the third
+		// back-to-back request deterministically exceeds the burst even
+		// under -race scheduling gaps (100 rps refilled every 10ms and
+		// flaked under parallel package load).
+		r.RateLimit = &config.RateLimitConfig{Enabled: true, RequestsPerSecond: 1, Burst: 2}
 	})}
 	handler, _ := newGraphQLTestHandler(t, routes, backend.URL)
 
@@ -217,9 +221,11 @@ func TestGraphQLHandler_RouteRateLimit_RedisStore(t *testing.T) {
 	backend := okBackend(t, nil)
 
 	routes := []config.GraphQLRoute{gqlRoute("rl-redis-route", func(r *config.GraphQLRoute) {
+		// 1 rps for a deterministic third-request 429 (see the memory-store
+		// test above for the flake rationale).
 		r.RateLimit = &config.RateLimitConfig{
 			Enabled:           true,
-			RequestsPerSecond: 100,
+			RequestsPerSecond: 1,
 			Burst:             2,
 			Store:             config.RateLimitStoreRedis,
 			Redis: &config.RateLimitRedisConfig{

@@ -32,8 +32,11 @@ func TestRouteMiddleware_RateLimit_MemoryStore(t *testing.T) {
 	m := NewRouteMiddlewareManager(nil, observability.NopLogger())
 	defer m.Stop()
 
+	// RequestsPerSecond=1 keeps the refill window (1s) well above any realistic
+	// gap between the three sequential in-process requests, so the third is
+	// deterministically throttled even under heavy concurrent test load.
 	route := rateLimitedRoute("rl-mem", &config.RateLimitConfig{
-		Enabled: true, RequestsPerSecond: 100, Burst: 2,
+		Enabled: true, RequestsPerSecond: 1, Burst: 2,
 	})
 
 	// Burst admits two requests, the third is throttled.
@@ -61,9 +64,15 @@ func TestRouteMiddleware_RateLimit_RedisStore(t *testing.T) {
 	m := NewRouteMiddlewareManager(nil, observability.NopLogger())
 	defer m.Stop()
 
+	// RequestsPerSecond=1 makes the refill window (1s) far larger than any
+	// plausible scheduling gap between the three in-process requests below.
+	// The manager path cannot inject a fake clock, so a higher RPS (e.g. 100 =>
+	// 10ms refill) can non-deterministically refill a token under heavy load
+	// and let the third request through. Deterministic refill semantics are
+	// covered separately by TestRedisRateLimiter_RefillOverTime (fake clock).
 	route := rateLimitedRoute("rl-redis", &config.RateLimitConfig{
 		Enabled:           true,
-		RequestsPerSecond: 100,
+		RequestsPerSecond: 1,
 		Burst:             2,
 		Store:             config.RateLimitStoreRedis,
 		Redis: &config.RateLimitRedisConfig{

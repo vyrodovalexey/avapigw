@@ -27,6 +27,25 @@ import (
 // defaultDialTimeout bounds connection establishment per target.
 const defaultDialTimeout = 10 * time.Second
 
+// Transport pooling for fan-out targets. Mirrors the REST reverse proxy's
+// pooled transport (internal/proxy): without an explicit
+// MaxIdleConnsPerHost, net/http keeps only 2 idle connections per host,
+// forcing per-request dials at fan-out load and churning ephemeral ports.
+const (
+	// defaultMaxIdleConns caps idle connections across all targets.
+	defaultMaxIdleConns = 512
+
+	// defaultMaxIdleConnsPerHost keeps enough warm connections per target
+	// host to avoid per-request dials at load.
+	defaultMaxIdleConnsPerHost = 100
+
+	// defaultIdleConnTimeout matches the backend pool convention.
+	defaultIdleConnTimeout = 90 * time.Second
+
+	// defaultDialKeepAlive is the TCP keep-alive probe interval.
+	defaultDialKeepAlive = 30 * time.Second
+)
+
 // Invoker is an aggregate.Invoker backed by net/http. It maintains a per-target
 // http.Client cache so TLS material is reused across fan-out invocations.
 type Invoker struct {
@@ -170,9 +189,14 @@ func (i *Invoker) transportFor(tlsCfg *config.BackendTLSConfig) (*http.Transport
 	transport := &http.Transport{
 		// HTTP request redirections are handled by an explicit non-following
 		// policy at the client level; the transport itself never auto-forwards.
+		DialContext: (&net.Dialer{
+			Timeout:   defaultDialTimeout,
+			KeepAlive: defaultDialKeepAlive,
+		}).DialContext,
 		ForceAttemptHTTP2:   true,
-		MaxIdleConns:        100,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:        defaultMaxIdleConns,
+		MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:     defaultIdleConnTimeout,
 		TLSHandshakeTimeout: defaultDialTimeout,
 	}
 	if tlsCfg == nil || !tlsCfg.Enabled {

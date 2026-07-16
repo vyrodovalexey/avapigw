@@ -85,6 +85,12 @@ const (
 	seedReasonRevision     = "revision_advanced"
 	seedReasonTimeout      = "timeout"
 	seedReasonCanceled     = "context_canceled"
+	// seedReasonAwaitingLeadership is reported when the caller's context ended
+	// while the replica was still waiting to be elected leader. On such a
+	// replica the controllers never run and the store stays empty, so the
+	// bounded seed-timeout fallback must never fire (it would serve an empty
+	// snapshot); gated RPCs park until election instead.
+	seedReasonAwaitingLeadership = "awaiting_leadership"
 )
 
 // ServerConfig contains configuration for the gRPC server.
@@ -159,6 +165,14 @@ type Server struct {
 	storeSeedGateArmed atomic.Bool
 	storeSeededCh      chan struct{}
 	storeSeededOnce    sync.Once
+
+	// leaderElected, when set via SetLeadershipSignal, gates the bounded
+	// store-seed wait on leader election: the seed-timeout clock starts at
+	// election, not at RPC arrival, so a non-leader replica (whose
+	// controllers never run and whose store stays empty) parks gated RPCs
+	// instead of timing out into an empty snapshot. Nil means no leadership
+	// gating (standalone/embedded servers behave as an always-elected leader).
+	leaderElected <-chan struct{}
 
 	// Connected gateways
 	gateways map[string]*gatewayConnection
@@ -1251,6 +1265,38 @@ func (s *Server) MarkStoreSeeded() {
 	})
 }
 
+// SetLeadershipSignal wires the leader-election signal into the store
+// readiness gate. The channel (typically controller-runtime's mgr.Elected())
+// must be closed exactly once, when this replica becomes leader — or
+// immediately at manager start when leader election is disabled.
+//
+// Once set, WaitForStoreSeeded parks gated RPCs until election before
+// starting its bounded seed-timeout wait, so a NON-LEADER replica never
+// serves an empty (or timeout-fallback) snapshot: streams stay parked and
+// unary RPCs run into their own deadlines, causing clients to retry (and
+// reach the leader) instead of wiping their configuration.
+//
+// Leadership loss/regain: controller-runtime managers never "un-elect" — on
+// leadership loss the manager terminates and the process restarts, arriving
+// back here un-elected with an empty store. The signal therefore only ever
+// transitions once per process lifetime and needs no reset path.
+//
+// Must be called during setup, before the server starts serving RPCs.
+// Calling it with nil leaves leadership gating disabled.
+func (s *Server) SetLeadershipSignal(elected <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leaderElected = elected
+}
+
+// leadershipSignal returns the configured leader-election channel (nil when
+// leadership gating is disabled) under the read lock.
+func (s *Server) leadershipSignal() <-chan struct{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.leaderElected
+}
+
 // StoreSeeded reports whether the store is considered seeded: either the
 // readiness gate is not armed, or MarkStoreSeeded has been called.
 func (s *Server) StoreSeeded() bool {
@@ -1292,12 +1338,32 @@ func (s *Server) storeSeedWaitTimeout() time.Duration {
 //
 // The wait is additionally capped by the caller's context deadline (minus a
 // small margin) so gated unary RPCs still respond before the client gives up.
+//
+// When a leadership signal is configured (SetLeadershipSignal), the bounded
+// wait — including the deadline cap and the timeout fallback — only starts
+// AFTER this replica is elected leader. On a non-leader the store is empty
+// by construction (controllers only run on the leader), so falling back on
+// timeout would push an empty FULL_SYNC; parking is the correct behavior.
 func (s *Server) WaitForStoreSeeded(ctx context.Context, timeout time.Duration) (seeded bool, reason string) {
 	if !s.storeSeedGateArmed.Load() {
 		return true, seedReasonGateDisabled
 	}
 	if s.StoreSeeded() {
 		return true, seedReasonSeeded
+	}
+
+	// Leadership gate: park until elected. Bounded only by the caller's
+	// context — deliberately NOT by the seed timeout, whose clock must start
+	// at election so the empty-store fallback can never fire on a non-leader.
+	if elected := s.leadershipSignal(); elected != nil {
+		select {
+		case <-ctx.Done():
+			return false, seedReasonAwaitingLeadership
+		case <-s.storeSeededCh:
+			return true, seedReasonSeeded
+		case <-elected:
+			// Elected leader — start the bounded seed wait below.
+		}
 	}
 
 	// Cap the wait by the caller's deadline minus a safety margin.

@@ -67,9 +67,16 @@ func (r *Router) AddRoute(route config.GRPCRoute) error {
 	r.routes = append(r.routes, compiled)
 	r.routeMap[route.Name] = compiled
 
-	// Sort routes by priority (higher priority first)
-	sort.Slice(r.routes, func(i, j int) bool {
-		return r.routes[i].Priority > r.routes[j].Priority
+	// Sort routes by priority (higher priority first). Equal priorities are
+	// ordered by route name ascending — names are unique (enforced via
+	// routeMap above), so first-match-wins is a deterministic total order
+	// independent of insertion order (cross-namespace merges, file-config
+	// loads, and equal-priority regex pairs all load reproducibly).
+	sort.SliceStable(r.routes, func(i, j int) bool {
+		if r.routes[i].Priority != r.routes[j].Priority {
+			return r.routes[i].Priority > r.routes[j].Priority
+		}
+		return r.routes[i].Name < r.routes[j].Name
 	})
 
 	return nil
@@ -342,7 +349,10 @@ func (r *Router) Clear() {
 	r.routeMap = make(map[string]*CompiledGRPCRoute)
 }
 
-// LoadRoutes loads routes from configuration.
+// LoadRoutes loads routes from configuration, replacing any previously
+// loaded routes. An empty (or nil) slice clears the router. Routes end up
+// ordered by descending priority with a name-ascending tie-break (see
+// AddRoute), so matching is deterministic regardless of input order.
 func (r *Router) LoadRoutes(routes []config.GRPCRoute) error {
 	r.Clear()
 

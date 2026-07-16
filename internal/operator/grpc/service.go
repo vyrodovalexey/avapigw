@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -351,6 +352,9 @@ func (svc *configurationServiceImpl) awaitStoreSeeded(ctx context.Context, rpc s
 }
 
 // buildSnapshot builds a ConfigurationSnapshot from the server's in-memory maps.
+// Each resource slice is ordered by ascending resource key (namespace/name) so
+// that identical store contents always produce an identical snapshot — and
+// therefore an identical checksum — regardless of Go map iteration order.
 func (svc *configurationServiceImpl) buildSnapshot(
 	ctx context.Context,
 ) (*operatorv1alpha1.ConfigurationSnapshot, error) {
@@ -365,47 +369,26 @@ func (svc *configurationServiceImpl) buildSnapshot(
 		Timestamp: timestamppb.Now(),
 	}
 
-	// Build API routes
-	for key, data := range svc.server.apiRoutes {
-		resource := buildConfigResource(operatorv1alpha1.ResourceType_RESOURCE_TYPE_API_ROUTE, key, data)
-		snapshot.ApiRoutes = append(snapshot.ApiRoutes, resource)
-	}
-
-	// Build gRPC routes
-	for key, data := range svc.server.grpcRoutes {
-		resource := buildConfigResource(operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRPC_ROUTE, key, data)
-		snapshot.GrpcRoutes = append(snapshot.GrpcRoutes, resource)
-	}
-
-	// Build backends
-	for key, data := range svc.server.backends {
-		resource := buildConfigResource(operatorv1alpha1.ResourceType_RESOURCE_TYPE_BACKEND, key, data)
-		snapshot.Backends = append(snapshot.Backends, resource)
-	}
-
-	// Build gRPC backends
-	for key, data := range svc.server.grpcBackends {
-		resource := buildConfigResource(operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRPC_BACKEND, key, data)
-		snapshot.GrpcBackends = append(snapshot.GrpcBackends, resource)
-	}
-
-	// Build GraphQL routes
-	for key, data := range svc.server.graphqlRoutes {
-		resource := buildConfigResource(
-			operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_ROUTE,
-			key, data,
-		)
-		snapshot.GraphqlRoutes = append(snapshot.GraphqlRoutes, resource)
-	}
-
-	// Build GraphQL backends
-	for key, data := range svc.server.graphqlBackends {
-		resource := buildConfigResource(
-			operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND,
-			key, data,
-		)
-		snapshot.GraphqlBackends = append(snapshot.GraphqlBackends, resource)
-	}
+	// Build the per-kind resource slices in deterministic (sorted-key) order.
+	// The kinds themselves keep their fixed proto field order.
+	snapshot.ApiRoutes = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_API_ROUTE, svc.server.apiRoutes,
+	)
+	snapshot.GrpcRoutes = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRPC_ROUTE, svc.server.grpcRoutes,
+	)
+	snapshot.Backends = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_BACKEND, svc.server.backends,
+	)
+	snapshot.GrpcBackends = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRPC_BACKEND, svc.server.grpcBackends,
+	)
+	snapshot.GraphqlRoutes = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_ROUTE, svc.server.graphqlRoutes,
+	)
+	snapshot.GraphqlBackends = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND, svc.server.graphqlBackends,
+	)
 
 	totalResources := len(snapshot.ApiRoutes) + len(snapshot.GrpcRoutes) +
 		len(snapshot.Backends) + len(snapshot.GrpcBackends) +
@@ -435,6 +418,34 @@ func buildConfigResource(
 		Name:     key,
 		SpecJson: data,
 	}
+}
+
+// buildSortedResources converts a resource map into a ConfigurationResource
+// slice ordered by ascending resource key ("namespace/name"). Deterministic
+// ordering makes snapshots — and the checksums computed over them —
+// reproducible for identical store contents, independent of map iteration
+// order. An empty map yields a nil slice so the JSON wire shape (and thus the
+// checksum) of absent resource types is unchanged from prior releases.
+// Callers must hold the server's read lock.
+func buildSortedResources(
+	resourceType operatorv1alpha1.ResourceType,
+	resources map[string][]byte,
+) []*operatorv1alpha1.ConfigurationResource {
+	if len(resources) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(resources))
+	for key := range resources {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	out := make([]*operatorv1alpha1.ConfigurationResource, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, buildConfigResource(resourceType, key, resources[key]))
+	}
+	return out
 }
 
 // computeSnapshotChecksum computes a SHA-256 checksum of the snapshot for validation.

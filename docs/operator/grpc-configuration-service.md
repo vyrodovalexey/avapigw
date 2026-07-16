@@ -105,10 +105,30 @@ Registers a new gateway instance and returns the initial configuration.
 (bounded) until the configuration store has been seeded from the cluster —
 the operator logs `configuration store ready for initial snapshot` when the
 gate opens — so a reconnecting gateway never receives an incomplete snapshot
-from a cold store. On the gateway side, a running gateway with a non-empty
-configuration ignores an **empty** snapshot and keeps its last-known-good
-configuration (warning logged; the deletion of the last remaining CR
-propagates with the next non-empty snapshot or a gateway restart).
+from a cold store.
+
+On **multi-replica deployments**, the seeding gate is leadership-aware:
+controllers only run on the elected leader, so only the leader seeds the
+store and serves initial snapshots. A non-leader replica parks
+initial-snapshot streams and lets gated unary RPCs run into their own
+deadlines (wait reason `awaiting_leadership`) instead of timing out into an
+empty snapshot — clients retry and reach the leader. The bounded seed-timeout
+clock starts at election. On leadership loss, controller-runtime terminates
+the manager and the process restarts, so the signal never needs resetting.
+
+On the gateway side, snapshots are **authoritative per resource type**: an
+empty resource type in an applied FULL_SYNC clears the corresponding
+router/registry, so deleting the last resource of one type propagates to
+running gateways. Two guards take precedence: a running gateway with a
+non-empty configuration ignores an **all-empty** snapshot (warning logged;
+full teardown propagates with the next non-empty snapshot or a gateway
+restart), and for 30 seconds after a (re)connect, snapshots whose total
+resource count regresses versus the running configuration are deferred while
+the operator store may still be mid-seed.
+
+The gateway's operator client also closes its previous gRPC connection when
+a reconnect attempt establishes a new one, so reconnect loops do not leak
+connections.
 
 **Usage:**
 ```go

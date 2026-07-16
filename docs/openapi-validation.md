@@ -540,15 +540,15 @@ OpenAPI validation provides comprehensive metrics for monitoring and alerting:
 ```prometheus
 # Request validation results
 gateway_openapi_validation_requests_total{route="items-api", result="success"} 1500
-gateway_openapi_validation_requests_total{route="items-api", result="failed"} 25
+gateway_openapi_validation_requests_total{route="items-api", result="failure"} 25
 
 # Validation duration
 gateway_openapi_validation_duration_seconds{route="items-api"} 0.002
 
 # Validation errors by type
-gateway_openapi_validation_errors_total{route="items-api", error_type="body_invalid"} 15
-gateway_openapi_validation_errors_total{route="items-api", error_type="param_missing"} 8
-gateway_openapi_validation_errors_total{route="items-api", error_type="header_invalid"} 2
+gateway_openapi_validation_errors_total{route="items-api", error_type="body"} 15
+gateway_openapi_validation_errors_total{route="items-api", error_type="params"} 8
+gateway_openapi_validation_errors_total{route="items-api", error_type="headers"} 2
 ```
 
 ### Metric Labels
@@ -561,12 +561,11 @@ gateway_openapi_validation_errors_total{route="items-api", error_type="header_in
 
 ### Error Types
 
-- `body_invalid` - Request body validation failed
-- `param_missing` - Required parameter missing
-- `param_invalid` - Parameter validation failed
-- `header_invalid` - Header validation failed
-- `security_failed` - Security requirement validation failed
-- `spec_load_error` - OpenAPI spec loading failed
+- `body` - Request body validation failed
+- `params` - Query or path parameter validation failed (missing or invalid)
+- `headers` - Header parameter validation failed
+- `security` - Security requirement validation failed
+- `unknown` - Any other validation failure
 
 ### Monitoring Queries
 
@@ -586,7 +585,7 @@ topk(5, sum by (error_type) (
 
 # Routes with highest validation failure rate
 topk(10, sum by (route) (
-  rate(gateway_openapi_validation_requests_total{result="failed"}[5m])
+  rate(gateway_openapi_validation_requests_total{result="failure"}[5m])
 ))
 ```
 

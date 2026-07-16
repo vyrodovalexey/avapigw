@@ -2048,6 +2048,9 @@ spec:
 | `spec.hosts` | `[]BackendHost` | Yes | Backend host configuration |
 | `spec.healthCheck.enabled` | `bool` | No | Enable gRPC health checking |
 | `spec.healthCheck.service` | `string` | No | Service name for health check |
+| `spec.healthCheck.useHTTP` | `bool` | No | Use HTTP GET instead of gRPC health protocol |
+| `spec.healthCheck.httpPath` | `string` | No | HTTP health path (schema default `/healthz`; must start with `/`). With `useHTTP: false` the schema default is tolerated (inert), but any explicit non-default path is rejected |
+| `spec.healthCheck.httpPort` | `int` | No | HTTP health port (1-65535; defaults to the backend port). Only valid with `useHTTP: true` |
 | `spec.connectionPool.maxIdleConns` | `int` | No | Max idle connections |
 | `spec.connectionPool.maxConnsPerHost` | `int` | No | Max connections per host |
 | `spec.connectionPool.idleConnTimeout` | `string` | No | Idle connection timeout |

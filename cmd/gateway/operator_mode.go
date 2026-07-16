@@ -220,11 +220,15 @@ const (
 
 	// operatorStartMaxBackoff caps the per-attempt backoff.
 	operatorStartMaxBackoff = 30 * time.Second
-
-	// operatorStartOverallDeadline bounds the total time spent retrying the
-	// initial operator connection before failing fatally.
-	operatorStartOverallDeadline = 3 * time.Minute
 )
+
+// operatorStartOverallDeadline bounds the total time spent retrying the
+// initial operator connection before failing fatally. It is a var (not a
+// const) purely to provide a test seam: tests that drive runOperatorMode
+// against an unreachable operator can shrink it so exhaustion is reached
+// quickly instead of blocking for the full production window. Production
+// behavior is unchanged (default 3 minutes).
+var operatorStartOverallDeadline = 3 * time.Minute
 
 // startOperatorClientWithRetry attempts to start the operator client, retrying
 // the initial connect/register with exponential backoff (bounded and
@@ -456,17 +460,24 @@ func mergeAuditConfig(existing, incoming *config.AuditConfig) *config.AuditConfi
 
 // applyMergedComponents applies routes, backends, gRPC routes, and middleware
 // updates from the merged configuration.
+//
+// FULL_SYNC snapshots are authoritative: empty resource sets are applied so
+// routers and registries CLEAR when the last resource of a type is deleted.
+// Emptiness policy (the all-types-empty snapshot guard and the post-reconnect
+// regression window) is owned upstream by operator.ConfigHandler, never by
+// this applier. Nil-component guards stay: partially initialized applications
+// skip the corresponding subsystem entirely.
 func (a *gatewayConfigApplier) applyMergedComponents(
 	ctx context.Context, merged *config.GatewayConfig,
 ) error {
-	if a.app.router != nil && len(merged.Spec.Routes) > 0 {
+	if a.app.router != nil {
 		if err := a.app.router.LoadRoutes(merged.Spec.Routes); err != nil {
 			a.logger.Error("failed to apply routes", observability.Error(err))
 			return err
 		}
 	}
 
-	if a.app.backendRegistry != nil && len(merged.Spec.Backends) > 0 {
+	if a.app.backendRegistry != nil {
 		if err := a.app.backendRegistry.ReloadFromConfig(ctx, merged.Spec.Backends); err != nil {
 			a.logger.Error("failed to apply backends", observability.Error(err))
 			return err
@@ -497,25 +508,34 @@ func (a *gatewayConfigApplier) applyMergedComponents(
 	return nil
 }
 
-// applyMergedGRPCComponents applies gRPC routes and backends from the merged configuration.
+// applyMergedGRPCComponents applies gRPC routes and backends from the merged
+// configuration. Empty sets are applied so listeners and the gRPC backend
+// registry clear when the last resource of the type is deleted (FULL_SYNC is
+// authoritative; see applyMergedComponents for the emptiness-policy split).
 func (a *gatewayConfigApplier) applyMergedGRPCComponents(
 	ctx context.Context, merged *config.GatewayConfig,
 ) error {
-	// Hot-reload gRPC routes via the router's thread-safe LoadRoutes method.
-	if len(merged.Spec.GRPCRoutes) > 0 {
-		for _, listener := range a.app.gateway.GetGRPCListeners() {
-			if err := listener.LoadRoutes(merged.Spec.GRPCRoutes); err != nil {
-				a.logger.Error("failed to reload gRPC routes",
-					observability.String("listener", listener.Name()),
-					observability.Error(err),
-				)
-				return err
-			}
+	if a.app.gateway == nil {
+		return nil
+	}
+
+	// Hot-reload gRPC routes via each listener's thread-safe LoadRoutes method.
+	for _, listener := range a.app.gateway.GetGRPCListeners() {
+		if err := listener.LoadRoutes(merged.Spec.GRPCRoutes); err != nil {
+			a.logger.Error("failed to reload gRPC routes",
+				observability.String("listener", listener.Name()),
+				observability.Error(err),
+			)
+			return err
 		}
 	}
 
-	// Hot-reload gRPC backends via the backend registry's copy-on-write pattern.
-	if len(merged.Spec.GRPCBackends) > 0 && a.app.gateway != nil {
+	// Hot-reload gRPC backends via the backend registry's copy-on-write
+	// pattern. Guarded on the gateway-level gRPC backend registry (a
+	// nil-component guard, not an emptiness gate): listeners inherit the
+	// registry at creation time, and a gateway without one carries no gRPC
+	// backend state to clear — its listeners would reject the reload.
+	if a.app.gateway.GetGRPCBackendRegistry() != nil {
 		converted := config.GRPCBackendsToBackends(merged.Spec.GRPCBackends)
 		if err := a.app.gateway.ReloadGRPCBackends(ctx, converted); err != nil {
 			a.logger.Error("failed to reload gRPC backends",
@@ -528,11 +548,14 @@ func (a *gatewayConfigApplier) applyMergedGRPCComponents(
 	return nil
 }
 
-// applyMergedGraphQLComponents applies GraphQL routes and backends from the merged configuration.
+// applyMergedGraphQLComponents applies GraphQL routes and backends from the
+// merged configuration. Empty sets are applied so the GraphQL router and
+// proxy clear when the last resource of the type is deleted (FULL_SYNC is
+// authoritative; see applyMergedComponents for the emptiness-policy split).
 func (a *gatewayConfigApplier) applyMergedGraphQLComponents(
 	_ context.Context, merged *config.GatewayConfig,
 ) error {
-	if len(merged.Spec.GraphQLRoutes) > 0 && a.app.graphqlRouter != nil {
+	if a.app.graphqlRouter != nil {
 		if err := a.app.graphqlRouter.LoadRoutes(merged.Spec.GraphQLRoutes); err != nil {
 			a.logger.Error("failed to reload GraphQL routes",
 				observability.Error(err),
@@ -541,7 +564,7 @@ func (a *gatewayConfigApplier) applyMergedGraphQLComponents(
 		}
 	}
 
-	if len(merged.Spec.GraphQLBackends) > 0 && a.app.graphqlProxy != nil {
+	if a.app.graphqlProxy != nil {
 		a.app.graphqlProxy.UpdateBackends(merged.Spec.GraphQLBackends)
 	}
 

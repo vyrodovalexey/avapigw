@@ -481,40 +481,40 @@ spec:
             host: user-service
             port: 8080
     
-     # Header-based routing
-     - name: mobile-api
-       match:
-         - uri:
-             prefix: /api
-           headers:
-             - name: User-Agent
-               regex: "Mobile|Android|iPhone"
-       route:
-         - destination:
-             host: mobile-backend
-             port: 8080
-     
-     # Route with custom request limits, CORS, and security headers
-     - name: api-route-with-overrides
-       match:
-         - uri:
-             prefix: /api/v1/upload
-           methods: [POST]
-       route:
-         - destination:
-             host: upload-backend
-             port: 8080
-       # Route-level request limits (overrides global)
-       requestLimits:
-         maxBodySize: 52428800    # 50MB for file uploads
-         maxHeaderSize: 1048576   # 1MB for headers
-       # Route-level CORS (overrides global)
-       cors:
-         allowOrigins: ["https://app.example.com", "https://admin.example.com"]
-         allowMethods: ["POST", "OPTIONS"]
-         allowHeaders: ["Content-Type", "Authorization", "X-Upload-Token"]
-         maxAge: 3600
-         allowCredentials: true
+    # Header-based routing
+    - name: mobile-api
+      match:
+        - uri:
+            prefix: /api
+          headers:
+            - name: User-Agent
+              regex: "Mobile|Android|iPhone"
+      route:
+        - destination:
+            host: mobile-backend
+            port: 8080
+
+    # Route with custom request limits, CORS, and security headers
+    - name: api-route-with-overrides
+      match:
+        - uri:
+            prefix: /api/v1/upload
+          methods: [POST]
+      route:
+        - destination:
+            host: upload-backend
+            port: 8080
+      # Route-level request limits (overrides global)
+      requestLimits:
+        maxBodySize: 52428800    # 50MB for file uploads
+        maxHeaderSize: 1048576   # 1MB for headers
+      # Route-level CORS (overrides global)
+      cors:
+        allowOrigins: ["https://app.example.com", "https://admin.example.com"]
+        allowMethods: ["POST", "OPTIONS"]
+        allowHeaders: ["Content-Type", "Authorization", "X-Upload-Token"]
+        maxAge: 3600
+        allowCredentials: true
       # Route-level security headers (overrides global)
       security:
         enabled: true
@@ -552,108 +552,106 @@ spec:
         timeout: 5s
         healthyThreshold: 2
         unhealthyThreshold: 3
-        headers:
-          Authorization: "Bearer health-token"
-        loadBalancer:
-          algorithm: roundRobin  # or weighted, leastConn, random
-        # Backend-level max sessions
-        maxSessions:
+      loadBalancer:
+        algorithm: roundRobin  # or weighted, leastConn, random
+      # Backend-level max sessions
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      # Backend-level rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+
+    # Backend with circuit breaker and JWT authentication
+    - name: secure-api-backend
+      hosts:
+        - address: secure-api.example.com
+          port: 443
+          weight: 1
+      # Backend-level circuit breaker
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+        halfOpenRequests: 3
+      # Backend authentication with JWT from OIDC
+      authentication:
+        type: jwt
+        jwt:
           enabled: true
-          maxConcurrent: 500
-        # Backend-level rate limiting
-        rateLimit:
+          tokenSource: oidc
+          oidc:
+            issuerUrl: https://keycloak.example.com/realms/myrealm
+            clientId: gateway-client
+            clientSecret: secret-key
+            scopes: ["openid", "profile"]
+          headerName: Authorization
+          headerPrefix: Bearer
+      # TLS configuration for backend
+      tls:
+        enabled: true
+        mode: SIMPLE
+        caFile: /etc/ssl/certs/ca.crt
+        serverName: secure-api.example.com
+
+    # Backend with Basic authentication from Vault
+    - name: legacy-backend
+      hosts:
+        - address: legacy.internal.com
+          port: 8080
+          weight: 1
+      # Backend authentication with Basic auth from Vault
+      authentication:
+        type: basic
+        basic:
           enabled: true
-          requestsPerSecond: 100
-          burst: 200
-     
-     # Backend with circuit breaker and JWT authentication
-     - name: secure-api-backend
-       hosts:
-         - address: secure-api.example.com
-           port: 443
-           weight: 1
-       # Backend-level circuit breaker
-       circuitBreaker:
-         enabled: true
-         threshold: 5
-         timeout: 30s
-         halfOpenRequests: 3
-       # Backend authentication with JWT from OIDC
-       authentication:
-         type: jwt
-         jwt:
-           enabled: true
-           tokenSource: oidc
-           oidc:
-             issuerUrl: https://keycloak.example.com/realms/myrealm
-             clientId: gateway-client
-             clientSecret: secret-key
-             scopes: ["openid", "profile"]
-           headerName: Authorization
-           headerPrefix: Bearer
-       # TLS configuration for backend
-       tls:
-         enabled: true
-         mode: SIMPLE
-         caFile: /etc/ssl/certs/ca.crt
-         serverName: secure-api.example.com
-     
-     # Backend with Basic authentication from Vault
-     - name: legacy-backend
-       hosts:
-         - address: legacy.internal.com
-           port: 8080
-           weight: 1
-       # Backend authentication with Basic auth from Vault
-       authentication:
-         type: basic
-         basic:
-           enabled: true
-           vaultPath: secret/legacy-backend
-           usernameKey: username
-           passwordKey: password
-     
-     # Backend with mTLS authentication
-     - name: mtls-backend
-       hosts:
-         - address: mtls.example.com
-           port: 443
-           weight: 1
-       # Backend authentication with mTLS
-       authentication:
-         type: mtls
-         mtls:
-           enabled: true
-           certFile: /etc/ssl/certs/client.crt
-           keyFile: /etc/ssl/private/client.key
-           caFile: /etc/ssl/certs/backend-ca.crt
-        # TLS configuration for mTLS
-        tls:
+          vaultPath: secret/legacy-backend
+          usernameKey: username
+          passwordKey: password
+
+    # Backend with mTLS authentication
+    - name: mtls-backend
+      hosts:
+        - address: mtls.example.com
+          port: 443
+          weight: 1
+      # Backend authentication with mTLS
+      authentication:
+        type: mtls
+        mtls:
           enabled: true
-          mode: MUTUAL
-          caFile: /etc/ssl/certs/backend-ca.crt
           certFile: /etc/ssl/certs/client.crt
           keyFile: /etc/ssl/private/client.key
-      
-      # Backend with max sessions and rate limiting
-      - name: high-traffic-backend
-        hosts:
-          - address: 10.0.1.20
-            port: 8080
-          - address: 10.0.1.21
-            port: 8080
-        # Backend-level max sessions
-        maxSessions:
-          enabled: true
-          maxConcurrent: 500
-        # Backend-level rate limiting
-        rateLimit:
-          enabled: true
-          requestsPerSecond: 100
-          burst: 200
-        # Capacity-aware load balancing
-        loadBalancer:
-          algorithm: leastConn
+          caFile: /etc/ssl/certs/backend-ca.crt
+      # TLS configuration for mTLS
+      tls:
+        enabled: true
+        mode: MUTUAL
+        caFile: /etc/ssl/certs/backend-ca.crt
+        certFile: /etc/ssl/certs/client.crt
+        keyFile: /etc/ssl/private/client.key
+
+    # Backend with max sessions and rate limiting
+    - name: high-traffic-backend
+      hosts:
+        - address: 10.0.1.20
+          port: 8080
+        - address: 10.0.1.21
+          port: 8080
+      # Backend-level max sessions
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      # Backend-level rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+      # Capacity-aware load balancing
+      loadBalancer:
+        algorithm: leastConn
 ```
 
 ### Rate Limiting Configuration
@@ -2566,7 +2564,6 @@ spec:
         path: /health
         interval: 10s
         timeout: 5s
-            ttl: 24h
       # TLS configuration for mTLS
       tls:
         enabled: true
@@ -5004,7 +5001,26 @@ match:
 
 ### Route Priority
 
-Routes are evaluated in the order they appear in the configuration. More specific routes should be placed before general ones.
+Routes are matched in **deterministic specificity order**, independent of the
+order they appear in the configuration (or of Kubernetes resource ordering in
+operator mode). The router computes a priority for every route:
+
+- **Exact path match**: 1000
+- **Prefix path match**: 500 + prefix length (longer prefixes win)
+- **Regex path match**: 100
+- **Method restriction**: +50
+- **Header conditions**: +10 each
+- **Query parameter conditions**: +5 each
+- **No match conditions (catch-all)**: 0
+
+Higher priority wins; routes with **equal priority are ordered by route name
+(ascending)**, so first-match-wins is a stable total order and reloads or
+cross-namespace merges cannot reorder equal-priority routes. The gRPC router
+uses the same scheme (service exact = 1000 / prefix = 500 + length / regex =
+100; method exact = 500 / prefix = 250 + length / regex = 50; +10 per
+metadata condition) including the name tie-break, and GraphQL routes are
+sorted by their own specificity formula (see
+[docs/graphql.md](docs/graphql.md)).
 
 ### Path Parameters
 
@@ -5207,8 +5223,7 @@ rateLimit:
   enabled: true
   requestsPerSecond: 1000
   burst: 2000
-  perClient: true
-  keyExtractor: "metadata:user-id"        # Extract from gRPC metadata
+  perClient: true                         # Per-client-IP token buckets
 ```
 
 #### Circuit Breaker
@@ -5346,8 +5361,9 @@ spec:
             host: order-service
             port: 50051
       rateLimit:
+        enabled: true
         requestsPerSecond: 100
-        keyExtractor: "metadata:tenant-id"
+        perClient: true
   
   grpcBackends:
     - name: user-service
@@ -5531,8 +5547,7 @@ rateLimit:
   enabled: true
   requestsPerSecond: 100
   burst: 200
-  perClient: true
-  keyExtractor: "ip"  # ip, header, query
+  perClient: true   # Per-client-IP token buckets (default: shared bucket)
 ```
 
 ### Circuit Breaker

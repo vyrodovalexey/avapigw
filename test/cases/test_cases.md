@@ -4175,14 +4175,25 @@ code paths.
 Files: `test/e2e/aggregate_operator_e2e_test.go`, `test/e2e/aggregate_live_helpers_test.go`
 (build tag `e2e`). These are user-journey tests against the **deployed** operator-mode
 gateway + operator in the `avapigw-test` namespace (docker-desktop). All endpoints,
-namespace, route names and credentials come from ENV (`AVAPIGW_E2E_NAMESPACE`,
-`AVAPIGW_E2E_AGGREGATE_ROUTE`, `AVAPIGW_E2E_AGGREGATE_PATH`, `AVAPIGW_E2E_VM_URL`,
-`AVAPIGW_E2E_GATEWAY_SVC`, `TEST_REDIS_SENTINEL_*`) with sane defaults; no hardcoded
-secrets. The whole live suite auto-skips (CI-safe) when `AVAPIGW_E2E_LIVE=0`, when the
-cluster/aggregate CRD is not reachable, or when the gateway Service has no ready
-endpoints (stale CRDs alone — e.g. left over after an undeploy — must not enable the
-suite, since port-forwards and Ready-condition waits can only fail without a live
-deployment).
+namespaces, route names and credentials come from ENV (`AVAPIGW_E2E_NAMESPACE`,
+`AVAPIGW_E2E_FIXTURE_NAMESPACE`, `AVAPIGW_E2E_AGGREGATE_ROUTE`,
+`AVAPIGW_E2E_AGGREGATE_PATH`, `AVAPIGW_E2E_VM_URL`, `AVAPIGW_E2E_GATEWAY_SVC`,
+`TEST_REDIS_SENTINEL_*`) with sane defaults; no hardcoded secrets.
+
+Namespaces: the gateway/operator DEPLOYMENT lives in the deployment namespace
+(`AVAPIGW_E2E_NAMESPACE`, default `avapigw-test`), while the DO-04 perf FIXTURE CRs
+(`crds-do04-aggregate.yaml` — `do04-aggregate-route`, `do04-http-backend-1/2`) live in a
+dedicated fixture namespace (`AVAPIGW_E2E_FIXTURE_NAMESPACE`, default `avapigw-perf`) so
+the namespace-scoped admission duplicate checker never rejects them against the
+avapigw-test suites. The operator watches all namespaces, so fixture CRs still reconcile
+and reach the gateway. Fixture reads (`do04-*` route/backends and the live gate) use the
+fixture namespace; routes the tests create themselves use the deployment namespace.
+
+The whole live suite auto-skips (CI-safe) when `AVAPIGW_E2E_LIVE=0`, when the
+cluster/aggregate CRD is not reachable in the FIXTURE namespace, or when the gateway
+Service has no ready endpoints in the deployment namespace (stale CRDs alone — e.g. left
+over after an undeploy — must not enable the suite, since port-forwards and
+Ready-condition waits can only fail without a live deployment).
 
 How the gateway is reached: the gateway Service exposes only TLS listeners
 (https/8443, grpcs/9443) + metrics/9090; NodePorts are not host-routable on
@@ -4575,3 +4586,260 @@ File: `test/e2e/redis_ratelimit_cache_e2e_test.go` (build tag `e2e`).
   6. Verify rate limit bucket and cache entry on the sentinel-managed master; cache PTTL within jitter bounds [ttl*(1-j), ttl*(1+j)]
   7. Serve the middleware metrics registry over HTTP → gateway_middleware_redis_rate_limit_{allowed,denied}_total{route="full-config-route"} and the duration histogram are exposed
 - **Expected Results**: All five features cooperate on one route with correct ordering (auth → rate limit → CORS → cache → transform → proxy); sentinel-backed state and new metrics observable
+
+## Webhook Admission Lifecycle Tests
+
+The validating webhooks admit lifecycle-driven updates that can never introduce new
+conflicts, eliminating the webhook/finalizer deadlock: updates to TERMINATING objects
+(deletionTimestamp set) are admitted unconditionally so finalizer removal always
+proceeds; METADATA-ONLY updates (semantically unchanged spec) run local spec validation
+only and skip duplicate/cross-kind conflict checks; and terminating resources are
+excluded from every duplicate and cross-kind conflict CANDIDATE set so a stuck
+terminating peer never blocks a surviving or replacement resource.
+
+Files: `internal/operator/webhook/finalizer_deadlock_test.go` (runs under
+`test-operator-unit/functional/integration`).
+
+### TestValidateUpdate_TerminatingObjectAdmitted
+- **Description**: Updates to a resource being deleted are admitted unconditionally, even when the object overlaps a live peer and even when its spec is locally invalid (data-driven across APIRoute, Backend, GRPCRoute, GraphQLRoute)
+- **Preconditions**: Resource has deletionTimestamp set (finalizer keeps it alive); an overlapping live peer exists
+- **Steps**:
+  1. Create a terminating resource whose spec conflicts with a live peer
+  2. Submit a finalizer-removal update (metadata change) via ValidateUpdate
+  3. Repeat with a locally invalid spec on the terminating object
+- **Expected Results**: All updates admitted — deletion can always complete; no duplicate/conflict/spec error blocks the terminating object
+
+### TestValidateUpdate_FinalizerAddOnLegacyOverlappingPair
+- **Description**: Metadata-only updates (finalizer/label add) on LEGACY overlapping resources (admitted before conflict rules tightened) are not blocked by duplicate or cross-kind checks
+- **Preconditions**: Two overlapping same-kind resources already persisted (legacy state)
+- **Steps**:
+  1. Add a finalizer to one of the pair without touching the spec
+  2. Submit the update to the webhook
+- **Expected Results**: Update admitted — the unchanged spec cannot introduce NEW conflicts; local spec validation still runs
+
+### TestValidateUpdate_SpecChangeToConflict_StillRejected
+- **Description**: The lifecycle short-circuits do not weaken real conflict enforcement: a genuine spec change that creates an identical-specificity duplicate is still rejected
+- **Preconditions**: A live peer resource exists
+- **Steps**:
+  1. Update a live resource's spec to collide with the peer (identical-specificity match)
+  2. Submit the update
+- **Expected Results**: Update rejected with a conflict error naming the peer
+
+### TestValidateUpdate_TerminatingPeerUnblocksSurvivor
+- **Description**: A conflicting candidate that is TERMINATING is skipped from the conflict set, so the surviving resource can be created/updated while its old peer drains
+- **Preconditions**: A terminating resource (deletionTimestamp set, finalizer pending) holds the contested match/hosts
+- **Steps**:
+  1. Create (or spec-update) a replacement resource with the same match as the terminating peer
+  2. Submit to the webhook; also exercise Backend/GRPCBackend/GraphQLBackend cross-kind host:port candidate sets (TestCrossKindBackendChecks_TerminatingCandidatesSkipped)
+- **Expected Results**: Replacement admitted — terminating peers never block survivors; live peers still conflict
+
+### TestValidateUpdate_MetadataOnlyInvalidSpec_StillValidated
+- **Description**: The metadata-only short-circuit skips CONFLICT checks only — local spec validation still applies to non-terminating objects
+- **Preconditions**: Persisted resource with a spec that fails current local validation
+- **Steps**:
+  1. Submit a metadata-only update (old spec == new spec, both locally invalid) on a NON-terminating object
+- **Expected Results**: Update rejected by local spec validation (invalid specs do not ride through on the metadata-only path)
+
+## Same-Kind Route Overlap Relaxation Tests (gRPC + GraphQL)
+
+Same-kind duplicate admission now mirrors the APIRoute philosophy: only
+IDENTICAL-SPECIFICITY duplicates — match conditions the data-plane router cannot order
+deterministically for a user — are rejected. Match conditions of DIFFERENT specificity
+coexist and are resolved by the router's specificity sort. gRPC: nested (non-identical)
+service/method prefixes are now ADMITTED (`com.example` + `com.example.user` coexist;
+longest-prefix wins at the data plane); identical prefixes/exacts and double catch-alls
+remain rejected. GraphQL: block specificity is scored with the data plane's
+authoritative `graphqlrouter.Specificity` weights (path exact=1000 | prefix=500+len |
+regex=100; operationName exact=500 | prefix=250+len | regex=50; operationType set=+200;
++10 per header) — a generic route vs a more specific one on the same path is ADMITTED;
+only equal-specificity blocks whose values can cover the same request are rejected.
+
+Files: `internal/operator/webhook/duplicate_grpc_relax_test.go`,
+`internal/operator/webhook/duplicate_graphql_relax_test.go` (run under
+`test-operator-unit/functional/integration`).
+
+### TestCheckGRPCRouteDuplicate_SpecificityTopology
+- **Description**: Data-driven topology of gRPC same-kind admission: identical exact services (same/absent methods), identical service prefixes, identical method prefixes, and double catch-alls are conflicts; nested service prefixes, nested method prefixes, exact-vs-prefix service matches, different exact methods, and catch-all vs specific are admitted
+- **Preconditions**: Existing GRPCRoute persisted; DuplicateChecker with fake client
+- **Steps**:
+  1. For each pair in the table, persist route A and run CheckGRPCRouteDuplicate on route B
+- **Expected Results**: Only identical-specificity pairs report conflicts; every different-specificity pair is admitted
+
+### TestGRPCDataplaneParity_NestedPrefixesDeterministic
+- **Description**: Admission/data-plane parity — every ADMITTED nested-prefix pair must be deterministically ordered by the gRPC router (longest prefix wins), and identical-prefix pairs the webhook REJECTS are exactly those the router cannot order by specificity (equal priority, name tie-break only)
+- **Preconditions**: gRPC router loaded with the admitted pair
+- **Steps**:
+  1. Load `com.example` and `com.example.user` prefix routes in both insertion orders
+  2. Match a request under the longer prefix; also exercise nested METHOD prefixes (TestGRPCDataplaneParity_NestedMethodPrefixesDeterministic)
+  3. For the rejected identical-prefix pair, verify both routes compile to equal priority (TestGRPCDataplaneParity_IdenticalPrefixesAmbiguous)
+- **Expected Results**: Longest-prefix route wins regardless of load order; the webhook rejects exactly the pairs whose ordering would fall through to the arbitrary name tie-break
+
+### TestCheckGraphQLRouteDuplicate_SpecificityTopology
+- **Description**: Data-driven topology of GraphQL same-kind admission: identical exact paths (with equal operationType/operationName surfaces), identical prefixes, and double catch-alls conflict; exact vs prefix on the same path, nested prefixes, typed vs untyped blocks, named vs unnamed operations, header-count differences, and catch-all vs specific are admitted (different specificity)
+- **Preconditions**: Existing GraphQLRoute persisted; DuplicateChecker with fake client
+- **Steps**:
+  1. For each pair in the table, persist route A and run CheckGraphQLRouteDuplicate on route B
+- **Expected Results**: Only identical-specificity blocks with overlapping values (path/operationType/operationName/headers all able to cover one request) are conflicts
+
+### TestGraphQLMatchSpecificity_ParityWithRouterWeights
+- **Description**: The webhook's block scoring delegates to the exported `graphqlrouter.Specificity` — the single source of truth — so admission and data-plane precedence cannot drift
+- **Preconditions**: None
+- **Steps**:
+  1. Score representative CRD match blocks via the webhook path and via the router package directly
+- **Expected Results**: Identical scores for identical blocks (exact/prefix/regex path, operationName, operationType, headers)
+
+### TestGraphQLDataplaneParity_SpecificityOrdering
+- **Description**: Every ADMITTED different-specificity GraphQL pair resolves deterministically in the router — the more specific block wins regardless of load order; TestGraphQLBasicVsDo04FixturePair_Admitted pins the real-world fixture pair (generic `/graphql` route vs the DO-04 header-conditioned route) as admitted and deterministic
+- **Preconditions**: GraphQL router loaded with the admitted pair in both orders
+- **Steps**:
+  1. Load pair, Match a request satisfying both blocks
+  2. Reverse load order and repeat
+- **Expected Results**: Same winner in both orders (higher specificity); no admission rejection for the pair
+
+## Route Precedence Determinism Tests (HTTP, gRPC, GraphQL)
+
+All three routers now yield a DETERMINISTIC total match order independent of input
+order (Kubernetes map iteration, cross-namespace merges, file loads). HTTP and gRPC
+routers order by descending priority with an ascending route-NAME tie-break at equal
+priority. The GraphQL router now sorts compiled routes by descending Specificity with
+the same name tie-break (previously input-order/first-match — operator-mode map
+iteration made matches nondeterministic). `LoadRoutes` with an empty/nil slice clears
+each router.
+
+Files: `internal/router/router_determinism_test.go`,
+`internal/grpc/router/router_determinism_test.go`,
+`internal/graphql/router/specificity_test.go` (unit suites).
+
+### TestRouter_EqualPriorityNameTieBreak (HTTP + gRPC)
+- **Description**: Two routes compiling to EQUAL priority (e.g. same-length prefixes, equal-priority regex pairs) always match in route-name order, in both insertion orders and via AddRoute increments
+- **Preconditions**: None
+- **Steps**:
+  1. Load equal-priority routes named "b-route", "a-route" (insertion order b, a); match a request satisfying both
+  2. Reverse insertion order and repeat; also load via incremental AddRoute
+- **Expected Results**: "a-route" (name ascending) wins every time; shuffled load orders produce identical match tables (TestRouter_LoadRoutes_ShuffledOrderDeterministic)
+
+### TestRouter_Match_SpecificityIndependentOfLoadOrder (GraphQL)
+- **Description**: GraphQL route matching is specificity-ordered, not input-ordered: loading [generic, specific] and [specific, generic] both match the specific route; the full documented specificity ladder (exact > long prefix > short prefix > regex > catch-all; operationType/operationName/headers add weight) is pinned by TestSpecificity_DocumentedOrdering and TestRouter_Match_SpecificityLadder
+- **Preconditions**: None
+- **Steps**:
+  1. Load a generic catch-all and a specific exact-path route in both orders
+  2. Match a request satisfying both; shuffle larger route sets (TestRouter_Match_ShuffledDeterminism)
+- **Expected Results**: Most specific route always wins; equal-specificity falls back to the name tie-break (TestRouter_Match_EqualSpecificityNameTieBreak); `SortRoutesBySpecificity` orders config slices exactly like LoadRoutes
+
+### TestConfigHandler_CollectGraphQLRoutes_SpecificityOrder (operator handler)
+- **Description**: The gateway's operator ConfigHandler hands GraphQL route slices to the applier pre-sorted by `SortRoutesBySpecificity` (and all other resource slices sorted by composite state key — TestConfigHandler_CollectSorted_DeterministicOrder), so apply logs, diffs, and router order stay aligned across identical snapshots
+- **Preconditions**: Handler state populated from a snapshot with routes in adversarial map order
+- **Steps**:
+  1. HandleSnapshot with shuffled resources; capture the slice passed to the applier
+- **Expected Results**: Deterministic, specificity-ordered (GraphQL) / key-ordered (others) slices on every call
+
+## Operator FULL_SYNC Empty-Type Clearing Tests
+
+FULL_SYNC snapshots are authoritative: an EMPTY resource type in the merged operator
+config now CLEARS the corresponding router/registry (previously `len(...) > 0` guards
+skipped empty sets, so deleting the LAST resource of a type left stale state serving
+traffic). Emptiness POLICY stays upstream in `operator.ConfigHandler`: an all-types-empty
+snapshot is still guarded, and a post-reconnect REGRESSING snapshot (total shrinks) is
+still deferred to protect operator restarts; a non-regressing snapshot with one type
+empty applies and clears. Nil-component guards remain (partially initialized apps skip
+the subsystem).
+
+Files: `cmd/gateway/operator_empty_clear_test.go` (applier seam, real routers),
+`internal/gateway/operator/handler_snapshot_keys_test.go` (handler policy seam) — unit
+suites; the pairing covers the full HandleSnapshot → applier → router path.
+
+### TestApplyFullConfig_PartialEmptyClearsOnlyEmptyTypes
+- **Description**: The full FULL_SYNC apply path with HTTP routes populated and GraphQL routes empty clears the GraphQL router while the HTTP router serves the new set — per-type independence through the operator-mode applier (`ApplyFullConfig`)
+- **Preconditions**: Applier over real HTTP router, backend registry, and GraphQL router, each preloaded with one resource
+- **Steps**:
+  1. ApplyFullConfig with 1 HTTP route, zero GraphQL routes/backends/gRPC resources
+  2. Match an HTTP request; count GraphQL routes
+- **Expected Results**: GraphQL router count = 0; HTTP route matches; per-type clears covered for HTTP routes, backends, gRPC listener routes, and GraphQL router (sibling TestApplyMerged*_Empty* tests)
+
+### TestConfigHandler_PartialEmptySnapshotApplies_WithinWindow
+- **Description**: Handler policy — a NON-regressing FULL_SYNC (total resource count preserved or grown) with one type emptied applies immediately, even inside the post-reconnect regression window
+- **Preconditions**: Handler seeded (2 HTTP + 1 GraphQL), MarkReconnected called
+- **Steps**:
+  1. HandleSnapshot with 3 HTTP routes and zero GraphQL routes (total 3, non-regressing)
+- **Expected Results**: Applied — populated type updated, GraphQL state empty; a REGRESSING partial-empty snapshot within the window is still deferred with last-known-good kept (TestConfigHandler_PartialEmptyRegressingSnapshotDeferred_WithinWindow); an ALL-empty snapshot never wipes running config (existing handler_empty_snapshot_test.go)
+
+## Deterministic Operator Snapshots & Leadership-Gated Seeding Tests
+
+Files: `internal/operator/grpc/service_determinism_test.go`,
+`internal/operator/grpc/server_leadership_test.go`, `cmd/operator/store_seeding_test.go`
+(operator unit suites); `internal/gateway/operator/client_conn_leak_test.go`,
+`internal/gateway/operator/handler_snapshot_keys_test.go` (gateway unit suite).
+
+### TestBuildSnapshot_DeterministicChecksum_AcrossInsertionOrders
+- **Description**: buildSnapshot orders every resource slice by ascending resource key (namespace/name), so identical store contents produce byte-identical snapshots and checksums regardless of Go map insertion/iteration order — gateways no longer see spurious checksum changes on operator restart
+- **Preconditions**: Store populated with all six resource types across multiple namespaces, in several insertion orders
+- **Steps**:
+  1. Build snapshots from permuted stores; compare checksums and per-type key order
+- **Expected Results**: Identical checksums; slices sorted by resource key (TestBuildSnapshot_SlicesSortedByResourceKey); checksum changes exactly when content changes; empty types stay nil
+
+### TestWaitForStoreSeeded_NotElected_ParksPastSeedTimeout
+- **Description**: The gRPC store readiness gate is LEADERSHIP-GATED: a non-leader replica (controllers never run, store permanently empty) parks initial-snapshot RPCs past the seed timeout instead of timing out into an empty FULL_SYNC that would wipe a connecting gateway's running config
+- **Preconditions**: Server with leadership signal wired (SetLeadershipSignal), replica not elected
+- **Steps**:
+  1. Call the seeded wait with a context outliving the seed timeout
+  2. Elect the replica mid-wait in sibling cases (TestWaitForStoreSeeded_TimeoutClockStartsAtElection, _ElectedThenSeeded)
+- **Expected Results**: Not-elected wait reports awaiting_leadership and never opens the gate; the bounded seed-timeout clock starts AT election; nil signal preserves the old single-replica behavior (gating disabled); store revisions on a non-leader do not open the gate
+
+### TestSeedGRPCStore (leadership ordering, cmd/operator)
+- **Description**: The operator wires the leadership signal into the gRPC server BEFORE serving and the seeding goroutine waits for election → cache sync → initial reconcile before MarkStoreSeeded; shutdown before/during any stage skips the seed mark
+- **Preconditions**: Fake manager elected-channel and cache-sync waiter
+- **Steps**:
+  1. Run seedGRPCStore with elected closed/never-closed/closed-late and canceled contexts
+- **Expected Results**: Seed mark only after election + sync (+ bounded reconcile wait); non-leaders and canceled shutdowns never mark the (empty) store seeded
+
+### TestClient_Connect_ClosesPreviousConnection
+- **Description**: The gateway's operator client closes the PREVIOUS gRPC connection before replacing it on reconnect, so retry/reconnect loops cannot leak sockets
+- **Preconditions**: Client connected to a mock operator endpoint
+- **Steps**:
+  1. Connect; capture conn; Connect again; Stop
+- **Expected Results**: First conn observed closed before replacement; already-closed conns are logged and skipped; Stop after reconnect never double-closes
+
+### TestConfigHandler_SnapshotThenIncrementalDelete_KeySymmetry
+- **Description**: FULL_SYNC seeds handler state under the SAME composite namespace/name key incremental updates use, so a snapshot-seeded resource is addressable by later incremental MODIFY/DELETE events (previously snapshots keyed by bare name, orphaning namespaced increments)
+- **Preconditions**: Snapshot with a namespaced resource applied
+- **Steps**:
+  1. HandleSnapshot seeding `prod/orders-route`; send incremental DELETE for the same namespace/name
+  2. Repeat for MODIFY (no duplicate entries) and GraphQL kinds
+- **Expected Results**: State entry removed/updated in place; undecodable snapshot resources are logged and skipped without half-clearing state (TestConfigHandler_SnapshotUndecodableResourceSkipped)
+
+## TLS Handshake Duration Metrics Tests
+
+The `gateway_tls_handshake_duration_seconds` histogram (labels: tls version, mode) is
+now WIRED on both the HTTPS listener and the gRPC TLS listener via
+`tls.InstrumentHandshakeTiming` (GetConfigForClient starts the clock at ClientHello;
+the per-connection VerifyConnection observes on success). Failed connection
+verifications record `gateway_tls_handshake_errors_total{reason="verify_connection_failed"}`
+and no duration sample. Existing GetConfigForClient/VerifyConnection chains (route TLS,
+ALPN enforcement, connection metrics) are preserved.
+
+Files: `internal/tls/handshake_test.go`, `internal/gateway/listener_handshake_metrics_test.go`,
+`internal/grpc/server/tls_handshake_metrics_test.go` (unit suites);
+`test/e2e/tls_handshake_metrics_e2e_test.go` (build tag `e2e`).
+
+### TestListener_TLSHandshakeDurationMetric_Recorded
+- **Description**: A real HTTPS handshake through the gateway Listener records exactly one histogram sample with a sane (0, 5s) duration while the existing connection counter still fires
+- **Preconditions**: HTTPS listener with self-signed certs, isolated Prometheus registry
+- **Steps**:
+  1. Start listener; TLS-dial and complete one HTTP request; gather registry
+- **Expected Results**: count=1, 0 < sum < 5s, gateway_tls_connections_total=1; failed mTLS handshakes record NO duration sample (TestListener_TLSHandshakeMetrics_MutualBadClientCert); VerifyConnection rejections count a bounded handshake error instead
+
+### TestGRPCListener_TLSHandshakeDurationMetric_Recorded
+- **Description**: A TLS handshake against the gRPC listener (h2 ALPN) records on the same histogram; the instrumentation is installed AFTER ALPN verification so the observation wraps the full chain (TestConfigureGRPCTLS_HandshakeTiming_ALPNFailureChainPreserved)
+- **Preconditions**: GRPC listener with TLS enabled, isolated registry
+- **Steps**:
+  1. Start listener; raw TLS dial with h2 ALPN; send HTTP/2 preface; read server answer; gather registry
+- **Expected Results**: ≥1 histogram sample with sane duration
+
+### TestE2E_TLS_HandshakeDurationMetric_GatewayJourney
+- **Description**: Full user journey — a gateway configured with an HTTPS listener via `gateway.New(cfg, WithGatewayTLSMetrics(...))` serves TLS traffic and the handshake-duration histogram becomes observable, proving the gateway→listener metrics wiring end-to-end (not just the listener seam)
+- **Preconditions**: None external (self-generated certs, direct-response route, isolated registry)
+- **Steps**:
+  1. Build a gateway config with one HTTPS listener (SIMPLE mode, generated cert/key) and a direct-response route
+  2. Start the gateway; make HTTPS requests through it (InsecureSkipVerify client)
+  3. Gather the registry and locate gateway_tls_handshake_duration_seconds
+- **Expected Results**: ≥1 sample after traffic (0 before), sum > 0; response served over TLS with the expected body

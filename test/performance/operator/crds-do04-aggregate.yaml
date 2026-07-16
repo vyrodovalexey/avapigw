@@ -1,4 +1,4 @@
-# DO-04 Operator-Mode CRD Manifests (avapigw-test)
+# DO-04 Operator-Mode CRD Manifests (avapigw-perf)
 # =============================================================================
 # Deployed by the DevOps DO-04 subtask to bring up a working set of routes /
 # backends for the e2e (AGG-17 / E-1..E-6) and performance (PT-01..06) phases.
@@ -6,13 +6,32 @@
 # Includes at least one route exercising the new AGGREGATE (fan-out) config so
 # e2e/perf can drive the aggregate feature end-to-end via CRDs only.
 #
-# Apply with:
-#   kubectl apply -f test/performance/operator/crds-do04-aggregate.yaml -n avapigw-test
+# NAMESPACE: all DO-04 perf fixtures live in the dedicated `avapigw-perf`
+# namespace (created by the Namespace manifest below). The admission webhook's
+# duplicate/overlap checker is namespace-scoped, so keeping these fixtures out
+# of `avapigw-test` lets this suite and test/k8s/crds-full-test.yaml (e.g.
+# graphql-basic, which also matches exact /graphql) be applied independently
+# on a webhook-enabled cluster without mutual rejection. The operator watches
+# all namespaces, so reconciliation and gateway config delivery are unaffected.
+#
+# Apply with (namespace is embedded in every manifest):
+#   kubectl apply -f test/performance/operator/crds-do04-aggregate.yaml
 #
 # Backends point at the docker-compose test ENV exposed on the host:
 #   REST   : host.docker.internal:8801..8805
 #   gRPC   : host.docker.internal:8811..8814
 #   GraphQL: host.docker.internal:8801/8802 (REST backends also serve /graphql)
+
+# =============================================================================
+# Dedicated perf-fixture namespace
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: avapigw-perf
+  labels:
+    app: avapigw-do04
 
 # =============================================================================
 # HTTP Backends (Backend CRDs)
@@ -22,7 +41,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: Backend
 metadata:
   name: do04-http-backend-1
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: http-backend
@@ -44,7 +63,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: Backend
 metadata:
   name: do04-http-backend-2
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: http-backend
@@ -70,7 +89,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: GRPCBackend
 metadata:
   name: do04-grpc-backend-1
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: grpc-backend
@@ -100,14 +119,16 @@ apiVersion: avapigw.io/v1alpha1
 kind: GraphQLBackend
 metadata:
   name: do04-graphql-backend-1
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: graphql-backend
 spec:
   hosts:
     # The docker-compose REST backends do NOT serve /graphql; use the
-    # in-cluster GraphQL mock (test/k8s/graphql-mock.yaml) instead.
+    # in-cluster GraphQL mock (test/k8s/graphql-mock.yaml) instead. The mock
+    # Service is deployed in avapigw-test (deployment namespace); the FQDN
+    # below intentionally crosses namespaces from this avapigw-perf fixture.
     - address: graphql-mock.avapigw-test.svc.cluster.local
       port: 8080
       weight: 1
@@ -128,7 +149,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: APIRoute
 metadata:
   name: do04-http-route
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: http-route
@@ -161,7 +182,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: APIRoute
 metadata:
   name: do04-aggregate-route
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: http-route
@@ -220,7 +241,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: GRPCRoute
 metadata:
   name: do04-grpc-route
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: grpc-route
@@ -243,7 +264,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: GraphQLRoute
 metadata:
   name: do04-graphql-route
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: graphql-route

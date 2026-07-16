@@ -822,10 +822,21 @@ func TestValidateGRPCHealthCheck(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name: "httpPath set when useHTTP is false",
+			// The API server applies the CRD schema default
+			// (httpPath="/healthz") before the webhook runs, so the
+			// defaulted value must be admitted even when useHTTP is false.
+			name: "CRD-defaulted httpPath tolerated when useHTTP is false",
 			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
 				UseHTTP:  false,
 				HTTPPath: "/healthz",
+			},
+			wantError: false,
+		},
+		{
+			name: "explicit non-default httpPath set when useHTTP is false",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  false,
+				HTTPPath: "/custom-health",
 			},
 			wantError: true,
 		},

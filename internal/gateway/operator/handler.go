@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	graphqlrouter "github.com/vyrodovalexey/avapigw/internal/graphql/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	operatorv1alpha1 "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1"
 )
@@ -587,66 +589,30 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 		return nil
 	}
 
-	// Clear existing state
+	// Decode every resource type before touching state so an undecodable
+	// snapshot never leaves the handler half-cleared.
+	routes, routeKeys := decodeResources[config.Route](h.logger, "route", snapshot.ApiRoutes)
+	backends, backendKeys := decodeResources[config.Backend](h.logger, "backend", snapshot.Backends)
+	grpcRoutes, grpcRouteKeys := decodeResources[config.GRPCRoute](h.logger, "gRPC route", snapshot.GrpcRoutes)
+	grpcBackends, grpcBackendKeys := decodeResources[config.GRPCBackend](
+		h.logger, "gRPC backend", snapshot.GrpcBackends)
+	graphqlRoutes, graphqlRouteKeys := decodeResources[config.GraphQLRoute](
+		h.logger, "GraphQL route", snapshot.GraphqlRoutes)
+	graphqlBackends, graphqlBackendKeys := decodeResources[config.GraphQLBackend](
+		h.logger, "GraphQL backend", snapshot.GraphqlBackends)
+
+	// Replace the tracked state in a single atomic swap under one lock so
+	// concurrent readers never observe a half-cleared configuration. State
+	// is keyed by the SAME composite namespace/name key incremental updates
+	// use (see HandleUpdate): a FULL_SYNC followed by an incremental
+	// MODIFY/DELETE for the same resource must address the same map entry.
 	h.mu.Lock()
-	h.routes = make(map[string]*config.Route)
-	h.backends = make(map[string]*config.Backend)
-	h.grpcRoutes = make(map[string]*config.GRPCRoute)
-	h.grpcBackends = make(map[string]*config.GRPCBackend)
-	h.graphqlRoutes = make(map[string]*config.GraphQLRoute)
-	h.graphqlBackends = make(map[string]*config.GraphQLBackend)
-	h.mu.Unlock()
-
-	// Process API routes
-	routes := h.parseRoutes(snapshot.ApiRoutes)
-
-	// Process backends
-	backends := h.parseBackends(snapshot.Backends)
-
-	// Process gRPC routes
-	grpcRoutes := h.parseGRPCRoutes(snapshot.GrpcRoutes)
-
-	// Process gRPC backends
-	grpcBackends := h.parseGRPCBackends(snapshot.GrpcBackends)
-
-	// Process GraphQL routes
-	graphqlRoutes := h.parseGraphQLRoutes(snapshot.GraphqlRoutes)
-
-	// Process GraphQL backends
-	graphqlBackends := h.parseGraphQLBackends(snapshot.GraphqlBackends)
-
-	// Store in state
-	h.mu.Lock()
-	for _, r := range routes {
-		route := r
-		key := resourceKey("", route.Name)
-		h.routes[key] = &route
-	}
-	for _, b := range backends {
-		backend := b
-		key := resourceKey("", backend.Name)
-		h.backends[key] = &backend
-	}
-	for _, r := range grpcRoutes {
-		route := r
-		key := resourceKey("", route.Name)
-		h.grpcRoutes[key] = &route
-	}
-	for _, b := range grpcBackends {
-		backend := b
-		key := resourceKey("", backend.Name)
-		h.grpcBackends[key] = &backend
-	}
-	for _, r := range graphqlRoutes {
-		route := r
-		key := resourceKey("", route.Name)
-		h.graphqlRoutes[key] = &route
-	}
-	for _, b := range graphqlBackends {
-		backend := b
-		key := resourceKey("", backend.Name)
-		h.graphqlBackends[key] = &backend
-	}
+	h.routes = stateMap(routes, routeKeys)
+	h.backends = stateMap(backends, backendKeys)
+	h.grpcRoutes = stateMap(grpcRoutes, grpcRouteKeys)
+	h.grpcBackends = stateMap(grpcBackends, grpcBackendKeys)
+	h.graphqlRoutes = stateMap(graphqlRoutes, graphqlRouteKeys)
+	h.graphqlBackends = stateMap(graphqlBackends, graphqlBackendKeys)
 	h.mu.Unlock()
 
 	// Apply full configuration if applier supports it
@@ -682,172 +648,99 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 	return nil
 }
 
-// parseRoutes parses configuration resources into routes.
-func (h *ConfigHandler) parseRoutes(
+// decodeResources decodes each resource's SpecJson into T. Successfully
+// decoded items are returned in input order together with their composite
+// state keys (resourceKey(namespace, name)), the SAME key shape incremental
+// updates use in HandleUpdate, so snapshot-seeded and incrementally updated
+// state address identical map entries. Undecodable resources are logged with
+// the given kind label and skipped.
+func decodeResources[T any](
+	logger observability.Logger,
+	kind string,
 	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.Route {
-	routes := make([]config.Route, 0, len(resources))
+) (items []T, keys []string) {
+	items = make([]T, 0, len(resources))
+	keys = make([]string, 0, len(resources))
 	for _, r := range resources {
-		var route config.Route
-		if err := json.Unmarshal(r.SpecJson, &route); err != nil {
-			h.logger.Error("failed to parse route",
+		var item T
+		if err := json.Unmarshal(r.SpecJson, &item); err != nil {
+			logger.Error("failed to parse "+kind,
 				observability.String("name", r.Name),
 				observability.Error(err),
 			)
 			continue
 		}
-		routes = append(routes, route)
+		items = append(items, item)
+		keys = append(keys, resourceKey(r.Namespace, r.Name))
 	}
-	return routes
+	return items, keys
 }
 
-// parseBackends parses configuration resources into backends.
-func (h *ConfigHandler) parseBackends(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.Backend {
-	backends := make([]config.Backend, 0, len(resources))
-	for _, r := range resources {
-		var backend config.Backend
-		if err := json.Unmarshal(r.SpecJson, &backend); err != nil {
-			h.logger.Error("failed to parse backend",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		backends = append(backends, backend)
+// stateMap builds a state map from decoded items and their composite keys
+// (parallel slices produced by decodeResources). Items are copied so state
+// entries stay isolated from the slices handed to the applier.
+func stateMap[T any](items []T, keys []string) map[string]*T {
+	m := make(map[string]*T, len(items))
+	for i := range items {
+		item := items[i]
+		m[keys[i]] = &item
 	}
-	return backends
+	return m
 }
 
-// parseGRPCRoutes parses configuration resources into gRPC routes.
-func (h *ConfigHandler) parseGRPCRoutes(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GRPCRoute {
-	routes := make([]config.GRPCRoute, 0, len(resources))
-	for _, r := range resources {
-		var route config.GRPCRoute
-		if err := json.Unmarshal(r.SpecJson, &route); err != nil {
-			h.logger.Error("failed to parse gRPC route",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		routes = append(routes, route)
+// collectSorted flattens a resource state map into a slice ordered by the
+// composite state key (namespace/name). Go map iteration order is
+// randomized, and the collected slices are pushed into routers/registries
+// and logged — keys are unique, so key order keeps route loading, apply
+// logs, and config diffs deterministic across processes and restarts.
+func collectSorted[T any](m map[string]*T) []T {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	return routes
+	sort.Strings(keys)
+
+	items := make([]T, 0, len(m))
+	for _, k := range keys {
+		items = append(items, *m[k])
+	}
+	return items
 }
 
-// parseGRPCBackends parses configuration resources into gRPC backends.
-func (h *ConfigHandler) parseGRPCBackends(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GRPCBackend {
-	backends := make([]config.GRPCBackend, 0, len(resources))
-	for _, r := range resources {
-		var backend config.GRPCBackend
-		if err := json.Unmarshal(r.SpecJson, &backend); err != nil {
-			h.logger.Error("failed to parse gRPC backend",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		backends = append(backends, backend)
-	}
-	return backends
-}
-
-// collectRoutes collects all routes from the state.
+// collectRoutes collects all routes from the state in deterministic order.
 func (h *ConfigHandler) collectRoutes() []config.Route {
-	routes := make([]config.Route, 0, len(h.routes))
-	for _, r := range h.routes {
-		routes = append(routes, *r)
-	}
-	return routes
+	return collectSorted(h.routes)
 }
 
-// collectBackends collects all backends from the state.
+// collectBackends collects all backends from the state in deterministic order.
 func (h *ConfigHandler) collectBackends() []config.Backend {
-	backends := make([]config.Backend, 0, len(h.backends))
-	for _, b := range h.backends {
-		backends = append(backends, *b)
-	}
-	return backends
+	return collectSorted(h.backends)
 }
 
-// collectGRPCRoutes collects all gRPC routes from the state.
+// collectGRPCRoutes collects all gRPC routes from the state in deterministic order.
 func (h *ConfigHandler) collectGRPCRoutes() []config.GRPCRoute {
-	routes := make([]config.GRPCRoute, 0, len(h.grpcRoutes))
-	for _, r := range h.grpcRoutes {
-		routes = append(routes, *r)
-	}
-	return routes
+	return collectSorted(h.grpcRoutes)
 }
 
-// collectGRPCBackends collects all gRPC backends from the state.
+// collectGRPCBackends collects all gRPC backends from the state in deterministic order.
 func (h *ConfigHandler) collectGRPCBackends() []config.GRPCBackend {
-	backends := make([]config.GRPCBackend, 0, len(h.grpcBackends))
-	for _, b := range h.grpcBackends {
-		backends = append(backends, *b)
-	}
-	return backends
+	return collectSorted(h.grpcBackends)
 }
 
-// parseGraphQLRoutes parses configuration resources into GraphQL routes.
-func (h *ConfigHandler) parseGraphQLRoutes(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GraphQLRoute {
-	routes := make([]config.GraphQLRoute, 0, len(resources))
-	for _, r := range resources {
-		var route config.GraphQLRoute
-		if err := json.Unmarshal(r.SpecJson, &route); err != nil {
-			h.logger.Error("failed to parse GraphQL route",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		routes = append(routes, route)
-	}
-	return routes
-}
-
-// parseGraphQLBackends parses configuration resources into GraphQL backends.
-func (h *ConfigHandler) parseGraphQLBackends(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GraphQLBackend {
-	backends := make([]config.GraphQLBackend, 0, len(resources))
-	for _, r := range resources {
-		var backend config.GraphQLBackend
-		if err := json.Unmarshal(r.SpecJson, &backend); err != nil {
-			h.logger.Error("failed to parse GraphQL backend",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		backends = append(backends, backend)
-	}
-	return backends
-}
-
-// collectGraphQLRoutes collects all GraphQL routes from the state.
+// collectGraphQLRoutes collects all GraphQL routes from the state, ordered by
+// the SAME exported specificity function the GraphQL data-plane router uses
+// in LoadRoutes (graphqlrouter.SortRoutesBySpecificity), so operator-applied
+// route order, apply logs, and the router's matching order never diverge.
 func (h *ConfigHandler) collectGraphQLRoutes() []config.GraphQLRoute {
-	routes := make([]config.GraphQLRoute, 0, len(h.graphqlRoutes))
-	for _, r := range h.graphqlRoutes {
-		routes = append(routes, *r)
-	}
+	routes := collectSorted(h.graphqlRoutes)
+	graphqlrouter.SortRoutesBySpecificity(routes)
 	return routes
 }
 
-// collectGraphQLBackends collects all GraphQL backends from the state.
+// collectGraphQLBackends collects all GraphQL backends from the state in
+// deterministic order.
 func (h *ConfigHandler) collectGraphQLBackends() []config.GraphQLBackend {
-	backends := make([]config.GraphQLBackend, 0, len(h.graphqlBackends))
-	for _, b := range h.graphqlBackends {
-		backends = append(backends, *b)
-	}
-	return backends
+	return collectSorted(h.graphqlBackends)
 }
 
 // snapshotIsEmpty reports whether the snapshot carries no resources of any

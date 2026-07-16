@@ -144,15 +144,9 @@ func (l *Listener) convertToTLSConfig(cfg *config.ListenerTLSConfig) *tlspkg.Con
 		}
 	}
 
-	// Vault configuration
-	if cfg.Vault != nil && cfg.Vault.Enabled {
-		tlsCfg.Vault = &tlspkg.VaultTLSConfig{
-			Enabled:    true,
-			PKIMount:   cfg.Vault.PKIMount,
-			Role:       cfg.Vault.Role,
-			CommonName: cfg.Vault.CommonName,
-			AltNames:   cfg.Vault.AltNames,
-		}
+	// Vault configuration (maps the documented vault.ttl into the provider)
+	if vaultCfg := convertVaultTLSConfig(cfg.Vault, l.logger); vaultCfg != nil {
+		tlsCfg.Vault = vaultCfg
 		// When Vault is the certificate source, set ServerCertificate accordingly
 		if tlsCfg.ServerCertificate == nil {
 			tlsCfg.ServerCertificate = &tlspkg.CertificateConfig{
@@ -236,6 +230,9 @@ func (l *Listener) Start(ctx context.Context) error {
 
 	// Install TLS connection metrics via VerifyConnection callback
 	l.installTLSConnectionMetrics()
+
+	// Install TLS handshake duration metrics via GetConfigForClient/VerifyConnection
+	l.installTLSHandshakeMetrics()
 
 	// Create listener with context
 	var lc net.ListenConfig
@@ -390,6 +387,23 @@ func (l *Listener) installTLSConnectionMetrics() {
 		}
 		return nil
 	}
+}
+
+// installTLSHandshakeMetrics instruments the TLS config to measure the
+// duration of every TLS handshake and record it on the handshake-duration
+// histogram. The measurement starts when the ClientHello is received
+// (GetConfigForClient) and completes when connection verification succeeds
+// (VerifyConnection), so each sample covers the real server-side handshake.
+// Failed connection verifications are recorded as bounded handshake errors
+// instead of duration samples. Installed after installTLSConnectionMetrics so
+// the per-connection observation wraps the full verification chain.
+func (l *Listener) installTLSHandshakeMetrics() {
+	if l.server.TLSConfig == nil {
+		return
+	}
+
+	onSuccess, onFailure := tlspkg.NewHandshakeRecorder(l.tlsManager, l.tlsMetrics)
+	tlspkg.InstrumentHandshakeTiming(l.server.TLSConfig, onSuccess, onFailure)
 }
 
 // serve starts serving requests.

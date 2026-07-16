@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -20,6 +21,41 @@ import (
 
 // routerTracerName is the OpenTelemetry tracer name for router operations.
 const routerTracerName = "avapigw/graphql-router"
+
+// Specificity weights for GraphQL route ordering. They mirror the documented
+// HTTP router priority scheme (exact 1000, prefix 500+len, regex 100, +10 per
+// header) and the gRPC router's halved weights for the secondary match
+// dimension (operation name, mirroring gRPC method: exact 500, prefix
+// 250+len, regex 50). Higher total specificity is matched first.
+const (
+	// specificityPathExact is the weight of an exact path match.
+	specificityPathExact = 1000
+
+	// specificityPathPrefix is the base weight of a prefix path match;
+	// longer prefixes gain +1 per character so nested prefixes outrank
+	// their parents.
+	specificityPathPrefix = 500
+
+	// specificityPathRegex is the weight of a regex path match.
+	specificityPathRegex = 100
+
+	// specificityOpNameExact is the weight of an exact operation-name match.
+	specificityOpNameExact = 500
+
+	// specificityOpNamePrefix is the base weight of a prefix operation-name
+	// match; longer prefixes gain +1 per character.
+	specificityOpNamePrefix = 250
+
+	// specificityOpNameRegex is the weight of a regex operation-name match.
+	specificityOpNameRegex = 50
+
+	// specificityOpType is the weight of a set operation type
+	// (query, mutation, or subscription).
+	specificityOpType = 200
+
+	// specificityHeader is the weight added per header match condition.
+	specificityHeader = 10
+)
 
 // GraphQLRequest represents a parsed GraphQL request body.
 type GraphQLRequest struct {
@@ -56,6 +92,9 @@ type compiledRoute struct {
 	pathRegex     *regexp.Regexp
 	opNameRegex   *regexp.Regexp
 	headerRegexes map[string]*regexp.Regexp
+	// specificity caches Specificity(config) at compile time for the
+	// LoadRoutes ordering sort.
+	specificity int
 }
 
 // Option is a functional option for configuring the router.
@@ -81,7 +120,11 @@ func New(opts ...Option) *Router {
 	return r
 }
 
-// LoadRoutes loads and compiles route configurations.
+// LoadRoutes loads and compiles route configurations. An empty (or nil)
+// slice clears all routes. Compiled routes are ordered by descending
+// Specificity with a route-name tie-break, so Match's first-match-wins walk
+// is deterministic and independent of the caller's input order (for example
+// Kubernetes map iteration in operator mode).
 func (r *Router) LoadRoutes(routes []config.GraphQLRoute) error {
 	compiled := make([]compiledRoute, 0, len(routes))
 
@@ -93,6 +136,11 @@ func (r *Router) LoadRoutes(routes []config.GraphQLRoute) error {
 		compiled = append(compiled, *cr)
 	}
 
+	sort.SliceStable(compiled, func(i, j int) bool {
+		return routeLess(compiled[i].specificity, compiled[i].config.Name,
+			compiled[j].specificity, compiled[j].config.Name)
+	})
+
 	r.mu.Lock()
 	r.routes = compiled
 	r.mu.Unlock()
@@ -102,6 +150,84 @@ func (r *Router) LoadRoutes(routes []config.GraphQLRoute) error {
 	)
 
 	return nil
+}
+
+// Specificity computes the routing specificity score of a GraphQL route.
+// It is the single source of truth for route precedence, shared by
+// LoadRoutes (data plane ordering), SortRoutesBySpecificity (config-slice
+// ordering for the operator apply path), and admission-webhook parity checks.
+//
+// The score is the sum over all match blocks of:
+//
+//	path:          exact=1000 | prefix=500+len(prefix) | regex=100 | unset=0
+//	operationName: exact=500  | prefix=250+len(prefix) | regex=50  | unset=0
+//	operationType: set=200 | empty=0
+//	headers:       +10 per header condition
+//
+// Within one StringMatch the field precedence is Exact > Prefix > Regex,
+// mirroring match evaluation. A route without match blocks (catch-all)
+// scores 0 and therefore sorts last.
+func Specificity(route *config.GraphQLRoute) int {
+	total := 0
+	for i := range route.Match {
+		total += matchSpecificity(&route.Match[i])
+	}
+	return total
+}
+
+// matchSpecificity scores a single match block (see Specificity).
+func matchSpecificity(m *config.GraphQLRouteMatch) int {
+	score := stringMatchSpecificity(m.Path,
+		specificityPathExact, specificityPathPrefix, specificityPathRegex)
+	score += stringMatchSpecificity(m.OperationName,
+		specificityOpNameExact, specificityOpNamePrefix, specificityOpNameRegex)
+	if m.OperationType != "" {
+		score += specificityOpType
+	}
+	score += len(m.Headers) * specificityHeader
+	return score
+}
+
+// stringMatchSpecificity scores a StringMatch with the given weights,
+// honoring the Exact > Prefix > Regex field precedence used by match
+// evaluation. Prefix matches gain +1 per prefix character so longer
+// (more specific) prefixes outrank shorter ones.
+func stringMatchSpecificity(sm *config.StringMatch, exact, prefix, regex int) int {
+	if sm == nil {
+		return 0
+	}
+	switch {
+	case sm.Exact != "":
+		return exact
+	case sm.Prefix != "":
+		return prefix + len(sm.Prefix)
+	case sm.Regex != "":
+		return regex
+	default:
+		return 0
+	}
+}
+
+// routeLess is the shared ordering predicate: descending specificity with an
+// ascending route-name tie-break, yielding a deterministic total order for
+// uniquely named routes.
+func routeLess(aSpecificity int, aName string, bSpecificity int, bName string) bool {
+	if aSpecificity != bSpecificity {
+		return aSpecificity > bSpecificity
+	}
+	return aName < bName
+}
+
+// SortRoutesBySpecificity orders routes in place by descending Specificity
+// with an ascending route-name tie-break — exactly the order LoadRoutes
+// establishes internally. Callers that hand route slices to the router (such
+// as the operator config handler) use it to keep apply logs, diffs, and the
+// router's matching order aligned.
+func SortRoutesBySpecificity(routes []config.GraphQLRoute) {
+	sort.SliceStable(routes, func(i, j int) bool {
+		return routeLess(Specificity(&routes[i]), routes[i].Name,
+			Specificity(&routes[j]), routes[j].Name)
+	})
 }
 
 // Match finds the best matching route for the given HTTP request and parsed GraphQL request.
@@ -255,6 +381,7 @@ func compileRoute(route *config.GraphQLRoute) (*compiledRoute, error) {
 	cr := &compiledRoute{
 		config:        *route,
 		headerRegexes: make(map[string]*regexp.Regexp),
+		specificity:   Specificity(route),
 	}
 
 	for _, match := range route.Match {

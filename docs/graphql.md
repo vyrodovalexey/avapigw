@@ -50,6 +50,14 @@ The AV API Gateway provides comprehensive GraphQL support with advanced features
 > unauthenticated requests to a GraphQL route with
 > `authentication.enabled: true` — are now rejected.
 
+> **Limitation — plaintext backend connections only:** the GraphQL proxy
+> connects to backends over plaintext `http` (queries/mutations) and `ws`
+> (subscriptions); the scheme is hardcoded and a `tls` block on a
+> GraphQLBackend does **not** enable HTTPS/WSS for the GraphQL data path.
+> Client-facing TLS termination at the gateway listener is unaffected. Run
+> GraphQL backends on a trusted network (or a service mesh providing
+> transport encryption) until backend TLS is supported.
+
 ## Configuration Guide
 
 ### Global GraphQL Configuration
@@ -130,6 +138,35 @@ spec:
 ```
 
 ### Advanced Routing Configuration
+
+#### Route Precedence
+
+GraphQL routes are matched in **deterministic specificity order**,
+independent of the order they appear in the configuration (or of Kubernetes
+resource ordering in operator mode). The router computes a specificity score
+for every route as the sum over its match blocks of:
+
+| Condition | Weight |
+|-----------|--------|
+| `path.exact` | 1000 |
+| `path.prefix` | 500 + prefix length |
+| `path.regex` | 100 |
+| `operationName.exact` | 500 |
+| `operationName.prefix` | 250 + prefix length |
+| `operationName.regex` | 50 |
+| `operationType` set | +200 |
+| Each header condition | +10 |
+| No match block (catch-all) | 0 |
+
+Within one `path`/`operationName` matcher the field precedence is
+`exact` > `prefix` > `regex`, mirroring match evaluation. Routes are sorted
+by **descending specificity** with an **ascending route-name tie-break**, and
+matching is first-match-wins over that order — so a more specific route
+always wins (e.g. an `operationType`-specific route beats a generic route on
+the same path), and equal-specificity routes (such as two regex routes)
+resolve deterministically by name. The admission webhook uses the same
+formula for its overlap checks (see
+[Webhook Validation](operator/webhook-validation.md#graphql-route-conflicts)).
 
 #### Route by Operation Type
 
@@ -701,12 +738,11 @@ spec:
     enabled: true
     threshold: 5
     timeout: 30s
-  
-  tls:
-    enabled: true
-    mode: SIMPLE
-    caFile: "/certs/ca.crt"
 ```
+
+> **Note:** GraphQL request/subscription proxying is plaintext-only — the
+> proxy dials backends with hardcoded `http`/`ws` schemes, so a `tls` block
+> on a GraphQLBackend does not enable HTTPS/WSS for the GraphQL data path.
 
 ### Operator Features
 

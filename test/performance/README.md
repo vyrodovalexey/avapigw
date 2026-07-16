@@ -21,26 +21,44 @@ The performance testing suite includes:
 
 ## Latest Performance Test Results
 
-### PT Matrix Run (2026-07-15, local compose-network gateway)
+### PT Matrix Run (2026-07-16, local compose-network gateway, current HEAD)
 
 The most recent full run covers the six PT scenario groups (~180 s steady
 state each, scenarios per group run concurrently) against a locally built
 gateway container attached to the compose network, with monitoring-metric
 verification in VictoriaMetrics after every group. Full report:
-[`results/perftest-report_pt-local-docker_20260715_071500.md`](results/perftest-report_pt-local-docker_20260715_071500.md)
-(charts in `results/charts-pt-local_20260715_071500/`). Driver:
-`scripts/run-pt-local.sh` (thin adaptation of `run-pt-suite.sh` for local
-gateway endpoints; reuses `run-grpc-group.sh` / `run-http-group.sh` /
-`run-graphql-group.sh`).
+[`results/perftest-report_pt-local-docker_20260716_032156.md`](results/perftest-report_pt-local-docker_20260716_032156.md)
+(charts in `results/charts-pt-local_20260716_032156/`). Driver:
+`scripts/run-pt-local.sh` (reused; container bring-up codified in
+`scripts/start-pt-docker.sh`). Highlights: NEW
+`gateway_tls_handshake_duration_seconds` histogram proven under load;
+GraphQL per-route enforcement + GraphQL metrics fixes verified (429/401 now
+enforced on `/graphql`, `avapigw_graphql_requests_total` populates); REST
+transport-pooling fix verified (PT-03/04 clean WITHOUT port-range sysctls);
+NEW finding: the GraphQL forwarder still dial-storms per request and needs
+the sysctls (or a production pooled-transport fix) for PT-05/06.
 
 | Group | Scenario set | Window | Σ RPS achieved | Errors (excl. deliberate 429) |
 |-------|--------------|--------|----------------|-------------------------------|
-| PT-01 | gRPC & streaming (plaintext :9000) — unary/serverstream/bidistream + OIDC + backend-mTLS | 184 s | 13,477 | <0.01% |
-| PT-02 | TLS gRPC & streaming (:9443) | 184 s | 10,143 | <0.01% |
-| PT-03 | HTTP & WS (:8080) — basic/apikey/OIDC auth, sentinel ratelimit, transform, encoding+gzip, sentinel cache, CORS, OpenAPI | 187 s | 4,295 + 3×WS | 0 × 5xx |
-| PT-04 | HTTPS & WSS (:8443) — same feature stack over TLS | 188 s | 4,497 + 3×WSS | 0 × 5xx |
-| PT-05 | GraphQL & WS (:8080) | 185 s | 3,599 + WS | 0 |
-| PT-06 | TLS GraphQL & WSS (:8443) | 185 s | 3,600 + WSS | 0 |
+| PT-01 | gRPC & streaming (plaintext :9000) — unary/serverstream/bidistream + OIDC + backend-mTLS | 184 s | 11,953 | <0.01% |
+| PT-02 | TLS gRPC & streaming (:9443) | 184 s | 9,211 | <0.01% |
+| PT-03 | HTTP & WS (:8080) — basic/apikey/OIDC auth, sentinel ratelimit, transform, encoding+gzip, sentinel cache, CORS, OpenAPI | 187 s | 4,668 + 3×WS | 0 × 5xx |
+| PT-04 | HTTPS & WSS (:8443) — same feature stack over TLS | 187 s | 4,658 + 3×WSS | 0 × 5xx |
+| PT-05 | GraphQL & WS (:8080) — auth/RL/transform/CORS now ENFORCED | 186 s | 3,599 + WS | 0 × 5xx (re-run w/ sysctls) |
+| PT-06 | TLS GraphQL & WSS (:8443) | 186 s | 3,595 + WSS | 0 × 5xx (re-run w/ sysctls) |
+
+gRPC unary-style scenarios measured 10–12 % below the 20260715 baseline
+(flagged in the report for same-day A/B attribution; HTTP/HTTPS/GraphQL
+groups improved or held).
+
+### Previous PT Matrix Run (2026-07-15)
+
+Report:
+[`results/perftest-report_pt-local-docker_20260715_071500.md`](results/perftest-report_pt-local-docker_20260715_071500.md)
+(charts in `results/charts-pt-local_20260715_071500/`). Σ RPS: PT-01 13,477 /
+PT-02 10,143 / PT-03 4,295 / PT-04 4,497 / PT-05 3,599 / PT-06 3,600 —
+GraphQL feature enforcement and GraphQL/TLS-handshake metrics were NOT yet
+active in that build (see that report's findings 3–5).
 
 Known environment note from that run: the compose sentinels announce the
 master at its docker-bridge IP, which is **unreachable from a macOS host** —
@@ -710,6 +728,23 @@ All Kubernetes performance tests use the `avapigw-test` namespace consistently:
 - Service account: `avapigw` in `avapigw-test` namespace
 - This ensures isolation from other deployments and consistent test environment
 
+**Exception: DO-04 perf fixtures live in `avapigw-perf`**
+The operator-mode perf/e2e fixture CRDs
+(`test/performance/operator/crds-do04-aggregate.yaml`) carry their own
+dedicated `avapigw-perf` namespace, embedded in every manifest (the file also
+creates the namespace — apply it without `-n`). The admission webhook's
+duplicate/overlap checker is namespace-scoped, so keeping these fixtures out
+of `avapigw-test` lets them coexist with `test/k8s/crds-full-test.yaml` on a
+webhook-enabled cluster without mutual rejection. The operator watches all
+namespaces, so reconciliation and gateway config delivery are unaffected. The
+e2e live gate reads the fixture namespace from the
+`AVAPIGW_E2E_FIXTURE_NAMESPACE` environment variable (default:
+`avapigw-perf`).
+
+The in-cluster GraphQL mock (`test/k8s/graphql-mock.yaml`) tolerates client
+disconnects mid-response (`BrokenPipeError`/`ConnectionResetError` are
+swallowed), so aggressive load tests and probe restarts cannot crash it.
+
 ## Infrastructure Setup
 
 ### Vault Configuration
@@ -765,6 +800,19 @@ Configure Vault Kubernetes authentication for K8s deployments:
 - Kubernetes auth method configuration
 - Kubernetes auth role bound to `avapigw` service account
 - PKI certificate issuance testing
+- With `--setup-pki`: the PKI engine and the **canonical `test-role`**
+  definition (allowed domains `localhost, local, test, avapigw.local,
+  avapigw-test.local, docker.internal` with subdomains)
+
+> **Sync contract:** `test/docker-compose/scripts/setup-vault.sh` writes the
+> **same `test-role` on the same `pki` mount** — whichever script runs last
+> wins. Both definitions are kept aligned on the canonical allowed-domain set
+> (see the comment in each script); in particular the `docker.internal`
+> domain must stay present because the k8s gateway
+> (`helm/avapigw/values-local.yaml`) issues listener certificates with a
+> `host.docker.internal` altName and would crash-loop on certificate renewal
+> without it. The compose script only adds the bare backend CN domains
+> (`rest_api_4`, `grpc_3`) and a higher `max_ttl` for 1-year backend certs.
 
 ### Keycloak Configuration
 
@@ -1525,8 +1573,10 @@ phantom:
 target:
   host: "host.docker.internal"
   port: 9000
+```
 
-# k6
+```javascript
+// k6
 const WS_URL = 'ws://host.docker.internal:8080/ws';
 ```
 

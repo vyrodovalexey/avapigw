@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -92,15 +93,34 @@ func (v *GRPCRouteValidator) ValidateCreate(
 }
 
 // ValidateUpdate implements admission.CustomValidator.
+//
+// Two lifecycle short-circuits prevent the webhook/finalizer deadlock:
+// deleting objects are admitted unconditionally, and metadata-only updates
+// (semantically unchanged spec) run local spec validation only, skipping
+// duplicate conflict checks.
 func (v *GRPCRouteValidator) ValidateUpdate(
 	ctx context.Context,
-	_, newObj *avapigwv1alpha1.GRPCRoute,
+	oldObj, newObj *avapigwv1alpha1.GRPCRoute,
 ) (admission.Warnings, error) {
+	// The object is being deleted; admit so metadata updates (for example
+	// finalizer removal) always proceed.
+	if newObj.GetDeletionTimestamp() != nil {
+		return nil, nil
+	}
+
 	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
 		GetWebhookMetrics().RecordValidation("GRPCRoute", "update", "rejected", time.Since(start), len(warnings))
 		return warnings, err
+	}
+
+	// Metadata-only update: the spec is unchanged, so this update cannot
+	// introduce new duplicate conflicts. Local spec validation (above)
+	// still applies.
+	if apiequality.Semantic.DeepEqual(oldObj.Spec, newObj.Spec) {
+		GetWebhookMetrics().RecordValidation("GRPCRoute", "update", "allowed", time.Since(start), len(warnings))
+		return warnings, nil
 	}
 
 	// Check for duplicates (excluding self)
