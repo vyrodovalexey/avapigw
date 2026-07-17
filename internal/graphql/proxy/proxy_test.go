@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -280,6 +281,86 @@ func TestProxy_BuildTargetURL_RoundRobin(t *testing.T) {
 	// Fourth call should wrap around to host 0
 	url4 := p.buildTargetURL(target)
 	assert.Equal(t, "http://10.0.0.1:4000", url4.String())
+}
+
+// TestProxy_BuildTargetURL_HighCounterNoNegativeIndex is the regression test
+// for the signed round-robin modulo (A-3): `int(counter) % len(hosts)`
+// truncated the int64 counter on 32-bit platforms after ~2^31 requests, and
+// Go's % preserves the dividend's sign, so the negative index panicked the
+// slice access. Each case seeds the atomic counter at a hostile boundary and
+// asserts every subsequent selection stays a valid host (no panic). The
+// negative and int64-wraparound seeds deterministically panic the old signed
+// line on 64-bit builds too, so this test guards all architectures.
+func TestProxy_BuildTargetURL_HighCounterNoNegativeIndex(t *testing.T) {
+	t.Parallel()
+
+	p := New()
+	hosts := []config.BackendHost{
+		{Address: "10.0.0.1", Port: 4000},
+		{Address: "10.0.0.2", Port: 4001},
+		{Address: "10.0.0.3", Port: 4002},
+	}
+	validHosts := map[string]bool{
+		"http://10.0.0.1:4000": true,
+		"http://10.0.0.2:4001": true,
+		"http://10.0.0.3:4002": true,
+	}
+
+	tests := []struct {
+		name string
+		seed int64
+	}{
+		{name: "just below 32-bit boundary", seed: math.MaxInt32 - 2},
+		{name: "exactly at 32-bit boundary", seed: math.MaxInt32},
+		{name: "just above 32-bit boundary", seed: math.MaxInt32 + 1},
+		{name: "int64 wraparound", seed: math.MaxInt64},
+		{name: "post-wraparound negative counter", seed: -2},
+		{name: "deeply negative counter", seed: math.MinInt64 + 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			target := &backendTarget{name: "wrap", hosts: hosts}
+			target.current.Store(tc.seed)
+
+			for i := 0; i < 2*len(hosts); i++ {
+				u := p.buildTargetURL(target)
+				assert.True(t, validHosts[u.String()],
+					"counter seed %d call %d selected out-of-range host %q", tc.seed, i, u)
+			}
+		})
+	}
+}
+
+// TestProxy_BuildTargetURL_RoundRobinOrderAcross32BitBoundary asserts the
+// unsigned modulo preserves round-robin fairness while the counter crosses
+// math.MaxInt32: consecutive selections must still cycle through every host
+// exactly once per len(hosts) calls (no skips or repeats at the boundary).
+func TestProxy_BuildTargetURL_RoundRobinOrderAcross32BitBoundary(t *testing.T) {
+	t.Parallel()
+
+	p := New()
+	target := &backendTarget{
+		name: "boundary",
+		hosts: []config.BackendHost{
+			{Address: "10.0.0.1", Port: 4000},
+			{Address: "10.0.0.2", Port: 4001},
+			{Address: "10.0.0.3", Port: 4002},
+		},
+	}
+	target.current.Store(math.MaxInt32 - 3)
+
+	rounds := 3
+	for round := 0; round < rounds; round++ {
+		seen := make(map[string]bool, len(target.hosts))
+		for i := 0; i < len(target.hosts); i++ {
+			seen[p.buildTargetURL(target).String()] = true
+		}
+		assert.Len(t, seen, len(target.hosts),
+			"round %d across the 32-bit boundary must select each host exactly once", round)
+	}
 }
 
 func TestProxy_Forward_Success(t *testing.T) {

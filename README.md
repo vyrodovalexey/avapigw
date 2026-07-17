@@ -3614,6 +3614,10 @@ export TLS_KEY_FILE=/app/certs/tls.key
 export TLS_MIN_VERSION=1.2
 
 # Vault integration
+# These VAULT_* variables override the corresponding spec.vault fields
+# per-field (ENV > file > defaults). The gateway-wide Vault client can also be
+# configured in the config file under spec.vault — see
+# docs/configuration-reference.md#vault-client-connection-specvault.
 export VAULT_ENABLED=true
 export VAULT_ADDR=https://vault.example.com:8200
 export VAULT_AUTH_METHOD=kubernetes

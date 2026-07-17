@@ -794,6 +794,7 @@ func TestConfig_Clone(t *testing.T) {
 				CAPath:     "/path/to/ca",
 				ClientCert: "/path/to/cert.pem",
 				ClientKey:  "/path/to/key.pem",
+				ServerName: "vault.internal",
 				SkipVerify: true,
 			},
 			Cache: &CacheConfig{
@@ -849,6 +850,9 @@ func TestConfig_Clone(t *testing.T) {
 		}
 		if clone.TLS.CACert != original.TLS.CACert {
 			t.Error("Clone().TLS.CACert mismatch")
+		}
+		if clone.TLS.ServerName != original.TLS.ServerName {
+			t.Error("Clone().TLS.ServerName mismatch")
 		}
 
 		// Verify Cache config is deep copied

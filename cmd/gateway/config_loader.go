@@ -23,6 +23,14 @@ func loadAndValidateConfig(configPath string, logger observability.Logger) *conf
 	// ENV values take priority over file-based configuration.
 	applyRedisSentinelEnvToConfig(cfg, logger)
 
+	// Apply Vault environment variable overrides BEFORE validation so the
+	// validated config is the effective one (ENV > file > default,
+	// per-field). This keeps the validator env-free: the "address required"
+	// rule is satisfied because the overlay copies VAULT_ADDR into
+	// spec.vault.address first, so Helm env-only deployments never see a
+	// false "address required" error.
+	cfg.Spec.Vault = applyVaultEnv(cfg.Spec.Vault, logger)
+
 	warnings, err := config.ValidateConfigWithWarnings(cfg)
 	if err != nil {
 		fatalWithSync(logger, "invalid configuration", observability.Error(err))

@@ -10,52 +10,198 @@ This document provides a comprehensive reference for configuring Vault PKI integ
 
 ## Vault Configuration
 
-### Vault Client Connection (Environment Variables Only)
+### Vault Client Connection (`spec.vault`)
 
-The gateway configures its Vault **client connection** exclusively through
-environment variables — there is **no `spec.vault` section** in the gateway
-configuration file. The YAML configuration only contains the per-listener,
-per-route, and per-backend `tls.vault` PKI blocks documented below; the client
-that serves those blocks is initialized from the environment at startup
-(see `cmd/gateway/vault.go`).
+The gateway-wide Vault **client connection** — how the gateway reaches and
+authenticates against the Vault server — is configured through the
+`spec.vault` section of the gateway configuration file, overlaid by `VAULT_*`
+environment variables. This is **distinct** from the per-listener, per-route,
+and per-backend [`tls.vault` PKI blocks](#listener-level-tls-configuration)
+documented below: `tls.vault` requests certificate **issuance** from Vault PKI
+and *requires* the client connection defined here.
 
-The Vault client is initialized when `VAULT_ADDR` is set or when any
-listener/route enables Vault TLS.
+> **`spec.vault` (client connection) vs. `tls.vault` (PKI issuance)**
+>
+> - `spec.vault` — one gateway-wide block: server address, auth method, TLS to
+>   Vault, caching, retries. Consumed at startup to build the Vault client.
+> - `tls.vault` — per-listener/route/backend blocks (`pkiMount`, `role`,
+>   `commonName`, …) that issue serving/client certificates. They use the
+>   client that `spec.vault` (or `VAULT_ADDR`) establishes.
 
-| Environment Variable | Default | Description |
-|-----------------------|---------|-------------|
-| `VAULT_ADDR` | - | Vault server address (e.g. `https://vault.example.com:8200`). Setting it enables Vault client initialization |
-| `VAULT_AUTH_METHOD` | `token` | Authentication method: `token`, `kubernetes`, or `approle` |
-| `VAULT_TOKEN` | - | Static token for `token` auth (development only) |
-| `VAULT_NAMESPACE` | - | Vault Enterprise namespace |
-| `VAULT_CACERT` | - | Path to a CA certificate file for verifying the Vault server |
-| `VAULT_CAPATH` | - | Path to a directory of CA certificates |
-| `VAULT_CLIENT_CERT` | - | Client certificate for TLS authentication to Vault |
-| `VAULT_CLIENT_KEY` | - | Client key for TLS authentication to Vault |
-| `VAULT_SKIP_VERIFY` | `false` | Skip TLS verification of the Vault server (not recommended) |
-| `VAULT_K8S_ROLE` | - | Vault role for `kubernetes` auth |
-| `VAULT_K8S_MOUNT_PATH` | `kubernetes` | Mount path of the Kubernetes auth method |
-| `VAULT_K8S_TOKEN_PATH` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Service account token path for `kubernetes` auth |
-| `VAULT_APPROLE_ROLE_ID` | - | Role ID for `approle` auth |
-| `VAULT_APPROLE_SECRET_ID` | - | Secret ID for `approle` auth |
-| `VAULT_APPROLE_MOUNT_PATH` | `approle` | Mount path of the AppRole auth method |
+The Vault client is initialized when `spec.vault.enabled` is `true`, when
+`VAULT_ADDR` is set, or when any listener/route enables `tls.vault` PKI
+issuance.
 
-Example (Kubernetes deployment):
+> **Operator note:** `spec.vault` is a **gateway-only** section. The operator
+> configures its Vault client exclusively through `VAULT_*` environment
+> variables and flags (see the [operator configuration](operator/configuration.md)).
 
-```bash
-export VAULT_ADDR="https://vault.example.com:8200"
-export VAULT_AUTH_METHOD=kubernetes
-export VAULT_K8S_ROLE=gateway-role
+#### `spec.vault` fields
+
+Duration fields are strings such as `"5m"` or `"100ms"`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Turns the Vault client on. Absent section preserves legacy env-only behavior |
+| `address` | string | - | Vault server address (e.g. `https://vault.example.com:8200`). Required when `enabled` (unless `VAULT_ADDR` is set) |
+| `namespace` | string | - | Vault Enterprise namespace |
+| `authMethod` | enum | `token` | `token`, `kubernetes`, or `approle` |
+| `token` | string | - | Inline token for `token` auth. **Discouraged** in files (validation warning); prefer `tokenFile`/`VAULT_TOKEN`. Mutually exclusive with `tokenFile` |
+| `tokenFile` | string | - | Path to a file containing the token (preferred file reference). Mutually exclusive with `token` |
+| `kubernetes.role` | string | - | Vault role for `kubernetes` auth. **Required** for `kubernetes` |
+| `kubernetes.mountPath` | string | `kubernetes` | Mount path of the Kubernetes auth method |
+| `kubernetes.tokenPath` | string | `/var/run/secrets/kubernetes.io/serviceaccount/token` | ServiceAccount token file path |
+| `appRole.roleId` | string | - | AppRole role ID. **Required** for `approle` |
+| `appRole.secretId` | string | - | Inline AppRole secret ID. **Discouraged** in files (validation warning); prefer `secretIdFile`/`VAULT_APPROLE_SECRET_ID`. Mutually exclusive with `secretIdFile` |
+| `appRole.secretIdFile` | string | - | Path to a file containing the secret ID (preferred). Mutually exclusive with `secretId` |
+| `appRole.mountPath` | string | `approle` | Mount path of the AppRole auth method |
+| `tls.caCert` | string | - | Path to a CA certificate file for verifying the Vault server |
+| `tls.caPath` | string | - | Path to a directory of CA certificates |
+| `tls.clientCert` | string | - | Client certificate for mTLS to Vault (requires `clientKey`) |
+| `tls.clientKey` | string | - | Client key for mTLS to Vault (requires `clientCert`) |
+| `tls.serverName` | string | host of `address` | TLS SNI/server name used to verify the Vault server certificate |
+| `tls.skipVerify` | bool | `false` | Skip TLS verification of the Vault server (insecure; testing only) |
+| `cache.enabled` | bool | `false` | Enable client-side secret caching |
+| `cache.ttl` | duration | `5m` | Cache time-to-live |
+| `cache.maxSize` | int | `1000` | Maximum number of cached entries |
+| `retry.maxRetries` | int | `3` | Maximum request retry attempts |
+| `retry.backoffBase` | duration | `100ms` | Base duration for exponential backoff |
+| `retry.backoffMax` | duration | `5s` | Maximum backoff duration |
+| `auth.maxRetries` | int | `3` | Maximum startup authentication retries |
+| `auth.initialBackoff` | duration | `1s` | Initial backoff between authentication retries |
+| `auth.maxBackoff` | duration | `10s` | Maximum backoff between authentication retries |
+| `auth.timeout` | duration | `30s` | Overall timeout for the startup authentication retry loop |
+
+Example (`spec.vault` with Kubernetes auth):
+
+```yaml
+spec:
+  vault:
+    enabled: true
+    address: https://vault.example.com:8200
+    authMethod: kubernetes
+    kubernetes:
+      role: gateway-role
+    tls:
+      caCert: /etc/vault/ca.crt
+    cache:
+      enabled: true
+      ttl: 5m
+    retry:
+      maxRetries: 3
+      backoffBase: 100ms
+      backoffMax: 5s
 ```
 
-Vault authentication is retried with exponential backoff at startup (3
-retries, 1s–10s backoff, 30s overall timeout), so a briefly unavailable Vault
-does not fail gateway startup immediately.
+Vault authentication is retried with exponential backoff at startup (defaults:
+3 retries, 1s–10s backoff, 30s overall timeout — tunable via `spec.vault.auth`),
+so a briefly unavailable Vault does not fail gateway startup immediately.
 
-> **Note:** The Helm chart's `vault.*` values control the injection of these
-> environment variables into the gateway deployment — they are not passed
-> through to the gateway configuration file. See
-> [Helm Values Reference](#helm-values-reference).
+#### Environment variable overlay and precedence
+
+Each `spec.vault` field can be overridden by a `VAULT_*` environment variable.
+The overlay is applied by `cmd/gateway` **before validation**, so the validated
+(and running) configuration is always the *effective* one. Precedence is
+**per-field**: `ENV > config file > defaults`.
+
+| Environment Variable | Overrides | Default | Notes |
+|-----------------------|-----------|---------|-------|
+| `VAULT_ADDR` | `spec.vault.address` | - | Also **forces `enabled: true`** (legacy trigger) |
+| `VAULT_AUTH_METHOD` | `spec.vault.authMethod` | `token` | |
+| `VAULT_TOKEN` | `spec.vault.token` | - | **Clears `tokenFile`** so the env token wins per-field |
+| `VAULT_NAMESPACE` | `spec.vault.namespace` | - | |
+| `VAULT_CACERT` | `spec.vault.tls.caCert` | - | |
+| `VAULT_CAPATH` | `spec.vault.tls.caPath` | - | |
+| `VAULT_CLIENT_CERT` | `spec.vault.tls.clientCert` | - | |
+| `VAULT_CLIENT_KEY` | `spec.vault.tls.clientKey` | - | |
+| `VAULT_SKIP_VERIFY` | `spec.vault.tls.skipVerify` | `false` | Accepts `true/false/yes/no/1/0/on/off`; invalid values warn and keep the previous value |
+| `VAULT_K8S_ROLE` | `spec.vault.kubernetes.role` | - | Applied only when the effective auth method is `kubernetes` |
+| `VAULT_K8S_MOUNT_PATH` | `spec.vault.kubernetes.mountPath` | `kubernetes` | |
+| `VAULT_K8S_TOKEN_PATH` | `spec.vault.kubernetes.tokenPath` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | |
+| `VAULT_APPROLE_ROLE_ID` | `spec.vault.appRole.roleId` | - | Applied only when the effective auth method is `approle` |
+| `VAULT_APPROLE_SECRET_ID` | `spec.vault.appRole.secretId` | - | **Clears `secretIdFile`** so the env secret ID wins per-field |
+| `VAULT_APPROLE_MOUNT_PATH` | `spec.vault.appRole.mountPath` | `approle` | |
+
+Only field **names** are logged when an override is applied — token/secret
+**values** are never logged.
+
+**Mixed-mode example** (Helm injects `VAULT_TOKEN` via a Secret-backed env; the
+rest of the client lives in the file):
+
+```yaml
+# spec.vault in the gateway config file
+spec:
+  vault:
+    enabled: true
+    address: https://vault.example.com:8200
+    authMethod: token
+    # No token / tokenFile here — supplied by the environment.
+```
+
+```bash
+# Injected into the deployment (e.g. from a mounted Secret)
+export VAULT_TOKEN="s.xxxxxxxxxxxxxxxx"
+```
+
+The effective config authenticates with the env-supplied token while every
+other field comes from the file.
+
+#### Validation rules
+
+Validation runs on the **effective** (post-overlay) configuration:
+
+- `authMethod` must be one of `token`, `kubernetes`, `approle` (empty defaults
+  to `token`).
+- `address` is required when `enabled` (or when `VAULT_ADDR` is set).
+- Per-method required fields:
+  - `token`: exactly one of `token` **or** `tokenFile`.
+  - `kubernetes`: `kubernetes.role`.
+  - `approle`: `appRole.roleId` **plus** exactly one of `secretId` **or**
+    `secretIdFile`.
+- Mutual exclusions: `token`/`tokenFile` and `secretId`/`secretIdFile` cannot
+  both be set (error).
+- An inline `token` or `secretId` present in the file emits a **warning** (not
+  an error) recommending `tokenFile`/`secretIdFile`, the corresponding
+  environment variable (Secret-mounted), or Kubernetes auth.
+- `tls.clientCert` and `tls.clientKey` must be supplied together.
+- Durations/counters (`cache`, `retry`, `auth`) cannot be negative and are
+  type-checked even when the section is disabled.
+- Sub-blocks for a non-selected auth method (e.g. `appRole` while
+  `authMethod: kubernetes`) emit a **warning** that they are ignored.
+- `enabled: false` while a `tls.vault` PKI block is configured is an **error**
+  (`spec.vault.enabled`): PKI issuance needs the client. Because `VAULT_ADDR`
+  forces `enabled: true` during the overlay, env-driven setups never hit this.
+
+#### No hot-reload — restart required
+
+The Vault client is created **once at startup**. Changing `spec.vault` on a
+configuration reload logs a warning
+(`spec.vault changed; vault client settings apply at startup — restart required`)
+and is **skipped** — the running client keeps its startup settings. The skip is
+counted by
+`gateway_config_reload_component_total{component="vault",result="skipped"}`
+(the counter line is pre-created at zero so it is visible on `/metrics` before
+the first skipped reload). Apply Vault client changes by restarting the gateway.
+
+The config watcher validates the **effective** configuration: the same
+`VAULT_*` overlay used at boot is applied before each reload's validation, so an
+env-mixed deployment (e.g. `VAULT_ADDR` only in the environment) does not fail
+raw-file validation on every file change — hot reload keeps working for all
+**other** sections. See
+[Hot-Reload Limitations](hot-reload-limitations.md).
+
+#### Backward compatibility
+
+Omitting `spec.vault` preserves today's env-only behavior byte-for-byte: when
+the section is absent and `VAULT_ADDR` is set, a client is synthesized purely
+from the environment exactly as before.
+
+> **Note:** The Helm chart's top-level `vault.*` values control the injection of
+> the `VAULT_*` environment variables into the gateway deployment, gated by the
+> `vault.injectEnv` flag (default `true`). Set `vault.injectEnv: false` and use
+> `gateway.vault` to source the client connection purely from the rendered
+> `spec.vault` file section. See [Helm Values Reference](#helm-values-reference)
+> and the chart [README](../helm/avapigw/README.md).
 
 ## Listener-Level TLS Configuration
 
@@ -387,10 +533,18 @@ by the **Vault PKI role**, not by gateway configuration.
 
 ## Helm Values Reference
 
-The Helm chart's `vault.*` values control **environment variable injection**
-into the gateway deployment (`VAULT_ADDR`, `VAULT_AUTH_METHOD`,
+The Helm chart's top-level `vault.*` values control **environment variable
+injection** into the gateway deployment (`VAULT_ADDR`, `VAULT_AUTH_METHOD`,
 `VAULT_K8S_ROLE`, ...) plus the Vault PKI blocks rendered into the generated
-gateway configuration.
+gateway configuration. The `vault.injectEnv` flag (default `true`) gates the
+`VAULT_*` env injection.
+
+To express the Vault client connection as a file section instead, set
+`gateway.vault` (rendered verbatim as [`spec.vault`](#vault-client-connection-specvault)
+in the generated ConfigMap). For a file-only setup, combine `gateway.vault`
+with `vault.injectEnv: false` so no `VAULT_*` env is injected — see the
+`values-vault-file.yaml` example shipped with the chart and the chart
+[README](../helm/avapigw/README.md).
 
 ### Complete Vault PKI Configuration
 
@@ -2622,10 +2776,12 @@ gateway_config_reload_total{status="failure"} 1
 # Configuration reload duration
 gateway_config_reload_duration_seconds 0.050
 
-# Component-specific reload operations
-gateway_config_reload_component_total{component="cors",status="success"} 8
-gateway_config_reload_component_total{component="security",status="success"} 6
-gateway_config_reload_component_total{component="audit",status="success"} 4
+# Component-specific reload operations (label is `result`, not `status`)
+gateway_config_reload_component_total{component="cors",result="success"} 8
+gateway_config_reload_component_total{component="routes",result="success"} 6
+gateway_config_reload_component_total{component="audit",result="success"} 4
+# spec.vault is never hot-reloaded; a change is counted as skipped
+gateway_config_reload_component_total{component="vault",result="skipped"} 0
 
 # Configuration watcher status
 gateway_config_watcher_running 1

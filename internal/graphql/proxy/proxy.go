@@ -303,8 +303,20 @@ func (p *Proxy) resolveBackend(name string) (*backendTarget, error) {
 
 // buildTargetURL builds the target URL from the backend target using round-robin selection.
 // Uses atomic counter for lock-free concurrent access.
+//
+// The round-robin index is computed entirely in the unsigned domain: the old
+// `int(counter) % len(hosts)` form truncated the int64 counter on 32-bit
+// platforms once it exceeded math.MaxInt32 (~2^31 requests), and Go's %
+// preserves the dividend's sign, so the negative remainder panicked the slice
+// access. uint64 arithmetic keeps the index in [0, len(hosts)) for every
+// counter value, including int64 wraparound, while preserving the original
+// selection order (the first call still yields hosts[0]).
 func (p *Proxy) buildTargetURL(target *backendTarget) *url.URL {
-	idx := int(target.current.Add(1)-1) % len(target.hosts)
+	// #nosec G115 -- the int64->uint64 conversion wrap is intentional: the
+	// two's-complement mapping of the counter into the unsigned domain is
+	// exactly what keeps the modulo result in [0, len(hosts)) for every
+	// counter value, including negatives after 32-bit truncation/wraparound.
+	idx := (uint64(target.current.Add(1)) - 1) % uint64(len(target.hosts))
 	host := target.hosts[idx]
 	return &url.URL{
 		Scheme: "http",

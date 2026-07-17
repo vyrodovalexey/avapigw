@@ -407,6 +407,29 @@ func vmQuery(ctx context.Context, t *testing.T, query string) (int, map[string]i
 	return len(result), decoded
 }
 
+// vmQueryEventually polls a VictoriaMetrics instant query until it returns at
+// least one series or the deadline elapses, returning the final series count.
+// Instant queries for gauges (e.g. gateway_active_requests) are inherently
+// timing-sensitive: a series can momentarily be absent between scrape cycles or
+// immediately after a data-plane pod restart, even though the scrape pipeline
+// is healthy. Polling within the caller's context deadline makes the
+// "pipeline healthy" assertion deterministic instead of single-shot flaky.
+func vmQueryEventually(ctx context.Context, t *testing.T, query string) int {
+	t.Helper()
+	deadline := time.Now().Add(45 * time.Second)
+	var n int
+	for {
+		n, _ = vmQuery(ctx, t, query)
+		if n > 0 {
+			return n
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return n
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
 // TestE2E_Aggregate_E4_MetricsScraped verifies the gateway metrics are scraped
 // into VictoriaMetrics, then drives aggregate traffic and queries for
 // gateway_aggregate_* series. If the data plane does not emit aggregate metrics
@@ -419,11 +442,14 @@ func TestE2E_Aggregate_E4_MetricsScraped(t *testing.T) {
 	skipUnlessLive(t, ctx)
 
 	t.Run("gateway is scraped into VictoriaMetrics", func(t *testing.T) {
-		n, _ := vmQuery(ctx, t, fmt.Sprintf(`up{namespace=%q}`, liveNamespace()))
+		n := vmQueryEventually(ctx, t, fmt.Sprintf(`up{namespace=%q}`, liveNamespace()))
 		assert.Positive(t, n, "VictoriaMetrics has up{} series for the namespace")
 
 		// A representative gateway metric must be present (pipeline healthy).
-		gn, _ := vmQuery(ctx, t, `gateway_active_requests`)
+		// Poll rather than single-shot: the gateway_active_requests gauge series
+		// can lag a scrape cycle behind (or briefly disappear after a data-plane
+		// pod restart) even when the scrape pipeline is healthy.
+		gn := vmQueryEventually(ctx, t, `gateway_active_requests`)
 		assert.Positive(t, gn, "gateway_* metrics scraped into VictoriaMetrics")
 		t.Logf("E-4: VM scrape healthy: up series=%d, gateway_active_requests series=%d", n, gn)
 	})

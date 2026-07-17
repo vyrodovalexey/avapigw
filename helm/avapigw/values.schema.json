@@ -838,6 +838,168 @@
               "description": "Enable security requirement validation"
             }
           }
+        },
+        "vault": {
+          "type": "object",
+          "description": "Gateway-wide Vault client connection rendered verbatim as spec.vault in the generated gateway config. Deployment-injected VAULT_* environment variables override these fields per-field (ENV > config file > defaults). When set, replaces the legacy spec.vault block derived from the top-level vault.* values.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable the gateway Vault client"
+            },
+            "address": {
+              "type": "string",
+              "description": "Vault server address (e.g. https://vault:8200); required when enabled unless VAULT_ADDR is set"
+            },
+            "namespace": {
+              "type": "string",
+              "description": "Vault namespace (Enterprise feature)"
+            },
+            "authMethod": {
+              "type": "string",
+              "enum": ["token", "kubernetes", "approle"],
+              "description": "Authentication method (empty defaults to token)"
+            },
+            "token": {
+              "type": "string",
+              "description": "Inline Vault token (discouraged; prefer tokenFile or the VAULT_TOKEN environment variable)"
+            },
+            "tokenFile": {
+              "type": "string",
+              "description": "Path to a file containing the Vault token (mutually exclusive with token)"
+            },
+            "kubernetes": {
+              "type": "object",
+              "description": "Kubernetes ServiceAccount JWT authentication",
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "description": "Vault role to authenticate as (required)"
+                },
+                "mountPath": {
+                  "type": "string",
+                  "description": "Mount path of the Kubernetes auth method (default kubernetes)"
+                },
+                "tokenPath": {
+                  "type": "string",
+                  "description": "Path to the ServiceAccount token file"
+                }
+              }
+            },
+            "appRole": {
+              "type": "object",
+              "description": "AppRole authentication",
+              "properties": {
+                "roleId": {
+                  "type": "string",
+                  "description": "AppRole role ID (required)"
+                },
+                "secretId": {
+                  "type": "string",
+                  "description": "Inline AppRole secret ID (discouraged; prefer secretIdFile or the VAULT_APPROLE_SECRET_ID environment variable)"
+                },
+                "secretIdFile": {
+                  "type": "string",
+                  "description": "Path to a file containing the AppRole secret ID (mutually exclusive with secretId)"
+                },
+                "mountPath": {
+                  "type": "string",
+                  "description": "Mount path of the AppRole auth method (default approle)"
+                }
+              }
+            },
+            "tls": {
+              "type": "object",
+              "description": "TLS for the connection TO the Vault server (file paths)",
+              "properties": {
+                "caCert": {
+                  "type": "string",
+                  "description": "Path to a PEM-encoded CA certificate file"
+                },
+                "caPath": {
+                  "type": "string",
+                  "description": "Path to a directory of PEM-encoded CA certificate files"
+                },
+                "clientCert": {
+                  "type": "string",
+                  "description": "Path to the client certificate for mTLS to Vault"
+                },
+                "clientKey": {
+                  "type": "string",
+                  "description": "Path to the client private key for mTLS to Vault"
+                },
+                "serverName": {
+                  "type": "string",
+                  "description": "TLS server name (SNI) override for Vault server verification"
+                },
+                "skipVerify": {
+                  "type": "boolean",
+                  "description": "Disable TLS certificate verification (insecure; testing only)"
+                }
+              }
+            },
+            "cache": {
+              "type": "object",
+              "description": "Client-side secret caching",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable secret caching"
+                },
+                "ttl": {
+                  "type": "string",
+                  "description": "Cache time-to-live (e.g. 5m)"
+                },
+                "maxSize": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Maximum number of cached entries (default 1000)"
+                }
+              }
+            },
+            "retry": {
+              "type": "object",
+              "description": "Request retry behavior of the Vault client",
+              "properties": {
+                "maxRetries": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Maximum number of retry attempts (default 3)"
+                },
+                "backoffBase": {
+                  "type": "string",
+                  "description": "Base duration for exponential backoff (e.g. 100ms)"
+                },
+                "backoffMax": {
+                  "type": "string",
+                  "description": "Maximum backoff duration (e.g. 5s)"
+                }
+              }
+            },
+            "auth": {
+              "type": "object",
+              "description": "Startup authentication retry bounds",
+              "properties": {
+                "maxRetries": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Maximum number of authentication retries (default 3)"
+                },
+                "initialBackoff": {
+                  "type": "string",
+                  "description": "Initial backoff between retries (default 1s)"
+                },
+                "maxBackoff": {
+                  "type": "string",
+                  "description": "Maximum backoff between retries (default 10s)"
+                },
+                "timeout": {
+                  "type": "string",
+                  "description": "Overall authentication retry loop timeout (default 30s)"
+                }
+              }
+            }
+          }
         }
       },
       "description": "Gateway configuration"
@@ -859,6 +1021,11 @@
           "type": "boolean",
           "default": false,
           "description": "Enable Vault integration"
+        },
+        "injectEnv": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inject VAULT_* environment variables into the gateway deployment. Set false to source the Vault client connection solely from the spec.vault section rendered via gateway.vault (ENV > file > default per-field); PKI issuance (vault.pki) is unaffected."
         },
         "address": {
           "type": "string",

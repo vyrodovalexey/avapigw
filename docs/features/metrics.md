@@ -628,9 +628,9 @@ Metrics for hot configuration reload operations and configuration watcher.
 
 ### gateway_config_reload_component_total
 - **Type:** Counter
-- **Labels:** `component`, `status`
-- **Description:** Total number of component reload operations (rate_limiter, max_sessions, routes, backends, audit, grpc_routes, grpc_backends, cors, etc.)
-- **Example:** `gateway_config_reload_component_total{component="grpc_backends",status="success"} 8`
+- **Labels:** `component`, `result`
+- **Description:** Total number of component reload operations. Components: `rate_limiter`, `max_sessions`, `routes`, `backends`, `audit`, `cors`, `grpc_routes`, `grpc_backends`, `graphql_routes`, `graphql_backends`, `vault`. `result` is `success`, `error`, or `skipped`. The `vault` component is never hot-reloaded — a `spec.vault` change is only ever reported as `result="skipped"` (see [Hot-Reload Limitations](../hot-reload-limitations.md)).
+- **Example:** `gateway_config_reload_component_total{component="grpc_backends",result="success"} 8`
 
 ## Health Check Metrics
 

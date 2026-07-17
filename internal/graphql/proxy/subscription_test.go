@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -107,6 +108,63 @@ func TestSubscriptionProxy_BuildWebSocketURL(t *testing.T) {
 	url3 := sp.buildWebSocketURL(target)
 	assert.Equal(t, "ws", url3.Scheme)
 	assert.Equal(t, "10.0.0.1:4000", url3.Host)
+}
+
+// TestSubscriptionProxy_BuildWebSocketURL_HighCounterNoNegativeIndex is the
+// regression test for the signed round-robin modulo in buildWebSocketURL —
+// the same bug class as A-3 in Proxy.buildTargetURL (see
+// TestProxy_BuildTargetURL_HighCounterNoNegativeIndex): the old
+// `int(counter) % len(hosts)` truncated the int64 counter on 32-bit platforms
+// after ~2^31 connections, and Go's % preserves the dividend's sign, so the
+// negative index panicked the slice access. Each case seeds the atomic
+// counter at a hostile boundary and asserts every subsequent selection stays
+// a valid host (no panic). The negative and int64-wraparound seeds
+// deterministically panic the old signed line on 64-bit builds too, so this
+// test guards all architectures.
+func TestSubscriptionProxy_BuildWebSocketURL_HighCounterNoNegativeIndex(t *testing.T) {
+	t.Parallel()
+
+	p := New()
+	sp := NewSubscriptionProxy(p)
+	hosts := []config.BackendHost{
+		{Address: "10.0.0.1", Port: 4000},
+		{Address: "10.0.0.2", Port: 4001},
+		{Address: "10.0.0.3", Port: 4002},
+	}
+	validHosts := map[string]bool{
+		"10.0.0.1:4000": true,
+		"10.0.0.2:4001": true,
+		"10.0.0.3:4002": true,
+	}
+
+	tests := []struct {
+		name string
+		seed int64
+	}{
+		{name: "just below 32-bit boundary", seed: math.MaxInt32 - 2},
+		{name: "exactly at 32-bit boundary", seed: math.MaxInt32},
+		{name: "just above 32-bit boundary", seed: math.MaxInt32 + 1},
+		{name: "int64 wraparound", seed: math.MaxInt64},
+		{name: "post-wraparound negative counter", seed: -2},
+		{name: "deeply negative counter", seed: math.MinInt64 + 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			target := &backendTarget{name: "wrap", hosts: hosts}
+			target.current.Store(tc.seed)
+
+			for i := 0; i < 2*len(hosts); i++ {
+				u := sp.buildWebSocketURL(target)
+				assert.True(t, validHosts[u.Host],
+					"counter seed %d call %d selected out-of-range host %q", tc.seed, i, u.Host)
+				assert.Equal(t, "ws", u.Scheme)
+				assert.Equal(t, "/graphql", u.Path)
+			}
+		})
+	}
 }
 
 func TestCopySubscriptionHeaders(t *testing.T) {

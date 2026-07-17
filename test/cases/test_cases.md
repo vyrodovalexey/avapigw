@@ -1337,6 +1337,71 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   5. Test certificate revocation handling
 - **Expected Results**: All security features work correctly
 
+## Gateway-wide Vault Client (spec.vault) Tests
+
+These tests cover the gateway-wide `spec.vault` section
+(`internal/config.VaultConfig`), which configures the Vault CLIENT CONNECTION
+used by the whole gateway (distinct from the per-listener/route `tls.vault` PKI
+issuance blocks above). The section is overlaid per-field by the environment
+(`ENV > file > defaults`), supports file-referenced secrets (`tokenFile`,
+`appRole.secretIdFile`), surfaces inline-secret WARNINGs at validation, and is
+intentionally NOT hot-reloaded (the config watcher warns and skips vault
+changes while still validating the effective, env-overlaid config).
+
+Field mapping (`convertVaultClientConfig`), the full ENV overlay matrix
+(`applyVaultEnv`), the no-hot-reload warn+skip (`warnVaultConfigChanged`), and
+the watcher pre-validate transform (`vaultEnvPreValidateTransform`) are
+exhaustively UNIT covered in `cmd/gateway` and `internal/config`. The
+integration cases below cover the SUITE seam: a real config FILE driving a real
+Vault client against LIVE Vault, plus the file-loaded validation behavior.
+
+### TestIntegration_SpecVault_ConfigFile_TokenFile_ResolvesSecret
+- **Description**: A gateway config FILE with `spec.vault{enabled, address, authMethod: token, tokenFile}` and NO `VAULT_*` environment in the process builds a working Vault client that resolves a real KV secret.
+- **Preconditions**: Live Vault reachable; `secret/backend-auth/basic` provisioned (compose `setup-vault.sh`); token written to a temp `tokenFile` (with trailing newline to exercise trimming); all `VAULT_*` env cleared for the process.
+- **Steps**:
+  1. Write the Vault token to a temp `tokenFile` (`myroot\n`).
+  2. Write a gateway config file referencing that `tokenFile` in `spec.vault` (no inline token).
+  3. `config.LoadConfig` the file and assert `spec.vault` parsed.
+  4. Apply the production per-field ENV overlay (no `VAULT_*` set → file wins).
+  5. Map the effective section to a `vault.Config` (resolving `tokenFile` from disk).
+  6. Construct + authenticate the Vault client against live Vault.
+  7. `KV().Read("secret", "backend-auth/basic")`.
+- **Expected Results**: Client authenticates; secret resolves to `username=backend-user`, `password=backend-pass`.
+
+### TestIntegration_SpecVault_EnvAddressWins
+- **Description**: Per-field precedence — the config FILE carries a WRONG Vault address, but a correct `VAULT_ADDR` in the environment wins, so the gateway boots and Vault works.
+- **Preconditions**: Live Vault reachable; correct address available for `VAULT_ADDR`.
+- **Steps**:
+  1. Write a config file with a deliberately black-holed address (`http://127.0.0.1:1`) and a valid `tokenFile`.
+  2. Set `VAULT_ADDR` to the correct live Vault address.
+  3. Load the file, apply the ENV overlay (env address wins, forces `enabled=true`).
+  4. Build + authenticate the client and read the secret.
+- **Expected Results**: The env address is used (not the wrong file value); secret resolves successfully, proving `ENV > file` per-field.
+
+### TestIntegration_SpecVault_EnvTokenClearsTokenFile
+- **Description**: Per-field precedence for the token — the file references a `tokenFile` (with a BOGUS token), but `VAULT_TOKEN` in the environment wins and CLEARS the `tokenFile` reference (keeping the exactly-one(token|tokenFile) invariant), and the client still works.
+- **Preconditions**: Live Vault reachable; correct token available for `VAULT_TOKEN`.
+- **Steps**:
+  1. Write a config file whose `tokenFile` contains a bogus token.
+  2. Set `VAULT_TOKEN` to the correct token.
+  3. Load + overlay; assert effective `tokenFile` is EMPTY and effective `token` equals the env token.
+  4. Build + authenticate the client and read the secret.
+- **Expected Results**: Env token wins, `tokenFile` cleared; secret resolves successfully.
+
+### TestIntegration_SpecVault_Validation_FileSeam
+- **Description**: Validation behavior on FILE-loaded `spec.vault`: an inline token surfaces a WARNING (not an error), and an AppRole config missing `roleId` is REJECTED at load-time validation.
+- **Preconditions**: None (pure config-time validation; runs in the integration suite alongside the live cases).
+- **Steps**:
+  1. Load a config file with `spec.vault.token` inline; call `ValidateConfigWithWarnings`.
+  2. Assert no error and a warning at path `spec.vault.token` containing "discouraged".
+  3. Load a config file with `authMethod: approle` and `appRole.secretId` but no `roleId`; call `ValidateConfig`.
+  4. Assert an error mentioning `roleId`.
+- **Expected Results**: Inline token → warning (accepted); AppRole without `roleId` → validation error (rejected).
+
+### TestIntegration_SpecVault_Kubernetes (Phase 7 — deferred)
+- **Description**: `spec.vault.authMethod: kubernetes` (ServiceAccount JWT) end-to-end requires an in-cluster ServiceAccount token and a Vault `kubernetes` auth mount; it is exercised in-cluster in Phase 7 and intentionally NOT covered here.
+- **Status**: Deferred to Phase 7 (in-cluster). No local docker-compose coverage.
+
 ## New Features Comprehensive Tests
 
 ### TestComprehensive_RouteLevel_AllFeatures

@@ -144,7 +144,7 @@ func New(cfg *Config, logger observability.Logger, opts ...ClientOption) (Client
 			CAPath:        cfg.TLS.CAPath,
 			ClientCert:    cfg.TLS.ClientCert,
 			ClientKey:     cfg.TLS.ClientKey,
-			TLSServerName: "",
+			TLSServerName: cfg.TLS.ServerName,
 			Insecure:      cfg.TLS.SkipVerify,
 		}
 		if err := apiConfig.ConfigureTLS(tlsConfig); err != nil {

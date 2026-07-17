@@ -97,7 +97,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	var vaultClient vault.Client
 	var vaultFactory tlspkg.VaultProviderFactory
 	if needsVault(cfg) {
-		vaultClient = initVaultClient(logger)
+		vaultClient = initVaultClient(cfg.Spec.Vault, logger)
 		if needsVaultTLS(cfg) {
 			vaultFactory = createVaultProviderFactory(vaultClient)
 			logger.Info("vault provider factory created for TLS certificate management")

@@ -121,11 +121,22 @@ func createMinimalConfig(flags cliFlags) *config.GatewayConfig {
 	return cfg
 }
 
-// loadOperatorInitialConfig loads the initial gateway configuration for operator mode.
+// loadOperatorInitialConfig loads the initial gateway configuration for
+// operator mode and applies the Vault environment overlay so operator mode
+// also boots from the EFFECTIVE vault configuration (ENV > file > defaults,
+// per-field). Operator CRD pushes never carry spec.vault; the boot config
+// file (Helm ConfigMap) is the only file source in operator mode.
+func loadOperatorInitialConfig(flags cliFlags, logger observability.Logger) *config.GatewayConfig {
+	cfg := loadOperatorBaseConfig(flags, logger)
+	cfg.Spec.Vault = applyVaultEnv(cfg.Spec.Vault, logger)
+	return cfg
+}
+
+// loadOperatorBaseConfig loads the base gateway configuration for operator mode.
 // It tries to load from the config file first (which contains correct listener/TLS settings
 // from the Helm configmap), falling back to a minimal default config.
 // Routes and backends are cleared since they will come from the operator.
-func loadOperatorInitialConfig(flags cliFlags, logger observability.Logger) *config.GatewayConfig {
+func loadOperatorBaseConfig(flags cliFlags, logger observability.Logger) *config.GatewayConfig {
 	cfg, err := config.LoadConfig(flags.configPath)
 	if err != nil {
 		logger.Warn("failed to load config file for operator mode, using minimal config",
@@ -415,6 +426,19 @@ func (a *gatewayConfigApplier) ApplyGraphQLBackends(_ context.Context, backends 
 // mergeOperatorConfig merges operator-provided resources into the existing
 // gateway config to preserve required fields (APIVersion, Kind, Metadata,
 // Listeners) that were initialized from the config file or createMinimalConfig().
+//
+// INVARIANT: every config.GatewaySpec field MUST be explicitly carried through
+// the merge. Operator FULL_SYNC pushes carry only CRD-owned resources, and the
+// merged result REPLACES a.app.config after every sync — any GatewaySpec field
+// omitted from the literal below is silently dropped from the stored config
+// and the loss compounds on each subsequent sync. Boot-config-owned sections
+// (built from the config file or createMinimalConfig) are taken from
+// `existing`; operator/CRD-owned resources are taken from the incoming `cfg`.
+//
+// When adding a field to config.GatewaySpec, add it to the literal below AND
+// register its merge source in mergedGatewaySpecFieldSources
+// (operator_merge_guard_test.go); the reflection-guard test fails, naming the
+// field, until both places are updated.
 func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *config.GatewayConfig {
 	existing := a.app.config
 	if existing == nil {
@@ -426,24 +450,28 @@ func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *c
 		Kind:       existing.Kind,
 		Metadata:   existing.Metadata,
 		Spec: config.GatewaySpec{
-			Listeners:       existing.Spec.Listeners,
-			Routes:          cfg.Spec.Routes,
-			Backends:        cfg.Spec.Backends,
-			GRPCRoutes:      cfg.Spec.GRPCRoutes,
-			GRPCBackends:    cfg.Spec.GRPCBackends,
-			GraphQLRoutes:   cfg.Spec.GraphQLRoutes,
-			GraphQLBackends: cfg.Spec.GraphQLBackends,
-			RateLimit:       cfg.Spec.RateLimit,
-			CircuitBreaker:  existing.Spec.CircuitBreaker,
-			CORS:            existing.Spec.CORS,
-			Observability:   existing.Spec.Observability,
-			Authentication:  existing.Spec.Authentication,
-			Authorization:   existing.Spec.Authorization,
-			Security:        existing.Spec.Security,
-			Audit:           mergeAuditConfig(existing.Spec.Audit, cfg.Spec.Audit),
-			RequestLimits:   existing.Spec.RequestLimits,
-			MaxSessions:     cfg.Spec.MaxSessions,
-			TrustedProxies:  existing.Spec.TrustedProxies,
+			Listeners:         existing.Spec.Listeners,
+			Routes:            cfg.Spec.Routes,
+			Backends:          cfg.Spec.Backends,
+			GRPCRoutes:        cfg.Spec.GRPCRoutes,
+			GRPCBackends:      cfg.Spec.GRPCBackends,
+			GraphQLRoutes:     cfg.Spec.GraphQLRoutes,
+			GraphQLBackends:   cfg.Spec.GraphQLBackends,
+			RateLimit:         cfg.Spec.RateLimit,
+			CircuitBreaker:    existing.Spec.CircuitBreaker,
+			CORS:              existing.Spec.CORS,
+			Observability:     existing.Spec.Observability,
+			Authentication:    existing.Spec.Authentication,
+			Authorization:     existing.Spec.Authorization,
+			Security:          existing.Spec.Security,
+			Audit:             mergeAuditConfig(existing.Spec.Audit, cfg.Spec.Audit),
+			RequestLimits:     existing.Spec.RequestLimits,
+			MaxSessions:       cfg.Spec.MaxSessions,
+			TrustedProxies:    existing.Spec.TrustedProxies,
+			GraphQL:           existing.Spec.GraphQL,
+			OpenAPIValidation: existing.Spec.OpenAPIValidation,
+			WebSocket:         existing.Spec.WebSocket,
+			Vault:             existing.Spec.Vault,
 		},
 	}
 }
