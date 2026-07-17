@@ -32,6 +32,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/metrics/streaming"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/openapi"
 	"github.com/vyrodovalexey/avapigw/internal/proxy"
 	"github.com/vyrodovalexey/avapigw/internal/router"
 	"github.com/vyrodovalexey/avapigw/internal/security"
@@ -52,7 +53,7 @@ type application struct {
 	metricsServer       *http.Server
 	tracer              *observability.Tracer
 	config              *config.GatewayConfig
-	rateLimiter         *middleware.RateLimiter
+	rateLimiter         middleware.RateLimiterHandle
 	maxSessionsLimiter  *middleware.MaxSessionsLimiter
 	auditLogger         *audit.AtomicAuditLogger
 	auditMetrics        *audit.Metrics
@@ -62,6 +63,7 @@ type application struct {
 	routeMiddlewareMgr  *gateway.RouteMiddlewareManager
 	graphqlRouter       *graphqlrouter.Router
 	graphqlProxy        *graphqlproxy.Proxy
+	graphqlHandler      *gateway.GraphQLHandler
 }
 
 // initApplication initializes all application components.
@@ -95,7 +97,7 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	var vaultClient vault.Client
 	var vaultFactory tlspkg.VaultProviderFactory
 	if needsVault(cfg) {
-		vaultClient = initVaultClient(logger)
+		vaultClient = initVaultClient(cfg.Spec.Vault, logger)
 		if needsVaultTLS(cfg) {
 			vaultFactory = createVaultProviderFactory(vaultClient)
 			logger.Info("vault provider factory created for TLS certificate management")
@@ -157,10 +159,27 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		proxy.WithMetricsRegistry(metrics.Registry()),
 		proxy.WithRouteMiddleware(routeMiddlewareMgr),
 		proxy.WithAggregateHandler(restAggregateHandler),
+		// Wire the WebSocket origin allowlist (CSWSH protection) into the
+		// data plane; nil/empty config keeps the permissive legacy behavior.
+		proxy.WithWebSocketConfig(cfg.Spec.WebSocket),
 	)
+
+	// Compose the GraphQL endpoint INSIDE the global middleware chain via
+	// the path dispatcher, so /graphql traffic passes global middleware
+	// (auth, rate limits, recovery, metrics, tracing) AND each matched
+	// GraphQL route's own middleware chain (auth, authz, rate limit, CORS,
+	// headers) through the shared RouteMiddlewareManager. Registering
+	// GraphQL directly on the gin engine bypassed both layers.
+	gqlHandler := initGraphQLHandler(
+		cfg, gqlRouter, gqlProxy, graphqlAggregateHandler, routeMiddlewareMgr, logger,
+	)
+	dispatcher := gateway.NewGraphQLPathDispatcher(
+		gateway.GraphQLPathFromConfig(cfg), graphqlDispatchHandler(gqlHandler), reverseProxy,
+	)
+
 	middlewareResult, mwErr := buildMiddlewareChain(
-		reverseProxy, cfg, logger, metrics, tracer, auditLogger,
-		cfg.Spec.Authentication, authMetrics,
+		dispatcher, cfg, logger, metrics, tracer, auditLogger,
+		cfg.Spec.Authentication, authMetrics, vaultClient,
 	)
 	if mwErr != nil {
 		fatalWithSync(logger, "failed to build middleware chain", observability.Error(mwErr))
@@ -191,15 +210,10 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	if grpcBackendRegistry != nil {
 		gwOpts = append(gwOpts, gateway.WithGatewayGRPCBackendRegistry(grpcBackendRegistry))
 	}
-	if gqlRouter != nil {
-		gwOpts = append(gwOpts, gateway.WithGraphQLRouter(gqlRouter))
-	}
-	if gqlProxy != nil {
-		gwOpts = append(gwOpts,
-			gateway.WithGraphQLProxy(gqlProxy),
-			gateway.WithGraphQLAggregateHandler(graphqlAggregateHandler),
-		)
-	}
+	// GraphQL components are intentionally NOT passed to the gateway: the
+	// GraphQL endpoint is served through the dispatcher inside the global
+	// middleware chain above. Passing them here would additionally register
+	// the endpoint on the gin engine, which bypasses the global chain.
 
 	gw, err := gateway.New(cfg, gwOpts...)
 	if err != nil {
@@ -227,7 +241,64 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		routeMiddlewareMgr:  routeMiddlewareMgr,
 		graphqlRouter:       gqlRouter,
 		graphqlProxy:        gqlProxy,
+		graphqlHandler:      gqlHandler,
 	}
+}
+
+// initGraphQLHandler builds the shared GraphQL endpoint handler wired with
+// the per-route middleware manager, the aggregate handler, and the GraphQL
+// body/WS origin settings. Returns nil when the GraphQL components are
+// unavailable (disabled GraphQL pipeline).
+func initGraphQLHandler(
+	cfg *config.GatewayConfig,
+	gqlRouter *graphqlrouter.Router,
+	gqlProxy *graphqlproxy.Proxy,
+	aggregator *aggregategraphql.Handler,
+	routeMiddlewareMgr *gateway.RouteMiddlewareManager,
+	logger observability.Logger,
+) *gateway.GraphQLHandler {
+	if gqlRouter == nil || gqlProxy == nil {
+		return nil
+	}
+
+	opts := []gateway.GraphQLHandlerOption{
+		gateway.WithGraphQLHandlerLogger(logger),
+		gateway.WithGraphQLHandlerRouteMiddleware(routeMiddlewareMgr),
+	}
+	// Guard against a typed-nil pointer becoming a non-nil interface.
+	if aggregator != nil {
+		opts = append(opts, gateway.WithGraphQLHandlerAggregator(aggregator))
+	}
+	if cfg.Spec.GraphQL != nil && cfg.Spec.GraphQL.MaxBodySize > 0 {
+		opts = append(opts, gateway.WithGraphQLHandlerMaxBodySize(cfg.Spec.GraphQL.MaxBodySize))
+	}
+	if cfg.Spec.WebSocket != nil && len(cfg.Spec.WebSocket.AllowedOrigins) > 0 {
+		opts = append(opts, gateway.WithGraphQLHandlerSubscriptionOrigins(cfg.Spec.WebSocket.AllowedOrigins))
+	}
+
+	handler, err := gateway.NewGraphQLHandler(gqlRouter, gqlProxy, opts...)
+	if err != nil {
+		// Defensive: only reachable with nil router/proxy, both checked above.
+		logger.Error("failed to build GraphQL handler; GraphQL endpoint disabled",
+			observability.Error(err),
+		)
+		return nil
+	}
+
+	logger.Info("GraphQL endpoint composed into global middleware chain",
+		observability.String("path", gateway.GraphQLPathFromConfig(cfg)),
+	)
+	return handler
+}
+
+// graphqlDispatchHandler converts the concrete handler into the dispatcher's
+// http.Handler dependency, preserving nil-ness (a typed nil pointer inside a
+// non-nil interface would defeat the dispatcher's nil check).
+func graphqlDispatchHandler(h *gateway.GraphQLHandler) http.Handler {
+	if h == nil {
+		return nil
+	}
+	return h
 }
 
 // registerSubsystemMetrics initializes and registers all subsystem
@@ -360,12 +431,18 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 	graphqlmetrics.InitMetrics(registry)
 	graphqlmetrics.InitVecMetrics()
 
+	// OpenAPI validation metrics singleton. Register with the gateway's
+	// custom registry so validation successes/failures recorded by the
+	// route middleware path appear on the /metrics endpoint.
+	openapi.InitSharedMetrics(registry)
+
 	subsystems := []string{
 		"cache", "encoding", "transform", "vault", "backend_auth",
 		"middleware", "security", "health", "router",
 		"apikey", "jwt", "oidc", "mtls",
 		"rbac", "abac", "external_authz",
 		"route", "backend", "ws_streaming", "grpc_streaming", "graphql",
+		"openapi_validation",
 	}
 	logger.Info("subsystem metrics registered with gateway registry",
 		observability.Int("subsystem_count", len(subsystems)),

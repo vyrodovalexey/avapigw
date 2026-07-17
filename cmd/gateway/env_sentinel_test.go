@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
 func TestApplyRedisSentinelEnv_AllVarsSet(t *testing.T) {
@@ -124,7 +125,7 @@ func TestApplyRedisSentinelEnv_OnlyMasterPasswordSet(t *testing.T) {
 
 func TestApplyRedisSentinelEnvToConfig_NilConfig(t *testing.T) {
 	// Should not panic
-	applyRedisSentinelEnvToConfig(nil)
+	applyRedisSentinelEnvToConfig(nil, observability.NopLogger())
 }
 
 func TestApplyRedisSentinelEnvToConfig_NoRoutes(t *testing.T) {
@@ -135,7 +136,7 @@ func TestApplyRedisSentinelEnvToConfig_NoRoutes(t *testing.T) {
 	}
 
 	// Should not panic
-	applyRedisSentinelEnvToConfig(cfg)
+	applyRedisSentinelEnvToConfig(cfg, observability.NopLogger())
 }
 
 func TestApplyRedisSentinelEnvToConfig_AppliesToRedisRoutes(t *testing.T) {
@@ -169,7 +170,7 @@ func TestApplyRedisSentinelEnvToConfig_AppliesToRedisRoutes(t *testing.T) {
 		},
 	}
 
-	applyRedisSentinelEnvToConfig(cfg)
+	applyRedisSentinelEnvToConfig(cfg, observability.NopLogger())
 
 	// Redis route should have sentinel config applied
 	require.NotNil(t, cfg.Spec.Routes[0].Cache.Redis.Sentinel)
@@ -201,7 +202,7 @@ func TestApplyRedisSentinelEnvToConfig_SkipsNonRedisRoutes(t *testing.T) {
 		},
 	}
 
-	applyRedisSentinelEnvToConfig(cfg)
+	applyRedisSentinelEnvToConfig(cfg, observability.NopLogger())
 
 	// Memory route should not have Redis config
 	assert.Nil(t, cfg.Spec.Routes[0].Cache.Redis)
@@ -226,7 +227,7 @@ func TestApplyRedisSentinelEnvToConfig_SkipsRoutesWithNilRedis(t *testing.T) {
 		},
 	}
 
-	applyRedisSentinelEnvToConfig(cfg)
+	applyRedisSentinelEnvToConfig(cfg, observability.NopLogger())
 
 	// Should not panic, Redis config remains nil
 	assert.Nil(t, cfg.Spec.Routes[0].Cache.Redis)
@@ -367,7 +368,7 @@ func TestApplyRedisFeatureEnv(t *testing.T) {
 				t.Setenv(k, v)
 			}
 
-			applyRedisFeatureEnv(tt.initial)
+			applyRedisFeatureEnv(tt.initial, observability.NopLogger())
 			tt.check(t, tt.initial)
 		})
 	}
@@ -380,7 +381,7 @@ func TestApplyRedisFeatureEnv_SentinelVaultPathsInitializeSentinel(t *testing.T)
 	assert.Nil(t, cfg.Sentinel,
 		"sentinel should be nil before applying env")
 
-	applyRedisFeatureEnv(cfg)
+	applyRedisFeatureEnv(cfg, observability.NopLogger())
 
 	require.NotNil(t, cfg.Sentinel,
 		"sentinel should be initialized by vault path env")
@@ -399,7 +400,7 @@ func TestApplyRedisFeatureEnv_ExistingSentinelPreserved(t *testing.T) {
 		},
 	}
 
-	applyRedisFeatureEnv(cfg)
+	applyRedisFeatureEnv(cfg, observability.NopLogger())
 
 	assert.Equal(t, "mymaster", cfg.Sentinel.MasterName,
 		"existing sentinel config should be preserved")

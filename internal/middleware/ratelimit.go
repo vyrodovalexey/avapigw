@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"container/list"
+	"context"
 	"io"
 	"net/http"
 	"sync"
@@ -36,17 +38,27 @@ const (
 	MaxCleanupInterval = time.Minute
 )
 
-// clientEntry holds a rate limiter and its last access time for TTL-based cleanup.
+// clientEntry holds a rate limiter and its last access time for TTL-based
+// cleanup. Each entry is linked into the RateLimiter's LRU list so the
+// least-recently-used entry can be located and evicted in O(1).
 type clientEntry struct {
 	limiter    *rate.Limiter
 	lastAccess time.Time
+	key        string        // client key, needed for map removal on eviction
+	elem       *list.Element // position in the LRU list
 }
 
 // RateLimiter provides rate limiting functionality.
 type RateLimiter struct {
-	limiter     *rate.Limiter
-	perClient   bool
-	clients     map[string]*clientEntry
+	limiter   *rate.Limiter
+	perClient bool
+	clients   map[string]*clientEntry
+	// lru keeps client entries in access order (front = most recently
+	// used). Because every access refreshes both lastAccess and the list
+	// position, the back of the list is always the entry with the oldest
+	// lastAccess, which makes TTL sweeps and capacity eviction
+	// proportional to the number of removed entries instead of O(n²).
+	lru         *list.List
 	mu          sync.RWMutex
 	rps         int
 	burst       int
@@ -56,6 +68,13 @@ type RateLimiter struct {
 	stopCh      chan struct{}
 	stopped     bool
 	hitCallback RateLimitHitFunc
+	// nowFunc returns the current time. It exists as a seam for
+	// deterministic TTL-eviction tests and defaults to time.Now.
+	nowFunc func() time.Time
+	// evictionScans counts entries examined by eviction/cleanup loops.
+	// It is reported in debug logs and lets tests assert that eviction
+	// work stays bounded under high client churn.
+	evictionScans int64
 }
 
 // RateLimitHitFunc is called when a rate limit hit occurs.
@@ -98,12 +117,14 @@ func NewRateLimiter(rps, burst int, perClient bool, opts ...RateLimiterOption) *
 		limiter:    rate.NewLimiter(rate.Limit(rps), burst),
 		perClient:  perClient,
 		clients:    make(map[string]*clientEntry),
+		lru:        list.New(),
 		rps:        rps,
 		burst:      burst,
 		logger:     observability.NopLogger(),
 		clientTTL:  DefaultClientTTL,
 		maxClients: DefaultMaxClients,
 		stopCh:     make(chan struct{}),
+		nowFunc:    time.Now,
 	}
 
 	for _, opt := range opts {
@@ -128,13 +149,18 @@ func (rl *RateLimiter) Allow(clientIP string) bool {
 
 // allowPerClient checks rate limit per client.
 // Uses a single critical section to avoid race conditions between
-// checking existence and updating lastAccess time.
+// checking existence and updating lastAccess time. The current time is
+// taken inside the critical section so that LRU list order always
+// matches lastAccess order.
 func (rl *RateLimiter) allowPerClient(clientIP string) bool {
-	now := time.Now()
-
 	rl.mu.Lock()
+	now := rl.nowFunc()
 	entry, exists := rl.clients[clientIP]
-	if !exists {
+	if exists {
+		// Refresh recency within the same critical section.
+		entry.lastAccess = now
+		rl.lru.MoveToFront(entry.elem)
+	} else {
 		// Check if we've hit the max clients limit before adding a new entry
 		if len(rl.clients) >= rl.maxClients {
 			// Evict oldest entries to make room
@@ -143,11 +169,10 @@ func (rl *RateLimiter) allowPerClient(clientIP string) bool {
 		entry = &clientEntry{
 			limiter:    rate.NewLimiter(rate.Limit(rl.rps), rl.burst),
 			lastAccess: now,
+			key:        clientIP,
 		}
+		entry.elem = rl.lru.PushFront(entry)
 		rl.clients[clientIP] = entry
-	} else {
-		// Update last access time within the same critical section
-		entry.lastAccess = now
 	}
 	// Get the limiter reference while holding the lock
 	limiter := entry.limiter
@@ -157,51 +182,113 @@ func (rl *RateLimiter) allowPerClient(clientIP string) bool {
 	return limiter.Allow()
 }
 
-// evictOldestLocked evicts the oldest entries to make room for new ones.
+// evictOldestLocked evicts entries to make room for a new client.
+// It first drops entries whose TTL expired, then — if the map is still
+// over capacity — trims the least-recently-used entries until the map is
+// at 90% of maxClients. Both phases pop from the back of the LRU list,
+// so the total work is proportional to the number of evicted entries
+// (amortized O(1) per insert) instead of the previous full-map rescan
+// per evicted entry (O(n²)).
 // Must be called with the mutex held.
 func (rl *RateLimiter) evictOldestLocked() {
-	// First, remove expired entries
-	now := time.Now()
-	for clientIP, entry := range rl.clients {
-		if now.Sub(entry.lastAccess) > rl.clientTTL {
-			delete(rl.clients, clientIP)
-		}
-	}
+	now := rl.nowFunc()
 
-	// If still over capacity, remove oldest entries until we're at 90% capacity
+	// Phase 1: drop expired entries from the LRU tail.
+	rl.removeExpiredFromTailLocked(now, rl.clientTTL)
+
+	// Phase 2: if still over capacity, trim LRU entries to 90% of maxClients.
 	targetSize := rl.maxClients * 9 / 10
 	for len(rl.clients) > targetSize {
-		var oldestKey string
-		var oldestTime time.Time
-
-		for key, entry := range rl.clients {
-			if oldestKey == "" || entry.lastAccess.Before(oldestTime) {
-				oldestKey = key
-				oldestTime = entry.lastAccess
-			}
-		}
-
-		if oldestKey != "" {
-			delete(rl.clients, oldestKey)
-		} else {
+		back := rl.lru.Back()
+		if back == nil {
 			break
 		}
+		rl.evictionScans++
+		rl.removeEntryLocked(back.Value.(*clientEntry))
 	}
 
 	rl.logger.Debug("evicted old rate limiter entries",
 		observability.Int("remaining", len(rl.clients)),
 		observability.Int("max_clients", rl.maxClients),
+		observability.Int64("eviction_scans_total", rl.evictionScans),
 	)
 }
 
+// removeExpiredFromTailLocked pops entries older than maxAge off the LRU
+// tail and returns the number of removed entries. Because the list is
+// ordered by lastAccess, the sweep stops at the first non-expired entry.
+// Must be called with the mutex held.
+func (rl *RateLimiter) removeExpiredFromTailLocked(now time.Time, maxAge time.Duration) int {
+	removed := 0
+	for {
+		back := rl.lru.Back()
+		if back == nil {
+			break
+		}
+		rl.evictionScans++
+		entry := back.Value.(*clientEntry)
+		if now.Sub(entry.lastAccess) <= maxAge {
+			break
+		}
+		rl.removeEntryLocked(entry)
+		removed++
+	}
+	return removed
+}
+
+// removeEntryLocked removes an entry from both the map and the LRU list.
+// Must be called with the mutex held.
+func (rl *RateLimiter) removeEntryLocked(entry *clientEntry) {
+	rl.lru.Remove(entry.elem)
+	delete(rl.clients, entry.key)
+}
+
+// httpRateLimiter is the shared surface of the in-memory and redis-backed
+// rate limiters used by the HTTP middleware implementation.
+type httpRateLimiter interface {
+	// allowHTTP reports whether the request from clientIP is allowed.
+	allowHTTP(ctx context.Context, clientIP string) bool
+
+	// middlewareLogger returns the logger for rejection logging.
+	middlewareLogger() observability.Logger
+
+	// hitFunc returns the optional rate limit hit callback.
+	hitFunc() RateLimitHitFunc
+
+	// storeLabel returns the store name recorded in OTEL span attributes.
+	storeLabel() string
+}
+
+// allowHTTP implements httpRateLimiter for the in-memory limiter.
+func (rl *RateLimiter) allowHTTP(_ context.Context, clientIP string) bool {
+	return rl.Allow(clientIP)
+}
+
+// middlewareLogger implements httpRateLimiter.
+func (rl *RateLimiter) middlewareLogger() observability.Logger { return rl.logger }
+
+// hitFunc implements httpRateLimiter.
+func (rl *RateLimiter) hitFunc() RateLimitHitFunc { return rl.hitCallback }
+
+// storeLabel implements httpRateLimiter.
+func (rl *RateLimiter) storeLabel() string { return config.RateLimitStoreMemory }
+
 // RateLimit returns a middleware that applies rate limiting.
 func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
+	return rateLimitHTTPMiddleware(rl)
+}
+
+// rateLimitHTTPMiddleware builds the HTTP middleware shared by the
+// in-memory and redis-backed rate limiters: tracing, decision, metrics,
+// and the 429 rejection response.
+func rateLimitHTTPMiddleware(limiter httpRateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx, span := rlTracer.Start(r.Context(), "ratelimit.check",
 				trace.WithSpanKind(trace.SpanKindInternal),
 				trace.WithAttributes(
 					attribute.String("ratelimit.path", r.URL.Path),
+					attribute.String("ratelimit.store", limiter.storeLabel()),
 				),
 			)
 			defer span.End()
@@ -217,35 +304,12 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 				routeName = unknownRoute
 			}
 
-			if !rl.Allow(clientIP) {
+			if !limiter.allowHTTP(ctx, clientIP) {
 				span.SetAttributes(
 					attribute.Bool("ratelimit.allowed", false),
 					attribute.String("ratelimit.decision", "rejected"),
 				)
-
-				rl.logger.Warn("rate limit exceeded",
-					observability.String("client_ip", clientIP),
-					observability.String("path", r.URL.Path),
-				)
-
-				if rl.hitCallback != nil {
-					rl.hitCallback(routeName)
-				}
-
-				mm := GetMiddlewareMetrics()
-				mm.rateLimitRejected.WithLabelValues(
-					routeName,
-				).Inc()
-
-				// Record route-level rate limit hit
-				routepkg.GetRouteMetrics().RecordRateLimitHit(
-					routeName, r.Method, "default",
-				)
-
-				w.Header().Set(HeaderContentType, ContentTypeJSON)
-				w.Header().Set(HeaderRetryAfter, "1")
-				w.WriteHeader(http.StatusTooManyRequests)
-				_, _ = io.WriteString(w, ErrRateLimitExceeded)
+				rejectRateLimited(w, r, limiter, routeName, clientIP)
 				return
 			}
 
@@ -261,6 +325,35 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// rejectRateLimited records rejection telemetry and writes the 429 response.
+func rejectRateLimited(
+	w http.ResponseWriter, r *http.Request, limiter httpRateLimiter, routeName, clientIP string,
+) {
+	limiter.middlewareLogger().Warn("rate limit exceeded",
+		observability.String("client_ip", clientIP),
+		observability.String("path", r.URL.Path),
+		observability.String("store", limiter.storeLabel()),
+	)
+
+	if hit := limiter.hitFunc(); hit != nil {
+		hit(routeName)
+	}
+
+	GetMiddlewareMetrics().rateLimitRejected.WithLabelValues(
+		routeName,
+	).Inc()
+
+	// Record route-level rate limit hit
+	routepkg.GetRouteMetrics().RecordRateLimitHit(
+		routeName, r.Method, "default",
+	)
+
+	w.Header().Set(HeaderContentType, ContentTypeJSON)
+	w.Header().Set(HeaderRetryAfter, "1")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = io.WriteString(w, ErrRateLimitExceeded)
 }
 
 // RateLimitFromConfig creates rate limit middleware from gateway config.
@@ -294,28 +387,17 @@ func RateLimitFromConfig(
 
 // CleanupOldClients removes old client limiters to prevent memory leaks.
 // It removes entries that haven't been accessed within the TTL period.
+// Expired entries are popped from the LRU tail (oldest lastAccess first),
+// so the cost is proportional to the number of removed entries.
 func (rl *RateLimiter) CleanupOldClients(maxAge time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	now := time.Now()
-	expiredClients := make([]string, 0)
+	removed := rl.removeExpiredFromTailLocked(rl.nowFunc(), maxAge)
 
-	// Find expired entries
-	for clientIP, entry := range rl.clients {
-		if now.Sub(entry.lastAccess) > maxAge {
-			expiredClients = append(expiredClients, clientIP)
-		}
-	}
-
-	// Remove expired entries
-	for _, clientIP := range expiredClients {
-		delete(rl.clients, clientIP)
-	}
-
-	if len(expiredClients) > 0 {
+	if removed > 0 {
 		rl.logger.Debug("cleaned up expired rate limiter entries",
-			observability.Int("removed", len(expiredClients)),
+			observability.Int("removed", removed),
 			observability.Int("remaining", len(rl.clients)),
 		)
 	}
@@ -386,11 +468,35 @@ func (rl *RateLimiter) Stop() {
 	}
 }
 
+// validRateLimitParams reports whether the rate limiting parameters are
+// usable by a token bucket. A non-positive rps or a burst below 1 turns
+// the bucket into a permanent silent deny (it can never hold a whole
+// token), so configuration updates carrying such values are rejected.
+func validRateLimitParams(cfg *config.RateLimitConfig) bool {
+	return cfg.RequestsPerSecond > 0 && cfg.Burst >= 1
+}
+
+// logInvalidRateLimitUpdate logs a rejected rate limiter configuration
+// update, keeping the previously applied parameters in effect.
+func logInvalidRateLimitUpdate(logger observability.Logger, scope string, cfg *config.RateLimitConfig) {
+	logger.Error("rejecting rate limiter config update with invalid parameters, keeping previous values",
+		observability.String("scope", scope),
+		observability.Int("rps", cfg.RequestsPerSecond),
+		observability.Int("burst", cfg.Burst),
+	)
+}
+
 // UpdateConfig updates the rate limiter with new configuration.
 // It replaces the global limiter and clears all per-client entries
 // so they are recreated with the new RPS/burst values.
+// Invalid parameters (rps < 1 or burst < 1) are rejected with a logged
+// error and the previous configuration stays in effect.
 func (rl *RateLimiter) UpdateConfig(cfg *config.RateLimitConfig) {
 	if cfg == nil {
+		return
+	}
+	if !validRateLimitParams(cfg) {
+		logInvalidRateLimitUpdate(rl.logger, config.RateLimitStoreMemory, cfg)
 		return
 	}
 
@@ -402,8 +508,10 @@ func (rl *RateLimiter) UpdateConfig(cfg *config.RateLimitConfig) {
 	rl.perClient = cfg.PerClient
 	rl.limiter = rate.NewLimiter(rate.Limit(cfg.RequestsPerSecond), cfg.Burst)
 
-	// Clear per-client entries so they are recreated with new values
+	// Clear per-client entries so they are recreated with new values.
+	// The LRU list is reset together with the map to keep both in sync.
 	rl.clients = make(map[string]*clientEntry)
+	rl.lru.Init()
 
 	rl.logger.Info("rate limiter configuration updated",
 		observability.Int("rps", cfg.RequestsPerSecond),

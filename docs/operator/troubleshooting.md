@@ -290,8 +290,26 @@ kubectl logs -n avapigw-system -l app.kubernetes.io/name=avapigw-operator | grep
 ### Issue: Duplicate Resource Detection
 
 **Symptoms:**
-- "duplicate route match found" errors
+- "conflicts with existing route(s) ...: overlapping path/method combination" errors
 - Resources with similar configurations being rejected
+
+**Note:** only **true duplicates** are rejected — match conditions with
+identical specificity and overlapping values. For APIRoutes that means the
+same match type and path with overlapping methods. Exact-vs-prefix
+combinations, nested prefixes (e.g. `/` and `/api`), and catch-all routes
+coexist with specific routes (the router orders them by specificity), and
+updating a resource never conflicts with its own previous version. The same
+applies to GRPCRoutes (identical service/method prefixes or exacts conflict;
+nested prefixes coexist via longest-prefix priority) and GraphQLRoutes
+(identical specificity AND overlapping match values; equal-specificity regex
+pairs are admitted and ordered by name). If a legitimate combination is
+rejected, verify the two routes really do declare an identical-specificity
+match with overlapping values.
+
+Resources being **deleted** (deletion timestamp set) are excluded from
+conflict evaluation, and metadata-only updates (labels/annotations/
+finalizers) skip conflict checks entirely — a conflicting peer that is
+terminating can never block your update.
 
 **Diagnosis:**
 ```bash
@@ -311,6 +329,76 @@ kubectl get apiroutes --all-namespaces -o custom-columns=NAME:.metadata.name,NAM
 kubectl patch apiroute conflicting-route -n namespace \
   --type='merge' \
   -p='{"spec":{"match":[{"uri":{"prefix":"/api/v2"},"methods":["GET"]}]}}'
+```
+
+### Issue: Route Returns 503 for Every Request (Fail-Closed Security)
+
+**Symptoms:**
+- A route configured with authentication/authorization returns 503 Service Unavailable for all requests
+- Gateway ERROR log: `failed to build route security middleware, failing closed`
+- `gateway_route_auth_failures_total{reason="construction_failed"}` increasing
+
+**Cause:** the route's authentication or authorization middleware could not
+be constructed (for example an invalid JWT/OIDC configuration or an
+unreachable dependency at build time). A route configured **with** a security
+control never serves traffic without it, so a rejecting fallback is
+installed. Treat this alert as page-worthy: the route is intentionally
+unavailable.
+
+**Solutions:**
+```bash
+# Find the construction error in gateway logs
+kubectl logs -n <gateway-namespace> -l app=avapigw | grep "failing closed"
+
+# Fix the route's authentication/authorization configuration; the route
+# recovers on the next configuration reload that yields a constructible
+# middleware. Other routes keep serving normally.
+```
+
+### Issue: Resource Stuck in Terminating (Fixed)
+
+**Symptoms (older versions only):**
+- `kubectl delete` on an APIRoute/Backend/GRPCRoute/GRPCBackend/GraphQL* hangs
+- The resource stays in `Terminating` with the finalizer still present
+- Operator webhook logs show the finalizer-removal UPDATE being denied
+
+**Status:** fixed. Updates on objects with a `deletionTimestamp` are now
+admitted unconditionally, so finalizer removal can never be blocked by
+validation; metadata-only updates skip duplicate/cross-kind conflict checks;
+and terminating resources are excluded from conflict evaluation (see
+[Admission Lifecycle](webhook-validation.md#admission-lifecycle)). If you see
+this on an older version, upgrade — or as a last resort remove the finalizer
+manually:
+
+```bash
+kubectl patch apiroute <name> -n <namespace> --type=merge \
+  -p '{"metadata":{"finalizers":[]}}'
+```
+
+### Issue: Deleted Last CR (All Types) Not Propagated to Gateways
+
+**Symptoms:**
+- After deleting the **very last** CR across all resource types, running gateways keep serving the old configuration
+- Gateway WARN log about keeping last-known-good configuration on an empty snapshot
+
+**Note:** deleting the last resource of **one** type now propagates —
+FULL_SYNC snapshots are authoritative per resource type and an empty type
+clears the corresponding gateway router/registry. Only the **all-empty**
+snapshot (no resources of any type) is still held back.
+
+**Cause:** a gateway running a non-empty configuration deliberately ignores
+an **all-empty** snapshot (availability over consistency) — such a snapshot
+is indistinguishable from an operator that lost its store. Snapshots whose
+total resource count regresses within 30s of a (re)connect are also deferred
+while the operator store may still be mid-seed. The operator additionally
+gates initial snapshots on store seeding after a restart (log:
+`configuration store ready for initial snapshot`).
+
+**Solutions:**
+```bash
+# The full teardown propagates with the next NON-EMPTY snapshot (e.g. any
+# other CR create/update) or a gateway restart:
+kubectl rollout restart deployment/avapigw -n <gateway-namespace>
 ```
 
 ## gRPC Communication Issues

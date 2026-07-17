@@ -20,7 +20,7 @@ The gateway exposes **130+ Prometheus metrics** across all components:
 - **Cache**: Memory and Redis cache performance with per-route isolation
 - **Authentication**: JWT, API Key, OIDC, mTLS validation (global middleware chain)
 - **Authorization**: RBAC, ABAC, external authorization
-- **TLS**: Handshakes, certificate lifecycle
+- **TLS**: Connections, handshake duration (recorded for HTTPS and gRPC TLS listener handshakes), handshake errors, certificate lifecycle
 - **Vault**: API requests, authentication, secret retrieval
 - **Backend Auth**: Backend authentication operations
 - **Proxy**: Backend communication, errors, duration
@@ -336,9 +336,13 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 
 #### Per-Route Middleware Chain (internal/gateway/route_middleware.go)
 ```
-Security Headers → CORS → Body Limit → Headers → Cache → 
-Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+OpenAPI Validation → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
+
+Route-level authentication/authorization fail **closed**: if the middleware
+cannot be constructed, the route returns 503 and
+`gateway_route_auth_failures_total{reason="construction_failed"}` increments.
 
 ### RouteMiddlewareApplier Interface
 
@@ -359,19 +363,26 @@ This pattern allows:
 
 ## Known Issues / Follow-ups
 
-These are **pre-existing** observability findings (not Go 1.26.4 regressions) tracked as follow-ups:
+These are **pre-existing** observability findings (not Go 1.26.5 regressions) tracked as follow-ups:
 
-- **HTTP per-route rate-limit label resolves to `unknown`** — for HTTP routes, the
-  per-route rate limit is not enforced because the route label resolves to `unknown`,
-  so the gateway falls back to the **global** rate limit. The
-  `gateway_middleware_rate_limit_*` metrics therefore reflect the global limiter for
-  HTTP traffic. Per-route **gRPC** rate limiting works correctly.
-- **GraphQL gateway handler bypasses the metrics chain** — `/graphql` requests return
-  valid data, but the gateway-level GraphQL handler does not increment the
-  `avapigw_graphql_*` / `gateway_requests_*` counters because it bypasses the
-  metrics/middleware chain. GraphQL **subscription** proxying (over WebSocket) **does**
-  record metrics. Use backend or VMAgent-side metrics to observe GraphQL request volume
-  until this gap is closed.
+- **HTTP per-route rate limiting** — RESOLVED: route-level `rateLimit` on HTTP
+  routes is now enforced by the per-route middleware chain (memory or redis
+  store), and the `gateway_middleware_rate_limit_*` metrics carry the route
+  name label (the proxy injects the route into the request context before the
+  per-route chain runs). GraphQL routes reuse the same per-route middleware
+  machinery (their chain-cache scope is prefixed `graphql:`), so route-level
+  rate limiting applies there too. The redis store additionally reports
+  `gateway_middleware_redis_rate_limit_allowed_total`,
+  `..._denied_total`, `..._errors_total{policy=fail_open|fail_closed}` and the
+  `..._duration_seconds` histogram. Per-route **gRPC** rate limiting remains
+  in-memory (redis store on GRPCRoute produces an admission warning).
+- **GraphQL gateway handler middleware bypass** — RESOLVED: `/graphql` requests
+  now flow through the matched route's middleware chain, so route-level
+  authentication, rate limiting, CORS, and transforms on GraphQL routes are
+  enforced and GraphQL request counters are incremented. This is a behavior
+  change for clients that relied on the previous bypass (GraphQL routes with
+  authentication enabled now reject unauthenticated requests). GraphQL
+  **subscription** proxying (over WebSocket) records metrics as before.
 
 ## Related Documentation
 

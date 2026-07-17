@@ -94,6 +94,51 @@ const defaultTimeout = 30 * time.Second
 // defaultMaxBodySize is the default maximum request body size (10MB).
 const defaultMaxBodySize = 10 * 1024 * 1024
 
+// Default transport pooling. Mirrors the HTTP reverse proxy's plaintext
+// pooled transport (internal/proxy): the previous 10 idle connections per
+// host forced per-request dials at load, churning ephemeral ports.
+const (
+	// defaultMaxIdleConns caps idle connections across all GraphQL backends.
+	defaultMaxIdleConns = 512
+
+	// defaultMaxIdleConnsPerHost keeps enough warm connections per backend
+	// host to avoid per-request dials at load.
+	defaultMaxIdleConnsPerHost = 100
+
+	// defaultIdleConnTimeout matches the backend pool convention.
+	defaultIdleConnTimeout = 90 * time.Second
+
+	// defaultDialTimeout bounds backend TCP connection establishment.
+	defaultDialTimeout = 30 * time.Second
+
+	// defaultDialKeepAlive is the TCP keep-alive probe interval.
+	defaultDialKeepAlive = 30 * time.Second
+
+	// defaultTLSHandshakeTimeout bounds TLS handshakes.
+	defaultTLSHandshakeTimeout = 10 * time.Second
+
+	// defaultExpectContinueTimeout matches http.DefaultTransport.
+	defaultExpectContinueTimeout = 1 * time.Second
+)
+
+// newDefaultTransport builds the pooled transport used when no custom
+// transport is injected via WithTransport.
+func newDefaultTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   defaultDialTimeout,
+			KeepAlive: defaultDialKeepAlive,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          defaultMaxIdleConns,
+		MaxIdleConnsPerHost:   defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:       defaultIdleConnTimeout,
+		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+		ExpectContinueTimeout: defaultExpectContinueTimeout,
+	}
+}
+
 // New creates a new GraphQL reverse proxy.
 func New(opts ...Option) *Proxy {
 	p := &Proxy{
@@ -108,18 +153,16 @@ func New(opts ...Option) *Proxy {
 	}
 
 	if p.transport == nil {
-		p.transport = &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     90 * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-		}
+		p.transport = newDefaultTransport()
 	}
 
 	return p
+}
+
+// Transport returns the proxy's HTTP transport. Exposed for configuration
+// assertions in tests.
+func (p *Proxy) Transport() http.RoundTripper {
+	return p.transport
 }
 
 // UpdateBackends updates the backend targets for the proxy.
@@ -142,6 +185,13 @@ func (p *Proxy) UpdateBackends(backends []config.GraphQLBackend) {
 }
 
 // Forward forwards a GraphQL request to the appropriate backend.
+//
+// The returned response's Body MUST be closed by the caller. The per-request
+// timeout context stays alive until the body is closed: canceling it earlier
+// (the previous `defer cancel()`) made net/http's read loop observe
+// ctx.Done() before the caller finished reading the body, so every pooled
+// connection was torn down instead of returned to the idle pool — a dial per
+// request that exhausted ephemeral ports under load (PT-05/06 Finding 1).
 func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request) (*http.Response, error) {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "graphql.proxy.forward",
@@ -173,8 +223,11 @@ func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request
 		}
 	}
 
+	// The cancel func is deliberately NOT deferred: it is invoked on every
+	// error path below and otherwise handed to cancelOnCloseBody so the
+	// context (and its timer) is released when the caller closes the body.
+	// The timeout thereby bounds the WHOLE exchange including body streaming.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	// Build the target URL
 	targetURL := p.buildTargetURL(target)
@@ -183,6 +236,7 @@ func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request
 	// Create the proxied request
 	proxyReq, err := p.createProxyRequest(ctx, r, targetURL)
 	if err != nil {
+		cancel()
 		if p.metrics != nil {
 			p.metrics.RecordError(backendName, "forward", "request_creation_failed")
 		}
@@ -193,11 +247,22 @@ func (p *Proxy) Forward(ctx context.Context, backendName string, r *http.Request
 	// Execute the request
 	resp, err := p.transport.RoundTrip(proxyReq)
 	if err != nil {
+		cancel()
 		if p.metrics != nil {
 			p.metrics.RecordError(backendName, "forward", "transport_error")
 		}
 		span.RecordError(err)
 		return nil, fmt.Errorf("failed to forward request to %s: %w", backendName, err)
+	}
+
+	// Tie the context lifetime to the response body so the pooled
+	// connection is recycled after the caller drains and closes it.
+	if resp.Body != nil {
+		resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	} else {
+		// Defensive: RoundTrippers must return a non-nil Body, but test
+		// doubles may not; release the context immediately in that case.
+		cancel()
 	}
 
 	duration := time.Since(start)
@@ -238,8 +303,20 @@ func (p *Proxy) resolveBackend(name string) (*backendTarget, error) {
 
 // buildTargetURL builds the target URL from the backend target using round-robin selection.
 // Uses atomic counter for lock-free concurrent access.
+//
+// The round-robin index is computed entirely in the unsigned domain: the old
+// `int(counter) % len(hosts)` form truncated the int64 counter on 32-bit
+// platforms once it exceeded math.MaxInt32 (~2^31 requests), and Go's %
+// preserves the dividend's sign, so the negative remainder panicked the slice
+// access. uint64 arithmetic keeps the index in [0, len(hosts)) for every
+// counter value, including int64 wraparound, while preserving the original
+// selection order (the first call still yields hosts[0]).
 func (p *Proxy) buildTargetURL(target *backendTarget) *url.URL {
-	idx := int(target.current.Add(1)-1) % len(target.hosts)
+	// #nosec G115 -- the int64->uint64 conversion wrap is intentional: the
+	// two's-complement mapping of the counter into the unsigned domain is
+	// exactly what keeps the modulo result in [0, len(hosts)) for every
+	// counter value, including negatives after 32-bit truncation/wraparound.
+	idx := (uint64(target.current.Add(1)) - 1) % uint64(len(target.hosts))
 	host := target.hosts[idx]
 	return &url.URL{
 		Scheme: "http",
@@ -293,6 +370,23 @@ func (p *Proxy) createProxyRequest(
 	}
 
 	return req, nil
+}
+
+// cancelOnCloseBody ties a per-request timeout context's cancel func to the
+// response body lifecycle. net/http only returns a connection to the idle
+// pool once the body is fully read AND the request context is still alive;
+// canceling before Close tears the connection down (forcing a dial per
+// request). Close is safe to call multiple times: CancelFunc is idempotent.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+// Close closes the underlying body, then releases the request context.
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // copyHeaders copies headers from src to dst, excluding hop-by-hop headers.

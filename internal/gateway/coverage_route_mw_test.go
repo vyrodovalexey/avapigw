@@ -176,7 +176,7 @@ func TestBuildRouteAuthMiddleware_WithJWKSUrl(t *testing.T) {
 	assert.NotNil(t, mw, "should return middleware for valid JWKS URL config")
 }
 
-func TestBuildRouteAuthMiddleware_WithInvalidKey(t *testing.T) {
+func TestBuildRouteAuthMiddleware_WithHMACSecret(t *testing.T) {
 	t.Parallel()
 
 	manager := NewRouteMiddlewareManager(&config.GatewaySpec{}, observability.NopLogger())
@@ -187,15 +187,25 @@ func TestBuildRouteAuthMiddleware_WithInvalidKey(t *testing.T) {
 			Enabled: true,
 			JWT: &config.JWTAuthConfig{
 				Enabled:   true,
-				Secret:    "not-a-valid-jwk-or-pem",
+				Secret:    "raw-hmac-shared-secret",
 				Algorithm: "HS256",
 			},
 		},
 	}
 
-	// Should return nil because NewAuthenticator fails with invalid key
+	// HS256 with a raw shared secret is a valid configuration: the secret
+	// is parsed as a symmetric key, so a real authentication middleware is
+	// built and unauthenticated requests are rejected with 401.
 	mw := manager.buildRouteAuthMiddleware(route)
-	assert.Nil(t, mw, "should return nil for invalid key config")
+	require.NotNil(t, mw, "HS256 with raw secret must build an auth middleware")
+
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"requests without credentials must be rejected")
 }
 
 // ============================================================================

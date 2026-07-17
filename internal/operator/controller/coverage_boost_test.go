@@ -1368,13 +1368,16 @@ func TestAPIRouteReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
 		},
 	}
 
-	// This should return an error due to context deadline exceeded
 	result, err := reconciler.Reconcile(ctx, req)
-	// With a deadline-exceeded context, the fake client's Get() returns context.DeadlineExceeded
-	if err == nil {
-		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
+	// The expired context makes the gRPC apply fail inside the reconcile
+	// callback; the reconciler schedules a fixed-delay requeue with a nil
+	// error so controller-runtime honors the Result instead of using backoff.
+	if err != nil {
+		t.Errorf("Reconcile() error = %v, want nil (reconcile failure should requeue with fixed delay)", err)
 	}
-	_ = result
+	if result.RequeueAfter != RequeueAfterReconcileFailure {
+		t.Errorf("Reconcile() RequeueAfter = %v, want %v", result.RequeueAfter, RequeueAfterReconcileFailure)
+	}
 }
 
 func TestGRPCRouteReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
@@ -1413,10 +1416,15 @@ func TestGRPCRouteReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
-	if err == nil {
-		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
+	// The expired context makes the gRPC apply fail inside the reconcile
+	// callback; the reconciler schedules a fixed-delay requeue with a nil
+	// error so controller-runtime honors the Result instead of using backoff.
+	if err != nil {
+		t.Errorf("Reconcile() error = %v, want nil (reconcile failure should requeue with fixed delay)", err)
 	}
-	_ = result
+	if result.RequeueAfter != RequeueAfterReconcileFailure {
+		t.Errorf("Reconcile() RequeueAfter = %v, want %v", result.RequeueAfter, RequeueAfterReconcileFailure)
+	}
 }
 
 func TestBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
@@ -1455,10 +1463,15 @@ func TestBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
-	if err == nil {
-		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
+	// The expired context makes the gRPC apply fail inside the reconcile
+	// callback; the reconciler schedules a fixed-delay requeue with a nil
+	// error so controller-runtime honors the Result instead of using backoff.
+	if err != nil {
+		t.Errorf("Reconcile() error = %v, want nil (reconcile failure should requeue with fixed delay)", err)
 	}
-	_ = result
+	if result.RequeueAfter != RequeueAfterReconcileFailure {
+		t.Errorf("Reconcile() RequeueAfter = %v, want %v", result.RequeueAfter, RequeueAfterReconcileFailure)
+	}
 }
 
 func TestGRPCBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) {
@@ -1497,10 +1510,15 @@ func TestGRPCBackendReconciler_Reconcile_GRPCServerError_FullPath(t *testing.T) 
 	}
 
 	result, err := reconciler.Reconcile(ctx, req)
-	if err == nil {
-		t.Error("Reconcile() with deadline exceeded context should return error, got nil")
+	// The expired context makes the gRPC apply fail inside the reconcile
+	// callback; the reconciler schedules a fixed-delay requeue with a nil
+	// error so controller-runtime honors the Result instead of using backoff.
+	if err != nil {
+		t.Errorf("Reconcile() error = %v, want nil (reconcile failure should requeue with fixed delay)", err)
 	}
-	_ = result
+	if result.RequeueAfter != RequeueAfterReconcileFailure {
+		t.Errorf("Reconcile() RequeueAfter = %v, want %v", result.RequeueAfter, RequeueAfterReconcileFailure)
+	}
 }
 
 // ============================================================================

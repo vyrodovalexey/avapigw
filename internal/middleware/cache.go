@@ -3,6 +3,7 @@ package middleware
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -21,6 +22,52 @@ import (
 // for caching. Responses exceeding this limit are still forwarded to the
 // client but are not stored in cache.
 const maxCacheBodySize = 10 << 20 // 10MB
+
+// cacheFillTimeout bounds the cache fill write after the response has been
+// sent to the client. The fill is detached from the client's request
+// context (a disconnect right after receiving the response must not cancel
+// the fill), so this timeout is its only bound.
+const cacheFillTimeout = 5 * time.Second
+
+// uncacheableHeaders lists response headers that must never be stored in a
+// shared cache entry, in canonical form:
+//
+//   - Per-request CORS headers: the CORS middleware runs BEFORE this cache
+//     middleware on the request path (see RouteMiddlewareManager
+//     buildMiddlewareChain: CORS wraps cache) and eagerly sets its response
+//     headers on the live header map. A grant issued to the origin that
+//     filled the cache (e.g. Access-Control-Allow-Origin) must never be
+//     replayed to other origins; the live CORS middleware is the single
+//     source of truth on every request, including cache hits.
+//   - Set-Cookie: per-client credential material.
+//   - X-Cache: replay marker, set per response.
+//   - Hop-by-hop headers (RFC 9110 section 7.6.1): connection-scoped, not
+//     part of the cacheable representation.
+var uncacheableHeaders = map[string]struct{}{
+	"Access-Control-Allow-Origin":      {},
+	"Access-Control-Allow-Credentials": {},
+	"Access-Control-Expose-Headers":    {},
+	"Access-Control-Allow-Methods":     {},
+	"Access-Control-Allow-Headers":     {},
+	"Access-Control-Max-Age":           {},
+	"Set-Cookie":                       {},
+	"X-Cache":                          {},
+	"Connection":                       {},
+	"Keep-Alive":                       {},
+	"Proxy-Authenticate":               {},
+	"Proxy-Authorization":              {},
+	"Te":                               {},
+	"Trailer":                          {},
+	"Transfer-Encoding":                {},
+	"Upgrade":                          {},
+}
+
+// isUncacheableHeader reports whether a response header must be excluded
+// from cached entries and from cache replay.
+func isUncacheableHeader(key string) bool {
+	_, ok := uncacheableHeaders[http.CanonicalHeaderKey(key)]
+	return ok
+}
 
 // cachedResponse holds a serialized HTTP response for cache storage.
 type cachedResponse struct {
@@ -129,13 +176,29 @@ func (cm *cacheMiddleware) serveCachedResponse(w http.ResponseWriter, r *http.Re
 }
 
 // writeCachedResponse writes a cached response to the ResponseWriter.
+//
+// Headers already present on the live response writer win over cached
+// values: per-request middlewares (CORS, security headers) run before this
+// cache middleware and have already set the correct values for THIS
+// request, so cached values must neither override nor duplicate them (the
+// stored Vary value, for example, is only emitted when the live chain did
+// not set its own). Uncacheable headers are also skipped on replay as
+// defense in depth against entries stored by older gateway versions.
 func writeCachedResponse(w http.ResponseWriter, cached *cachedResponse) {
+	liveHeaders := w.Header()
 	for k, vals := range cached.Headers {
+		canonical := http.CanonicalHeaderKey(k)
+		if isUncacheableHeader(canonical) {
+			continue
+		}
+		if _, exists := liveHeaders[canonical]; exists {
+			continue
+		}
 		for _, v := range vals {
-			w.Header().Add(k, v)
+			liveHeaders.Add(canonical, v)
 		}
 	}
-	w.Header().Set("X-Cache", "HIT")
+	liveHeaders.Set("X-Cache", "HIT")
 	w.WriteHeader(cached.StatusCode)
 	_, _ = w.Write(cached.Body)
 }
@@ -173,9 +236,10 @@ func (cm *cacheMiddleware) captureAndCache(
 }
 
 // storeResponse serializes and stores the captured response in cache.
-// Headers are read from recorder.Header() which delegates to the embedded
-// ResponseWriter — this is the canonical source for response headers set
-// by downstream handlers.
+// Headers are taken from the recorder's WriteHeader-time snapshot (what was
+// actually sent, isolated from later mutations of the live header map) with
+// per-request and hop-by-hop headers stripped so a cache entry filled by
+// one request never leaks another request's CORS grants or cookies.
 func (cm *cacheMiddleware) storeResponse(
 	r *http.Request,
 	key string,
@@ -183,7 +247,7 @@ func (cm *cacheMiddleware) storeResponse(
 ) {
 	cached := cachedResponse{
 		StatusCode: recorder.statusCode,
-		Headers:    cloneHeaders(recorder.Header()),
+		Headers:    cacheableHeaders(recorder.headerSnapshot),
 		Body:       recorder.body.Bytes(),
 	}
 
@@ -192,7 +256,14 @@ func (cm *cacheMiddleware) storeResponse(
 		return
 	}
 
-	if setErr := cm.cache.Set(r.Context(), key, serialized, cm.ttl); setErr != nil {
+	// Detach the fill write from the client's request context: the client
+	// has already received the response, and a disconnect at this point
+	// must not cancel the fill. Context values (trace metadata) are
+	// preserved; the write is bounded by cacheFillTimeout instead.
+	fillCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), cacheFillTimeout)
+	defer cancel()
+
+	if setErr := cm.cache.Set(fillCtx, key, serialized, cm.ttl); setErr != nil {
 		cm.logger.Debug("failed to store response in cache",
 			observability.String("key", key),
 			observability.Error(setErr),
@@ -252,6 +323,21 @@ func cloneHeaders(h http.Header) map[string][]string {
 	return clone
 }
 
+// cacheableHeaders deep-copies snapshot headers, dropping per-request and
+// hop-by-hop headers that must not be shared across requests.
+func cacheableHeaders(h http.Header) map[string][]string {
+	clone := make(map[string][]string, len(h))
+	for k, v := range h {
+		if isUncacheableHeader(k) {
+			continue
+		}
+		vc := make([]string, len(v))
+		copy(vc, v)
+		clone[k] = vc
+	}
+	return clone
+}
+
 // cacheResponseRecorder captures the response for caching while also
 // writing it to the underlying ResponseWriter.
 type cacheResponseRecorder struct {
@@ -260,15 +346,24 @@ type cacheResponseRecorder struct {
 	body           *bytes.Buffer
 	headerWritten  bool
 	bufferExceeded bool
+
+	// headerSnapshot is a deep copy of the response headers taken at
+	// WriteHeader time. The live header map is shared with per-request
+	// middlewares (CORS in particular) and may be mutated after the
+	// response is written, so the cached entry is built from this
+	// snapshot rather than from the live map.
+	headerSnapshot http.Header
 }
 
-// WriteHeader captures the status code and forwards it to the underlying
-// ResponseWriter exactly once. Duplicate calls are suppressed to avoid
-// "superfluous response.WriteHeader" warnings from net/http.
+// WriteHeader captures the status code, snapshots the response headers as
+// sent, and forwards the call to the underlying ResponseWriter exactly
+// once. Duplicate calls are suppressed to avoid "superfluous
+// response.WriteHeader" warnings from net/http.
 func (r *cacheResponseRecorder) WriteHeader(code int) {
 	if !r.headerWritten {
 		r.statusCode = code
 		r.headerWritten = true
+		r.headerSnapshot = cloneHeaders(r.ResponseWriter.Header())
 		r.ResponseWriter.WriteHeader(code)
 	}
 }
@@ -279,9 +374,7 @@ func (r *cacheResponseRecorder) WriteHeader(code int) {
 // An implicit 200 status is sent if WriteHeader has not been called yet.
 func (r *cacheResponseRecorder) Write(b []byte) (int, error) {
 	if !r.headerWritten {
-		r.statusCode = http.StatusOK
-		r.headerWritten = true
-		r.ResponseWriter.WriteHeader(http.StatusOK)
+		r.WriteHeader(http.StatusOK)
 	}
 
 	if !r.bufferExceeded {

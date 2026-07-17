@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -125,6 +126,79 @@ func TestCacheMetrics_RecordError(t *testing.T) {
 			assert.Equal(t, before+1, after, "errorsTotal should increment by 1")
 		})
 	}
+}
+
+// metricSeriesExists reports whether a series with the given label values
+// exists for the named metric family in the default registry.
+func metricSeriesExists(t *testing.T, name string, want map[string]string) bool {
+	t.Helper()
+
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := make(map[string]string, len(metric.GetLabel()))
+			for _, pair := range metric.GetLabel() {
+				labels[pair.GetName()] = pair.GetValue()
+			}
+			matches := true
+			for k, v := range want {
+				if labels[k] != v {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestCacheMetrics_Init_PreInitializesLabelCombinations(t *testing.T) {
+	m := GetCacheMetrics()
+	m.Init()
+	m.Init() // idempotent
+
+	for _, backend := range []string{"memory", "redis"} {
+		for _, op := range []string{"get", "set", "delete", "exists"} {
+			labels := map[string]string{"backend": backend, "operation": op}
+			assert.True(t,
+				metricSeriesExists(t, "gateway_cache_errors_total", labels),
+				"errors_total series for %s/%s must be pre-initialized", backend, op)
+			assert.True(t,
+				metricSeriesExists(t, "gateway_cache_operation_duration_seconds", labels),
+				"operation_duration series for %s/%s must be pre-initialized", backend, op)
+		}
+	}
+
+	// Redis-only operations added for metric parity (GetWithTTL/SetNX/Expire).
+	for _, op := range []string{"get_with_ttl", "setnx", "expire"} {
+		labels := map[string]string{"backend": "redis", "operation": op}
+		assert.True(t,
+			metricSeriesExists(t, "gateway_cache_errors_total", labels),
+			"errors_total series for redis/%s must be pre-initialized", op)
+		assert.True(t,
+			metricSeriesExists(t, "gateway_cache_operation_duration_seconds", labels),
+			"operation_duration series for redis/%s must be pre-initialized", op)
+	}
+}
+
+func TestCacheMetrics_MustRegister(t *testing.T) {
+	m := GetCacheMetrics()
+	m.Init()
+
+	registry := prometheus.NewRegistry()
+	m.MustRegister(registry)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	assert.NotEmpty(t, families, "registered collectors must be gatherable")
 }
 
 func TestCacheMetrics_ConcurrentAccess(t *testing.T) {

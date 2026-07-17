@@ -70,7 +70,10 @@ func MiddlewareFromConfig(
 		logger = observability.NopLogger()
 	}
 
-	validator, err := NewValidatorFromConfig(cfg, logger, nil)
+	// Wire the shared metrics singleton so validation successes/failures on
+	// the route middleware path are recorded (previously nil, leaving the
+	// gateway_openapi_validation_* series permanently at zero).
+	validator, err := NewValidatorFromConfig(cfg, logger, GetSharedMetrics())
 	if err != nil {
 		logger.Error("failed to create OpenAPI validator, skipping validation",
 			observability.Error(err),

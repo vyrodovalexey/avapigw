@@ -71,6 +71,16 @@ type GatewayInstance struct {
 	Registry *backend.Registry
 	Proxy    *proxy.ReverseProxy
 	BaseURL  string
+
+	// RouteMiddleware is the per-route middleware manager. It is only set
+	// when the gateway was started through StartGatewayWithRouteMiddleware
+	// and is stopped by Stop to release rate limiter resources.
+	RouteMiddleware *gateway.RouteMiddlewareManager
+
+	// CacheFactory manages per-route caches. It is only set when the
+	// gateway was started through StartGatewayWithRouteMiddleware and is
+	// closed by Stop to release cache connections.
+	CacheFactory *gateway.CacheFactory
 }
 
 // StartGateway starts a gateway instance with the given configuration.
@@ -104,8 +114,12 @@ func StartGatewayWithConfig(ctx context.Context, cfg *config.GatewayConfig) (*Ga
 		return nil, fmt.Errorf("failed to start backends: %w", err)
 	}
 
-	// Create proxy
-	p := proxy.NewReverseProxy(r, registry, proxy.WithProxyLogger(logger))
+	// Create proxy. WebSocket config is wired the same way initApplication
+	// does in cmd/gateway so tests exercise the production origin policy.
+	p := proxy.NewReverseProxy(r, registry,
+		proxy.WithProxyLogger(logger),
+		proxy.WithWebSocketConfig(cfg.Spec.WebSocket),
+	)
 
 	// Create gateway
 	gw, err := gateway.New(cfg,
@@ -142,6 +156,12 @@ func StartGatewayWithConfig(ctx context.Context, cfg *config.GatewayConfig) (*Ga
 func (gi *GatewayInstance) Stop(ctx context.Context) error {
 	if gi.Registry != nil {
 		_ = gi.Registry.StopAll(ctx)
+	}
+	if gi.RouteMiddleware != nil {
+		gi.RouteMiddleware.Stop()
+	}
+	if gi.CacheFactory != nil {
+		_ = gi.CacheFactory.Close()
 	}
 	if gi.Gateway != nil {
 		return gi.Gateway.Stop(ctx)

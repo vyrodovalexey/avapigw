@@ -3,10 +3,13 @@ package webhook
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestGRPCBackendValidator_ValidateCreate_ValidBackend(t *testing.T) {
@@ -1168,5 +1171,69 @@ func TestGRPCBackendValidator_ValidateDelete(t *testing.T) {
 	}
 	if len(warnings) > 0 {
 		t.Errorf("ValidateDelete() warnings = %v, want empty", warnings)
+	}
+}
+
+// TestGRPCBackendValidator_ValidateUpdate_CrossConflictWithBackend covers the
+// update-path cross-kind rejection: a spec CHANGE that moves the GRPCBackend
+// onto a host:port already claimed by a live Backend must be rejected by the
+// second (cross-conflict) check in ValidateUpdate. The old spec differs from
+// the new one, so the metadata-only short-circuit does not apply, and no
+// same-kind duplicate exists, so the first check passes.
+func TestGRPCBackendValidator_ValidateUpdate_CrossConflictWithBackend(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = avapigwv1alpha1.AddToScheme(scheme)
+
+	existingBackend := &avapigwv1alpha1.Backend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.BackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-service", Port: 8080},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existingBackend).
+		Build()
+
+	validator := &GRPCBackendValidator{
+		Client:           fakeClient,
+		DuplicateChecker: NewDuplicateChecker(fakeClient),
+	}
+
+	oldBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "updated-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "old-grpc-service", Port: 50051},
+			},
+		},
+	}
+	newBackend := &avapigwv1alpha1.GRPCBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "updated-grpc-backend",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCBackendSpec{
+			Hosts: []avapigwv1alpha1.BackendHost{
+				{Address: "shared-service", Port: 8080},
+			},
+		},
+	}
+
+	_, err := validator.ValidateUpdate(context.Background(), oldBackend, newBackend)
+	if err == nil {
+		t.Fatal("ValidateUpdate() should return error for cross-CRD host:port conflict with Backend")
+	}
+	if !strings.Contains(err.Error(), "existing-backend") {
+		t.Errorf("ValidateUpdate() error should identify the conflicting Backend, got %v", err)
 	}
 }

@@ -134,6 +134,13 @@ func stopCoreServices(ctx context.Context, app *application, logger observabilit
 		logger.Error("failed to stop gateway gracefully", observability.Error(err))
 	}
 
+	// Close active GraphQL subscription relays (WebSocket connections
+	// outlive the HTTP requests that established them).
+	if app.graphqlHandler != nil {
+		logger.Info("closing GraphQL subscription relays")
+		app.graphqlHandler.Close()
+	}
+
 	stopDependencies(ctx, app, logger)
 	stopBackgroundWorkers(app, logger)
 }
@@ -141,6 +148,14 @@ func stopCoreServices(ctx context.Context, app *application, logger observabilit
 // stopDependencies closes caches, Vault, backends, and tracer in the
 // correct dependency order.
 func stopDependencies(ctx context.Context, app *application, logger observability.Logger) {
+	// Stop route middleware (rate limiter goroutines and redis
+	// connections) before Vault — redis limiters may hold Vault-resolved
+	// credentials.
+	if app.routeMiddlewareMgr != nil {
+		logger.Info("stopping route middleware manager")
+		app.routeMiddlewareMgr.Stop()
+	}
+
 	// Close cache factory before Vault client — caches may depend on Vault
 	// for credentials (e.g. Redis auth via Vault KV).
 	if app.cacheFactory != nil {

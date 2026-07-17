@@ -675,8 +675,10 @@ func TestFunctional_APIRoute_Authorization(t *testing.T) {
 					Enabled: true,
 					Policies: []avapigwv1alpha1.ABACPolicyConfig{
 						{
-							Name:       "owner-policy",
-							Expression: "request.user.id == resource.owner_id",
+							Name: "owner-policy",
+							// Runtime CEL env: subject/request are map(string, dyn),
+							// resource is a plain string (see abac.NewCELEnv).
+							Expression: "subject.id == request.user.id",
 							Resources:  []string{"/api/v1/documents/*"},
 							Actions:    []string{"GET", "PUT", "DELETE"},
 							Effect:     "allow",
@@ -852,8 +854,10 @@ func TestFunctional_APIRoute_CombinedAuthAuthz(t *testing.T) {
 				Enabled: true,
 				Policies: []avapigwv1alpha1.ABACPolicyConfig{
 					{
-						Name:       "owner-policy",
-						Expression: "request.user.id == resource.owner_id",
+						Name: "owner-policy",
+						// Must compile against the gateway's runtime CEL env
+						// where 'resource' is a string, not a map.
+						Expression: "subject.id == request.user.id",
 						Effect:     "allow",
 					},
 				},

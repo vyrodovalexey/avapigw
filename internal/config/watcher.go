@@ -17,19 +17,31 @@ type ConfigCallback func(*GatewayConfig)
 // ErrorCallback is called when an error occurs during config reload.
 type ErrorCallback func(error)
 
+// PreValidateTransform normalizes a freshly parsed configuration BEFORE the
+// watcher validates it and returns the effective configuration to validate,
+// store, and deliver to the reload callback. Callers use it to apply the
+// same normalization performed at boot (e.g. the cmd/gateway Vault
+// environment overlay), so a file that is only valid together with
+// environment-supplied values does not fail raw-file validation and kill hot
+// reload. The watcher always hands the hook a defensive shallow copy of the
+// raw parsed configuration; hooks may replace top-level sections on that
+// copy but must not deep-mutate shared sub-structures of the input.
+type PreValidateTransform func(*GatewayConfig) *GatewayConfig
+
 // Watcher watches configuration files for changes and triggers reloads.
 type Watcher struct {
-	path          string
-	watcher       *fsnotify.Watcher
-	callback      ConfigCallback
-	errorCallback ErrorCallback
-	logger        observability.Logger
-	debounceDelay time.Duration
-	lastConfig    *GatewayConfig
-	mu            sync.RWMutex
-	stopCh        chan struct{}
-	stoppedCh     chan struct{}
-	running       bool
+	path                 string
+	watcher              *fsnotify.Watcher
+	callback             ConfigCallback
+	errorCallback        ErrorCallback
+	preValidateTransform PreValidateTransform
+	logger               observability.Logger
+	debounceDelay        time.Duration
+	lastConfig           *GatewayConfig
+	mu                   sync.RWMutex
+	stopCh               chan struct{}
+	stoppedCh            chan struct{}
+	running              bool
 }
 
 // WatcherOption is a functional option for configuring the watcher.
@@ -53,6 +65,18 @@ func WithLogger(logger observability.Logger) WatcherOption {
 func WithErrorCallback(callback ErrorCallback) WatcherOption {
 	return func(w *Watcher) {
 		w.errorCallback = callback
+	}
+}
+
+// WithPreValidateTransform sets a transform hook applied to every freshly
+// loaded configuration BEFORE validation (initial Start load, watch-loop
+// reloads, and ForceReload). The transformed configuration is what gets
+// validated, stored as the last config, and passed to the reload callback.
+// When no hook is set, the watcher behavior is unchanged: the raw parsed
+// configuration is validated and delivered as-is.
+func WithPreValidateTransform(transform PreValidateTransform) WatcherOption {
+	return func(w *Watcher) {
+		w.preValidateTransform = transform
 	}
 }
 
@@ -101,6 +125,8 @@ func (w *Watcher) Start(ctx context.Context) error {
 		return err
 	}
 
+	config = w.effectiveConfig(config)
+
 	if err := ValidateConfig(config); err != nil {
 		return err
 	}
@@ -145,6 +171,30 @@ func (w *Watcher) GetLastConfig() *GatewayConfig {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.lastConfig
+}
+
+// effectiveConfig applies the pre-validate transform hook to a freshly
+// parsed configuration and returns the effective configuration to validate
+// and deliver. Without a hook the raw configuration is returned unchanged
+// (identity — byte-identical legacy behavior). With a hook, a defensive
+// shallow copy is handed to the hook so implementations that assign
+// top-level sections in place (e.g. cfg.Spec.Vault = overlay(...)) can never
+// mutate the raw parsed configuration the watcher loaded.
+func (w *Watcher) effectiveConfig(raw *GatewayConfig) *GatewayConfig {
+	if w.preValidateTransform == nil {
+		return raw
+	}
+
+	// Shallow copy: Spec is a value, so replacing pointer sections on the
+	// copy leaves the raw configuration untouched.
+	cp := *raw
+	if effective := w.preValidateTransform(&cp); effective != nil {
+		return effective
+	}
+
+	// Defensive: a hook that (incorrectly) returns nil falls back to the
+	// copy it received, which carries any in-place transformations.
+	return &cp
 }
 
 // watch is the main watch loop.
@@ -277,6 +327,11 @@ func (w *Watcher) reload(ctx context.Context) {
 		// Continue with validation
 	}
 
+	// Validate the EFFECTIVE configuration (post transform hook) so files
+	// that rely on environment-supplied values (e.g. VAULT_ADDR) do not
+	// fail raw-file validation and silently disable hot reload.
+	config = w.effectiveConfig(config)
+
 	if err := ValidateConfig(config); err != nil {
 		w.logger.Error("configuration validation failed",
 			observability.Error(err),
@@ -315,6 +370,8 @@ func (w *Watcher) ForceReload() error {
 	if err != nil {
 		return err
 	}
+
+	config = w.effectiveConfig(config)
 
 	if err := ValidateConfig(config); err != nil {
 		return err

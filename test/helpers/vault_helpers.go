@@ -5,10 +5,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	vault "github.com/hashicorp/vault/api"
+
+	"github.com/vyrodovalexey/avapigw/internal/config"
+	internalvault "github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 const (
@@ -360,6 +364,135 @@ func GetVaultTestConfig() VaultTestConfig {
 		Namespace:  os.Getenv("VAULT_NAMESPACE"),
 		SkipVerify: os.Getenv("VAULT_SKIP_VERIFY") == "true",
 	}
+}
+
+// ApplySpecVaultEnvOverlay applies the per-field ENV > file > defaults overlay
+// for the gateway-wide spec.vault section, mirroring the PRODUCTION seam
+// cmd/gateway/env.go applyVaultEnv (address, authMethod, token, namespace).
+// It is intentionally scoped to the fields the suite tests exercise (address,
+// authMethod, token, namespace); the full env matrix is exhaustively unit
+// covered in cmd/gateway/env_vault_test.go. The input section is cloned so the
+// parsed configuration is never mutated (same contract as applyVaultEnv).
+//
+// A configured VAULT_ADDR forces Enabled=true and clears an env-overridden
+// token's tokenFile, exactly like the production overlay, so the per-field
+// precedence contract holds for suite-level assertions.
+func ApplySpecVaultEnvOverlay(vcfg *config.VaultConfig) *config.VaultConfig {
+	addr := os.Getenv("VAULT_ADDR")
+	if vcfg == nil && addr == "" {
+		return nil
+	}
+
+	effective := vcfg.Clone()
+	if effective == nil {
+		effective = &config.VaultConfig{}
+	}
+
+	if addr != "" {
+		effective.Address = addr
+		effective.Enabled = true
+	}
+	if am := os.Getenv("VAULT_AUTH_METHOD"); am != "" {
+		effective.AuthMethod = am
+	}
+	if token := os.Getenv("VAULT_TOKEN"); token != "" {
+		effective.Token = token
+		// ENV token wins per-field; clearing tokenFile keeps the
+		// exactly-one(token|tokenFile) invariant coherent.
+		effective.TokenFile = ""
+	}
+	if ns := os.Getenv("VAULT_NAMESPACE"); ns != "" {
+		effective.Namespace = ns
+	}
+
+	return effective
+}
+
+// SpecVaultConfigToVaultClientConfig maps an EFFECTIVE gateway-wide spec.vault
+// section (post ApplySpecVaultEnvOverlay) into an internal/vault.Config,
+// resolving tokenFile / appRole.secretIdFile references from disk. It mirrors
+// the PRODUCTION seam cmd/gateway/vault.go convertVaultClientConfig so suite
+// tests drive the real config → vault client translation (including file-based
+// secret resolution) without importing package main.
+//
+// Only the token / kubernetes / approle auth branches plus tokenFile /
+// secretIdFile resolution are modeled here (the fields the suite exercises);
+// the exhaustive field-by-field mapping is unit covered in
+// cmd/gateway/vault_spec_test.go.
+func SpecVaultConfigToVaultClientConfig(vcfg *config.VaultConfig) (*internalvault.Config, error) {
+	if vcfg == nil {
+		return &internalvault.Config{
+			Enabled:    true,
+			AuthMethod: internalvault.AuthMethodToken,
+		}, nil
+	}
+
+	out := &internalvault.Config{
+		Enabled:    true,
+		Address:    vcfg.Address,
+		Namespace:  vcfg.Namespace,
+		AuthMethod: internalvault.AuthMethod(vcfg.EffectiveAuthMethod()),
+		Token:      vcfg.Token,
+	}
+
+	switch out.AuthMethod {
+	case internalvault.AuthMethodKubernetes:
+		k8s := vcfg.Kubernetes
+		if k8s == nil {
+			k8s = &config.VaultKubernetesAuthConfig{}
+		}
+		out.Kubernetes = &internalvault.KubernetesAuthConfig{
+			Role:      k8s.Role,
+			MountPath: k8s.MountPath,
+			TokenPath: k8s.TokenPath,
+		}
+		out.Kubernetes.MountPath = out.Kubernetes.GetMountPath()
+		out.Kubernetes.TokenPath = out.Kubernetes.GetTokenPath()
+	case internalvault.AuthMethodAppRole:
+		appRole := vcfg.AppRole
+		if appRole == nil {
+			appRole = &config.VaultAppRoleAuthConfig{}
+		}
+		out.AppRole = &internalvault.AppRoleAuthConfig{
+			RoleID:    appRole.RoleID,
+			SecretID:  appRole.SecretID,
+			MountPath: appRole.MountPath,
+		}
+		out.AppRole.MountPath = out.AppRole.GetMountPath()
+	case internalvault.AuthMethodToken:
+		// Token auth carries no sub-block.
+	}
+
+	if vcfg.TokenFile != "" && out.Token == "" {
+		token, err := readVaultSecretFileForTest(vcfg.TokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read vault token file %q: %w", vcfg.TokenFile, err)
+		}
+		out.Token = token
+	}
+	if out.AppRole != nil && vcfg.AppRole != nil &&
+		vcfg.AppRole.SecretIDFile != "" && out.AppRole.SecretID == "" {
+		secretID, err := readVaultSecretFileForTest(vcfg.AppRole.SecretIDFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read vault approle secretId file %q: %w",
+				vcfg.AppRole.SecretIDFile, err)
+		}
+		out.AppRole.SecretID = secretID
+	}
+
+	return out, nil
+}
+
+// readVaultSecretFileForTest reads secret material from a file, trimming the
+// surrounding whitespace / trailing newline that vault login and Kubernetes
+// Secret mounts leave behind — mirroring cmd/gateway/vault.go
+// readVaultSecretFile.
+func readVaultSecretFileForTest(path string) (string, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- test-controlled path
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 /*

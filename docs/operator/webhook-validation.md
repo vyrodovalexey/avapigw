@@ -5,8 +5,9 @@ The AVAPIGW Operator includes comprehensive admission webhooks that validate Cus
 ## Table of Contents
 
 - [Overview](#overview)
+- [Admission Lifecycle](#admission-lifecycle)
 - [Validation Rules](#validation-rules)
-- [Duplicate Detection](#duplicate-detection)
+- [Cross-CRD Duplicate Detection](#cross-crd-duplicate-detection)
 - [Cross-Reference Validation](#cross-reference-validation)
 - [Error Messages](#error-messages)
 - [Configuration](#configuration)
@@ -27,6 +28,29 @@ The admission webhooks provide five main types of validation with enhanced valid
 - **ValidatingAdmissionWebhook** - Validates CRD specifications before creation/update
 - **MutatingAdmissionWebhook** - Sets default values and normalizes configurations
 - **Ingress ValidatingAdmissionWebhook** - Validates standard Kubernetes Ingress resources
+
+## Admission Lifecycle
+
+The update webhooks apply three lifecycle rules (uniformly across APIRoute,
+Backend, GRPCRoute, GRPCBackend, GraphQLRoute, and GraphQLBackend) that
+guarantee deletion and metadata housekeeping can never be blocked by
+validation:
+
+1. **Deleting objects are always admitted.** An UPDATE on an object whose
+   `metadata.deletionTimestamp` is set is admitted unconditionally, so
+   finalizer removal always proceeds and a resource can never wedge in
+   `Terminating` because of webhook validation (this previously caused a
+   webhook/finalizer deadlock).
+2. **Metadata-only updates skip conflict checks.** When the spec is
+   semantically unchanged (only labels, annotations, finalizers, or other
+   metadata changed), the webhook still runs **local spec validation** but
+   skips duplicate and cross-kind conflict checks — the update cannot
+   introduce a new conflict, so finalizer or label changes on overlapping
+   legacy objects are never rejected.
+3. **Terminating candidates are excluded from conflict evaluation.** Both
+   same-kind duplicate checks and cross-kind conflict checks skip existing
+   resources that have a `deletionTimestamp`: a resource on its way out never
+   blocks admission of a surviving or replacement resource.
 
 ## Validation Rules
 
@@ -155,28 +179,64 @@ healthCheck:
   timeout: "5s"
 ```
 
+#### HTTP-Mode Health Check Fields (`useHTTP`)
+
+The health check can switch from gRPC protocol to HTTP GET via `useHTTP`:
+
+```yaml
+healthCheck:
+  enabled: true
+  useHTTP: true
+  httpPath: "/monitoring/health"     # Must start with "/"
+  httpPort: 8080                     # Range: 1-65535; defaults to the backend port
+```
+
+Validation of `httpPath`/`httpPort` against the `useHTTP` toggle:
+
+- **`useHTTP: true`** — `httpPath` must start with `/`; `httpPort` (when set)
+  must be in range 1-65535
+- **`useHTTP: false`** — an explicit `httpPath` other than the CRD schema
+  default `/healthz` is rejected, and `httpPort` must not be set
+- **Schema default tolerated** — the CRD schema defaults `httpPath` to
+  `/healthz` (`+kubebuilder:default`), and the API server applies structural
+  defaulting **before** the validating webhook runs. Every GRPCBackend with a
+  `healthCheck` block therefore reaches the webhook with `httpPath: /healthz`
+  populated even when the user never set it, and the webhook tolerates this
+  inert default when `useHTTP` is false. (Before this fix, the webhook
+  rejected the defaulted value, making every GRPCBackend with a `healthCheck`
+  block unadmittable — an admission deadlock.)
+
 ## Cross-CRD Duplicate Detection
 
 The webhook prevents duplicate route configurations that could cause conflicts across different CRD types:
 
 ### Cross-Route Intersection Prevention
 
-**NEW FEATURE**: The webhook now prevents path intersections between APIRoute and GraphQLRoute CRDs to avoid routing conflicts.
+The webhook prevents path intersections between APIRoute and GraphQLRoute CRDs to avoid routing conflicts, rejecting only **true duplicates** the data plane cannot order deterministically.
 
 #### Overlap Detection Logic
 
-Routes are considered overlapping if their paths intersect:
+Routes are rejected only when they are **true duplicates** — the same match
+type with the same path (identical specificity) and overlapping methods.
+Combinations of different specificity are resolved deterministically by the
+router (exact = 1000 > prefix = 500 + prefix length > regex = 100; an empty
+match acts as a priority-0 catch-all) and are therefore allowed:
 
-- **Exact path vs Exact path**: Overlap if paths are identical
-- **Prefix match vs Exact path**: Overlap if the exact path starts with the prefix
-- **Exact path vs Prefix match**: Overlap if the exact path starts with the prefix  
-- **Prefix match vs Prefix match**: Overlap if either prefix starts with the other
-- **Nil/empty match**: Treated as "catch-all" and overlaps with everything
+- **Exact path vs Exact path**: Conflict only if paths are identical
+- **Prefix match vs Prefix match**: Conflict only if prefixes are identical — nested prefixes (e.g. `/` and `/api`) resolve by longest-prefix specificity
+- **Exact path vs Prefix match**: Never a conflict — the router resolves exact-first
+- **Nil/empty match (catch-all)**: Coexists with any route that has match conditions; only two match-less catch-alls conflict with each other
+- **Self-updates**: Updating a resource never conflicts with its own previous version
+
+The same semantics apply across kinds sharing the HTTP data path
+(APIRoute ↔ GraphQLRoute): only identical exact paths or identical prefixes
+are cross-kind conflicts, because the APIRoute would be silently shadowed by
+the GraphQL pipeline on exactly the path space it claims.
 
 #### Examples of Conflicting Routes
 
 ```yaml
-# CONFLICT: APIRoute prefix overlaps with GraphQLRoute exact path
+# CONFLICT: identical exact path across kinds
 # APIRoute
 apiVersion: avapigw.io/v1
 kind: APIRoute
@@ -185,7 +245,7 @@ metadata:
 spec:
   match:
     - uri:
-        prefix: "/graphql"  # Conflicts with GraphQLRoute below
+        exact: "/graphql"   # Conflicts with GraphQLRoute below
 
 ---
 # GraphQLRoute  
@@ -196,11 +256,11 @@ metadata:
 spec:
   match:
     - path:
-        exact: "/graphql"   # CONFLICT: exact path starts with APIRoute prefix
+        exact: "/graphql"   # CONFLICT: identical exact path (same specificity)
 ```
 
 ```yaml
-# CONFLICT: GraphQLRoute path overlaps with APIRoute prefix
+# CONFLICT: identical prefix across kinds
 # APIRoute
 apiVersion: avapigw.io/v1
 kind: APIRoute
@@ -220,13 +280,13 @@ metadata:
 spec:
   match:
     - path:
-        exact: "/api/graphql"  # CONFLICT: exact path starts with APIRoute prefix
+        prefix: "/api"      # CONFLICT: identical prefix (same specificity)
 ```
 
 #### Examples of Non-Conflicting Routes
 
 ```yaml
-# NO CONFLICT: Non-overlapping paths
+# NO CONFLICT: exact vs prefix resolves exact-first
 # APIRoute
 apiVersion: avapigw.io/v1
 kind: APIRoute
@@ -235,7 +295,7 @@ metadata:
 spec:
   match:
     - uri:
-        prefix: "/api/v1"   # No conflict with GraphQLRoute
+        prefix: "/api"      # Coexists: prefix has lower specificity
 
 ---
 # GraphQLRoute
@@ -246,7 +306,20 @@ metadata:
 spec:
   match:
     - path:
-        exact: "/graphql"   # No conflict with APIRoute
+        exact: "/api/graphql"  # Coexists: exact match wins on this path
+```
+
+```yaml
+# NO CONFLICT: nested prefixes resolve by longest-prefix specificity
+# APIRoute 1 (catch-all style prefix)
+match:
+  - uri:
+      prefix: "/"
+
+# APIRoute 2 (more specific prefix)
+match:
+  - uri:
+      prefix: "/api"
 ```
 
 #### Validation Modes
@@ -261,11 +334,8 @@ Both modes use the same overlap detection logic to ensure consistent behavior ac
 ### HTTP Route Conflicts
 
 Routes are considered duplicates if they have:
-- Same URI match pattern
-- Overlapping HTTP methods
-- Same header constraints
-
-This validation now works across Backend vs GRPCBackend to prevent conflicts:
+- Same URI match type with the same path (identical specificity)
+- Overlapping HTTP methods (an empty method list matches all methods)
 
 ```yaml
 # This would be rejected as a duplicate:
@@ -275,12 +345,15 @@ match:
       prefix: "/api/v1"
     methods: ["GET", "POST"]
 
-# APIRoute 2 (DUPLICATE - same prefix and overlapping methods)
+# APIRoute 2 (DUPLICATE - identical prefix and overlapping methods)
 match:
   - uri:
       prefix: "/api/v1"
     methods: ["GET", "PUT"]
 ```
+
+Routes with the same path but **disjoint** methods (for example `GET` vs
+`POST` on the same prefix) are not duplicates.
 
 ### Cross-CRD Backend Conflicts
 
@@ -311,10 +384,31 @@ spec:
 
 ### gRPC Route Conflicts
 
-gRPC routes are considered duplicates if they have:
-- Same service match pattern
-- Same method match pattern
-- Same metadata constraints
+Like HTTP routes, gRPC routes are rejected only when they are **true
+duplicates** — match conditions with **identical specificity** that the gRPC
+router cannot order deterministically:
+
+- **Identical exact matches** — same `service.exact` with overlapping method
+  conditions (same `method.exact`, identical `method.prefix`, or a method
+  catch-all on either side)
+- **Identical prefixes** — same `service.prefix` value (or, for the same
+  service condition, the same `method.prefix` value)
+- **Match-less catch-alls** — a gRPC route with **no match conditions**
+  still conflicts with **any** other gRPC route (unlike GraphQL, the gRPC
+  checker does not fold catch-alls into the specificity comparison)
+
+Overlaps of **different specificity are admitted** and resolved by the gRPC
+router's longest-prefix priority (exact service = 1000 > prefix service =
+500 + prefix length > regex = 100; exact method = 500 > prefix method =
+250 + prefix length > regex = 50):
+
+- **Nested service prefixes** (e.g. `com.example` and `com.example.user`) —
+  admitted; the longer prefix wins for requests matching both
+- **Nested method prefixes** for the same service — admitted; resolved the
+  same way
+- **Exact vs prefix service** — admitted; exact wins
+- **Identical service with disjoint exact methods** — admitted (e.g. `Get`
+  vs `Create` on the same service prefix)
 
 ```yaml
 # This would be rejected as a duplicate:
@@ -325,7 +419,7 @@ match:
     method:
       exact: "GetUser"
 
-# Route 2 (DUPLICATE - same service and method)
+# Route 2 (DUPLICATE - same service and method, identical specificity)
 match:
   - service:
       exact: "api.v1.UserService"
@@ -333,13 +427,107 @@ match:
       exact: "GetUser"
 ```
 
+```yaml
+# NO CONFLICT: nested service prefixes resolve by longest-prefix priority
+# Route 1
+match:
+  - service:
+      prefix: "com.example"
+
+# Route 2 (admitted - more specific prefix wins for its subtree)
+match:
+  - service:
+      prefix: "com.example.user"
+```
+
+### GraphQL Route Conflicts
+
+GraphQL routes are rejected only when two match blocks have **identical
+specificity** AND **overlapping match values** in every dimension (some
+request could satisfy both blocks). Everything else is admitted and ordered
+deterministically by the GraphQL router, which sorts routes by descending
+specificity with a route-name tie-break.
+
+The specificity of a route is the sum over its match blocks of
+(authoritative formula, shared with the data-plane router —
+`internal/graphql/router.Specificity`):
+
+| Condition | Weight |
+|-----------|--------|
+| `path.exact` | 1000 |
+| `path.prefix` | 500 + prefix length |
+| `path.regex` | 100 |
+| `operationName.exact` | 500 |
+| `operationName.prefix` | 250 + prefix length |
+| `operationName.regex` | 50 |
+| `operationType` set | +200 |
+| Each header condition | +10 |
+| No match block (catch-all) | 0 |
+
+Consequences:
+
+- **Different specificity → admitted.** A catch-all coexists with any
+  path-specific route; nested path prefixes coexist; an
+  `operationType`-specific route coexists with a generic route on the same
+  path (the +200 operationType weight differentiates them)
+- **Identical specificity, disjoint values → admitted.** For example two
+  routes with `operationType: query` vs `operationType: mutation` on the same
+  exact path, or exact paths `/graphql` vs `/api/graphql`
+- **Identical specificity, overlapping values → rejected.** For example two
+  match-less catch-alls, or two routes with the same exact path and no other
+  distinguishing conditions
+- **Regex pairs → admitted.** Regex intersection is statically undecidable,
+  so equal-specificity regex routes are admitted; the router still orders
+  them deterministically via the name tie-break
+
 ### Priority-Based Resolution
 
-When routes have overlapping patterns, the webhook uses priority rules:
+When routes have overlapping patterns of different specificity, the webhook
+allows them and the gateway router orders them deterministically:
 
-1. **Exact matches** have higher priority than prefix or regex
-2. **More specific patterns** have higher priority
-3. **Routes with more constraints** (headers, methods) have higher priority
+1. **Exact matches** — priority 1000 (highest)
+2. **Prefix matches** — priority 500 + prefix length (longer prefixes win)
+3. **Regex matches** — priority 100
+4. **Empty match** — priority 0 (catch-all)
+
+The same scheme applies to gRPC routes (service weights as above; method
+weights halved: exact 500, prefix 250 + length, regex 50) and to GraphQL
+routes (see [GraphQL Route Conflicts](#graphql-route-conflicts) for the full
+formula).
+
+Routes with **equal priority** are ordered by route name (ascending), so
+first-match-wins is a stable total order independent of load order. Only
+patterns with **identical specificity and overlapping match values** are
+ambiguous from the user's perspective and rejected at admission time.
+
+### Admission Warnings
+
+Some configurations are admitted with a **warning** instead of a rejection:
+
+- `authentication.mtls` enabled without `caFile` — valid when the client CA
+  is provided elsewhere (for example a Vault-managed CA); the warning flags
+  that client certificate validation relies on an externally provided CA
+- `rateLimit.store: redis` on every kind except APIRoute — GRPCRoute keeps
+  the in-memory limiter and backend-level rate limits accept the field for
+  forward compatibility. GraphQL routes enforce the redis limiter through
+  the shared per-route middleware chain, but the conservative warning is
+  still emitted on GraphQLRoute
+- `cache.type: redis` on GRPCRoute/GraphQLRoute — redis route caching is
+  wired for the HTTP APIRoute data path; GraphQL routes attach the shared
+  cache middleware but only GET requests are cached
+- Backend `spec.cache` — RESERVED; accepted but not applied by the gateway
+
+### ABAC CEL Validation
+
+ABAC CEL expressions are compiled at admission time against the same
+environment the gateway evaluates at runtime:
+
+- **Variables**: `subject`, `request`, `resource` (string), `action`,
+  `environment` (maps), and `now` (timestamp)
+- **Functions**: `ip_in_range(string, string) bool`, `has_role(string) bool`
+
+Expressions referencing undeclared variables (for example `identity.*`) are
+rejected at admission time instead of failing at evaluation time.
 
 ## Ingress Webhook Validation
 

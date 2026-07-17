@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -133,10 +134,24 @@ func (v *APIRouteValidator) ValidateCreate(
 }
 
 // ValidateUpdate implements admission.CustomValidator.
+//
+// Two lifecycle short-circuits prevent the webhook/finalizer deadlock:
+//   - objects being deleted (deletionTimestamp set) are admitted
+//     unconditionally so finalizer removal is never blocked;
+//   - metadata-only updates (semantically unchanged spec) run local spec
+//     validation only and skip duplicate/cross-kind conflict checks, so
+//     finalizer or label changes on overlapping legacy objects are never
+//     blocked by conflict rules.
 func (v *APIRouteValidator) ValidateUpdate(
 	ctx context.Context,
-	_, newObj *avapigwv1alpha1.APIRoute,
+	oldObj, newObj *avapigwv1alpha1.APIRoute,
 ) (admission.Warnings, error) {
+	// The object is being deleted; admit so metadata updates (for example
+	// finalizer removal) always proceed.
+	if newObj.GetDeletionTimestamp() != nil {
+		return nil, nil
+	}
+
 	tracer := otel.Tracer(webhookTracerName)
 	ctx, span := tracer.Start(ctx, "Webhook.APIRoute.ValidateUpdate",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -156,6 +171,17 @@ func (v *APIRouteValidator) ValidateUpdate(
 			time.Since(start), len(warnings),
 		)
 		return warnings, err
+	}
+
+	// Metadata-only update: the spec is unchanged, so this update cannot
+	// introduce new duplicate or cross-kind conflicts. Local spec
+	// validation (above) still applies.
+	if apiequality.Semantic.DeepEqual(oldObj.Spec, newObj.Spec) {
+		GetWebhookMetrics().RecordValidation(
+			"APIRoute", "update", "allowed",
+			time.Since(start), len(warnings),
+		)
+		return warnings, nil
 	}
 
 	// Check for duplicates (excluding self)
@@ -256,7 +282,7 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 
 	// Validate cache configuration
 	if spec.Cache != nil {
-		if err := v.validateCache(spec.Cache); err != nil {
+		if err := validateRouteCacheConfig(spec.Cache); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -303,15 +329,23 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		}
 	}
 
-	// Security warnings for plaintext secrets in authentication config
+	// Security warnings for plaintext secrets in authentication config,
+	// plus a warning when mTLS is enabled without an explicit caFile
+	// (valid only with a gateway-level CA source such as Vault-managed PKI).
 	if spec.Authentication != nil {
 		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+		warnings = append(warnings, warnMTLSMissingCAFile(spec.Authentication)...)
 	}
 
 	// Security warnings for plaintext secrets in authorization cache sentinel config
 	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
 		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
 	}
+
+	// Security warnings for plaintext secrets in route cache and rate limiter
+	// Redis Sentinel configurations
+	warnings = append(warnings, warnRouteCacheSentinelSecrets(spec.Cache)...)
+	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
 
 	// Check for conflicting configurations
 	if spec.Redirect != nil && len(spec.Route) > 0 {
@@ -497,23 +531,6 @@ func (v *APIRouteValidator) validateFaultInjection(fault *avapigwv1alpha1.FaultI
 		}
 		if fault.Abort.Percentage < 0 || fault.Abort.Percentage > 100 {
 			return fmt.Errorf("fault.abort.percentage must be between 0 and 100")
-		}
-	}
-
-	return nil
-}
-
-// validateCache validates cache configuration.
-func (v *APIRouteValidator) validateCache(cache *avapigwv1alpha1.CacheConfig) error {
-	if cache.TTL != "" {
-		if err := validateDuration(string(cache.TTL)); err != nil {
-			return fmt.Errorf("cache.ttl is invalid: %w", err)
-		}
-	}
-
-	if cache.StaleWhileRevalidate != "" {
-		if err := validateDuration(string(cache.StaleWhileRevalidate)); err != nil {
-			return fmt.Errorf("cache.staleWhileRevalidate is invalid: %w", err)
 		}
 	}
 

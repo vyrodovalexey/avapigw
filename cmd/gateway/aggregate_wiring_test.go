@@ -108,6 +108,18 @@ func TestGraphQLAggregateHandler_Builds(t *testing.T) {
 	assert.ErrorIs(t, err, aggregate.ErrNoTargets)
 }
 
+// withShortOperatorStartDeadline shrinks the operator initial-connection retry
+// window for tests that deliberately drive runOperatorGateway / runOperatorMode
+// against an unreachable or always-erroring operator client and assert the
+// fatal-exit path. With the production deadline (3m) those tests would each
+// block for ~2 minutes exhausting retries. It returns a restore function to be
+// deferred, keeping production behavior unchanged outside the test scope.
+func withShortOperatorStartDeadline() func() {
+	orig := operatorStartOverallDeadline
+	operatorStartOverallDeadline = 2 * time.Second
+	return func() { operatorStartOverallDeadline = orig }
+}
+
 // fakeOperatorClient simulates an operator client whose Start fails a fixed
 // number of times before succeeding, exercising the retry-with-backoff path.
 type fakeOperatorClient struct {
@@ -125,7 +137,7 @@ func (f *fakeOperatorClient) Start(_ context.Context) error {
 	return nil
 }
 
-func (f *fakeOperatorClient) Stop() error      { return nil }
+func (f *fakeOperatorClient) Stop() error       { return nil }
 func (f *fakeOperatorClient) SessionID() string { return "session" }
 
 // TestStartOperatorClientWithRetry_RecoversAfterTransientFailures proves the

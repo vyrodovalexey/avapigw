@@ -1,0 +1,803 @@
+# =============================================================================
+# PT local perf gateway config — 6 scenario groups (PT-01..PT-06) on one gateway
+# =============================================================================
+# Run LOCALLY on the host (perf-start-gateway pattern) so the docker-compose
+# VictoriaMetrics scrape job `avapigw-gateway` (host.docker.internal:9090) is UP.
+#
+# Listeners:
+#   :8080 HTTP        (PT-03 http+ws, PT-05 graphql+ws)
+#   :8443 HTTPS       (PT-04 https+wss, PT-06 tls graphql+wss) — Vault PKI cert
+#   :9000 gRPC        (PT-01 plaintext gRPC listener)
+#   :9443 gRPC-TLS    (PT-02 TLS gRPC listener) — same route table
+#   :9090 metrics     (scraped by compose VM as job avapigw-gateway)
+#
+# Feature coverage per required scenario groups:
+#   PT-01/02: gRPC unary + server/bidi streaming; OIDC (client->gateway JWT via
+#             metadata x-test-scenario=oidc); mTLS (gateway->backend mutual TLS
+#             to grpc_3 :8813 with client certs, x-test-scenario=mtls*)
+#   PT-03/04: openapi validation on ALL /api/v1/validated/* routes; basic auth
+#             (gateway->backend 8805 with Vault KV creds); API-key auth (Vault);
+#             OIDC (Keycloak JWT); rate limit + cache through REDIS SENTINEL;
+#             transform; encoding(+gzip); CORS; WS (plain/apikey/OIDC)
+#   PT-05/06: GraphQL routes on /graphql (basic/apikey/OIDC/ratelimit-sentinel/
+#             transform/CORS) against graphql-mock 8901/8902; WS as above
+apiVersion: gateway.avapigw.io/v1
+kind: Gateway
+metadata:
+  name: pt-local-gateway
+  labels:
+    app: avapigw
+    environment: perftest
+    suite: pt-local
+spec:
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      hosts: ["*"]
+      bind: 0.0.0.0
+
+    - name: https
+      port: 8443
+      protocol: HTTPS
+      hosts: ["*"]
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        certFile: test/performance/certs/pt-local/server.crt
+        keyFile: test/performance/certs/pt-local/server.key
+        minVersion: TLS12
+        maxVersion: TLS13
+
+    - name: grpc
+      port: 9000
+      protocol: GRPC
+      hosts: ["*"]
+      bind: 0.0.0.0
+      grpc:
+        maxConcurrentStreams: 1000
+        maxRecvMsgSize: 4194304
+        maxSendMsgSize: 4194304
+        reflection: true
+        healthCheck: true
+        keepalive:
+          time: 30s
+          timeout: 10s
+          maxConnectionIdle: 5m
+          maxConnectionAge: 30m
+          maxConnectionAgeGrace: 10s
+          permitWithoutStream: true
+
+    - name: grpc-tls
+      port: 9443
+      protocol: GRPC
+      hosts: ["*"]
+      bind: 0.0.0.0
+      tls:
+        mode: SIMPLE
+        certFile: test/performance/certs/pt-local/server.crt
+        keyFile: test/performance/certs/pt-local/server.key
+        minVersion: TLS12
+        maxVersion: TLS13
+      grpc:
+        maxConcurrentStreams: 1000
+        maxRecvMsgSize: 4194304
+        maxSendMsgSize: 4194304
+        reflection: true
+        healthCheck: true
+        keepalive:
+          time: 30s
+          timeout: 10s
+          maxConnectionIdle: 5m
+          maxConnectionAge: 30m
+          maxConnectionAgeGrace: 10s
+          permitWithoutStream: true
+
+  # ===========================================================================
+  # HTTP routes (PT-03 / PT-04) — every validated route has OpenAPI validation
+  # ===========================================================================
+  routes:
+    - name: health-check
+      match:
+        - uri:
+            exact: /health
+          methods: [GET]
+      directResponse:
+        status: 200
+        body: '{"status":"healthy","gateway":"pt-local"}'
+        headers:
+          Content-Type: application/json
+
+    # -- basic authentication (gateway -> backend 8805, creds from Vault KV) --
+    # Scenario "basic": client sends no credentials; the gateway injects Basic
+    # auth (secret/backend-auth/basic) toward the basic-auth backend.
+    - name: pt-validated-basic
+      match:
+        - uri:
+            prefix: /api/v1/validated/items
+          methods: [GET, POST]
+      route:
+        - destination:
+            host: backend-basic-8805
+            port: 8805
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+
+    # -- API-key authentication (Vault KV hash-based keys) --
+    - name: pt-validated-apikey
+      match:
+        - uri:
+            prefix: /api/v1/validated/apikey/items
+          methods: [GET, POST]
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+      authentication:
+        enabled: true
+        apiKey:
+          enabled: true
+          header: X-API-Key
+          hashAlgorithm: sha256
+          vaultPath: secret/data/perftest/apikeys
+
+    # -- OIDC / JWT authentication (Keycloak gateway-test realm) --
+    - name: pt-validated-oidc
+      match:
+        - uri:
+            prefix: /api/v1/validated/oidc/items
+          methods: [GET, POST]
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: http://localhost:8090/realms/gateway-test
+          jwksUrl: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+          audience:
+            - account
+
+    # -- rate limiting through Redis Sentinel (expect 429 share at 600 rps) --
+    - name: pt-validated-ratelimit
+      match:
+        - uri:
+            prefix: /api/v1/validated/ratelimit/items
+          methods: [GET, POST]
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+        perClient: false
+        store: redis
+        redis:
+          keyPrefix: "pt:rl:http:"
+          poolSize: 20
+          connectTimeout: 2s
+          readTimeout: 1s
+          writeTimeout: 1s
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs:
+              - 127.0.0.1:26379
+              - 127.0.0.1:26380
+              - 127.0.0.1:26381
+            password: password
+
+    # -- request/response transform --
+    - name: pt-validated-transform
+      match:
+        - uri:
+            prefix: /api/v1/validated/transform/items
+          methods: [GET, POST]
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+      transform:
+        request:
+          staticHeaders:
+            X-Perf-Transform: pt-local
+        response:
+          allowFields:
+            - data
+          denyFields:
+            - success
+
+    # -- encoding + gzip compression --
+    - name: pt-validated-encoding
+      match:
+        - uri:
+            prefix: /api/v1/validated/encoding/items
+          methods: [GET, POST]
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+      encoding:
+        requestEncoding: json
+        responseEncoding: json
+        enableContentNegotiation: true
+        compression:
+          enabled: true
+          algorithms: [gzip]
+          minSize: 128
+          level: 5
+
+    # -- response caching through Redis Sentinel --
+    - name: pt-validated-cache
+      match:
+        - uri:
+            prefix: /api/v1/validated/cache/items
+          methods: [GET]
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+          weight: 50
+        - destination:
+            host: backend-8802
+            port: 8802
+          weight: 50
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+      cache:
+        enabled: true
+        type: redis
+        ttl: 60s
+        redis:
+          keyPrefix: "pt:cache:"
+          poolSize: 20
+          connectTimeout: 2s
+          readTimeout: 1s
+          writeTimeout: 1s
+          ttlJitter: 0.1
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs:
+              - 127.0.0.1:26379
+              - 127.0.0.1:26380
+              - 127.0.0.1:26381
+            password: password
+        keyConfig:
+          includeMethod: true
+          includePath: true
+
+    # -- CORS --
+    - name: pt-validated-cors
+      match:
+        - uri:
+            prefix: /api/v1/validated/cors/items
+          methods: [GET, POST, OPTIONS]
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+          weight: 50
+        - destination:
+            host: backend-8802
+            port: 8802
+          weight: 50
+      rewrite:
+        uri: /api/v1/items
+      timeout: 30s
+      openAPIValidation:
+        enabled: true
+        specFile: test/performance/configs/openapi/items-api-local.yaml
+        failOnError: true
+        validateRequestBody: true
+        validateRequestParams: true
+      cors:
+        allowOrigins: ["*"]
+        allowMethods: [GET, POST, OPTIONS]
+        allowHeaders: [Content-Type, Authorization, X-API-Key, Origin]
+        exposeHeaders: [X-Request-ID]
+        maxAge: 86400
+        allowCredentials: false
+
+    # -- WebSocket routes (PT-03 ws / PT-04 wss) --
+    - name: pt-ws-plain
+      match:
+        - uri:
+            exact: /ws
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      timeout: 0s
+
+    - name: pt-ws-apikey
+      match:
+        - uri:
+            exact: /ws-perf-apikey
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      rewrite:
+        uri: /ws
+      timeout: 0s
+      authentication:
+        enabled: true
+        apiKey:
+          enabled: true
+          header: X-API-Key
+          hashAlgorithm: sha256
+          vaultPath: secret/data/perftest/apikeys
+
+    - name: pt-ws-oidc
+      match:
+        - uri:
+            exact: /ws-perf-oidc
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      rewrite:
+        uri: /ws
+      timeout: 0s
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: http://127.0.0.1:8090/realms/gateway-test
+          jwksUrl: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+          audience:
+            - account
+
+    # -- catch-all --
+    - name: catch-all
+      match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: backend-8801
+            port: 8801
+      timeout: 30s
+
+  backends:
+    - name: backend-8801
+      hosts:
+        - address: 127.0.0.1
+          port: 8801
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 2000
+        maxPendingRequests: 2000
+        connectTimeout: 5s
+
+    - name: backend-8802
+      hosts:
+        - address: 127.0.0.1
+          port: 8802
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 2000
+        maxPendingRequests: 2000
+        connectTimeout: 5s
+
+    # basic-auth backend: gateway injects Basic credentials from Vault KV
+    - name: backend-basic-8805
+      hosts:
+        - address: 127.0.0.1
+          port: 8805
+          weight: 1
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 2000
+        maxPendingRequests: 2000
+        connectTimeout: 5s
+      authentication:
+        type: basic
+        basic:
+          enabled: true
+          vaultPath: secret/backend-auth/basic
+          usernameKey: username
+          passwordKey: password
+
+  # ===========================================================================
+  # gRPC routes (PT-01 plaintext listener :9000, PT-02 TLS listener :9443)
+  # ===========================================================================
+  grpcRoutes:
+    # OIDC: client Bearer token validated at the gateway (Keycloak JWT)
+    - name: pt-grpc-oidc
+      match:
+        - service:
+            exact: api.v1.TestService
+          metadata:
+            - name: x-test-scenario
+              exact: oidc
+      route:
+        - destination:
+            host: grpc-backend-8811
+            port: 8811
+          weight: 50
+        - destination:
+            host: grpc-backend-8812
+            port: 8812
+          weight: 50
+      timeout: 30s
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: http://localhost:8090/realms/gateway-test
+          jwksUrl: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+          audience:
+            - account
+
+    # mTLS: gateway connects to grpc_3 (:8813) with MUTUAL TLS client certs
+    # (matches x-test-scenario=mtls and mtls-stream)
+    - name: pt-grpc-mtls
+      match:
+        - service:
+            exact: api.v1.TestService
+          metadata:
+            - name: x-test-scenario
+              prefix: mtls
+      route:
+        - destination:
+            host: grpc-backend-mtls-8813
+            port: 8813
+      timeout: 30s
+
+    # Baseline unary/streaming throughput (x-perf-baseline metadata)
+    - name: pt-grpc-baseline
+      match:
+        - service:
+            exact: api.v1.TestService
+          metadata:
+            - name: x-perf-baseline
+              present: true
+      route:
+        - destination:
+            host: grpc-backend-8811
+            port: 8811
+          weight: 50
+        - destination:
+            host: grpc-backend-8812
+            port: 8812
+          weight: 50
+      timeout: 30s
+
+    - name: pt-grpc-catchall
+      match:
+        - service:
+            prefix: "/"
+      route:
+        - destination:
+            host: grpc-backend-8811
+            port: 8811
+      timeout: 30s
+
+  grpcBackends:
+    - name: grpc-backend-8811
+      hosts:
+        - address: 127.0.0.1
+          port: 8811
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 10s
+        timeout: 5s
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+    - name: grpc-backend-8812
+      hosts:
+        - address: 127.0.0.1
+          port: 8812
+          weight: 1
+      healthCheck:
+        enabled: true
+        service: ""
+        interval: 10s
+        timeout: 5s
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+
+    # gateway->backend MUTUAL TLS with docker-compose Vault-issued client certs
+    - name: grpc-backend-mtls-8813
+      hosts:
+        - address: 127.0.0.1
+          port: 8813
+          weight: 1
+      loadBalancer:
+        algorithm: roundRobin
+      connectionPool:
+        maxConnections: 500
+        connectTimeout: 5s
+      tls:
+        enabled: true
+        mode: MUTUAL
+        certFile: test/docker-compose/certs/client.crt
+        keyFile: test/docker-compose/certs/client.key
+        caFile: test/docker-compose/certs/ca.crt
+
+  # ===========================================================================
+  # GraphQL routes (PT-05 / PT-06) — first match wins: specific routes first
+  # ===========================================================================
+  graphqlRoutes:
+    # OIDC: Authorization: Bearer ... -> JWT validated at gateway
+    - name: pt-graphql-oidc
+      match:
+        - path:
+            exact: /graphql
+          headers:
+            - name: Authorization
+              prefix: "Bearer "
+      route:
+        - destination:
+            host: graphql-mock
+            port: 8901
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: http://localhost:8090/realms/gateway-test
+          jwksUrl: http://127.0.0.1:8090/realms/gateway-test/protocol/openid-connect/certs
+          audience:
+            - account
+
+    # API key: X-API-Key: pk_... -> Vault KV hash lookup
+    - name: pt-graphql-apikey
+      match:
+        - path:
+            exact: /graphql
+          headers:
+            - name: X-API-Key
+              prefix: "pk_"
+      route:
+        - destination:
+            host: graphql-mock
+            port: 8901
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      authentication:
+        enabled: true
+        apiKey:
+          enabled: true
+          header: X-API-Key
+          hashAlgorithm: sha256
+          vaultPath: secret/data/perftest/apikeys
+
+    # Rate limiting through Redis Sentinel (X-Perf-Scenario: ratelimit)
+    - name: pt-graphql-ratelimit
+      match:
+        - path:
+            exact: /graphql
+          headers:
+            - name: X-Perf-Scenario
+              exact: ratelimit
+      route:
+        - destination:
+            host: graphql-mock
+            port: 8901
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+        perClient: false
+        store: redis
+        redis:
+          keyPrefix: "pt:rl:graphql:"
+          poolSize: 20
+          connectTimeout: 2s
+          readTimeout: 1s
+          writeTimeout: 1s
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs:
+              - 127.0.0.1:26379
+              - 127.0.0.1:26380
+              - 127.0.0.1:26381
+            password: password
+
+    # Transform: header manipulation (X-Perf-Scenario: transform)
+    - name: pt-graphql-transform
+      match:
+        - path:
+            exact: /graphql
+          headers:
+            - name: X-Perf-Scenario
+              exact: transform
+      route:
+        - destination:
+            host: graphql-mock
+            port: 8901
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      headers:
+        request:
+          set:
+            x-gateway: avapigw
+            x-perf-test: graphql-transform
+
+    # CORS: any browser Origin
+    - name: pt-graphql-cors
+      match:
+        - path:
+            exact: /graphql
+          headers:
+            - name: Origin
+              prefix: "http"
+      route:
+        - destination:
+            host: graphql-mock
+            port: 8901
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      cors:
+        allowOrigins: ["*"]
+        allowMethods: [GET, POST, OPTIONS]
+        allowHeaders: [Content-Type, Authorization, X-API-Key, Origin]
+        maxAge: 86400
+
+    # Baseline (no differentiating headers)
+    - name: pt-graphql-base
+      match:
+        - path:
+            exact: /graphql
+      route:
+        - destination:
+            host: graphql-mock
+            port: 8901
+      timeout: 30s
+      depthLimit: 10
+      complexityLimit: 100
+      introspectionEnabled: true
+
+  graphqlBackends:
+    - name: graphql-mock
+      hosts:
+        - address: 127.0.0.1
+          port: 8901
+          weight: 50
+        - address: 127.0.0.1
+          port: 8902
+          weight: 50
+      healthCheck:
+        path: /health
+        interval: 10s
+        timeout: 3s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+      loadBalancer:
+        algorithm: roundRobin
+
+  # ===========================================================================
+  # Globals
+  # ===========================================================================
+  cors:
+    allowOrigins: ["*"]
+    allowMethods: [GET, POST, PUT, DELETE, PATCH, OPTIONS]
+    allowHeaders: [Content-Type, Authorization, X-API-Key, X-Request-ID, Origin]
+    exposeHeaders: [X-Request-ID]
+    maxAge: 86400
+    allowCredentials: false
+
+  requestLimits:
+    maxBodySize: 10485760
+    maxHeaderSize: 1048576
+
+  vault:
+    enabled: true
+    address: http://127.0.0.1:8200
+    token: myroot
+    kvMount: secret
+
+  observability:
+    metrics:
+      enabled: true
+      path: /metrics
+      port: 9090
+    tracing:
+      enabled: false
+    logging:
+      level: warn
+      format: json

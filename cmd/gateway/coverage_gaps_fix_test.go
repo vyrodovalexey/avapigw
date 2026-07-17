@@ -1,7 +1,7 @@
 // Package main provides targeted tests to close remaining coverage gaps in cmd/gateway.
 // Focuses on: ApplyGRPCRoutes error, ApplyGRPCBackends error, ApplyGraphQLRoutes error,
-// applyMergedGraphQLComponents error, stopDependencies paths, initGraphQLComponents,
-// initGRPCBackendRegistry, initTracer, reloadGRPCBackendsIfChanged, startConfigWatcher.
+// stopDependencies paths, initGraphQLComponents, initGRPCBackendRegistry, initTracer,
+// reloadGRPCBackendsIfChanged, startConfigWatcher.
 package main
 
 import (
@@ -29,13 +29,18 @@ import (
 )
 
 // ============================================================================
-// ApplyGRPCRoutes error path - covers the error branch (line 263-269)
+// ApplyGRPCRoutes error path - covers the error branch (line 333-340)
 // ============================================================================
 
+// TestGatewayConfigApplier_ApplyGRPCRoutes_ErrorPath verifies that a
+// duplicate route name rejected by a live gRPC listener's router propagates
+// out of ApplyGRPCRoutes. The gateway must be STARTED so GetGRPCListeners is
+// non-empty (listeners are created in Start, not New); the gRPC router
+// deterministically rejects duplicate names.
 func TestGatewayConfigApplier_ApplyGRPCRoutes_ErrorPath(t *testing.T) {
 	logger := observability.NopLogger()
 
-	// Create config with a gRPC listener so GetGRPCListeners returns something
+	// Config with a gRPC listener (port 0 = dynamic, avoids conflicts).
 	cfg := &config.GatewayConfig{
 		APIVersion: "gateway.avapigw.io/v1",
 		Kind:       "Gateway",
@@ -43,13 +48,9 @@ func TestGatewayConfigApplier_ApplyGRPCRoutes_ErrorPath(t *testing.T) {
 		Spec: config.GatewaySpec{
 			Listeners: []config.Listener{
 				{
-					Name:     "http",
-					Port:     8080,
-					Protocol: config.ProtocolHTTP,
-				},
-				{
 					Name:     "grpc",
-					Port:     50051,
+					Bind:     "127.0.0.1",
+					Port:     0,
 					Protocol: config.ProtocolGRPC,
 				},
 			},
@@ -60,6 +61,12 @@ func TestGatewayConfigApplier_ApplyGRPCRoutes_ErrorPath(t *testing.T) {
 
 	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
 	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, gw.Start(ctx))
+	defer func() { _ = gw.Stop(ctx) }()
+	require.NotEmpty(t, gw.GetGRPCListeners(),
+		"control: a gRPC listener must exist for the error path to be reachable")
 
 	opApp := &operatorApplication{
 		application: &application{
@@ -74,9 +81,7 @@ func TestGatewayConfigApplier_ApplyGRPCRoutes_ErrorPath(t *testing.T) {
 		logger: logger,
 	}
 
-	ctx := context.Background()
-
-	// Routes with duplicate names should cause an error on the gRPC listener
+	// Routes with duplicate names deterministically fail router compilation.
 	routes := []config.GRPCRoute{
 		{
 			Name: "dup-grpc-route",
@@ -98,23 +103,51 @@ func TestGatewayConfigApplier_ApplyGRPCRoutes_ErrorPath(t *testing.T) {
 		},
 	}
 
-	// This exercises the error path in ApplyGRPCRoutes
 	err = applier.ApplyGRPCRoutes(ctx, routes)
-	// May or may not error depending on whether gRPC listeners exist
-	// The important thing is we exercise the code path
-	_ = err
+	require.Error(t, err, "duplicate gRPC route names must be rejected")
+	assert.Contains(t, err.Error(), "duplicate gRPC route name",
+		"error must identify the duplicate-name rejection")
 }
 
 // ============================================================================
-// ApplyGRPCBackends error path - covers the error branch (line 291-296)
+// ApplyGRPCBackends error path - covers the error branch (line 362-368)
 // ============================================================================
 
+// TestGatewayConfigApplier_ApplyGRPCBackends_ErrorPath verifies that a gRPC
+// listener without a backend registry deterministically rejects the reload
+// and the error propagates out of ApplyGRPCBackends. gateway.New without
+// WithGRPCBackendRegistry leaves each listener's registry nil, which is the
+// documented failure mode of GRPCListener.ReloadBackends.
 func TestGatewayConfigApplier_ApplyGRPCBackends_ErrorPath(t *testing.T) {
 	logger := observability.NopLogger()
-	cfg := createTestGatewayConfigGapsFix("test-grpc-backends-err")
 
+	cfg := &config.GatewayConfig{
+		APIVersion: "gateway.avapigw.io/v1",
+		Kind:       "Gateway",
+		Metadata:   config.Metadata{Name: "test-grpc-backends-err"},
+		Spec: config.GatewaySpec{
+			Listeners: []config.Listener{
+				{
+					Name:     "grpc",
+					Bind:     "127.0.0.1",
+					Port:     0,
+					Protocol: config.ProtocolGRPC,
+				},
+			},
+			Routes:   []config.Route{},
+			Backends: []config.Backend{},
+		},
+	}
+
+	// No WithGRPCBackendRegistry: the listener's registry stays nil.
 	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
 	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, gw.Start(ctx))
+	defer func() { _ = gw.Stop(ctx) }()
+	require.NotEmpty(t, gw.GetGRPCListeners(),
+		"control: a gRPC listener must exist for the error path to be reachable")
 
 	opApp := &operatorApplication{
 		application: &application{
@@ -129,34 +162,30 @@ func TestGatewayConfigApplier_ApplyGRPCBackends_ErrorPath(t *testing.T) {
 		logger: logger,
 	}
 
-	ctx := context.Background()
-
-	// Backends with duplicate names should cause an error
 	backends := []config.GRPCBackend{
 		{
-			Name: "dup-grpc-backend",
+			Name: "grpc-backend",
 			Hosts: []config.BackendHost{
 				{Address: "localhost", Port: 50051},
 			},
 		},
-		{
-			Name: "dup-grpc-backend", // Duplicate name
-			Hosts: []config.BackendHost{
-				{Address: "localhost", Port: 50052},
-			},
-		},
 	}
 
-	// This exercises the error path in ApplyGRPCBackends
 	err = applier.ApplyGRPCBackends(ctx, backends)
-	// May or may not error depending on gateway state
-	_ = err
+	require.Error(t, err, "reload without a backend registry must fail")
+	assert.Contains(t, err.Error(), "no backend registry configured",
+		"error must identify the missing-registry rejection")
 }
 
 // ============================================================================
-// ApplyGraphQLRoutes error path - covers the error branch (line 313-319)
+// ApplyGraphQLRoutes error path - covers the error branch (line 384-391)
 // ============================================================================
 
+// TestGatewayConfigApplier_ApplyGraphQLRoutes_ErrorPath verifies that a
+// GraphQL route compile failure (invalid regex) propagates out of
+// ApplyGraphQLRoutes. Note: duplicate NAMES are not an error for the GraphQL
+// router (pinned by TestGatewayConfigApplier_ApplyGraphQLRoutes_DuplicateNamesAccepted);
+// an invalid regex is the deterministic failure mode.
 func TestGatewayConfigApplier_ApplyGraphQLRoutes_ErrorPath(t *testing.T) {
 	logger := observability.NopLogger()
 	cfg := createTestGatewayConfigGapsFix("test-gql-routes-err-path")
@@ -182,92 +211,32 @@ func TestGatewayConfigApplier_ApplyGraphQLRoutes_ErrorPath(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Routes with duplicate names should cause an error
 	routes := []config.GraphQLRoute{
 		{
-			Name: "dup-gql-route",
+			Name: "bad-regex-gql-route",
 			Match: []config.GraphQLRouteMatch{
-				{Path: &config.StringMatch{Exact: "/graphql"}},
+				{Path: &config.StringMatch{Regex: "[invalid"}},
 			},
 			Route: []config.RouteDestination{
 				{Destination: config.Destination{Host: "localhost", Port: 8080}},
 			},
 		},
-		{
-			Name: "dup-gql-route", // Duplicate name
-			Match: []config.GraphQLRouteMatch{
-				{Path: &config.StringMatch{Exact: "/graphql2"}},
-			},
-			Route: []config.RouteDestination{
-				{Destination: config.Destination{Host: "localhost", Port: 8081}},
-			},
-		},
 	}
 
-	// This exercises the error path in ApplyGraphQLRoutes
 	err = applier.ApplyGraphQLRoutes(ctx, routes)
-	// May or may not error depending on router implementation
-	_ = err
+	require.Error(t, err, "invalid regex must fail GraphQL route compilation")
+	assert.Contains(t, err.Error(), "failed to compile route",
+		"error must identify the compile failure")
+	assert.Zero(t, gqlRouter.RouteCount(),
+		"failed load must not leave partial routes in the router")
 }
 
-// ============================================================================
-// applyMergedGraphQLComponents error path - covers the error branch (line 465-470)
-// ============================================================================
-
-func TestGatewayConfigApplier_ApplyMergedGraphQLComponents_RouteError(t *testing.T) {
-	logger := observability.NopLogger()
-	cfg := createTestGatewayConfigGapsFix("test-merged-gql-err")
-
-	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
-	require.NoError(t, err)
-
-	gqlRouter := graphqlrouter.New(graphqlrouter.WithRouterLogger(logger))
-
-	opApp := &operatorApplication{
-		application: &application{
-			gateway:       gw,
-			config:        cfg,
-			graphqlRouter: gqlRouter,
-			graphqlProxy:  nil,
-		},
-		operatorConfig: operator.DefaultConfig(),
-	}
-
-	applier := &gatewayConfigApplier{
-		app:    opApp,
-		logger: logger,
-	}
-
-	// Config with duplicate GraphQL routes to trigger error
-	merged := &config.GatewayConfig{
-		Spec: config.GatewaySpec{
-			GraphQLRoutes: []config.GraphQLRoute{
-				{
-					Name: "dup-merged-gql",
-					Match: []config.GraphQLRouteMatch{
-						{Path: &config.StringMatch{Exact: "/graphql"}},
-					},
-					Route: []config.RouteDestination{
-						{Destination: config.Destination{Host: "localhost", Port: 8080}},
-					},
-				},
-				{
-					Name: "dup-merged-gql", // Duplicate
-					Match: []config.GraphQLRouteMatch{
-						{Path: &config.StringMatch{Exact: "/graphql2"}},
-					},
-					Route: []config.RouteDestination{
-						{Destination: config.Destination{Host: "localhost", Port: 8081}},
-					},
-				},
-			},
-		},
-	}
-
-	err = applier.applyMergedGraphQLComponents(context.Background(), merged)
-	// May or may not error depending on router implementation
-	_ = err
-}
+// NOTE: the former TestGatewayConfigApplier_ApplyMergedGraphQLComponents_RouteError
+// (duplicate-name routes, `_ = err`) was deleted as a true duplicate:
+// the applyMergedGraphQLComponents error branch is deterministically asserted
+// by TestApplyMergedComponents_GraphQLErrorPropagates (operator_empty_clear_test.go),
+// and duplicate-name tolerance is pinned by
+// TestGatewayConfigApplier_ApplyGraphQLRoutes_DuplicateNamesAccepted.
 
 // ============================================================================
 // stopDependencies - cover gRPC backend registry path
@@ -276,7 +245,7 @@ func TestGatewayConfigApplier_ApplyMergedGraphQLComponents_RouteError(t *testing
 func TestStopDependencies_WithGRPCBackendRegistry(t *testing.T) {
 	logger := observability.NopLogger()
 
-	cfg := createTestGatewayConfigGapsFix("test-stop-deps-grpc")
+	cfg := createTestGatewayConfigGapsFixDynPort("test-stop-deps-grpc")
 
 	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
 	require.NoError(t, err)

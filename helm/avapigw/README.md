@@ -187,7 +187,8 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.listeners.grpc.tls.mode` | gRPC TLS mode (SIMPLE, MUTUAL, OPTIONAL_MUTUAL, INSECURE) | `SIMPLE` |
 | `gateway.rateLimit.enabled` | Enable rate limiting | `true` |
 | `gateway.rateLimit.requestsPerSecond` | Requests per second | `100` |
-| `gateway.rateLimit.burst` | Burst size | `200` |
+| `gateway.rateLimit.burst` | Burst size (must be >= 1) | `200` |
+| `gateway.rateLimit.perClient` | Per-client (IP) rate limiting | `true` |
 | `gateway.circuitBreaker.enabled` | Enable circuit breaker | `true` |
 | `gateway.circuitBreaker.threshold` | Failure threshold | `5` |
 | `gateway.maxSessions.enabled` | Enable max sessions limiting | `false` |
@@ -196,6 +197,7 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.maxSessions.queueTimeout` | Timeout for queued requests | `30s` |
 | `gateway.observability.metrics.enabled` | Enable metrics | `true` |
 | `gateway.observability.tracing.enabled` | Enable tracing | `false` |
+| `gateway.vault` | Gateway-wide Vault client connection rendered verbatim as `spec.vault` in the generated config (see [Vault Integration](#vault-integration)) | `{}` |
 
 ### Audit Configuration
 
@@ -229,6 +231,7 @@ The following table lists the configurable parameters of the avapigw chart and t
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `vault.enabled` | Enable Vault | `false` |
+| `vault.injectEnv` | Inject `VAULT_*` environment variables into the gateway deployment. Set `false` to source the Vault client connection solely from `gateway.vault` (`spec.vault`); PKI issuance (`vault.pki`) is unaffected | `true` |
 | `vault.address` | Vault address | `""` |
 | `vault.authMethod` | Auth method | `kubernetes` |
 | `vault.role` | Vault role | `""` |
@@ -244,6 +247,66 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `vault.pki.grpc.role` | gRPC-specific PKI role | `""` (uses main role) |
 | `vault.pki.grpc.commonName` | gRPC certificate common name | `""` (uses main commonName) |
 | `vault.pki.grpc.ttl` | gRPC certificate TTL | `""` (uses main ttl) |
+
+#### File-based Vault client configuration (`gateway.vault`)
+
+The gateway config file supports a `spec.vault` section for the gateway-wide
+Vault client connection. Set `gateway.vault` to render it verbatim into the
+generated ConfigMap:
+
+```yaml
+gateway:
+  vault:
+    enabled: true
+    address: https://vault.example.com:8200
+    authMethod: kubernetes
+    kubernetes:
+      role: avapigw
+    cache:
+      enabled: true
+      ttl: 5m
+```
+
+Semantics:
+
+- **Precedence**: deployment-injected `VAULT_*` environment variables (driven
+  by the top-level `vault.*` values) override `spec.vault` fields per-field
+  (ENV > config file > defaults), so existing env-driven deployments are
+  unaffected.
+- When `gateway.vault` is set, it **replaces** the legacy `spec.vault` block
+  derived from the top-level `vault.*` values in the rendered ConfigMap.
+- `gateway.vault` does **not** by itself change `VAULT_*` env injection or Vault
+  PKI listener TLS; those remain driven by the top-level `vault.*` values.
+- Do not add a `vault` key under `gateway.customConfig` — it would produce a
+  duplicate YAML mapping key, which the gateway rejects at startup.
+
+##### File-only Vault client (`vault.injectEnv: false`)
+
+By default the deployment injects `VAULT_*` environment variables (gated on
+`vault.enabled` and `vault.injectEnv`), and those override `spec.vault` fields
+per-field. To source the Vault client connection **purely from the file
+section**, set `vault.injectEnv: false` so no `VAULT_*` env is injected, and
+express the whole client in `gateway.vault`:
+
+```yaml
+vault:
+  enabled: true
+  injectEnv: false          # suppress VAULT_* env injection
+
+gateway:
+  vault:
+    enabled: true
+    address: https://vault.example.com:8200
+    authMethod: kubernetes
+    kubernetes:
+      role: avapigw
+```
+
+With no `VAULT_*` env present, the environment overlay is a no-op, so the
+effective Vault configuration is exactly what `gateway.vault` renders. The
+chart ships `values-vault-file.yaml` as a complete example of this pattern.
+`vault.injectEnv: false` suppresses only the `VAULT_*` env; Vault PKI listener
+TLS (`vault.pki`) is unaffected.
 
 ### Keycloak Integration
 
@@ -624,6 +687,21 @@ helm upgrade --install avapigw helm/avapigw/ \
 make perf-test-k8s
 ```
 
+Notes on `values-local.yaml`:
+
+- The **operator and its validating webhook are enabled by default**
+  (`operator.webhook.enabled: true`, self-signed TLS), matching the
+  production posture — CR creates/updates are validated locally exactly as
+  they would be in production. Since the admission-lifecycle fix, the webhook
+  never blocks finalizer removal, so it is safe to keep enabled during local
+  CR churn.
+- The Vault PKI listener certificates request a `host.docker.internal`
+  altName. The PKI `test-role` created by
+  `test/performance/scripts/setup-vault-k8s.sh --setup-pki` (and kept in sync
+  by `test/docker-compose/scripts/setup-vault.sh`) must therefore keep
+  `docker.internal` in its allowed domains — see the sync-contract comments
+  in both scripts.
+
 ### Enable Operator with CRD-based Configuration
 
 ```yaml
@@ -687,6 +765,17 @@ spec:
         port: 8080
   timeout: 30s
 ```
+
+The CRDs shipped with the chart (`helm/avapigw/crds/`) also support
+distributed rate limiting (`spec.rateLimit.store: redis` with a
+`spec.rateLimit.redis` connection block — standalone URL or Redis Sentinel,
+`failOpen` policy, Vault password paths) and redis-backed route caching
+(`spec.cache.type: redis` with `spec.cache.redis`). Distributed rate limiting
+is enforced for APIRoutes and GraphQLRoutes (gRPC routes keep the in-memory
+limiter); redis route caching is wired for the HTTP APIRoute data path. The
+admission webhook emits a conservative forward-compatibility warning for
+these redis options on kinds other than APIRoute. See the
+[CRD reference](../../docs/crd-reference.md) for the full schema.
 
 ```yaml
 # Example Backend CRD

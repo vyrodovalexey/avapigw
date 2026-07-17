@@ -338,10 +338,7 @@ func TestMemoryStore_EmptyConfig(t *testing.T) {
 func TestKeyCache_GetSet(t *testing.T) {
 	t.Parallel()
 
-	cache := &keyCache{
-		entries: make(map[string]*cacheEntry),
-		ttl:     time.Minute,
-	}
+	cache := newKeyCache(time.Minute, 0)
 
 	key := &StaticKey{
 		ID:      "key1",
@@ -365,10 +362,7 @@ func TestKeyCache_GetSet(t *testing.T) {
 func TestKeyCache_Expiration(t *testing.T) {
 	t.Parallel()
 
-	cache := &keyCache{
-		entries: make(map[string]*cacheEntry),
-		ttl:     10 * time.Millisecond,
-	}
+	cache := newKeyCache(10*time.Millisecond, 0)
 
 	key := &StaticKey{
 		ID:      "key1",

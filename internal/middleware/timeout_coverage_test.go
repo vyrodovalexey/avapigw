@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -329,6 +331,95 @@ func TestHandleTimeout_ResponseAlreadyStarted(t *testing.T) {
 
 	// Should not write timeout response since response already started
 	assert.NotEqual(t, http.StatusGatewayTimeout, rec.Code)
+}
+
+// TestTimeoutWriter_Flush tests that Flush delegates to a flushable
+// underlying writer.
+func TestTimeoutWriter_Flush(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	tw := &timeoutWriter{
+		ResponseWriter: rec,
+		done:           make(chan struct{}),
+		ctx:            context.Background(),
+	}
+
+	tw.Flush()
+
+	assert.True(t, rec.Flushed, "Flush must delegate to the underlying http.Flusher")
+}
+
+// nonFlushableWriter hides the Flusher/Hijacker interfaces of the
+// embedded recorder so the negative branches can be exercised.
+type nonFlushableWriter struct {
+	header http.Header
+}
+
+func (w *nonFlushableWriter) Header() http.Header         { return w.header }
+func (w *nonFlushableWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *nonFlushableWriter) WriteHeader(int)             {} //nolint:revive // no-op sink for tests
+
+// TestTimeoutWriter_Flush_NotSupported verifies Flush is a safe no-op
+// when the underlying writer does not implement http.Flusher.
+func TestTimeoutWriter_Flush_NotSupported(t *testing.T) {
+	t.Parallel()
+
+	tw := &timeoutWriter{
+		ResponseWriter: &nonFlushableWriter{header: http.Header{}},
+		done:           make(chan struct{}),
+		ctx:            context.Background(),
+	}
+
+	assert.NotPanics(t, func() { tw.Flush() })
+}
+
+// TestTimeoutWriter_Hijack_NotSupported verifies Hijack returns
+// http.ErrNotSupported when the underlying writer is not a Hijacker
+// (httptest.ResponseRecorder is not).
+func TestTimeoutWriter_Hijack_NotSupported(t *testing.T) {
+	t.Parallel()
+
+	tw := &timeoutWriter{
+		ResponseWriter: httptest.NewRecorder(),
+		done:           make(chan struct{}),
+		ctx:            context.Background(),
+	}
+
+	conn, rw, err := tw.Hijack()
+
+	assert.Nil(t, conn)
+	assert.Nil(t, rw)
+	assert.ErrorIs(t, err, http.ErrNotSupported)
+}
+
+// hijackableWriter implements http.Hijacker for the positive branch.
+type hijackableWriter struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+func (w *hijackableWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacked = true
+	return nil, nil, nil
+}
+
+// TestTimeoutWriter_Hijack_Supported verifies Hijack delegates to the
+// underlying http.Hijacker when available (WebSocket upgrade path).
+func TestTimeoutWriter_Hijack_Supported(t *testing.T) {
+	t.Parallel()
+
+	hw := &hijackableWriter{ResponseRecorder: httptest.NewRecorder()}
+	tw := &timeoutWriter{
+		ResponseWriter: hw,
+		done:           make(chan struct{}),
+		ctx:            context.Background(),
+	}
+
+	_, _, err := tw.Hijack()
+
+	assert.NoError(t, err)
+	assert.True(t, hw.hijacked, "Hijack must delegate to the underlying http.Hijacker")
 }
 
 // TestWriteTimeoutResponse tests writeTimeoutResponse directly.

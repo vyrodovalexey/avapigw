@@ -301,6 +301,13 @@ modes.
 | `targets[].retries` | int | `0` | Max retries for transient errors (0-10). |
 | `targets[].tls` | object | - | Per-target TLS (including mTLS). |
 | `targets[].authentication` | object | - | Per-target backend auth (basic/JWT/OIDC/mTLS; Vault refs supported). |
+
+> **Limitation — target paths:** an aggregate target has **no path
+> override**: every target receives the incoming request path as-is.
+> Route-level `rewrite` does **not** affect fan-out target paths — it applies
+> to the normal (non-aggregate) proxy path only. If two fan-out backends need
+> different paths, expose them on the same path or place a path-normalizing
+> layer in front of each backend.
 | `merge.enabled` | bool | `false` | Enable response merging (else labeled envelope). |
 | `merge.strategy` | enum | `deep` | `deep` \| `shallow` \| `replace` \| `ndjson`. |
 | `merge.timeField` | string | `_time` | NDJSON sort key (`ndjson` strategy only). Empty disables sorting. |

@@ -135,12 +135,7 @@ func BaseReconcile(
 	// Check if the object is being deleted
 	if !resource.GetDeletionTimestamp().IsZero() {
 		result, err := baseHandleDeletion(ctx, k8sClient, recorder, resource, cb, metrics)
-		if err != nil {
-			timer.RecordError()
-		} else {
-			metrics.DeleteResourceConditionMetrics(cb.ResourceKind, resource.GetName(), resource.GetNamespace())
-			timer.RecordSuccess()
-		}
+		recordDeletionOutcome(timer, metrics, result, err, cb.ResourceKind, resource)
 		return result, err
 	}
 
@@ -194,7 +189,13 @@ func BaseReconcile(
 			cb.SetFailureMetrics(metrics, resource)
 		}
 		timer.RecordError()
-		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, err
+		// Return a fixed-delay requeue with a nil error: controller-runtime
+		// ignores the Result and falls back to exponential backoff when the
+		// returned error is non-nil. Reconcile failures here are transient
+		// external errors (e.g., gRPC push to the gateway) that are already
+		// surfaced via the log, failure status, Warning event, and error
+		// metrics above, so a deterministic retry cadence is preferred.
+		return ctrl.Result{RequeueAfter: RequeueAfterReconcileFailure}, nil
 	}
 
 	// Update status
@@ -215,6 +216,9 @@ func BaseReconcile(
 }
 
 // baseHandleDeletion handles the deletion of a resource with finalizer cleanup.
+// It returns a fixed-delay requeue (with a nil error) when cleanup fails, so the
+// deletion is retried at a deterministic cadence, and (Result{}, err) when the
+// finalizer patch fails, so the workqueue applies exponential backoff.
 func baseHandleDeletion(
 	ctx context.Context,
 	k8sClient client.Client,
@@ -230,7 +234,11 @@ func baseHandleDeletion(
 		if err := cb.Cleanup(ctx, resource); err != nil {
 			logger.Error(err, "failed to cleanup "+cb.ResourceKind)
 			recorder.Event(resource, "Warning", EventReasonCleanupFailed, err.Error())
-			return ctrl.Result{RequeueAfter: RequeueAfterCleanupFailure}, err
+			// Fixed-delay requeue with a nil error: returning the error
+			// alongside a non-empty Result would make controller-runtime
+			// discard the scheduled delay. Cleanup failures are transient
+			// gateway calls already logged and recorded as a Warning event.
+			return ctrl.Result{RequeueAfter: RequeueAfterCleanupFailure}, nil
 		}
 
 		// Remove finalizer
@@ -246,6 +254,28 @@ func baseHandleDeletion(
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// recordDeletionOutcome records timer and condition metrics for a deletion
+// attempt. The deletion is complete only when no error occurred and no requeue
+// is scheduled; only then are the per-resource condition metrics removed. A
+// non-nil error (finalizer patch failure, retried with exponential backoff) or
+// a scheduled fixed-delay requeue (cleanup failure) keeps the condition metrics
+// in place until a later reconciliation completes the deletion.
+func recordDeletionOutcome(
+	timer *ReconcileTimer,
+	metrics *ControllerMetrics,
+	result ctrl.Result,
+	err error,
+	kind string,
+	resource client.Object,
+) {
+	if err != nil || result.RequeueAfter > 0 {
+		timer.RecordError()
+		return
+	}
+	metrics.DeleteResourceConditionMetrics(kind, resource.GetName(), resource.GetNamespace())
+	timer.RecordSuccess()
 }
 
 // deletionMessage returns the appropriate deletion message for a resource kind.

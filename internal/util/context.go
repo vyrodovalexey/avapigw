@@ -2,6 +2,7 @@ package util
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
@@ -9,14 +10,59 @@ import (
 type ctxKey string
 
 const (
-	ctxKeyRequestID  ctxKey = "request_id"
-	ctxKeyTraceID    ctxKey = "trace_id"
-	ctxKeySpanID     ctxKey = "span_id"
-	ctxKeyStartTime  ctxKey = "start_time"
-	ctxKeyRoute      ctxKey = "route"
-	ctxKeyBackend    ctxKey = "backend"
-	ctxKeyPathParams ctxKey = "path_params"
+	ctxKeyRequestID   ctxKey = "request_id"
+	ctxKeyTraceID     ctxKey = "trace_id"
+	ctxKeySpanID      ctxKey = "span_id"
+	ctxKeyStartTime   ctxKey = "start_time"
+	ctxKeyRoute       ctxKey = "route"
+	ctxKeyRouteHolder ctxKey = "route_holder"
+	ctxKeyBackend     ctxKey = "backend"
+	ctxKeyPathParams  ctxKey = "path_params"
 )
+
+// RouteHolder is a mutable, concurrency-safe carrier for the matched route
+// name. Context values only flow DOWNSTREAM, so middleware that must observe
+// the route selected by a downstream handler (e.g. the metrics middleware
+// labeling gateway_route_requests_total, which previously labeled every
+// request "unmatched") installs a holder before serving; ContextWithRoute
+// records the matched name into it when the router/proxy matches a route.
+type RouteHolder struct {
+	name atomic.Value // string
+}
+
+// Set records the matched route name. Empty names are ignored so a match
+// can never be erased by a later empty write.
+func (h *RouteHolder) Set(route string) {
+	if h == nil || route == "" {
+		return
+	}
+	h.name.Store(route)
+}
+
+// Get returns the recorded route name, or "" when no route was matched.
+func (h *RouteHolder) Get() string {
+	if h == nil {
+		return ""
+	}
+	if v, ok := h.name.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ContextWithRouteHolder installs a route holder into the context so
+// downstream route matches become observable upstream.
+func ContextWithRouteHolder(ctx context.Context, holder *RouteHolder) context.Context {
+	return context.WithValue(ctx, ctxKeyRouteHolder, holder)
+}
+
+// RouteHolderFromContext extracts the route holder from context, or nil.
+func RouteHolderFromContext(ctx context.Context) *RouteHolder {
+	if v, ok := ctx.Value(ctxKeyRouteHolder).(*RouteHolder); ok {
+		return v
+	}
+	return nil
+}
 
 // ContextWithRequestID adds a request ID to the context.
 func ContextWithRequestID(ctx context.Context, requestID string) context.Context {
@@ -70,8 +116,11 @@ func StartTimeFromContext(ctx context.Context) time.Time {
 	return time.Time{}
 }
 
-// ContextWithRoute adds a route name to the context.
+// ContextWithRoute adds a route name to the context. When an upstream
+// middleware installed a RouteHolder, the name is also recorded there so
+// upstream observers (metrics/logging) can label by matched route.
 func ContextWithRoute(ctx context.Context, route string) context.Context {
+	RouteHolderFromContext(ctx).Set(route)
 	return context.WithValue(ctx, ctxKeyRoute, route)
 }
 

@@ -378,7 +378,12 @@ func (l *GRPCListener) handleTLSManagerCreationError(
 			observability.String("certFile", tlsCfg.CertFile),
 			observability.Error(err),
 		)
-		return []grpcserver.Option{grpcserver.WithTLSCredentials(tlsCfg.CertFile, tlsCfg.KeyFile)}, nil
+		opts := []grpcserver.Option{grpcserver.WithTLSCredentials(tlsCfg.CertFile, tlsCfg.KeyFile)}
+		// Keep TLS observability (handshake duration/errors) on the fallback path.
+		if l.tlsMetrics != nil {
+			opts = append(opts, grpcserver.WithTLSMetrics(l.tlsMetrics))
+		}
+		return opts, nil
 	}
 
 	l.logger.Error("failed to create TLS manager and no fallback cert/key files available",
@@ -413,15 +418,11 @@ func (l *GRPCListener) createTLSManagerFromConfig(cfg *config.TLSConfig) (*tlspk
 		}
 	}
 
-	// Configure Vault-based TLS if enabled
-	if cfg.Vault != nil && cfg.Vault.Enabled {
-		tlsConfig.Vault = &tlspkg.VaultTLSConfig{
-			Enabled:    true,
-			PKIMount:   cfg.Vault.PKIMount,
-			Role:       cfg.Vault.Role,
-			CommonName: cfg.Vault.CommonName,
-			AltNames:   cfg.Vault.AltNames,
-		}
+	// Configure Vault-based TLS if enabled (maps the documented vault.ttl).
+	// VaultGRPCTLSConfig is structurally identical to VaultTLSConfig, so the
+	// pointer conversion reuses the shared listener-level converter.
+	if vaultCfg := convertVaultTLSConfig((*config.VaultTLSConfig)(cfg.Vault), l.logger); vaultCfg != nil {
+		tlsConfig.Vault = vaultCfg
 		// When Vault is the certificate source, set ServerCertificate accordingly
 		if tlsConfig.ServerCertificate == nil {
 			tlsConfig.ServerCertificate = &tlspkg.CertificateConfig{

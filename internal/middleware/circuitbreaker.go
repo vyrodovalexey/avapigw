@@ -1,25 +1,18 @@
 package middleware
 
 import (
-	"context"
 	"errors"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/sony/gobreaker"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
-
-// cbTracer is the OTEL tracer used for circuit breaker operations.
-var cbTracer = otel.Tracer("avapigw/circuitbreaker")
 
 // CircuitBreakerStateFunc is called when the circuit breaker changes state.
 // Parameters: name (circuit breaker name), state (0=closed, 1=half-open, 2=open).
@@ -87,18 +80,13 @@ func NewCircuitBreaker(
 				name, from.String(), to.String(),
 			).Inc()
 
-			// Record an OTEL span event for the state transition so it
-			// appears in distributed traces that trigger the change.
-			_, span := cbTracer.Start(context.Background(),
-				"circuitbreaker.state_change",
-				trace.WithSpanKind(trace.SpanKindInternal),
-			)
-			span.AddEvent("state_change", trace.WithAttributes(
-				attribute.String("circuitbreaker.name", name),
-				attribute.String("circuitbreaker.from", from.String()),
-				attribute.String("circuitbreaker.to", to.String()),
-			))
-			span.End()
+			// Intentionally no OTEL span here: OnStateChange runs
+			// outside any request context, so a span started from
+			// context.Background() would be an orphan root span that
+			// can never join the trace that triggered the transition.
+			// The transition is already observable through the Info
+			// log above and the circuit_breaker_transitions_total
+			// metric.
 
 			// Record route-level circuit breaker trip when
 			// transitioning to open state
@@ -153,14 +141,17 @@ func CircuitBreakerMiddleware(cb *CircuitBreaker) func(http.Handler) http.Handle
 			}
 
 			mm := GetMiddlewareMetrics()
-			cbState := cb.State().String()
 
 			rw := util.NewStatusCapturingResponseWriter(w)
 
 			// Execute the request through the circuit breaker for atomic state check
 			_, err := cb.Execute(func() (interface{}, error) {
+				// Read the state inside Execute so the metric label
+				// reflects the state under which this request was
+				// actually admitted. A value captured before Execute
+				// could go stale if the breaker transitions in between.
 				mm.circuitBreakerRequests.WithLabelValues(
-					"gateway", cbState,
+					"gateway", cb.State().String(),
 				).Inc()
 
 				next.ServeHTTP(rw, r)

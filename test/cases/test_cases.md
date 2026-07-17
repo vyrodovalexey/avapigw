@@ -1337,6 +1337,71 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   5. Test certificate revocation handling
 - **Expected Results**: All security features work correctly
 
+## Gateway-wide Vault Client (spec.vault) Tests
+
+These tests cover the gateway-wide `spec.vault` section
+(`internal/config.VaultConfig`), which configures the Vault CLIENT CONNECTION
+used by the whole gateway (distinct from the per-listener/route `tls.vault` PKI
+issuance blocks above). The section is overlaid per-field by the environment
+(`ENV > file > defaults`), supports file-referenced secrets (`tokenFile`,
+`appRole.secretIdFile`), surfaces inline-secret WARNINGs at validation, and is
+intentionally NOT hot-reloaded (the config watcher warns and skips vault
+changes while still validating the effective, env-overlaid config).
+
+Field mapping (`convertVaultClientConfig`), the full ENV overlay matrix
+(`applyVaultEnv`), the no-hot-reload warn+skip (`warnVaultConfigChanged`), and
+the watcher pre-validate transform (`vaultEnvPreValidateTransform`) are
+exhaustively UNIT covered in `cmd/gateway` and `internal/config`. The
+integration cases below cover the SUITE seam: a real config FILE driving a real
+Vault client against LIVE Vault, plus the file-loaded validation behavior.
+
+### TestIntegration_SpecVault_ConfigFile_TokenFile_ResolvesSecret
+- **Description**: A gateway config FILE with `spec.vault{enabled, address, authMethod: token, tokenFile}` and NO `VAULT_*` environment in the process builds a working Vault client that resolves a real KV secret.
+- **Preconditions**: Live Vault reachable; `secret/backend-auth/basic` provisioned (compose `setup-vault.sh`); token written to a temp `tokenFile` (with trailing newline to exercise trimming); all `VAULT_*` env cleared for the process.
+- **Steps**:
+  1. Write the Vault token to a temp `tokenFile` (`myroot\n`).
+  2. Write a gateway config file referencing that `tokenFile` in `spec.vault` (no inline token).
+  3. `config.LoadConfig` the file and assert `spec.vault` parsed.
+  4. Apply the production per-field ENV overlay (no `VAULT_*` set → file wins).
+  5. Map the effective section to a `vault.Config` (resolving `tokenFile` from disk).
+  6. Construct + authenticate the Vault client against live Vault.
+  7. `KV().Read("secret", "backend-auth/basic")`.
+- **Expected Results**: Client authenticates; secret resolves to `username=backend-user`, `password=backend-pass`.
+
+### TestIntegration_SpecVault_EnvAddressWins
+- **Description**: Per-field precedence — the config FILE carries a WRONG Vault address, but a correct `VAULT_ADDR` in the environment wins, so the gateway boots and Vault works.
+- **Preconditions**: Live Vault reachable; correct address available for `VAULT_ADDR`.
+- **Steps**:
+  1. Write a config file with a deliberately black-holed address (`http://127.0.0.1:1`) and a valid `tokenFile`.
+  2. Set `VAULT_ADDR` to the correct live Vault address.
+  3. Load the file, apply the ENV overlay (env address wins, forces `enabled=true`).
+  4. Build + authenticate the client and read the secret.
+- **Expected Results**: The env address is used (not the wrong file value); secret resolves successfully, proving `ENV > file` per-field.
+
+### TestIntegration_SpecVault_EnvTokenClearsTokenFile
+- **Description**: Per-field precedence for the token — the file references a `tokenFile` (with a BOGUS token), but `VAULT_TOKEN` in the environment wins and CLEARS the `tokenFile` reference (keeping the exactly-one(token|tokenFile) invariant), and the client still works.
+- **Preconditions**: Live Vault reachable; correct token available for `VAULT_TOKEN`.
+- **Steps**:
+  1. Write a config file whose `tokenFile` contains a bogus token.
+  2. Set `VAULT_TOKEN` to the correct token.
+  3. Load + overlay; assert effective `tokenFile` is EMPTY and effective `token` equals the env token.
+  4. Build + authenticate the client and read the secret.
+- **Expected Results**: Env token wins, `tokenFile` cleared; secret resolves successfully.
+
+### TestIntegration_SpecVault_Validation_FileSeam
+- **Description**: Validation behavior on FILE-loaded `spec.vault`: an inline token surfaces a WARNING (not an error), and an AppRole config missing `roleId` is REJECTED at load-time validation.
+- **Preconditions**: None (pure config-time validation; runs in the integration suite alongside the live cases).
+- **Steps**:
+  1. Load a config file with `spec.vault.token` inline; call `ValidateConfigWithWarnings`.
+  2. Assert no error and a warning at path `spec.vault.token` containing "discouraged".
+  3. Load a config file with `authMethod: approle` and `appRole.secretId` but no `roleId`; call `ValidateConfig`.
+  4. Assert an error mentioning `roleId`.
+- **Expected Results**: Inline token → warning (accepted); AppRole without `roleId` → validation error (rejected).
+
+### TestIntegration_SpecVault_Kubernetes (Phase 7 — deferred)
+- **Description**: `spec.vault.authMethod: kubernetes` (ServiceAccount JWT) end-to-end requires an in-cluster ServiceAccount token and a Vault `kubernetes` auth mount; it is exercised in-cluster in Phase 7 and intentionally NOT covered here.
+- **Status**: Deferred to Phase 7 (in-cluster). No local docker-compose coverage.
+
 ## New Features Comprehensive Tests
 
 ### TestComprehensive_RouteLevel_AllFeatures
@@ -2627,6 +2692,27 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   3. Verify messages are received in each cycle
 - **Expected Results**: Sequential WebSocket connections work reliably through gateway
 
+#### TestE2E_WebSocket_OriginAllowlist
+- **Description**: Test Cross-Site WebSocket Hijacking protection via spec.websocket.allowedOrigins
+- **Preconditions**: Backend service running, gateway started with websocket-origin-test.yaml (allowedOrigins: "https://app.example.com", "trusted.example.com")
+- **Steps**:
+  1. Connect with Origin "https://app.example.com" (scheme+host entry) and verify handshake succeeds and stream works
+  2. Connect with Origin "http://trusted.example.com" and verify the bare-host entry matches any scheme
+  3. Connect without an Origin header (non-browser client) and verify handshake succeeds
+  4. Connect with a same-origin Origin (gateway host:port) and verify handshake succeeds
+  5. Connect with Origin "https://evil.example.com" and verify the handshake is rejected with HTTP 403 before any backend dial
+  6. Connect with Origin "http://app.example.com" and verify a scheme-qualified entry does not match other schemes (403)
+  7. Verify the gateway stays healthy after rejected handshakes
+- **Expected Results**: Only allowlisted, same-origin, and origin-less handshakes are upgraded; other origins get 403 Forbidden
+
+#### TestE2E_WebSocket_OriginPermissiveDefault
+- **Description**: Test backward-compatible permissive default when no WebSocket origin allowlist is configured
+- **Preconditions**: Backend service running, gateway started with websocket-test.yaml (no websocket.allowedOrigins; a startup warning is logged)
+- **Steps**:
+  1. Connect with an arbitrary cross-site Origin header
+  2. Verify the handshake succeeds and messages stream through the gateway
+- **Expected Results**: Empty allowedOrigins preserves the legacy allow-all behavior (warning logged at startup)
+
 ## Operator Test Cases
 
 ### Unit Tests
@@ -3098,6 +3184,16 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   4. Test invalid vault path returns error
 - **Expected Results**: Cache resolves password from Vault and connects to Redis
 
+#### TestIntegration_Cache_Redis_OperationMetricsParity
+- **Description**: Test that Redis-only operations record operation metrics with their own labels (metric parity with base operations)
+- **Preconditions**: Redis running
+- **Steps**:
+  1. Create Redis cache and snapshot gateway_cache_operation_duration_seconds sample counts for operations get_with_ttl, setnx, expire
+  2. Drive GetWithTTL (after Set), SetNX on a fresh key, and Expire on an existing key
+  3. Verify the duration histogram gains samples for each of the get_with_ttl, setnx, and expire operation labels
+  4. Verify gateway_cache_errors_total pre-initializes the redis-only operation label combinations via Init()
+- **Expected Results**: GetWithTTL/SetNX/Expire are observable with the same metrics as Get/Set/Delete/Exists, using operation labels get_with_ttl, setnx, expire
+
 ### E2E Tests
 
 #### TestE2E_Cache_Features_TTLJitter
@@ -3425,23 +3521,25 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
 
 ## REST/GraphQL Cross-Route Intersection Prevention Tests
 
-### TC-CROSS-001: APIRoute prefix overlaps with GraphQLRoute exact path → rejected by webhook
-- **Description**: Test that creating an APIRoute whose prefix overlaps with an existing GraphQLRoute exact path is rejected
-- **Preconditions**: A GraphQLRoute with exact path `/graphql` exists in the cluster
+### TC-CROSS-001: APIRoute with identical-specificity path as GraphQLRoute → rejected by webhook
+- **Description**: Test that creating an APIRoute whose match has the SAME specificity as an existing GraphQLRoute (identical exact path or identical prefix) is rejected as a genuine cross-kind duplicate. Cross-kind combinations of different specificity (exact vs prefix, catch-all vs specific) coexist deterministically — the GraphQL pipeline exclusively owns its endpoint path — and must be admitted
+- **Preconditions**: A GraphQLRoute with exact path `/graphql` (or prefix `/graphql`) exists in the cluster
 - **Steps**:
   1. Create a GraphQLRoute with exact path `/graphql`
-  2. Create an APIRoute with prefix `/graphql`
+  2. Create an APIRoute with the identical exact path `/graphql` (or identical prefix when the GraphQLRoute uses a prefix)
   3. Submit the APIRoute to the webhook validator
-- **Expected Results**: Webhook rejects the APIRoute with a path conflict error mentioning the GraphQLRoute
+  4. Additionally create an APIRoute with prefix `/graphql` (different specificity) and verify it is admitted
+- **Expected Results**: Webhook rejects the identical-specificity APIRoute with a path conflict error mentioning the GraphQLRoute; the different-specificity APIRoute is admitted
 
-### TC-CROSS-002: GraphQLRoute path overlaps with APIRoute prefix → rejected by webhook
-- **Description**: Test that creating a GraphQLRoute whose path overlaps with an existing APIRoute prefix is rejected
+### TC-CROSS-002: GraphQLRoute with identical-specificity path as APIRoute → rejected by webhook
+- **Description**: Test that creating a GraphQLRoute whose match has the SAME specificity as an existing APIRoute (identical prefix or identical exact path) is rejected; a GraphQL exact path nested under an APIRoute prefix has different specificity and must be admitted
 - **Preconditions**: An APIRoute with prefix `/api` exists in the cluster
 - **Steps**:
   1. Create an APIRoute with prefix `/api`
-  2. Create a GraphQLRoute with exact path `/api/graphql`
+  2. Create a GraphQLRoute with the identical prefix `/api`
   3. Submit the GraphQLRoute to the webhook validator
-- **Expected Results**: Webhook rejects the GraphQLRoute with a path conflict error mentioning the APIRoute
+  4. Additionally create a GraphQLRoute with exact path `/api/graphql` (nested, different specificity) and verify it is admitted
+- **Expected Results**: Webhook rejects the identical-prefix GraphQLRoute with a path conflict error mentioning the APIRoute; the nested exact-path GraphQLRoute is admitted
 
 ### TC-CROSS-003: APIRoute and GraphQLRoute with non-overlapping paths → allowed
 - **Description**: Test that non-overlapping REST and GraphQL routes are allowed
@@ -3453,13 +3551,14 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
 - **Expected Results**: Both routes are accepted without errors
 
 ### TC-CROSS-004: Cross-namespace conflict detection (cluster-scoped)
-- **Description**: Test that cross-CRD route conflicts are detected across namespaces when cluster-scoped
+- **Description**: Test that identical-specificity cross-CRD route duplicates are detected across namespaces when cluster-scoped, and NOT detected when namespace-scoped
 - **Preconditions**: DuplicateChecker configured with cluster-wide scope
 - **Steps**:
   1. Create a GraphQLRoute with exact path `/graphql` in namespace `ns-a`
-  2. Create an APIRoute with prefix `/graphql` in namespace `ns-b`
+  2. Create an APIRoute with the identical exact path `/graphql` in namespace `ns-b`
   3. Submit the APIRoute to the webhook validator with cluster-scoped DuplicateChecker
-- **Expected Results**: Webhook rejects the APIRoute because the GraphQLRoute in a different namespace has a conflicting path
+  4. Repeat with a namespace-scoped DuplicateChecker and verify the APIRoute is admitted
+- **Expected Results**: Cluster-scoped checker rejects the APIRoute because the GraphQLRoute in a different namespace has an identical-specificity path; namespace-scoped checker admits it
 
 ### TC-CROSS-005: Config validation rejects overlapping REST/GraphQL routes
 - **Description**: Test that the config validator detects overlapping REST and GraphQL routes in a GatewayConfig
@@ -3469,13 +3568,13 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   2. Run ValidateConfig on the configuration
 - **Expected Results**: Validation returns an error about overlapping REST and GraphQL routes
 
-### TC-CROSS-006: Update operation that would create intersection → rejected
-- **Description**: Test that updating an APIRoute to create a path intersection with a GraphQLRoute is rejected
+### TC-CROSS-006: Update operation that would create an identical-specificity duplicate → rejected
+- **Description**: Test that updating an APIRoute to an identical-specificity path duplicate of a GraphQLRoute is rejected
 - **Preconditions**: An APIRoute with prefix `/rest` and a GraphQLRoute with exact path `/graphql` exist
 - **Steps**:
   1. Create an APIRoute with prefix `/rest` (no conflict)
   2. Create a GraphQLRoute with exact path `/graphql`
-  3. Update the APIRoute to change its prefix to `/graphql`
+  3. Update the APIRoute to change its match to the identical exact path `/graphql`
   4. Submit the update to the webhook validator
 - **Expected Results**: Webhook rejects the update with a path conflict error
 
@@ -3564,6 +3663,16 @@ This document covers test cases for the AVAPIGW API Gateway, including the core 
   2. Verify minimal.yaml can be referenced in config
   3. Verify invalid.yaml exists (for negative testing)
 - **Expected Results**: All test data spec files are accessible
+
+#### TestFunctional_OpenAPI_SpecURLLoading
+- **Description**: Test hardened remote OpenAPI spec loading (bounded fetch, external-ref deny)
+- **Preconditions**: None (uses in-process httptest servers)
+- **Steps**:
+  1. Load a valid spec from a URL and verify it parses; verify a second load is served from cache (no refetch) and Invalidate forces a refetch
+  2. Load a spec whose $ref targets a second URL and verify the load fails with "disallowed external reference" (external refs are denied unless explicitly allowed)
+  3. Load a spec from a URL that never responds with a short caller context deadline and verify the fetch aborts promptly (every fetch is also capped by a 30s client timeout instead of the unbounded http.DefaultClient)
+  4. Load a spec from a URL returning HTTP 500 and verify the status code is surfaced in the error
+- **Expected Results**: Remote spec loading cannot hang startup/reload, denies external references by default (SSRF/local-file read protection), and surfaces fetch errors
 
 ### Functional Operator Tests
 
@@ -4131,11 +4240,25 @@ code paths.
 Files: `test/e2e/aggregate_operator_e2e_test.go`, `test/e2e/aggregate_live_helpers_test.go`
 (build tag `e2e`). These are user-journey tests against the **deployed** operator-mode
 gateway + operator in the `avapigw-test` namespace (docker-desktop). All endpoints,
-namespace, route names and credentials come from ENV (`AVAPIGW_E2E_NAMESPACE`,
-`AVAPIGW_E2E_AGGREGATE_ROUTE`, `AVAPIGW_E2E_AGGREGATE_PATH`, `AVAPIGW_E2E_VM_URL`,
-`AVAPIGW_E2E_GATEWAY_SVC`, `TEST_REDIS_SENTINEL_*`) with sane defaults; no hardcoded
-secrets. The whole live suite auto-skips (CI-safe) when the cluster/aggregate CRD is
-not reachable, or when `AVAPIGW_E2E_LIVE=0`.
+namespaces, route names and credentials come from ENV (`AVAPIGW_E2E_NAMESPACE`,
+`AVAPIGW_E2E_FIXTURE_NAMESPACE`, `AVAPIGW_E2E_AGGREGATE_ROUTE`,
+`AVAPIGW_E2E_AGGREGATE_PATH`, `AVAPIGW_E2E_VM_URL`, `AVAPIGW_E2E_GATEWAY_SVC`,
+`TEST_REDIS_SENTINEL_*`) with sane defaults; no hardcoded secrets.
+
+Namespaces: the gateway/operator DEPLOYMENT lives in the deployment namespace
+(`AVAPIGW_E2E_NAMESPACE`, default `avapigw-test`), while the DO-04 perf FIXTURE CRs
+(`crds-do04-aggregate.yaml` — `do04-aggregate-route`, `do04-http-backend-1/2`) live in a
+dedicated fixture namespace (`AVAPIGW_E2E_FIXTURE_NAMESPACE`, default `avapigw-perf`) so
+the namespace-scoped admission duplicate checker never rejects them against the
+avapigw-test suites. The operator watches all namespaces, so fixture CRs still reconcile
+and reach the gateway. Fixture reads (`do04-*` route/backends and the live gate) use the
+fixture namespace; routes the tests create themselves use the deployment namespace.
+
+The whole live suite auto-skips (CI-safe) when `AVAPIGW_E2E_LIVE=0`, when the
+cluster/aggregate CRD is not reachable in the FIXTURE namespace, or when the gateway
+Service has no ready endpoints in the deployment namespace (stale CRDs alone — e.g. left
+over after an undeploy — must not enable the suite, since port-forwards and
+Ready-condition waits can only fail without a live deployment).
 
 How the gateway is reached: the gateway Service exposes only TLS listeners
 (https/8443, grpcs/9443) + metrics/9090; NodePorts are not host-routable on
@@ -4219,3 +4342,569 @@ failing.
 - **Description**: Black-box admission (via `kubectl --dry-run=server`) of the ndjson merge surface.
 - **Subtests**: valid ndjson aggregate CRD (`strategy: ndjson`, `timeField`/`keyField`, `limit: 0`) is admitted; a negative `limit` (`-1`) is rejected at admission with a message naming the `limit` constraint (`Minimum=0`).
 - **Expected**: valid ndjson CRD admitted; negative limit rejected; persists nothing (dry-run). Graceful skip when the installed CRD lacks the NDJSON surface.
+
+## API Key Authentication Tests
+
+### Functional Tests
+
+Files: `test/functional/apikey_test.go`, `test/functional/apikey_validation_test.go`
+(build tag `functional`). They cover the tightened load-time validation of static API
+key entries: an enabled config is rejected unless every entry carries either a raw key
+or a pre-computed hash compatible with the effective hash algorithm (previously such
+entries were accepted and silently failed every lookup), plus hash-only authentication
+and the `store_error` metric reason.
+
+#### TestFunctional_APIKey_ConfigValidation_StaticKeys
+- **Description**: Data-driven test of tightened static key entry validation at config load
+- **Preconditions**: None
+- **Steps**:
+  1. Validate entries with a raw key only → accepted for any algorithm
+  2. Validate hash-only entries with an algorithm-compatible hash (sha256 64-hex, sha512 128-hex, bcrypt string, uppercase hex) → accepted
+  3. Validate an entry with neither key nor hash → rejected ("either key or hash must be set")
+  4. Validate entries whose hash cannot match the algorithm (fake "hash1" under sha256, sha512-length hash under sha256 and vice versa, non-bcrypt hash under bcrypt, any hash-only entry under plaintext, non-hex value of digest length) → rejected ("hash is not compatible with hash algorithm")
+  5. Validate a disabled config containing a broken entry → accepted (validation applies to enabled configs only)
+- **Expected Results**: Entries that could never authenticate are rejected at load time with the offending index/ID in the error; usable entries load
+
+#### TestFunctional_APIKey_ConfigValidation_VaultBcrypt
+- **Description**: Test bcrypt/Vault-store incompatibility rejection at config load
+- **Preconditions**: None
+- **Steps**:
+  1. Validate hashAlgorithm bcrypt with store.type=vault → rejected at load (bcrypt hashes are salted and cannot address Vault paths)
+  2. Validate hashAlgorithm bcrypt with an enabled vault section → rejected at load
+  3. Validate hashAlgorithm sha256 with the vault store → accepted
+  4. Validate hashAlgorithm bcrypt with the memory store → accepted
+- **Expected Results**: bcrypt+Vault is rejected at load time with guidance to use sha256/sha512; bcrypt remains supported for the memory store
+
+#### TestFunctional_APIKey_Validator_HashOnlyKeys
+- **Description**: Test hash-only static entries (no raw key material in config) authenticate through the public Validator API
+- **Preconditions**: None
+- **Steps**:
+  1. For each of sha256, sha512, bcrypt: configure a hash-only entry, validate the raw key → KeyInfo returned with ID/scopes
+  2. Validate a wrong key → ErrAPIKeyNotFound
+  3. Configure an uppercase-hex sha256 hash → raw key still validates (hash normalization for lookup and comparison)
+- **Expected Results**: Hash-only entries authenticate presented raw keys; config never needs to retain plaintext keys
+
+#### TestFunctional_APIKey_Validator_StoreErrorMetric
+- **Description**: Test that store outages surface as reason="store_error" while genuine misses stay reason="not_found"
+- **Preconditions**: None (uses a failing Store stub and an isolated metrics registry)
+- **Steps**:
+  1. Build a validator with a store whose lookups fail with ErrStoreUnavailable and dedicated metrics
+  2. Validate any key → error wrapping ErrStoreUnavailable (not ErrAPIKeyNotFound)
+  3. Gather the registry → apikey_validation_total{status="error",reason="store_error"} == 1 and reason="not_found" == 0
+  4. Build a validator with a normal memory store, validate an unknown key → reason="not_found" == 1 and reason="store_error" == 0
+- **Expected Results**: Operators can distinguish store outages (store_error) from genuine misses (not_found) in metrics; outage errors propagate to the caller
+
+## Redis-Backed Distributed Rate Limiting Tests
+
+Route-level HTTP rate limiting is now enforced by the per-route middleware chain
+(previously it was silently ignored by the data path), and `rateLimit.store: redis`
+enables a distributed Lua token bucket shared across gateway instances through Redis
+standalone or Redis Sentinel. Functional tests run against miniredis (no external
+dependencies); integration/e2e tests run against the LIVE docker-compose Redis
+Sentinel (`TEST_REDIS_SENTINEL_ADDRS`, `TEST_REDIS_SENTINEL_MASTER_NAME`,
+`TEST_REDIS_MASTER_PASSWORD`). New metrics:
+`gateway_middleware_redis_rate_limit_{allowed,denied,errors}_total` and
+`gateway_middleware_redis_rate_limit_duration_seconds`.
+
+### Functional Tests
+
+File: `test/functional/ratelimit_redis_functional_test.go` (build tag `functional`).
+All gateway tests exercise the FULL production route chain via the new
+`helpers.StartGatewayWithRouteMiddleware` (RouteMiddlewareManager + CacheFactory wired
+the same way `cmd/gateway` initApplication does).
+
+#### TestFunctional_RateLimit_RouteChain_MemoryStore
+- **Description**: Test that route-level rate limiting with the default in-memory store is enforced through the full gateway route chain (newly enforced behavior)
+- **Preconditions**: None (in-process httptest backend)
+- **Steps**:
+  1. Start a gateway with a route rateLimit {enabled, rps=1, burst=3} via StartGatewayWithRouteMiddleware
+  2. Fire 8 sequential GET requests
+  3. Verify the first 3 are 200, the tail is 429, at most one refill token of slack
+  4. Verify the backend hit counter equals the number of admitted requests
+- **Expected Results**: Burst admitted, past-burst throttled with 429, throttled requests never reach the backend
+
+#### TestFunctional_RateLimit_RouteChain_RedisStore
+- **Description**: Test the redis-store distributed limiter through the full route chain with miniredis
+- **Preconditions**: None (miniredis)
+- **Steps**:
+  1. Start a gateway with route rateLimit {store: redis, url: miniredis, rps=1, burst=3, keyPrefix "fnrl:"}
+  2. Fire 8 requests → verify allowed∈[3,4], denied≥4, first three 200, last 429
+  3. Verify the 429 carries Retry-After: 1 and the JSON rate-limit error body
+  4. Verify the token bucket key `fnrl:ratelimit:<route>` exists in miniredis
+  5. Verify gateway_middleware_redis_rate_limit_{allowed,denied}_total grow with the per-route label
+- **Expected Results**: Distributed token bucket enforced through the production chain; bucket state and metrics observable
+
+#### TestFunctional_RateLimit_RouteChain_RedisStore_PerClient
+- **Description**: Test PerClient=true bucket isolation keyed by client IP derived from X-Forwarded-For behind a trusted proxy
+- **Preconditions**: None (miniredis; swaps the process-global client IP extractor and restores it)
+- **Steps**:
+  1. Configure trusted proxy 127.0.0.1 (as cmd/gateway initClientIPExtractor does) and route rateLimit {store: redis, perClient: true, burst=2}
+  2. Client A (XFF 10.1.1.1) sends 3 requests → 200, 200, 429
+  3. Client B (XFF 10.2.2.2) sends 2 requests → 200, 200
+  4. Verify per-client bucket keys `...:client:10.1.1.1` and `...:client:10.2.2.2` exist in redis
+- **Expected Results**: Each client gets its own token bucket; exhausting one client's bucket does not affect others
+
+#### TestFunctional_RateLimit_RouteChain_RedisStore_SharedBucket
+- **Description**: Test that two gateway instances sharing redis + key prefix + scope enforce ONE combined token bucket
+- **Preconditions**: None (miniredis)
+- **Steps**:
+  1. Start two gateways (different ports) with the same route name, redis URL and key prefix (burst=4)
+  2. Alternate 10 requests across both gateways
+  3. Verify combined allowed∈[4,5] (10 would mean per-instance buckets) and denied≥5
+  4. Verify a single shared bucket key exists
+- **Expected Results**: Distributed semantics: the burst is shared across instances, not per-instance
+
+#### TestFunctional_RateLimit_RouteChain_RedisStore_FailOpenOutage
+- **Description**: Test failOpen (default) behavior during a redis outage
+- **Preconditions**: None (miniredis stopped mid-test)
+- **Steps**:
+  1. Start gateway with redis-store rate limit, verify a request passes with redis up
+  2. Stop miniredis
+  3. Fire 4 requests → all 200
+  4. Verify gateway_middleware_redis_rate_limit_errors_total{policy="fail_open"} grows by ≥4
+- **Expected Results**: Fail-open keeps the route available during outages and records an error metric per decision
+
+#### TestFunctional_RateLimit_RouteChain_RedisStore_FailClosedOutage
+- **Description**: Test failOpen=false behavior during a redis outage
+- **Preconditions**: None (miniredis stopped mid-test)
+- **Steps**:
+  1. Start gateway with redis-store rate limit {failOpen: false}, verify a request passes with redis up
+  2. Stop miniredis
+  3. Fire 3 requests → all 429; backend hit counter unchanged
+  4. Verify errors_total{policy="fail_closed"} grows by ≥3
+- **Expected Results**: Fail-closed rejects traffic (429) rather than running unlimited during outages
+
+#### TestFunctional_RateLimitAndCache_Redis_ConfigValidationSurface
+- **Description**: Data-driven YAML validation surface for the redis rate limiter store and route-level redis cache (loader → validator, the config-file startup path)
+- **Preconditions**: None
+- **Steps**:
+  1. Valid: store=redis with url; store=redis with sentinel (masterName + addrs + password); cache type=redis with sentinel and ttlJitter 0.3
+  2. Invalid store enum (etcd) → "invalid store"
+  3. store=redis without redis block → "redis configuration with url or sentinel is required"
+  4. rateLimit url+sentinel together → "url and sentinel are mutually exclusive"
+  5. store=memory with a redis block → "redis configuration is only valid when store is 'redis'"
+  6. Invalid cache type enum; cache type=redis without redis block; cache url+sentinel together
+  7. cache ttlJitter 1.5 and -0.1 → "ttlJitter must be between 0.0 and 1.0"
+- **Expected Results**: The YAML surface enforces store/type enums, redis-required-when-selected, url/sentinel exclusivity and ttlJitter bounds
+
+### Integration Tests
+
+Files: `test/integration/ratelimit_sentinel_test.go`, `test/integration/ratelimit_vault_test.go`
+(build tag `integration`, LIVE docker-compose sentinel; announced Docker-internal master
+IPs are reachable through the shared `helpers.SentinelDialer`).
+
+#### TestIntegration_RateLimit_Sentinel_BurstSplit
+- **Description**: Test the distributed token bucket against the REAL Redis Sentinel deployment (mymaster, 3 sentinels, password)
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Build a RedisRateLimiter on a sentinel failover client (ENV-config: mymaster, 26379-26381, password), wrap a gateway route handler with it (rps=1, burst=5, unique keyPrefix)
+  2. Fire 12 requests → verify allowed∈[5,6] and denied≥6 (observed 5×200/7×429)
+  3. Inspect the master through the sentinel-discovered client: bucket key `<prefix>ratelimit:<scope>` exists, carries hash fields t/ts and a positive idle TTL
+- **Expected Results**: ~burst/rest 200/429 split enforced via sentinel; bucket observable on the master (EVALSHA token bucket, PEXPIRE 65000)
+
+#### TestIntegration_RateLimit_Sentinel_SharedBucket
+- **Description**: Test one combined token bucket across two gateway instances through the real sentinel
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Start two gateways, each with its own RedisRateLimiter instance sharing scope + prefix + sentinel (burst=6)
+  2. Alternate 12 requests across both → verify combined allowed∈[6,7], denied≥5 (observed 6/6)
+  3. Verify exactly one shared bucket key exists on the master
+- **Expected Results**: Combined rate enforced across instances through the shared sentinel-managed bucket
+
+#### TestIntegration_RateLimit_RouteChain_SentinelMasterURL
+- **Description**: Test the FULL production route chain (CRD-shaped route config through RouteMiddlewareManager) with store=redis pointing at the sentinel-managed master via its host-mapped URL
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Start gateway via StartGatewayWithRouteMiddleware with route rateLimit {store: redis, url: redis://default:password@127.0.0.1:6380, burst=4, keyPrefix}
+  2. Fire 10 requests → verify allowed∈[4,5], denied≥5 (observed 4×200/6×429)
+  3. Verify the bucket key with the configured prefix exists on the master
+- **Expected Results**: CRD-expressible redis rate limiting works end-to-end through the production chain against the sentinel-managed master
+
+#### TestIntegration_RateLimit_RouteChain_Sentinel_FailOpen
+- **Description**: Test the full route chain building a sentinel-mode limiter internally (no injected client) with fail-open availability semantics
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Route rateLimit carries the real sentinel config (mymaster, 3 addrs, password), failOpen default, burst=100, short connect/read timeouts
+  2. First (warm-up) request triggers the lazy chain build including the best-effort connectivity check → must answer 200
+  3. Fire 5 requests → all 200 whether or not the announced master is reachable from the host (unreachable on macOS, fail-open applies; reachable on Linux CI, bucket enforces)
+  4. Log whether the bucket key appeared on the master (reachability probe)
+- **Expected Results**: Fail-open sentinel-configured routes never block traffic; decisions stay bounded by readTimeout
+
+#### TestIntegration_RateLimit_RedisStore_VaultPassword
+- **Description**: Test the redis rate limiter resolving the Redis password from Vault (passwordVaultPath), mirroring the cache Vault-password pattern
+- **Preconditions**: docker-compose sentinel + Vault (myroot) + REST backend 8801 running
+- **Steps**:
+  1. Write the master password to Vault KV `redis/ratelimit` (key "password")
+  2. Start gateway (full route chain + Vault client) with route rateLimit {store: redis, url WITHOUT password, passwordVaultPath, failOpen: false, burst=3}
+  3. Fire 8 requests → verify allowed∈[3,4], denied≥4 (a password failure with failOpen=false would reject everything)
+  4. Verify the bucket key exists on the password-protected master
+- **Expected Results**: Password resolved from Vault; limiter authenticates and enforces limits through the full chain
+
+### E2E Tests
+
+File: `test/e2e/redis_ratelimit_cache_e2e_test.go` (build tag `e2e`, LIVE docker-compose env).
+
+#### TestE2E_Sentinel_DistributedRateLimit
+- **Description**: Distributed rate limiting user journey through REAL Redis Sentinel discovery across two gateway instances
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Two gateways, each with a sentinel-mode RedisRateLimiter (mymaster, 3 addrs, password; rps=1, burst=6)
+  2. Alternate 14 requests → combined allowed∈[6,7], denied≥7 (observed 6×200/8×429)
+  3. Verify exactly one shared bucket key exists on the sentinel-managed master
+  4. Wait 1.5s (rps=1) → traffic recovers with 200
+  5. Register + Init the middleware metrics on a registry, serve /metrics, verify gateway_middleware_redis_rate_limit_{allowed,denied,errors}_total and the duration histogram are exposed
+- **Expected Results**: One shared bucket across instances via sentinel; bucket refills; new metrics exposed on the metrics endpoint
+
+## Route-Level Redis/Sentinel Cache via CRD Tests
+
+Route-level caching is now CRD-expressible (`APIRoute spec.cache.type: redis` +
+`spec.cache.redis` with url XOR sentinel, keyPrefix, ttlJitter, hashKeys, retry,
+Vault password paths). The operator translates the spec to gateway JSON and the
+webhook validates it; gRPC/GraphQL routes accept but admission-warn (data path
+not implemented there yet).
+
+### Functional Operator Tests
+
+File: `test/functional/operator/redis_route_config_functional_test.go` (build tag `functional`).
+
+#### TestFunctional_APIRoute_RedisCache_Admission
+- **Description**: Black-box admission of APIRoute route-level redis cache configuration through the public webhook validator
+- **Preconditions**: None
+- **Steps**:
+  1. type=redis with sentinel (env-shaped: mymaster, 3 addrs, password) → admitted with plaintext-secret warning
+  2. type=redis with standalone url → admitted
+  3. url+sentinel together → rejected "mutually exclusive"
+  4. type=redis without redis block → rejected "cache.redis is required"
+  5. redis block without url or sentinel → rejected "requires either url or sentinel"
+  6. type=memory with redis block → rejected "only valid when cache.type is 'redis'"
+  7. ttlJitter 1.5 / -0.1 → rejected "ttlJitter must be between 0.0 and 1.0"
+- **Expected Results**: Admission enforces the same rules as gateway config validation; plaintext sentinel secrets warn
+
+#### TestFunctional_APIRoute_RedisRateLimit_Admission
+- **Description**: Black-box admission of APIRoute distributed rate limiter configuration
+- **Preconditions**: None
+- **Steps**:
+  1. store=redis with sentinel → admitted with plaintext warning; store=redis with url + readTimeout → admitted
+  2. store=redis without redis block → rejected; url+sentinel → rejected "mutually exclusive"
+  3. store=memory with redis block → rejected; invalid enum (etcd) → rejected
+  4. Disabled rate limit with store=redis but no redis block → still rejected (store validated even when disabled)
+- **Expected Results**: Store selection and Redis connection rules enforced at admission, before the limiter is ever enabled
+
+#### TestFunctional_Route_RedisStore_UnappliedWarnings
+- **Description**: Test truthful admission warnings for redis-backed stores per route kind
+- **Preconditions**: None
+- **Steps**:
+  1. GRPCRoute with rateLimit.store=redis and cache.type=redis → admitted with "not applied for GRPCRoute" warnings (in-memory limiter, no caching on the gRPC data path)
+  2. GraphQLRoute likewise → admitted with NO unapplied rate-limit warning (redis store enforced via the shared route middleware chain) but a precise cache warning: redis cache has no effect for POST GraphQL operations (GET-only caching)
+  3. APIRoute with the same config → NO unapplied warnings (redis store/cache are enforced for HTTP routes)
+- **Expected Results**: Forward-compatible acceptance with honest operator warnings; APIRoutes warn-free
+
+#### TestFunctional_APIRoute_RedisConfig_GatewayContract
+- **Description**: Full CRD → gateway contract: admitted APIRoute spec with sentinel cache + redis rate limit survives the operator's JSON translation and passes gateway validation
+- **Preconditions**: None
+- **Steps**:
+  1. Build APIRoute with cache {type: redis, sentinel, keyPrefix, ttlJitter 0.25, hashKeys} and rateLimit {store: redis, sentinel, perClient, failOpen: false, readTimeout}
+  2. ValidateCreate admits it
+  3. Marshal the spec to JSON (as the controller does) and unmarshal onto config.Route
+  4. Embed in a GatewayConfig → config.ValidateConfig passes
+  5. Verify effective values survive: GetEffectiveStore()=redis, GetEffectiveFailOpen()=false, TTLJitter, HashKeys, sentinel identity
+- **Expected Results**: Every CRD field round-trips intact into the gateway's runtime configuration
+
+### Integration Tests
+
+File: `test/integration/cache_sentinel_route_test.go` (build tag `integration`, LIVE docker-compose sentinel).
+
+#### TestIntegration_Cache_Sentinel_RouteChain
+- **Description**: Route cache data path against the REAL sentinel deployment: miss → hit, key prefix, TTL jitter bounds, POST bypass, invalidation
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Gateway route wrapped with the route cache middleware backed by a sentinel-mode cache (mymaster, 3 addrs, password; TTL 2m, ttlJitter 0.2, unique keyPrefix)
+  2. First GET → 200 without X-Cache; wait for the entry on the master
+  3. Second GET → 200 with X-Cache: HIT
+  4. Verify entry `<prefix>GET:/api/v1/items` exists on the master; PTTL within [ttl*(1-jitter), ttl*(1+jitter)]
+  5. POST bypasses the cache; deleting the key restores miss behavior
+- **Expected Results**: Sentinel-backed response caching works on the gateway data path with jittered TTLs and correct method semantics
+
+#### TestIntegration_Cache_RouteChain_MasterURL_FullChain
+- **Description**: FULL production route chain (RouteMiddlewareManager + CacheFactory from CRD-shaped route config) with redis cache on the sentinel-managed master, including hashKeys
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Start gateway via StartGatewayWithRouteMiddleware with route cache {type: redis, url: master host-mapped URL, hashKeys: true, TTL 90s}
+  2. GET → miss; wait for fill; GET → X-Cache: HIT
+  3. Verify the SHA256-hashed key exists and the raw key does NOT
+  4. Verify TTL is positive and ≤ 90s (no jitter configured)
+- **Expected Results**: CRD-expressible redis cache is served through the production chain; hashKeys stores hashed keys only
+
+### E2E Tests
+
+File: `test/e2e/redis_ratelimit_cache_e2e_test.go` (build tag `e2e`).
+
+#### TestE2E_FullConfig_AuthRateLimitCacheTransformCORS
+- **Description**: Full-config journey on ONE route combining JWT auth + distributed rate limit (redis on the sentinel-managed master) + redis cache (TTL jitter) + response transform (deny fields) + CORS, built through the production per-route middleware chain
+- **Preconditions**: docker-compose sentinel + REST backend 8801 running
+- **Steps**:
+  1. Request without token → 401; with an invalid token → 401 (auth first, no tokens consumed)
+  2. Authenticated GET (no Origin) → 200, cache miss, body transformed (data field denied); entry appears on the master
+  3. Authenticated GET with allowed Origin → X-Cache: HIT + Access-Control-Allow-Origin added per-request + still transformed
+  4. Authenticated GET with a non-allowlisted Origin on the hit path → no gateway CORS grant
+  5. Repeat authenticated GETs until burst is exhausted → 429 with Retry-After: 1, rejected before the cache
+  6. Verify rate limit bucket and cache entry on the sentinel-managed master; cache PTTL within jitter bounds [ttl*(1-j), ttl*(1+j)]
+  7. Serve the middleware metrics registry over HTTP → gateway_middleware_redis_rate_limit_{allowed,denied}_total{route="full-config-route"} and the duration histogram are exposed
+- **Expected Results**: All five features cooperate on one route with correct ordering (auth → rate limit → CORS → cache → transform → proxy); sentinel-backed state and new metrics observable
+
+## Webhook Admission Lifecycle Tests
+
+The validating webhooks admit lifecycle-driven updates that can never introduce new
+conflicts, eliminating the webhook/finalizer deadlock: updates to TERMINATING objects
+(deletionTimestamp set) are admitted unconditionally so finalizer removal always
+proceeds; METADATA-ONLY updates (semantically unchanged spec) run local spec validation
+only and skip duplicate/cross-kind conflict checks; and terminating resources are
+excluded from every duplicate and cross-kind conflict CANDIDATE set so a stuck
+terminating peer never blocks a surviving or replacement resource.
+
+Files: `internal/operator/webhook/finalizer_deadlock_test.go` (runs under
+`test-operator-unit/functional/integration`).
+
+### TestValidateUpdate_TerminatingObjectAdmitted
+- **Description**: Updates to a resource being deleted are admitted unconditionally, even when the object overlaps a live peer and even when its spec is locally invalid (data-driven across APIRoute, Backend, GRPCRoute, GraphQLRoute)
+- **Preconditions**: Resource has deletionTimestamp set (finalizer keeps it alive); an overlapping live peer exists
+- **Steps**:
+  1. Create a terminating resource whose spec conflicts with a live peer
+  2. Submit a finalizer-removal update (metadata change) via ValidateUpdate
+  3. Repeat with a locally invalid spec on the terminating object
+- **Expected Results**: All updates admitted — deletion can always complete; no duplicate/conflict/spec error blocks the terminating object
+
+### TestValidateUpdate_FinalizerAddOnLegacyOverlappingPair
+- **Description**: Metadata-only updates (finalizer/label add) on LEGACY overlapping resources (admitted before conflict rules tightened) are not blocked by duplicate or cross-kind checks
+- **Preconditions**: Two overlapping same-kind resources already persisted (legacy state)
+- **Steps**:
+  1. Add a finalizer to one of the pair without touching the spec
+  2. Submit the update to the webhook
+- **Expected Results**: Update admitted — the unchanged spec cannot introduce NEW conflicts; local spec validation still runs
+
+### TestValidateUpdate_SpecChangeToConflict_StillRejected
+- **Description**: The lifecycle short-circuits do not weaken real conflict enforcement: a genuine spec change that creates an identical-specificity duplicate is still rejected
+- **Preconditions**: A live peer resource exists
+- **Steps**:
+  1. Update a live resource's spec to collide with the peer (identical-specificity match)
+  2. Submit the update
+- **Expected Results**: Update rejected with a conflict error naming the peer
+
+### TestValidateUpdate_TerminatingPeerUnblocksSurvivor
+- **Description**: A conflicting candidate that is TERMINATING is skipped from the conflict set, so the surviving resource can be created/updated while its old peer drains
+- **Preconditions**: A terminating resource (deletionTimestamp set, finalizer pending) holds the contested match/hosts
+- **Steps**:
+  1. Create (or spec-update) a replacement resource with the same match as the terminating peer
+  2. Submit to the webhook; also exercise Backend/GRPCBackend/GraphQLBackend cross-kind host:port candidate sets (TestCrossKindBackendChecks_TerminatingCandidatesSkipped)
+- **Expected Results**: Replacement admitted — terminating peers never block survivors; live peers still conflict
+
+### TestValidateUpdate_MetadataOnlyInvalidSpec_StillValidated
+- **Description**: The metadata-only short-circuit skips CONFLICT checks only — local spec validation still applies to non-terminating objects
+- **Preconditions**: Persisted resource with a spec that fails current local validation
+- **Steps**:
+  1. Submit a metadata-only update (old spec == new spec, both locally invalid) on a NON-terminating object
+- **Expected Results**: Update rejected by local spec validation (invalid specs do not ride through on the metadata-only path)
+
+## Same-Kind Route Overlap Relaxation Tests (gRPC + GraphQL)
+
+Same-kind duplicate admission now mirrors the APIRoute philosophy: only
+IDENTICAL-SPECIFICITY duplicates — match conditions the data-plane router cannot order
+deterministically for a user — are rejected. Match conditions of DIFFERENT specificity
+coexist and are resolved by the router's specificity sort. gRPC: nested (non-identical)
+service/method prefixes are now ADMITTED (`com.example` + `com.example.user` coexist;
+longest-prefix wins at the data plane); identical prefixes/exacts and double catch-alls
+remain rejected. GraphQL: block specificity is scored with the data plane's
+authoritative `graphqlrouter.Specificity` weights (path exact=1000 | prefix=500+len |
+regex=100; operationName exact=500 | prefix=250+len | regex=50; operationType set=+200;
++10 per header) — a generic route vs a more specific one on the same path is ADMITTED;
+only equal-specificity blocks whose values can cover the same request are rejected.
+
+Files: `internal/operator/webhook/duplicate_grpc_relax_test.go`,
+`internal/operator/webhook/duplicate_graphql_relax_test.go` (run under
+`test-operator-unit/functional/integration`).
+
+### TestCheckGRPCRouteDuplicate_SpecificityTopology
+- **Description**: Data-driven topology of gRPC same-kind admission: identical exact services (same/absent methods), identical service prefixes, identical method prefixes, and double catch-alls are conflicts; nested service prefixes, nested method prefixes, exact-vs-prefix service matches, different exact methods, and catch-all vs specific are admitted
+- **Preconditions**: Existing GRPCRoute persisted; DuplicateChecker with fake client
+- **Steps**:
+  1. For each pair in the table, persist route A and run CheckGRPCRouteDuplicate on route B
+- **Expected Results**: Only identical-specificity pairs report conflicts; every different-specificity pair is admitted
+
+### TestGRPCDataplaneParity_NestedPrefixesDeterministic
+- **Description**: Admission/data-plane parity — every ADMITTED nested-prefix pair must be deterministically ordered by the gRPC router (longest prefix wins), and identical-prefix pairs the webhook REJECTS are exactly those the router cannot order by specificity (equal priority, name tie-break only)
+- **Preconditions**: gRPC router loaded with the admitted pair
+- **Steps**:
+  1. Load `com.example` and `com.example.user` prefix routes in both insertion orders
+  2. Match a request under the longer prefix; also exercise nested METHOD prefixes (TestGRPCDataplaneParity_NestedMethodPrefixesDeterministic)
+  3. For the rejected identical-prefix pair, verify both routes compile to equal priority (TestGRPCDataplaneParity_IdenticalPrefixesAmbiguous)
+- **Expected Results**: Longest-prefix route wins regardless of load order; the webhook rejects exactly the pairs whose ordering would fall through to the arbitrary name tie-break
+
+### TestCheckGraphQLRouteDuplicate_SpecificityTopology
+- **Description**: Data-driven topology of GraphQL same-kind admission: identical exact paths (with equal operationType/operationName surfaces), identical prefixes, and double catch-alls conflict; exact vs prefix on the same path, nested prefixes, typed vs untyped blocks, named vs unnamed operations, header-count differences, and catch-all vs specific are admitted (different specificity)
+- **Preconditions**: Existing GraphQLRoute persisted; DuplicateChecker with fake client
+- **Steps**:
+  1. For each pair in the table, persist route A and run CheckGraphQLRouteDuplicate on route B
+- **Expected Results**: Only identical-specificity blocks with overlapping values (path/operationType/operationName/headers all able to cover one request) are conflicts
+
+### TestGraphQLMatchSpecificity_ParityWithRouterWeights
+- **Description**: The webhook's block scoring delegates to the exported `graphqlrouter.Specificity` — the single source of truth — so admission and data-plane precedence cannot drift
+- **Preconditions**: None
+- **Steps**:
+  1. Score representative CRD match blocks via the webhook path and via the router package directly
+- **Expected Results**: Identical scores for identical blocks (exact/prefix/regex path, operationName, operationType, headers)
+
+### TestGraphQLDataplaneParity_SpecificityOrdering
+- **Description**: Every ADMITTED different-specificity GraphQL pair resolves deterministically in the router — the more specific block wins regardless of load order; TestGraphQLBasicVsDo04FixturePair_Admitted pins the real-world fixture pair (generic `/graphql` route vs the DO-04 header-conditioned route) as admitted and deterministic
+- **Preconditions**: GraphQL router loaded with the admitted pair in both orders
+- **Steps**:
+  1. Load pair, Match a request satisfying both blocks
+  2. Reverse load order and repeat
+- **Expected Results**: Same winner in both orders (higher specificity); no admission rejection for the pair
+
+## Route Precedence Determinism Tests (HTTP, gRPC, GraphQL)
+
+All three routers now yield a DETERMINISTIC total match order independent of input
+order (Kubernetes map iteration, cross-namespace merges, file loads). HTTP and gRPC
+routers order by descending priority with an ascending route-NAME tie-break at equal
+priority. The GraphQL router now sorts compiled routes by descending Specificity with
+the same name tie-break (previously input-order/first-match — operator-mode map
+iteration made matches nondeterministic). `LoadRoutes` with an empty/nil slice clears
+each router.
+
+Files: `internal/router/router_determinism_test.go`,
+`internal/grpc/router/router_determinism_test.go`,
+`internal/graphql/router/specificity_test.go` (unit suites).
+
+### TestRouter_EqualPriorityNameTieBreak (HTTP + gRPC)
+- **Description**: Two routes compiling to EQUAL priority (e.g. same-length prefixes, equal-priority regex pairs) always match in route-name order, in both insertion orders and via AddRoute increments
+- **Preconditions**: None
+- **Steps**:
+  1. Load equal-priority routes named "b-route", "a-route" (insertion order b, a); match a request satisfying both
+  2. Reverse insertion order and repeat; also load via incremental AddRoute
+- **Expected Results**: "a-route" (name ascending) wins every time; shuffled load orders produce identical match tables (TestRouter_LoadRoutes_ShuffledOrderDeterministic)
+
+### TestRouter_Match_SpecificityIndependentOfLoadOrder (GraphQL)
+- **Description**: GraphQL route matching is specificity-ordered, not input-ordered: loading [generic, specific] and [specific, generic] both match the specific route; the full documented specificity ladder (exact > long prefix > short prefix > regex > catch-all; operationType/operationName/headers add weight) is pinned by TestSpecificity_DocumentedOrdering and TestRouter_Match_SpecificityLadder
+- **Preconditions**: None
+- **Steps**:
+  1. Load a generic catch-all and a specific exact-path route in both orders
+  2. Match a request satisfying both; shuffle larger route sets (TestRouter_Match_ShuffledDeterminism)
+- **Expected Results**: Most specific route always wins; equal-specificity falls back to the name tie-break (TestRouter_Match_EqualSpecificityNameTieBreak); `SortRoutesBySpecificity` orders config slices exactly like LoadRoutes
+
+### TestConfigHandler_CollectGraphQLRoutes_SpecificityOrder (operator handler)
+- **Description**: The gateway's operator ConfigHandler hands GraphQL route slices to the applier pre-sorted by `SortRoutesBySpecificity` (and all other resource slices sorted by composite state key — TestConfigHandler_CollectSorted_DeterministicOrder), so apply logs, diffs, and router order stay aligned across identical snapshots
+- **Preconditions**: Handler state populated from a snapshot with routes in adversarial map order
+- **Steps**:
+  1. HandleSnapshot with shuffled resources; capture the slice passed to the applier
+- **Expected Results**: Deterministic, specificity-ordered (GraphQL) / key-ordered (others) slices on every call
+
+## Operator FULL_SYNC Empty-Type Clearing Tests
+
+FULL_SYNC snapshots are authoritative: an EMPTY resource type in the merged operator
+config now CLEARS the corresponding router/registry (previously `len(...) > 0` guards
+skipped empty sets, so deleting the LAST resource of a type left stale state serving
+traffic). Emptiness POLICY stays upstream in `operator.ConfigHandler`: an all-types-empty
+snapshot is still guarded, and a post-reconnect REGRESSING snapshot (total shrinks) is
+still deferred to protect operator restarts; a non-regressing snapshot with one type
+empty applies and clears. Nil-component guards remain (partially initialized apps skip
+the subsystem).
+
+Files: `cmd/gateway/operator_empty_clear_test.go` (applier seam, real routers),
+`internal/gateway/operator/handler_snapshot_keys_test.go` (handler policy seam) — unit
+suites; the pairing covers the full HandleSnapshot → applier → router path.
+
+### TestApplyFullConfig_PartialEmptyClearsOnlyEmptyTypes
+- **Description**: The full FULL_SYNC apply path with HTTP routes populated and GraphQL routes empty clears the GraphQL router while the HTTP router serves the new set — per-type independence through the operator-mode applier (`ApplyFullConfig`)
+- **Preconditions**: Applier over real HTTP router, backend registry, and GraphQL router, each preloaded with one resource
+- **Steps**:
+  1. ApplyFullConfig with 1 HTTP route, zero GraphQL routes/backends/gRPC resources
+  2. Match an HTTP request; count GraphQL routes
+- **Expected Results**: GraphQL router count = 0; HTTP route matches; per-type clears covered for HTTP routes, backends, gRPC listener routes, and GraphQL router (sibling TestApplyMerged*_Empty* tests)
+
+### TestConfigHandler_PartialEmptySnapshotApplies_WithinWindow
+- **Description**: Handler policy — a NON-regressing FULL_SYNC (total resource count preserved or grown) with one type emptied applies immediately, even inside the post-reconnect regression window
+- **Preconditions**: Handler seeded (2 HTTP + 1 GraphQL), MarkReconnected called
+- **Steps**:
+  1. HandleSnapshot with 3 HTTP routes and zero GraphQL routes (total 3, non-regressing)
+- **Expected Results**: Applied — populated type updated, GraphQL state empty; a REGRESSING partial-empty snapshot within the window is still deferred with last-known-good kept (TestConfigHandler_PartialEmptyRegressingSnapshotDeferred_WithinWindow); an ALL-empty snapshot never wipes running config (existing handler_empty_snapshot_test.go)
+
+## Deterministic Operator Snapshots & Leadership-Gated Seeding Tests
+
+Files: `internal/operator/grpc/service_determinism_test.go`,
+`internal/operator/grpc/server_leadership_test.go`, `cmd/operator/store_seeding_test.go`
+(operator unit suites); `internal/gateway/operator/client_conn_leak_test.go`,
+`internal/gateway/operator/handler_snapshot_keys_test.go` (gateway unit suite).
+
+### TestBuildSnapshot_DeterministicChecksum_AcrossInsertionOrders
+- **Description**: buildSnapshot orders every resource slice by ascending resource key (namespace/name), so identical store contents produce byte-identical snapshots and checksums regardless of Go map insertion/iteration order — gateways no longer see spurious checksum changes on operator restart
+- **Preconditions**: Store populated with all six resource types across multiple namespaces, in several insertion orders
+- **Steps**:
+  1. Build snapshots from permuted stores; compare checksums and per-type key order
+- **Expected Results**: Identical checksums; slices sorted by resource key (TestBuildSnapshot_SlicesSortedByResourceKey); checksum changes exactly when content changes; empty types stay nil
+
+### TestWaitForStoreSeeded_NotElected_ParksPastSeedTimeout
+- **Description**: The gRPC store readiness gate is LEADERSHIP-GATED: a non-leader replica (controllers never run, store permanently empty) parks initial-snapshot RPCs past the seed timeout instead of timing out into an empty FULL_SYNC that would wipe a connecting gateway's running config
+- **Preconditions**: Server with leadership signal wired (SetLeadershipSignal), replica not elected
+- **Steps**:
+  1. Call the seeded wait with a context outliving the seed timeout
+  2. Elect the replica mid-wait in sibling cases (TestWaitForStoreSeeded_TimeoutClockStartsAtElection, _ElectedThenSeeded)
+- **Expected Results**: Not-elected wait reports awaiting_leadership and never opens the gate; the bounded seed-timeout clock starts AT election; nil signal preserves the old single-replica behavior (gating disabled); store revisions on a non-leader do not open the gate
+
+### TestSeedGRPCStore (leadership ordering, cmd/operator)
+- **Description**: The operator wires the leadership signal into the gRPC server BEFORE serving and the seeding goroutine waits for election → cache sync → initial reconcile before MarkStoreSeeded; shutdown before/during any stage skips the seed mark
+- **Preconditions**: Fake manager elected-channel and cache-sync waiter
+- **Steps**:
+  1. Run seedGRPCStore with elected closed/never-closed/closed-late and canceled contexts
+- **Expected Results**: Seed mark only after election + sync (+ bounded reconcile wait); non-leaders and canceled shutdowns never mark the (empty) store seeded
+
+### TestClient_Connect_ClosesPreviousConnection
+- **Description**: The gateway's operator client closes the PREVIOUS gRPC connection before replacing it on reconnect, so retry/reconnect loops cannot leak sockets
+- **Preconditions**: Client connected to a mock operator endpoint
+- **Steps**:
+  1. Connect; capture conn; Connect again; Stop
+- **Expected Results**: First conn observed closed before replacement; already-closed conns are logged and skipped; Stop after reconnect never double-closes
+
+### TestConfigHandler_SnapshotThenIncrementalDelete_KeySymmetry
+- **Description**: FULL_SYNC seeds handler state under the SAME composite namespace/name key incremental updates use, so a snapshot-seeded resource is addressable by later incremental MODIFY/DELETE events (previously snapshots keyed by bare name, orphaning namespaced increments)
+- **Preconditions**: Snapshot with a namespaced resource applied
+- **Steps**:
+  1. HandleSnapshot seeding `prod/orders-route`; send incremental DELETE for the same namespace/name
+  2. Repeat for MODIFY (no duplicate entries) and GraphQL kinds
+- **Expected Results**: State entry removed/updated in place; undecodable snapshot resources are logged and skipped without half-clearing state (TestConfigHandler_SnapshotUndecodableResourceSkipped)
+
+## TLS Handshake Duration Metrics Tests
+
+The `gateway_tls_handshake_duration_seconds` histogram (labels: tls version, mode) is
+now WIRED on both the HTTPS listener and the gRPC TLS listener via
+`tls.InstrumentHandshakeTiming` (GetConfigForClient starts the clock at ClientHello;
+the per-connection VerifyConnection observes on success). Failed connection
+verifications record `gateway_tls_handshake_errors_total{reason="verify_connection_failed"}`
+and no duration sample. Existing GetConfigForClient/VerifyConnection chains (route TLS,
+ALPN enforcement, connection metrics) are preserved.
+
+Files: `internal/tls/handshake_test.go`, `internal/gateway/listener_handshake_metrics_test.go`,
+`internal/grpc/server/tls_handshake_metrics_test.go` (unit suites);
+`test/e2e/tls_handshake_metrics_e2e_test.go` (build tag `e2e`).
+
+### TestListener_TLSHandshakeDurationMetric_Recorded
+- **Description**: A real HTTPS handshake through the gateway Listener records exactly one histogram sample with a sane (0, 5s) duration while the existing connection counter still fires
+- **Preconditions**: HTTPS listener with self-signed certs, isolated Prometheus registry
+- **Steps**:
+  1. Start listener; TLS-dial and complete one HTTP request; gather registry
+- **Expected Results**: count=1, 0 < sum < 5s, gateway_tls_connections_total=1; failed mTLS handshakes record NO duration sample (TestListener_TLSHandshakeMetrics_MutualBadClientCert); VerifyConnection rejections count a bounded handshake error instead
+
+### TestGRPCListener_TLSHandshakeDurationMetric_Recorded
+- **Description**: A TLS handshake against the gRPC listener (h2 ALPN) records on the same histogram; the instrumentation is installed AFTER ALPN verification so the observation wraps the full chain (TestConfigureGRPCTLS_HandshakeTiming_ALPNFailureChainPreserved)
+- **Preconditions**: GRPC listener with TLS enabled, isolated registry
+- **Steps**:
+  1. Start listener; raw TLS dial with h2 ALPN; send HTTP/2 preface; read server answer; gather registry
+- **Expected Results**: ≥1 histogram sample with sane duration
+
+### TestE2E_TLS_HandshakeDurationMetric_GatewayJourney
+- **Description**: Full user journey — a gateway configured with an HTTPS listener via `gateway.New(cfg, WithGatewayTLSMetrics(...))` serves TLS traffic and the handshake-duration histogram becomes observable, proving the gateway→listener metrics wiring end-to-end (not just the listener seam)
+- **Preconditions**: None external (self-generated certs, direct-response route, isolated registry)
+- **Steps**:
+  1. Build a gateway config with one HTTPS listener (SIMPLE mode, generated cert/key) and a direct-response route
+  2. Start the gateway; make HTTPS requests through it (InsecureSkipVerify client)
+  3. Gather the registry and locate gateway_tls_handshake_duration_seconds
+- **Expected Results**: ≥1 sample after traffic (0 before), sum > 0; response served over TLS with the expected body

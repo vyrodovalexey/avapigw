@@ -17,6 +17,43 @@ data:
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
             action: keep
             regex: true
+          # Pods that expose multiple container ports (e.g. otel-collector exposes
+          # 4317/4318/8888) are discovered once per declared container port. Only the
+          # container port that matches the prometheus.io/port annotation should be
+          # scraped, otherwise every declared port is rewritten to IP:<metricsPort>
+          # producing identical duplicate targets and "duplicate scrape target" errors.
+          #
+          # Pods that declare multiple container ports (e.g. otel-collector exposes
+          # 4317/4318/8888) are discovered once per declared container port, and the
+          # __address__ rewrite below collapses all of them to IP:<annotationPort>,
+          # producing identical duplicate targets ("duplicate scrape target" errors).
+          #
+          # To keep exactly one target we compare the discovered container port to the
+          # desired prometheus.io/port. RE2 has no backreferences, so we use VictoriaMetrics'
+          # keep_if_equal action, which keeps the target only when all listed labels are
+          # equal. We seed a scratch copy of the annotation port that defaults to the
+          # container port (so pods WITHOUT declared container ports still match and are
+          # kept as a single target).
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: (\d+)
+            replacement: $1
+            target_label: __tmp_scrape_port
+          # For targets that carry a discovered container port, default the scratch label
+          # to that container port only when the annotation port is absent (keeps generic
+          # pods working); annotation port always wins when present.
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: replace
+            regex: (\d+)
+            replacement: $1
+            target_label: __tmp_ctr_port
+          # Keep the target only when the discovered container port equals the desired
+          # scrape port. Targets whose pods declare NO container ports have an empty
+          # __tmp_ctr_port and are handled by the second keep rule.
+          - source_labels: [__tmp_ctr_port, __tmp_scrape_port]
+            action: keep_if_equal
+          - action: labeldrop
+            regex: __tmp_.*
           - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
             action: replace
             target_label: __metrics_path__

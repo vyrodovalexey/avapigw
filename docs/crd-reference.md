@@ -229,6 +229,53 @@ spec:
       ttl: "60s"                       # Cache error responses
 ```
 
+##### Redis / Redis Sentinel Cache Backend
+
+Route-level caching supports a distributed Redis backend shared across
+gateway replicas. `type` selects the backend (`memory` is the default);
+`redis.url` (standalone) and `redis.sentinel` are mutually exclusive.
+
+```yaml
+spec:
+  cache:
+    enabled: true
+    ttl: "300s"
+    type: redis                         # memory (default) | redis
+    redis:
+      # Standalone mode (mutually exclusive with sentinel):
+      # url: "redis://redis.cache.svc:6379/0"
+      # passwordVaultPath: "secret/redis"   # Vault path with "password" key
+
+      # Sentinel mode for high availability:
+      sentinel:
+        masterName: "mymaster"
+        sentinelAddrs:
+          - "redis-sentinel-0.redis.svc:26379"
+          - "redis-sentinel-1.redis.svc:26379"
+        db: 0
+        passwordVaultPath: "secret/redis-master"       # master password from Vault
+        sentinelPasswordVaultPath: "secret/redis-sentinel"
+      poolSize: 10
+      connectTimeout: "5s"
+      readTimeout: "3s"
+      writeTimeout: "3s"
+      keyPrefix: "route-cache:"
+      ttlJitter: 0.1                    # ±10% TTL jitter (cache stampede protection)
+      hashKeys: true                    # SHA256-hash cache keys
+      retry:                            # Initial connection retry (exponential backoff)
+        maxRetries: 3
+        initialBackoff: "100ms"
+        maxBackoff: "30s"
+```
+
+> Note: redis-backed route caching is applied in the HTTP (APIRoute) data
+> path. GraphQL routes attach the same cache middleware through the shared
+> per-route chain, but only GET requests are cached, so POST-based GraphQL
+> operations are not cached. On GRPCRoute the configuration is accepted for
+> forward compatibility only. The admission webhook emits a
+> forward-compatibility warning for `cache.type: redis` on both GRPCRoute
+> and GraphQLRoute.
+
 #### Security and Rate Limiting
 
 ```yaml
@@ -247,6 +294,12 @@ spec:
       sources:
         - header: "X-API-Key"
         - query: "api_key"
+    mtls:
+      enabled: true
+      # caFile is optional: omitting it is valid when the client CA is
+      # provided elsewhere (e.g. a Vault-managed CA on the listener).
+      # The admission webhook emits a WARNING (not a rejection) when absent.
+      caFile: "/certs/client-ca.crt"
   
   # Authorization
   authorization:
@@ -270,6 +323,38 @@ spec:
     requestsPerSecond: 100
     burst: 200
     perClient: true                     # Per client IP
+  
+  # Distributed rate limiting (token buckets shared across gateway
+  # replicas through Redis or Redis Sentinel). store defaults to
+  # "memory"; url and sentinel are mutually exclusive.
+  # rateLimit:
+  #   enabled: true
+  #   requestsPerSecond: 100
+  #   burst: 200
+  #   perClient: true
+  #   store: redis                      # memory (default) | redis
+  #   redis:
+  #     sentinel:
+  #       masterName: "mymaster"
+  #       sentinelAddrs:
+  #         - "redis-sentinel-0.redis.svc:26379"
+  #         - "redis-sentinel-1.redis.svc:26379"
+  #       passwordVaultPath: "secret/redis-master"
+  #     readTimeout: "100ms"            # Bounds each rate limit decision
+  #     keyPrefix: "rl:"
+  #     failOpen: true                  # true (default): allow on Redis outage;
+  #                                     # false: reject with 429
+  #     retry:
+  #       maxRetries: 3
+  #       initialBackoff: "100ms"
+  
+  # NOTE: route-level rate limiting on HTTP and GraphQL routes is enforced
+  # by the shared per-route middleware chain (earlier releases validated but
+  # ignored it on HTTP routes — review limits before upgrading). The redis
+  # store is applied for APIRoutes and GraphQLRoutes; GRPCRoute keeps the
+  # in-memory limiter. The admission webhook emits a forward-compatibility
+  # warning for store: redis on every kind except APIRoute. burst must
+  # be >= 1.
   
   # Max sessions
   maxSessions:
@@ -497,6 +582,14 @@ spec:
     keepAlive: "30s"                    # Keep-alive duration
 ```
 
+> **Backend `spec.cache` is RESERVED.** The gateway data path does not
+> implement backend-level response caching yet; the field is accepted with an
+> admission warning (not a rejection) so existing manifests keep working, but
+> it has no effect. Use route-level caching
+> (APIRoute/GRPCRoute/GraphQLRoute `spec.cache`) instead, including the Redis
+> and Redis Sentinel backends. Backend-level `rateLimit.store: redis` is
+> likewise accepted with a warning and not applied yet.
+
 ## GRPCRoute CRD
 
 The `GRPCRoute` CRD defines gRPC routing rules and service-specific policies.
@@ -673,6 +766,26 @@ spec:
     healthyThreshold: 2
     unhealthyThreshold: 3
 ```
+
+HTTP-mode health checks (`useHTTP: true`) probe an HTTP endpoint instead of
+`grpc.health.v1.Health/Check` — useful for backends that require
+authentication on gRPC but expose an unauthenticated HTTP monitoring port:
+
+```yaml
+spec:
+  healthCheck:
+    enabled: true
+    useHTTP: true
+    httpPath: "/monitoring/health"      # Must start with "/"
+    httpPort: 8080                      # Optional; defaults to the backend port
+    interval: "10s"
+    timeout: "5s"
+```
+
+> **Note:** the CRD schema defaults `httpPath` to `/healthz`. This default is
+> applied by the API server even when `useHTTP` is false, and the validating
+> webhook tolerates it in that case (it is inert). An **explicit** non-default
+> `httpPath` — or any `httpPort` — with `useHTTP: false` is rejected.
 
 #### gRPC Connection Settings
 
@@ -910,11 +1023,15 @@ spec:
     staleWhileRevalidate: "60s"         # Serve stale while revalidating
     type: "redis"
     redis:
-      address: "redis.cache.svc.cluster.local:6379"
+      url: "redis://redis.cache.svc.cluster.local:6379/0"
       keyPrefix: "graphql:cache:"
       ttlJitter: 0.1
       hashKeys: true
 ```
+
+> Note: on GraphQLRoute, `cache.type: redis` and `rateLimit.store: redis`
+> are accepted for forward compatibility and produce an admission warning —
+> the redis-backed data path currently applies to HTTP APIRoutes.
 
 #### TLS Configuration
 
@@ -1087,6 +1204,11 @@ spec:
 
 #### Caching
 
+> **RESERVED:** backend-level caching (`GraphQLBackend spec.cache`, like
+> `Backend`/`GRPCBackend` `spec.cache`) is accepted with an admission
+> warning but is not wired to the gateway data path. Use route-level caching
+> (`GraphQLRoute spec.cache`) instead.
+
 ```yaml
 spec:
   cache:
@@ -1099,11 +1221,8 @@ spec:
       - "headers.Authorization"
     staleWhileRevalidate: "2m"
     type: "redis"
-    redis:
-      address: "redis.cache.svc.cluster.local:6379"
-      keyPrefix: "graphql:backend:cache:"
-      ttlJitter: 0.1
-      hashKeys: true
+    ttlJitter: 0.1
+    hashKeys: true
 ```
 
 #### Encoding
@@ -1212,8 +1331,36 @@ The operator performs comprehensive cross-reference validation to ensure configu
 
 1. **Backend References**: All route destinations must reference existing Backend or GRPCBackend resources
 2. **Namespace Validation**: Cross-namespace references are validated based on RBAC permissions
-3. **Duplicate Detection**: Prevents conflicting route configurations across different CRDs
+3. **Duplicate Detection**: Rejects only **true duplicates** — match conditions with identical specificity and overlapping values that the data-plane router cannot order deterministically:
+   - **APIRoute**: same match type and path with overlapping methods. Exact-vs-prefix combinations and nested prefixes (e.g. `/` and `/api`) are allowed; the router resolves them by precedence (exact = 1000 > prefix = 500 + prefix length > regex = 100), so a catch-all route coexists with specific routes
+   - **GRPCRoute**: conflicts only for identical-specificity pairs — identical `service`/`method` prefixes or identical exacts (a match-less catch-all still conflicts with any gRPC route). Nested prefixes (e.g. `com.example` and `com.example.user`) are admitted and resolved by the gRPC router's longest-prefix priority
+   - **GraphQLRoute**: conflicts only when two match blocks have identical specificity AND overlapping match values (specificity: path exact = 1000 / prefix = 500 + length / regex = 100; operationName exact = 500 / prefix = 250 + length / regex = 50; operationType set = +200; +10 per header condition; catch-all = 0). Equal-specificity regex pairs are admitted (intersection is undecidable) and ordered deterministically by name
+   - Overlap checks also apply across route kinds sharing the HTTP data path (APIRoute ↔ GraphQLRoute), and updating a resource never conflicts with its own previous version
 4. **Resource Dependencies**: Ensures dependent resources exist before applying configuration
+5. **Admission Lifecycle**: Objects with a `deletionTimestamp` are always admitted (finalizer removal is never blocked), metadata-only updates (spec unchanged) skip duplicate/cross-kind conflict checks while still running local spec validation, and terminating resources are excluded from conflict evaluation
+
+### Admission Warnings
+
+Some configurations are accepted with a warning instead of being rejected:
+
+- **`authentication.mtls` without `caFile`** — valid when the client CA is
+  managed elsewhere (for example a Vault-managed CA on the listener); the
+  warning flags that route-level client certificate validation relies on an
+  externally provided CA
+- **`rateLimit.store: redis` on every kind except APIRoute** — GRPCRoute
+  keeps the in-memory limiter and backend-level rate limits accept the field
+  for forward compatibility; GraphQL routes enforce the redis limiter through
+  the shared per-route chain but the conservative warning is still emitted
+- **`cache.type: redis` on GRPCRoute/GraphQLRoute** — redis route caching is
+  wired for the HTTP APIRoute data path (GraphQL routes attach the shared
+  cache middleware but only GET requests are cached)
+- **Backend `spec.cache`** — RESERVED, currently has no effect (see below)
+
+ABAC CEL expressions are compiled at admission time against the same
+environment the gateway evaluates at runtime — variables `subject`, `request`,
+`resource` (string), `action`, `environment`, `now`, and functions
+`ip_in_range(string, string)` / `has_role(string)`. Expressions referencing
+undeclared variables such as `identity.*` are rejected.
 
 ### Validation Examples
 
@@ -1509,14 +1656,15 @@ spec:
     allowHeaders: ["Content-Type", "Authorization"]
     allowCredentials: true
   
-  # Caching
+  # Caching (type: redis on GraphQLRoute is accepted with an admission
+  # warning; redis-backed route caching currently applies to HTTP APIRoutes)
   cache:
     enabled: true
     ttl: "300s"
     keyComponents: ["path", "query", "variables", "headers.Authorization"]
     type: "redis"
     redis:
-      address: "redis.cache.svc.cluster.local:6379"
+      url: "redis://redis.cache.svc.cluster.local:6379/0"
       keyPrefix: "graphql:cache:"
 ```
 

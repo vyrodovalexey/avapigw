@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -97,15 +98,34 @@ func (v *BackendValidator) ValidateCreate(
 }
 
 // ValidateUpdate implements admission.CustomValidator.
+//
+// Two lifecycle short-circuits prevent the webhook/finalizer deadlock:
+// deleting objects are admitted unconditionally, and metadata-only updates
+// (semantically unchanged spec) run local spec validation only, skipping
+// duplicate and cross-kind conflict checks.
 func (v *BackendValidator) ValidateUpdate(
 	ctx context.Context,
-	_, newObj *avapigwv1alpha1.Backend,
+	oldObj, newObj *avapigwv1alpha1.Backend,
 ) (admission.Warnings, error) {
+	// The object is being deleted; admit so metadata updates (for example
+	// finalizer removal) always proceed.
+	if newObj.GetDeletionTimestamp() != nil {
+		return nil, nil
+	}
+
 	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
 		GetWebhookMetrics().RecordValidation("Backend", "update", "rejected", time.Since(start), len(warnings))
 		return warnings, err
+	}
+
+	// Metadata-only update: the spec is unchanged, so this update cannot
+	// introduce new duplicate or cross-kind conflicts. Local spec
+	// validation (above) still applies.
+	if apiequality.Semantic.DeepEqual(oldObj.Spec, newObj.Spec) {
+		GetWebhookMetrics().RecordValidation("Backend", "update", "allowed", time.Since(start), len(warnings))
+		return warnings, nil
 	}
 
 	if v.DuplicateChecker != nil {
@@ -251,6 +271,14 @@ func (v *BackendValidator) validate(backend *avapigwv1alpha1.Backend) (admission
 	if spec.Cache != nil && spec.Cache.Sentinel != nil {
 		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Cache.Sentinel)...)
 	}
+
+	// Backend-level caching is reserved: warn so users reach for
+	// route-level caching instead of a silently ignored setting.
+	warnings = append(warnings, warnBackendCacheReserved(spec.Cache)...)
+
+	// Distributed rate limiting is not enforced in the backend data path.
+	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
+	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, "Backend")...)
 
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))

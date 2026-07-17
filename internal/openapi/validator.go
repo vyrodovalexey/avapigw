@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -85,6 +86,15 @@ func WithSpecURL(specURL string) Option {
 	}
 }
 
+// WithSpecData sets the inline OpenAPI spec content.
+// This is used when the spec is delivered as raw bytes (for example, resolved
+// from a Kubernetes ConfigMap by the operator) instead of a file path or URL.
+func WithSpecData(data []byte) Option {
+	return func(v *Validator) {
+		v.specData = data
+	}
+}
+
 // WithFailOnError sets whether to reject requests that fail validation.
 func WithFailOnError(failOnError bool) Option {
 	return func(v *Validator) {
@@ -139,6 +149,7 @@ type Validator struct {
 	loader           Loader
 	specFile         string
 	specURL          string
+	specData         []byte
 	failOnError      bool
 	validateBody     bool
 	validateParams   bool
@@ -148,6 +159,10 @@ type Validator struct {
 	metrics          *Metrics
 	doc              *openapi3.T
 	router           routers.Router
+
+	// loadTimeout bounds each spec load (fetch + parse + validate).
+	// It defaults to defaultSpecFetchTimeout; tests may shorten it.
+	loadTimeout time.Duration
 }
 
 // NewValidator creates a new Validator with the given options.
@@ -157,6 +172,7 @@ func NewValidator(opts ...Option) (*Validator, error) {
 		failOnError:    true,
 		validateBody:   true,
 		validateParams: true,
+		loadTimeout:    defaultSpecFetchTimeout,
 		// Headers and security validation are off by default.
 	}
 
@@ -172,7 +188,7 @@ func NewValidator(opts ...Option) (*Validator, error) {
 		v.loader = NewSpecLoader()
 	}
 
-	if err := v.loadSpec(); err != nil {
+	if err := v.loadSpecBounded(); err != nil {
 		return nil, err
 	}
 
@@ -213,21 +229,44 @@ func NewValidatorFromConfig(
 		opts = append(opts, WithSpecURL(cfg.SpecURL))
 	}
 
+	if cfg.SpecInline != "" {
+		opts = append(opts, WithSpecData([]byte(cfg.SpecInline)))
+	}
+
 	return NewValidator(opts...)
 }
 
-// loadSpec loads the OpenAPI specification from the configured source.
-func (v *Validator) loadSpec() error {
-	ctx := context.Background()
+// loadSpecBounded loads the spec under a timeout-bounded context.
+//
+// Construction and reload are driven by gateway route building and hot-reload
+// paths that do not carry a request-scoped context, so a bounded background
+// context is the boundary here: it guarantees that a hung spec source fails
+// fast instead of stalling startup or reload indefinitely.
+func (v *Validator) loadSpecBounded() error {
+	timeout := v.loadTimeout
+	if timeout <= 0 {
+		timeout = defaultSpecFetchTimeout
+	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	return v.loadSpec(ctx)
+}
+
+// loadSpec loads the OpenAPI specification from the configured source.
+// The context bounds the entire load, including any remote spec fetch.
+func (v *Validator) loadSpec(ctx context.Context) error {
 	var err error
 	switch {
+	case len(v.specData) > 0:
+		v.doc, err = v.loader.LoadFromData(ctx, v.specData)
 	case v.specFile != "":
 		v.doc, err = v.loader.LoadFromFile(ctx, v.specFile)
 	case v.specURL != "":
 		v.doc, err = v.loader.LoadFromURL(ctx, v.specURL)
 	default:
-		return errors.New("either specFile or specURL must be configured")
+		return errors.New("either specFile, specURL or inline spec data must be configured")
 	}
 
 	if err != nil {
@@ -245,12 +284,15 @@ func (v *Validator) loadSpec() error {
 // Reload invalidates the cached spec and reloads it.
 // This supports hot-reload when spec files change.
 func (v *Validator) Reload() error {
-	key := v.specFile
-	if key == "" {
-		key = v.specURL
+	switch {
+	case len(v.specData) > 0:
+		v.loader.Invalidate(dataCacheKey(v.specData))
+	case v.specFile != "":
+		v.loader.Invalidate(v.specFile)
+	default:
+		v.loader.Invalidate(v.specURL)
 	}
-	v.loader.Invalidate(key)
-	return v.loadSpec()
+	return v.loadSpecBounded()
 }
 
 // ValidateRequest validates an HTTP request against the OpenAPI specification.

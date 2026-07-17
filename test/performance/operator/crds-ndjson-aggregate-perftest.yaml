@@ -13,19 +13,33 @@
 # (timeField=_time), first-wins de-dupe (keyField=id) and limit are all
 # meaningfully exercised under load.
 #
-# Apply with:
-#   kubectl apply -f test/performance/operator/crds-ndjson-aggregate-perftest.yaml -n avapigw-test
+# NAMESPACE: DO-04 perf fixtures live in the dedicated `avapigw-perf`
+# namespace so they never collide with the avapigw-test suites under the
+# namespace-scoped admission duplicate checker. The Namespace manifest below
+# keeps this file independently applicable (idempotent with the identical
+# manifest in crds-do04-aggregate.yaml).
+#
+# Apply with (namespace is embedded in every manifest):
+#   kubectl apply -f test/performance/operator/crds-ndjson-aggregate-perftest.yaml
 #
 # Drive with (PT-04 HTTP group adds an ndjson scenario):
 #   GET https://<gw>/api/v1/ndjson
 # =============================================================================
 
 ---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: avapigw-perf
+  labels:
+    app: avapigw-do04
+
+---
 apiVersion: avapigw.io/v1alpha1
 kind: Backend
 metadata:
   name: do04-ndjson-backend-1
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: http-backend
@@ -48,7 +62,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: Backend
 metadata:
   name: do04-ndjson-backend-2
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: http-backend
@@ -79,7 +93,7 @@ apiVersion: avapigw.io/v1alpha1
 kind: APIRoute
 metadata:
   name: do04-ndjson-aggregate-route
-  namespace: avapigw-test
+  namespace: avapigw-perf
   labels:
     app: avapigw-do04
     component: http-route

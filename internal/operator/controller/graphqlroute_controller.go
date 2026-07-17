@@ -36,6 +36,7 @@ type GraphQLRouteReconciler struct {
 // +kubebuilder:rbac:groups=avapigw.io,resources=graphqlroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=avapigw.io,resources=graphqlroutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // Reconcile handles reconciliation of GraphQLRoute resources.
 func (r *GraphQLRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -94,6 +95,16 @@ func (r *GraphQLRouteReconciler) callbacks() *ReconcileCallbacks {
 func (r *GraphQLRouteReconciler) reconcileGraphQLRoute(
 	ctx context.Context, graphqlRoute *avapigwv1alpha1.GraphQLRoute,
 ) error {
+	// Resolve any ConfigMap-referenced GraphQL schemas into inline content so
+	// the gateway receives a self-contained, validatable configuration.
+	if err := resolveSchemaValidation(
+		ctx, r.Client, graphqlRoute.Namespace, graphqlRoute.Spec.SchemaValidation,
+	); err != nil {
+		r.Recorder.Eventf(graphqlRoute, "Warning", EventReasonReconcileFailed,
+			"Failed to resolve GraphQL schema validation: %v", err)
+		return fmt.Errorf("failed to resolve GraphQL schema validation: %w", err)
+	}
+
 	configJSON, err := json.Marshal(graphqlRoute.Spec)
 	if err != nil {
 		r.Recorder.Eventf(graphqlRoute, "Warning", EventReasonReconcileFailed,

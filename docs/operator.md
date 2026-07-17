@@ -88,12 +88,16 @@ graph TB
 - **Event Recording** - Annotation update failures now record Warning events for better observability
 - **Deterministic Cleanup** - Cleanup operations iterate through resources in sorted order for consistency
 
+**Deterministic Retry Cadence:**
+- **RequeueAfter on Transient Failures** - Reconcilers return `(Result{RequeueAfter}, nil)` for transient failures (reconcile, status update, cleanup) instead of returning the error, giving a deterministic retry cadence rather than controller-runtime's exponential backoff
+
 #### 2. Enhanced Admission Webhooks
 - **Validating Webhooks** - Validate CRD specifications before creation/update
-- **Cross-Route Intersection Prevention** - Prevent path conflicts between APIRoute and GraphQLRoute CRDs
+- **Cross-Route Intersection Prevention** - Prevent path conflicts between APIRoute and GraphQLRoute CRDs (only true duplicates — identical match type and path with overlapping methods — are rejected; exact-vs-prefix and nested prefixes coexist by router precedence)
 - **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations
 - **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
 - **Cross-Reference Validation** - Ensure referenced backends exist
+- **ABAC CEL Compilation** - CEL expressions are validated against the runtime evaluation environment at admission time
 
 **Shared DuplicateChecker Pattern (TASK-007):**
 - **Single Instance** - One shared DuplicateChecker across all webhooks for consistency
@@ -327,9 +331,16 @@ The operator provides comprehensive admission webhook validation:
 
 #### Cross-CRD Validation
 - **Cross-Route Intersection Prevention** - Prevents path conflicts between APIRoute and GraphQLRoute CRDs
-- **Duplicate Detection** - Prevents conflicting route configurations across different CRDs
+- **Duplicate Detection** - Rejects only true duplicates (identical specificity with overlapping match values); overlaps of different specificity are resolved deterministically by the gateway routers
 - **Reference Validation** - Ensures referenced backends exist and are accessible
 - **Namespace Validation** - Validates cross-namespace references based on RBAC
+
+#### Admission Lifecycle Safeguards
+- **Deletion always admitted** - Updates on objects with a `deletionTimestamp` bypass validation, so finalizer removal can never wedge a resource in `Terminating`
+- **Metadata-only updates** - Updates that leave the spec semantically unchanged run local spec validation only and skip duplicate/cross-kind conflict checks
+- **Terminating candidates excluded** - Resources being deleted are excluded from duplicate and cross-kind conflict evaluation
+
+See [Webhook Validation](operator/webhook-validation.md) for the full rules.
 
 #### Ingress Validation (when ingress controller enabled)
 - **Annotation Validation** - Validates AVAPIGW-specific annotations
@@ -434,6 +445,8 @@ service ConfigurationService {
    - Operator pushes configuration updates in real-time
    - Updates include resource additions, modifications, deletions
    - Full sync capability for recovery scenarios
+   - Configuration pushes cannot be lost while a previous send is in flight:
+     pending updates wake the stream again after the current send completes
 
 3. **Heartbeat Maintenance**
    - Gateway sends periodic heartbeats (default: 30s)
@@ -444,6 +457,61 @@ service ConfigurationService {
    - Gateway acknowledges successful configuration application
    - Reports any errors or application duration
    - Enables operator to track configuration state
+
+### Snapshot Reliability
+
+Several safeguards prevent configuration loss around operator restarts and
+multi-replica deployments:
+
+- **Leadership-gated store seeding (operator side)** — controllers only run
+  on the elected leader, so on multi-replica deployments only the **leader**
+  seeds the configuration store and serves initial snapshots. Non-leader
+  replicas park initial-snapshot streams and let gated unary RPCs run into
+  their own deadlines (reported with reason `awaiting_leadership`), causing
+  clients to retry until they reach the leader — a non-leader never serves an
+  empty snapshot from its permanently empty store. The bounded seed-timeout
+  clock starts **at election**, not at RPC arrival. On leadership loss the
+  manager terminates and the process restarts (controller-runtime never
+  "un-elects"), so the elected → seeded transition happens at most once per
+  process. With leader election disabled, the signal fires at manager start
+  and single-replica behavior is unchanged.
+- **Store seeding gate (operator side)** — after election, initial snapshot
+  RPCs wait (bounded) until the configuration store has been seeded from the
+  cluster, so a reconnecting gateway never receives an incomplete snapshot
+  from a cold store. The operator logs
+  `configuration store ready for initial snapshot` when the gate opens.
+- **FULL_SYNC is authoritative per resource type (gateway side)** — when a
+  snapshot is applied, an **empty resource type clears** the corresponding
+  router or registry: deleting the last APIRoute (or GRPCRoute, Backend, ...)
+  now propagates to running gateways instead of leaving stale routes serving
+  traffic. Two guards still protect restart scenarios and take precedence
+  over clearing:
+  - **All-empty snapshot guard** — a snapshot with **no resources at all** is
+    ignored while the gateway runs a non-empty configuration (warning
+    logged). An all-empty FULL_SYNC is almost always a cold operator store,
+    not an intentional full teardown; the deletion of the very last CR
+    across *all* types therefore still requires a subsequent non-empty
+    snapshot or a gateway restart to propagate.
+  - **Post-reconnect regression window** — for 30 seconds after an operator
+    (re)connect, snapshots whose **total resource count regresses** versus
+    the running configuration are deferred (the store may still be mid-seed).
+    Growing snapshots apply immediately; a genuine shrink is honored once the
+    window has passed.
+
+  The interplay: a per-type clear inside an otherwise non-empty snapshot
+  applies immediately outside the reconnect window; right after a reconnect,
+  a shrinking snapshot is deferred until the window closes; an all-empty
+  snapshot is never applied to a running non-empty gateway.
+- **Reconnect connection hygiene (gateway side)** — the gateway's operator
+  client closes the previous gRPC connection when establishing a new one, so
+  repeated reconnect attempts no longer leak connections, transport
+  goroutines, or sockets.
+- **Deterministic snapshots** — snapshot resources are listed in sorted
+  resource-key (namespace/name) order, so identical store contents always
+  produce byte-identical snapshots and checksums, regardless of map
+  iteration order. Gateways apply routes in deterministic precedence order
+  (priority with a route-name tie-break; GraphQL routes by specificity), so
+  operator-driven reloads cannot reorder equal-priority routes.
 
 ### OpenTelemetry Tracing
 
@@ -1046,8 +1114,9 @@ Look for these log patterns:
 ## Related Documentation
 
 - **[CRD Reference](crd-reference.md)** - Complete CRD specification and examples
-- **[Installation Guide](installation.md)** - Detailed installation instructions
-- **[Configuration Guide](configuration.md)** - Operator configuration options
-- **[Vault PKI Integration](vault-pki.md)** - Certificate management setup
+- **[Installation Guide](operator/installation.md)** - Detailed installation instructions
+- **[Configuration Guide](operator/configuration.md)** - Operator configuration options
+- **[Vault PKI Integration](operator/vault-pki.md)** - Certificate management setup
 - **[Webhook Configuration](webhook-configuration.md)** - Webhook and certificate configuration
-- **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
+- **[Webhook Validation](operator/webhook-validation.md)** - Admission validation rules and lifecycle
+- **[Troubleshooting](operator/troubleshooting.md)** - Common issues and solutions

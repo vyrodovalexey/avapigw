@@ -94,6 +94,10 @@ func runOperatorMode(flags cliFlags, logger observability.Logger) {
 		operator.WithMetricsRegistry(app.metrics.Registry()),
 		operator.WithConfigUpdateHandler(opApp.configHandler.HandleUpdate),
 		operator.WithSnapshotHandler(opApp.configHandler.HandleSnapshot),
+		// Arm the post-reconnect snapshot regression window so partial
+		// snapshots from a restarting operator cannot shrink the running
+		// route set (see ConfigHandler.MarkReconnected).
+		operator.WithReconnectListener(opApp.configHandler.MarkReconnected),
 	)
 	if err != nil {
 		fatalWithSync(logger, "failed to create operator client", observability.Error(err))
@@ -117,11 +121,22 @@ func createMinimalConfig(flags cliFlags) *config.GatewayConfig {
 	return cfg
 }
 
-// loadOperatorInitialConfig loads the initial gateway configuration for operator mode.
+// loadOperatorInitialConfig loads the initial gateway configuration for
+// operator mode and applies the Vault environment overlay so operator mode
+// also boots from the EFFECTIVE vault configuration (ENV > file > defaults,
+// per-field). Operator CRD pushes never carry spec.vault; the boot config
+// file (Helm ConfigMap) is the only file source in operator mode.
+func loadOperatorInitialConfig(flags cliFlags, logger observability.Logger) *config.GatewayConfig {
+	cfg := loadOperatorBaseConfig(flags, logger)
+	cfg.Spec.Vault = applyVaultEnv(cfg.Spec.Vault, logger)
+	return cfg
+}
+
+// loadOperatorBaseConfig loads the base gateway configuration for operator mode.
 // It tries to load from the config file first (which contains correct listener/TLS settings
 // from the Helm configmap), falling back to a minimal default config.
 // Routes and backends are cleared since they will come from the operator.
-func loadOperatorInitialConfig(flags cliFlags, logger observability.Logger) *config.GatewayConfig {
+func loadOperatorBaseConfig(flags cliFlags, logger observability.Logger) *config.GatewayConfig {
 	cfg, err := config.LoadConfig(flags.configPath)
 	if err != nil {
 		logger.Warn("failed to load config file for operator mode, using minimal config",
@@ -216,11 +231,15 @@ const (
 
 	// operatorStartMaxBackoff caps the per-attempt backoff.
 	operatorStartMaxBackoff = 30 * time.Second
-
-	// operatorStartOverallDeadline bounds the total time spent retrying the
-	// initial operator connection before failing fatally.
-	operatorStartOverallDeadline = 3 * time.Minute
 )
+
+// operatorStartOverallDeadline bounds the total time spent retrying the
+// initial operator connection before failing fatally. It is a var (not a
+// const) purely to provide a test seam: tests that drive runOperatorMode
+// against an unreachable operator can shrink it so exhaustion is reached
+// quickly instead of blocking for the full production window. Production
+// behavior is unchanged (default 3 minutes).
+var operatorStartOverallDeadline = 3 * time.Minute
 
 // startOperatorClientWithRetry attempts to start the operator client, retrying
 // the initial connect/register with exponential backoff (bounded and
@@ -407,6 +426,19 @@ func (a *gatewayConfigApplier) ApplyGraphQLBackends(_ context.Context, backends 
 // mergeOperatorConfig merges operator-provided resources into the existing
 // gateway config to preserve required fields (APIVersion, Kind, Metadata,
 // Listeners) that were initialized from the config file or createMinimalConfig().
+//
+// INVARIANT: every config.GatewaySpec field MUST be explicitly carried through
+// the merge. Operator FULL_SYNC pushes carry only CRD-owned resources, and the
+// merged result REPLACES a.app.config after every sync — any GatewaySpec field
+// omitted from the literal below is silently dropped from the stored config
+// and the loss compounds on each subsequent sync. Boot-config-owned sections
+// (built from the config file or createMinimalConfig) are taken from
+// `existing`; operator/CRD-owned resources are taken from the incoming `cfg`.
+//
+// When adding a field to config.GatewaySpec, add it to the literal below AND
+// register its merge source in mergedGatewaySpecFieldSources
+// (operator_merge_guard_test.go); the reflection-guard test fails, naming the
+// field, until both places are updated.
 func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *config.GatewayConfig {
 	existing := a.app.config
 	if existing == nil {
@@ -418,24 +450,28 @@ func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *c
 		Kind:       existing.Kind,
 		Metadata:   existing.Metadata,
 		Spec: config.GatewaySpec{
-			Listeners:       existing.Spec.Listeners,
-			Routes:          cfg.Spec.Routes,
-			Backends:        cfg.Spec.Backends,
-			GRPCRoutes:      cfg.Spec.GRPCRoutes,
-			GRPCBackends:    cfg.Spec.GRPCBackends,
-			GraphQLRoutes:   cfg.Spec.GraphQLRoutes,
-			GraphQLBackends: cfg.Spec.GraphQLBackends,
-			RateLimit:       cfg.Spec.RateLimit,
-			CircuitBreaker:  existing.Spec.CircuitBreaker,
-			CORS:            existing.Spec.CORS,
-			Observability:   existing.Spec.Observability,
-			Authentication:  existing.Spec.Authentication,
-			Authorization:   existing.Spec.Authorization,
-			Security:        existing.Spec.Security,
-			Audit:           mergeAuditConfig(existing.Spec.Audit, cfg.Spec.Audit),
-			RequestLimits:   existing.Spec.RequestLimits,
-			MaxSessions:     cfg.Spec.MaxSessions,
-			TrustedProxies:  existing.Spec.TrustedProxies,
+			Listeners:         existing.Spec.Listeners,
+			Routes:            cfg.Spec.Routes,
+			Backends:          cfg.Spec.Backends,
+			GRPCRoutes:        cfg.Spec.GRPCRoutes,
+			GRPCBackends:      cfg.Spec.GRPCBackends,
+			GraphQLRoutes:     cfg.Spec.GraphQLRoutes,
+			GraphQLBackends:   cfg.Spec.GraphQLBackends,
+			RateLimit:         cfg.Spec.RateLimit,
+			CircuitBreaker:    existing.Spec.CircuitBreaker,
+			CORS:              existing.Spec.CORS,
+			Observability:     existing.Spec.Observability,
+			Authentication:    existing.Spec.Authentication,
+			Authorization:     existing.Spec.Authorization,
+			Security:          existing.Spec.Security,
+			Audit:             mergeAuditConfig(existing.Spec.Audit, cfg.Spec.Audit),
+			RequestLimits:     existing.Spec.RequestLimits,
+			MaxSessions:       cfg.Spec.MaxSessions,
+			TrustedProxies:    existing.Spec.TrustedProxies,
+			GraphQL:           existing.Spec.GraphQL,
+			OpenAPIValidation: existing.Spec.OpenAPIValidation,
+			WebSocket:         existing.Spec.WebSocket,
+			Vault:             existing.Spec.Vault,
 		},
 	}
 }
@@ -452,17 +488,24 @@ func mergeAuditConfig(existing, incoming *config.AuditConfig) *config.AuditConfi
 
 // applyMergedComponents applies routes, backends, gRPC routes, and middleware
 // updates from the merged configuration.
+//
+// FULL_SYNC snapshots are authoritative: empty resource sets are applied so
+// routers and registries CLEAR when the last resource of a type is deleted.
+// Emptiness policy (the all-types-empty snapshot guard and the post-reconnect
+// regression window) is owned upstream by operator.ConfigHandler, never by
+// this applier. Nil-component guards stay: partially initialized applications
+// skip the corresponding subsystem entirely.
 func (a *gatewayConfigApplier) applyMergedComponents(
 	ctx context.Context, merged *config.GatewayConfig,
 ) error {
-	if a.app.router != nil && len(merged.Spec.Routes) > 0 {
+	if a.app.router != nil {
 		if err := a.app.router.LoadRoutes(merged.Spec.Routes); err != nil {
 			a.logger.Error("failed to apply routes", observability.Error(err))
 			return err
 		}
 	}
 
-	if a.app.backendRegistry != nil && len(merged.Spec.Backends) > 0 {
+	if a.app.backendRegistry != nil {
 		if err := a.app.backendRegistry.ReloadFromConfig(ctx, merged.Spec.Backends); err != nil {
 			a.logger.Error("failed to apply backends", observability.Error(err))
 			return err
@@ -493,25 +536,34 @@ func (a *gatewayConfigApplier) applyMergedComponents(
 	return nil
 }
 
-// applyMergedGRPCComponents applies gRPC routes and backends from the merged configuration.
+// applyMergedGRPCComponents applies gRPC routes and backends from the merged
+// configuration. Empty sets are applied so listeners and the gRPC backend
+// registry clear when the last resource of the type is deleted (FULL_SYNC is
+// authoritative; see applyMergedComponents for the emptiness-policy split).
 func (a *gatewayConfigApplier) applyMergedGRPCComponents(
 	ctx context.Context, merged *config.GatewayConfig,
 ) error {
-	// Hot-reload gRPC routes via the router's thread-safe LoadRoutes method.
-	if len(merged.Spec.GRPCRoutes) > 0 {
-		for _, listener := range a.app.gateway.GetGRPCListeners() {
-			if err := listener.LoadRoutes(merged.Spec.GRPCRoutes); err != nil {
-				a.logger.Error("failed to reload gRPC routes",
-					observability.String("listener", listener.Name()),
-					observability.Error(err),
-				)
-				return err
-			}
+	if a.app.gateway == nil {
+		return nil
+	}
+
+	// Hot-reload gRPC routes via each listener's thread-safe LoadRoutes method.
+	for _, listener := range a.app.gateway.GetGRPCListeners() {
+		if err := listener.LoadRoutes(merged.Spec.GRPCRoutes); err != nil {
+			a.logger.Error("failed to reload gRPC routes",
+				observability.String("listener", listener.Name()),
+				observability.Error(err),
+			)
+			return err
 		}
 	}
 
-	// Hot-reload gRPC backends via the backend registry's copy-on-write pattern.
-	if len(merged.Spec.GRPCBackends) > 0 && a.app.gateway != nil {
+	// Hot-reload gRPC backends via the backend registry's copy-on-write
+	// pattern. Guarded on the gateway-level gRPC backend registry (a
+	// nil-component guard, not an emptiness gate): listeners inherit the
+	// registry at creation time, and a gateway without one carries no gRPC
+	// backend state to clear — its listeners would reject the reload.
+	if a.app.gateway.GetGRPCBackendRegistry() != nil {
 		converted := config.GRPCBackendsToBackends(merged.Spec.GRPCBackends)
 		if err := a.app.gateway.ReloadGRPCBackends(ctx, converted); err != nil {
 			a.logger.Error("failed to reload gRPC backends",
@@ -524,11 +576,14 @@ func (a *gatewayConfigApplier) applyMergedGRPCComponents(
 	return nil
 }
 
-// applyMergedGraphQLComponents applies GraphQL routes and backends from the merged configuration.
+// applyMergedGraphQLComponents applies GraphQL routes and backends from the
+// merged configuration. Empty sets are applied so the GraphQL router and
+// proxy clear when the last resource of the type is deleted (FULL_SYNC is
+// authoritative; see applyMergedComponents for the emptiness-policy split).
 func (a *gatewayConfigApplier) applyMergedGraphQLComponents(
 	_ context.Context, merged *config.GatewayConfig,
 ) error {
-	if len(merged.Spec.GraphQLRoutes) > 0 && a.app.graphqlRouter != nil {
+	if a.app.graphqlRouter != nil {
 		if err := a.app.graphqlRouter.LoadRoutes(merged.Spec.GraphQLRoutes); err != nil {
 			a.logger.Error("failed to reload GraphQL routes",
 				observability.Error(err),
@@ -537,7 +592,7 @@ func (a *gatewayConfigApplier) applyMergedGraphQLComponents(
 		}
 	}
 
-	if len(merged.Spec.GraphQLBackends) > 0 && a.app.graphqlProxy != nil {
+	if a.app.graphqlProxy != nil {
 		a.app.graphqlProxy.UpdateBackends(merged.Spec.GraphQLBackends)
 	}
 

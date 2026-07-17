@@ -9,9 +9,14 @@
 //   - Cache key generation based on request attributes
 //   - Stale-while-revalidate support
 //   - Negative caching for error responses
-//   - Centralized retry logic with exponential backoff
-//   - OpenTelemetry tracing for cache operations
-//   - Comprehensive Prometheus metrics
+//   - Centralized retry logic with exponential backoff; only transient
+//     errors are retried (network timeouts, refused/reset connections,
+//     Redis LOADING/READONLY failover states) while permanent server
+//     replies (WRONGTYPE, OOM, NOAUTH, MOVED, ...) fail fast
+//   - OpenTelemetry tracing for cache operations; when key hashing is
+//     enabled, span attributes and logs record the hashed key only
+//   - Comprehensive Prometheus metrics (duration, errors, hits/misses)
+//     for all Redis operations including GetWithTTL, SetNX and Expire
 //
 // # Example Usage
 //

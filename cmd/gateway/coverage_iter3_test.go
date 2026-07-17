@@ -241,7 +241,7 @@ func TestInitVaultClient_WithTLSConfig(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&exitCode))
 	assert.Nil(t, client)
@@ -296,7 +296,7 @@ func TestInitVaultClient_WithKubernetesAuth(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&exitCode))
 	assert.Nil(t, client)
@@ -351,7 +351,7 @@ func TestInitVaultClient_WithAppRoleAuth(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&exitCode))
 	assert.Nil(t, client)
@@ -409,7 +409,7 @@ func TestInitVaultClient_WithTLSAndKubernetesAuth(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&exitCode))
 	assert.Nil(t, client)
@@ -468,7 +468,7 @@ func TestInitVaultClient_WithTLSAndAppRoleAuth(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&exitCode))
 	assert.Nil(t, client)

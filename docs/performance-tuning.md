@@ -103,6 +103,15 @@ rate(gateway_requests_total[5m]) / on() group_left() kube_deployment_status_repl
 
 ## Connection Pool Tuning
 
+### Default Transport Pooling
+
+The gateway's default plaintext transports (HTTP reverse proxy and GraphQL
+proxy) are pooled out of the box: 512 total idle connections with 100 idle
+connections per backend host and a 90s idle timeout. Earlier releases kept
+only 10 idle connections per host, which forced per-request dials under load
+and churned ephemeral ports. Custom per-backend `connection` settings below
+override these defaults.
+
 ### HTTP Connection Pool Settings
 
 ```yaml

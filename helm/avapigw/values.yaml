@@ -755,8 +755,51 @@ gateway:
     # -- Enable security requirement validation
     # validateSecurity: false
 
+  # Gateway-wide Vault CLIENT CONNECTION (rendered verbatim as spec.vault in
+  # the generated gateway config). This configures how the gateway reaches and
+  # authenticates against the Vault server via the CONFIG FILE, and is the
+  # file-based alternative/extension to the env-only surface driven by the
+  # top-level vault.* values (VAULT_ADDR, VAULT_TOKEN, ...).
+  #
+  # Precedence: deployment-injected VAULT_* environment variables override
+  # these fields PER-FIELD (ENV > config file > defaults).
+  #
+  # When set (non-empty), this section REPLACES the legacy spec.vault block
+  # derived from the top-level vault.* values in the rendered ConfigMap.
+  # It does NOT affect VAULT_* env injection or Vault PKI listener TLS, which
+  # remain driven by the top-level vault.* values.
+  #
+  # Default {} renders nothing (backward compatible).
+  # NEVER put inline token/secretId here for production; prefer tokenFile/
+  # secretIdFile, Secret-injected env, or kubernetes auth.
+  vault: {}
+    # Example: kubernetes auth with client-side cache and startup retry bounds
+    # enabled: true
+    # address: https://vault.example.com:8200
+    # authMethod: kubernetes
+    # kubernetes:
+    #   role: avapigw
+    #   mountPath: kubernetes
+    # tls:
+    #   caCert: /etc/vault/ca.crt
+    # cache:
+    #   enabled: true
+    #   ttl: 5m
+    #   maxSize: 1000
+    # retry:
+    #   maxRetries: 3
+    #   backoffBase: 100ms
+    #   backoffMax: 5s
+    # auth:
+    #   maxRetries: 3
+    #   initialBackoff: 1s
+    #   maxBackoff: 10s
+    #   timeout: 30s
+
   # Custom gateway configuration
   # This will be merged with the generated configuration
+  # NOTE: do not put a "vault" key here; use gateway.vault above instead
+  # (a duplicate vault mapping key would be a fatal YAML parse error).
   customConfig: {}
 
 # Redis configuration (Bitnami subchart)
@@ -908,14 +951,25 @@ tls:
     # - name: tenant-b
     #   secretName: tenant-b-tls
 
-# Vault configuration
-# NOTE: The Go gateway reads Vault connection settings exclusively from
-# environment variables (VAULT_ADDR, VAULT_TOKEN, VAULT_AUTH_METHOD, etc.).
-# The values below control environment variable injection in the deployment
-# and the vault section in the generated config (for reference only).
+# Vault configuration (chart-level)
+# The values below control VAULT_* environment variable injection in the
+# deployment, Vault PKI listener TLS, and the legacy spec.vault block in the
+# generated config. Since spec.vault landed in the gateway, the config file
+# CAN also carry the Vault client connection: use gateway.vault to express it
+# explicitly (it replaces the legacy derived block in the ConfigMap).
+# Environment variables always override config-file values per-field
+# (ENV > config file > defaults), so existing env-driven deployments are
+# unaffected.
 vault:
   # -- Enable Vault integration
   enabled: false
+  # -- Inject VAULT_* environment variables into the gateway deployment.
+  # Set to false to source the Vault CLIENT connection (address/auth) solely
+  # from the spec.vault section rendered into the ConfigMap via gateway.vault
+  # (ENV > file > default per-field, so with no env the file is authoritative).
+  # PKI issuance (vault.pki) volume mounts, ports and tls.vault blocks are
+  # unaffected by this flag.
+  injectEnv: true
   # -- Vault server address
   address: ""
   # -- Vault authentication method (token, kubernetes, approle)

@@ -2,18 +2,39 @@
 package gateway
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/authz"
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	routepkg "github.com/vyrodovalexey/avapigw/internal/metrics/route"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/openapi"
 	"github.com/vyrodovalexey/avapigw/internal/security"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
+
+// routeRateLimitInitTimeout bounds per-route redis rate limiter
+// initialization (Vault password reads plus the retried connectivity
+// check). Route middleware chains are built lazily on first use, so this
+// bound caps the worst-case first-request latency for the route.
+const routeRateLimitInitTimeout = 10 * time.Second
+
+// Security middleware stage labels used in fail-closed logs and metrics.
+const (
+	stageAuthentication = "authentication"
+	stageAuthorization  = "authorization"
+)
+
+// securityUnavailableBody is the JSON error body returned by the
+// fail-closed fallback when a route's authentication or authorization
+// middleware could not be constructed.
+const securityUnavailableBody = `{"error":"security middleware unavailable"}`
 
 // RouteMiddlewareOption is a functional option for configuring RouteMiddlewareManager.
 type RouteMiddlewareOption func(*RouteMiddlewareManager)
@@ -58,6 +79,11 @@ type RouteMiddlewareManager struct {
 	authMetrics     *auth.Metrics
 	authzMetrics    *authz.Metrics
 	vaultClient     vault.Client
+
+	// routeRateLimiters tracks per-route rate limiter lifecycles so their
+	// resources (cleanup goroutines, redis connections) are released when
+	// middleware chains are rebuilt or the gateway shuts down.
+	routeRateLimiters map[string]middleware.RateLimiterHandle
 }
 
 // NewRouteMiddlewareManager creates a new route middleware manager.
@@ -71,9 +97,10 @@ func NewRouteMiddlewareManager(
 	}
 
 	m := &RouteMiddlewareManager{
-		globalConfig:    globalConfig,
-		logger:          logger,
-		middlewareCache: make(map[string][]func(http.Handler) http.Handler),
+		globalConfig:      globalConfig,
+		logger:            logger,
+		middlewareCache:   make(map[string][]func(http.Handler) http.Handler),
+		routeRateLimiters: make(map[string]middleware.RateLimiterHandle),
 	}
 
 	for _, opt := range opts {
@@ -142,8 +169,12 @@ func (m *RouteMiddlewareManager) getGlobalMiddleware() []func(http.Handler) http
 }
 
 // buildRouteAuthMiddleware creates an authentication middleware for the given route.
-// Returns nil if authentication is not configured, not enabled, or if an error occurs
-// during configuration conversion or authenticator creation.
+// Returns nil if authentication is not configured or not enabled.
+//
+// Configuration conversion or authenticator construction errors fail
+// CLOSED: a route configured WITH authentication must never serve traffic
+// unauthenticated, so a rejecting fallback middleware is installed instead
+// (see securityFailClosedFallback).
 func (m *RouteMiddlewareManager) buildRouteAuthMiddleware(route *config.Route) func(http.Handler) http.Handler {
 	if route.Authentication == nil || !route.Authentication.Enabled {
 		return nil
@@ -151,11 +182,7 @@ func (m *RouteMiddlewareManager) buildRouteAuthMiddleware(route *config.Route) f
 
 	authConfig, err := auth.ConvertFromGatewayConfig(route.Authentication)
 	if err != nil {
-		m.logger.Error("failed to convert route auth config",
-			observability.String("route", route.Name),
-			observability.Error(err),
-		)
-		return nil
+		return m.securityFailClosedFallback(route.Name, stageAuthentication, err)
 	}
 	if authConfig == nil {
 		return nil
@@ -171,17 +198,41 @@ func (m *RouteMiddlewareManager) buildRouteAuthMiddleware(route *config.Route) f
 
 	authenticator, err := auth.NewAuthenticator(authConfig, opts...)
 	if err != nil {
-		m.logger.Error("failed to create route authenticator",
-			observability.String("route", route.Name),
-			observability.Error(err),
-		)
-		return nil
+		return m.securityFailClosedFallback(route.Name, stageAuthentication, err)
 	}
 
 	m.logger.Debug("applied route-level authentication",
 		observability.String("route", route.Name),
 	)
 	return authenticator.HTTPMiddleware()
+}
+
+// securityFailClosedFallback returns a middleware that rejects every request
+// with 503 Service Unavailable. It is installed when a route's
+// authentication or authorization middleware cannot be constructed: a route
+// configured WITH a security control must never serve traffic without it,
+// mirroring the fail-closed fallback of strict rate limiters below. The
+// gateway keeps serving other routes; the affected route recovers on the
+// next configuration reload that yields a constructible middleware.
+func (m *RouteMiddlewareManager) securityFailClosedFallback(
+	routeName, stage string, err error,
+) func(http.Handler) http.Handler {
+	m.logger.Error("failed to build route security middleware, failing closed",
+		observability.String("route", routeName),
+		observability.String("stage", stage),
+		observability.Error(err),
+	)
+
+	return func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			routepkg.GetRouteMetrics().RecordAuthFailure(
+				routeName, r.Method, stage, "construction_failed",
+			)
+			w.Header().Set(middleware.HeaderContentType, middleware.ContentTypeJSON)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, securityUnavailableBody)
+		})
+	}
 }
 
 // getOrCreateAuthzMetrics returns the shared authz metrics instance,
@@ -197,8 +248,12 @@ func (m *RouteMiddlewareManager) getOrCreateAuthzMetrics() *authz.Metrics {
 }
 
 // buildRouteAuthzMiddleware creates an authorization middleware for the given route.
-// Returns nil if authorization is not configured, not enabled, or if an error occurs
-// during configuration conversion or authorizer creation.
+// Returns nil if authorization is not configured or not enabled.
+//
+// Configuration conversion or authorizer construction errors fail CLOSED:
+// a route configured WITH authorization must never serve traffic without
+// policy enforcement, so a rejecting fallback middleware is installed
+// instead (see securityFailClosedFallback).
 func (m *RouteMiddlewareManager) buildRouteAuthzMiddleware(route *config.Route) func(http.Handler) http.Handler {
 	if route.Authorization == nil || !route.Authorization.Enabled {
 		return nil
@@ -206,11 +261,7 @@ func (m *RouteMiddlewareManager) buildRouteAuthzMiddleware(route *config.Route) 
 
 	authzConfig, err := authz.ConvertFromGatewayConfig(route.Authorization)
 	if err != nil {
-		m.logger.Error("failed to convert route authz config",
-			observability.String("route", route.Name),
-			observability.Error(err),
-		)
-		return nil
+		return m.securityFailClosedFallback(route.Name, stageAuthorization, err)
 	}
 	if authzConfig == nil {
 		return nil
@@ -224,11 +275,7 @@ func (m *RouteMiddlewareManager) buildRouteAuthzMiddleware(route *config.Route) 
 
 	authorizer, err := authz.New(authzConfig, opts...)
 	if err != nil {
-		m.logger.Error("failed to create route authorizer",
-			observability.String("route", route.Name),
-			observability.Error(err),
-		)
-		return nil
+		return m.securityFailClosedFallback(route.Name, stageAuthorization, err)
 	}
 
 	httpAuthz := authz.NewHTTPAuthorizer(authorizer, authzConfig,
@@ -240,6 +287,73 @@ func (m *RouteMiddlewareManager) buildRouteAuthzMiddleware(route *config.Route) 
 		observability.String("route", route.Name),
 	)
 	return httpAuthz.HTTPMiddleware()
+}
+
+// buildRouteRateLimitMiddleware creates a rate limit middleware for the
+// given route, honoring the configured store (in-memory or redis-backed
+// distributed limiting). The limiter lifecycle handle is tracked so its
+// resources are released on chain rebuilds and shutdown.
+//
+// Construction failures follow the limiter's failure policy: fail-open
+// limiters degrade to no limiting (logged error), while fail-closed
+// limiters reject all route traffic until the configuration is fixed —
+// a strict limiter must never run unenforced.
+// Must be called with m.mu held (via buildMiddlewareChain).
+func (m *RouteMiddlewareManager) buildRouteRateLimitMiddleware(route *config.Route) func(http.Handler) http.Handler {
+	if route.RateLimit == nil || !route.RateLimit.Enabled {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), routeRateLimitInitTimeout)
+	defer cancel()
+
+	mw, handle, err := middleware.NewRateLimitMiddleware(
+		ctx, route.RateLimit, route.Name, m.logger,
+		middleware.RateLimitDeps{VaultClient: m.vaultClient},
+	)
+	if err != nil {
+		return m.rateLimitConstructionFallback(route, err)
+	}
+
+	if handle != nil {
+		m.routeRateLimiters[route.Name] = handle
+	}
+
+	m.logger.Debug("applied route-level rate limit",
+		observability.String("route", route.Name),
+		observability.String("store", route.RateLimit.GetEffectiveStore()),
+	)
+	return mw
+}
+
+// rateLimitConstructionFallback resolves a rate limiter construction error
+// according to the failure policy of the route's rate limit configuration.
+func (m *RouteMiddlewareManager) rateLimitConstructionFallback(
+	route *config.Route, err error,
+) func(http.Handler) http.Handler {
+	failOpen := route.RateLimit.Redis.GetEffectiveFailOpen()
+
+	m.logger.Error("failed to create route rate limiter",
+		observability.String("route", route.Name),
+		observability.Bool("failOpen", failOpen),
+		observability.Error(err),
+	)
+
+	if failOpen {
+		// Fail open: skip rate limiting for this route until a config
+		// reload provides a constructible limiter.
+		return nil
+	}
+
+	// Fail closed: reject route traffic rather than running unlimited.
+	return func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(middleware.HeaderContentType, middleware.ContentTypeJSON)
+			w.Header().Set(middleware.HeaderRetryAfter, "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, middleware.ErrRateLimitExceeded)
+		})
+	}
 }
 
 // buildRouteCacheMiddleware creates a cache middleware for the given route.
@@ -268,14 +382,20 @@ func (m *RouteMiddlewareManager) buildRouteCacheMiddleware(route *config.Route) 
 func (m *RouteMiddlewareManager) buildMiddlewareChain(route *config.Route) []func(http.Handler) http.Handler {
 	var middlewares []func(http.Handler) http.Handler
 
-	// 0. Authentication (must be first - closest to client)
-	if authMw := m.buildRouteAuthMiddleware(route); authMw != nil {
-		middlewares = append(middlewares, authMw)
+	// Identity and admission stage, in order:
+	//   0. Authentication (must be first - closest to client)
+	//   1. Authorization (after authentication - needs identity from context)
+	//   1.5. Rate limiting (after auth so unauthenticated requests get 401
+	//        before 429; before body/validation work to shed load early)
+	admissionBuilders := []func(*config.Route) func(http.Handler) http.Handler{
+		m.buildRouteAuthMiddleware,
+		m.buildRouteAuthzMiddleware,
+		m.buildRouteRateLimitMiddleware,
 	}
-
-	// 1. Authorization (must be after authentication - needs identity from context)
-	if authzMw := m.buildRouteAuthzMiddleware(route); authzMw != nil {
-		middlewares = append(middlewares, authzMw)
+	for _, builder := range admissionBuilders {
+		if mw := builder(route); mw != nil {
+			middlewares = append(middlewares, mw)
+		}
 	}
 
 	// 2. Security headers (applied early)
@@ -474,7 +594,7 @@ func (m *RouteMiddlewareManager) GetEffectiveOpenAPIValidation(route *config.Rou
 func (m *RouteMiddlewareManager) ClearCache() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.middlewareCache = make(map[string][]func(http.Handler) http.Handler)
+	m.clearLocked()
 }
 
 // UpdateGlobalConfig updates the global configuration and clears the cache.
@@ -482,7 +602,28 @@ func (m *RouteMiddlewareManager) UpdateGlobalConfig(globalConfig *config.Gateway
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.globalConfig = globalConfig
+	m.clearLocked()
+}
+
+// Stop releases resources held by route middleware (rate limiter cleanup
+// goroutines and redis connections). It should be called during shutdown.
+func (m *RouteMiddlewareManager) Stop() {
+	m.ClearCache()
+}
+
+// clearLocked resets the middleware cache and stops tracked rate limiters
+// so rebuilt chains do not leak goroutines or redis connections.
+// Must be called with m.mu held.
+func (m *RouteMiddlewareManager) clearLocked() {
 	m.middlewareCache = make(map[string][]func(http.Handler) http.Handler)
+
+	for name, limiter := range m.routeRateLimiters {
+		limiter.Stop()
+		m.logger.Debug("stopped route rate limiter",
+			observability.String("route", name),
+		)
+	}
+	m.routeRateLimiters = make(map[string]middleware.RateLimiterHandle)
 }
 
 // ApplyMiddleware applies the middleware chain to a handler for a specific route.

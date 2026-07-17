@@ -109,6 +109,10 @@ type VaultTLSConfig struct {
 	// ClientKey is the path to the client private key file.
 	ClientKey string `yaml:"clientKey,omitempty" json:"clientKey,omitempty"`
 
+	// ServerName overrides the TLS server name (SNI) used to verify the
+	// Vault server certificate. Empty uses the host from Address.
+	ServerName string `yaml:"serverName,omitempty" json:"serverName,omitempty"`
+
 	// SkipVerify skips TLS certificate verification (insecure).
 	SkipVerify bool `yaml:"skipVerify,omitempty" json:"skipVerify,omitempty"`
 }
@@ -425,6 +429,7 @@ func (c *Config) Clone() *Config {
 			CAPath:     c.TLS.CAPath,
 			ClientCert: c.TLS.ClientCert,
 			ClientKey:  c.TLS.ClientKey,
+			ServerName: c.TLS.ServerName,
 			SkipVerify: c.TLS.SkipVerify,
 		}
 	}

@@ -4,8 +4,8 @@
 set -u
 cd "$(dirname "$0")/../../.." || exit 1
 ROOT="$(pwd)"
-BASE="${HTTP_BASE:-https://127.0.0.1:30988}"
-WSBASE="${WS_BASE:-wss://127.0.0.1:30988}"
+BASE="${HTTP_BASE:-https://127.0.0.1:18443}"    # GAP-P2: default to PF port (svc HTTPS 8443)
+WSBASE="${WS_BASE:-wss://127.0.0.1:18443}"
 DUR="${PERF_DURATION:-180}"
 CONN="${PERF_CONN:-50}"
 QPS="${PERF_QPS:-10}"
@@ -49,8 +49,10 @@ TOK_LH="$(refresh_tok localhost)"
 maybe_bg gscn basic
 maybe_bg gscn apikey    -H "X-API-Key: $APIKEY"
 maybe_bg gscn oidc      -H "Authorization: Bearer $TOK_LH"
-maybe_bg gscn ratelimit
-maybe_bg gscn transform
+# X-Perf-Scenario headers let per-feature GraphQL routes match distinctly
+# (ratelimit/transform routes carry the feature config in the gateway config)
+maybe_bg gscn ratelimit -H 'X-Perf-Scenario: ratelimit'
+maybe_bg gscn transform -H 'X-Perf-Scenario: transform'
 maybe_bg gscn cors      -H 'Origin: http://example.com'
 maybe_bg wscn ws        "$WSBASE/ws"
 # group6 = tls graphql + mirroring: drive the GraphQL AGGREGATE fan-out route

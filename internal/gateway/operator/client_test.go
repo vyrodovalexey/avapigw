@@ -359,8 +359,7 @@ func TestClient_CalculateBackoff(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client.reconnectAttempts = tt.attempts
-			backoff := client.calculateBackoff()
+			backoff := client.calculateBackoff(tt.attempts)
 			assert.Equal(t, tt.expected, backoff)
 		})
 	}
@@ -1246,10 +1245,10 @@ func TestClient_ReconnectWithBackoff_StopChannel(t *testing.T) {
 	// Initialize stop channel
 	client.stopCh = make(chan struct{})
 
-	// Start reconnect in goroutine
+	// Start reconnect in goroutine, passing the generation-captured stop channel
 	resultCh := make(chan bool, 1)
 	go func() {
-		resultCh <- client.reconnectWithBackoff(context.Background())
+		resultCh <- client.reconnectWithBackoff(context.Background(), client.stopCh)
 	}()
 
 	// Close stop channel to signal stop
@@ -1286,11 +1285,12 @@ func TestClient_ReconnectWithBackoff_MaxRetries(t *testing.T) {
 	client.stopCh = make(chan struct{})
 
 	// Start reconnect
-	result := client.reconnectWithBackoff(context.Background())
+	result := client.reconnectWithBackoff(context.Background(), client.stopCh)
 
 	// Should return false after max retries
 	assert.False(t, result, "reconnectWithBackoff should return false after max retries")
-	assert.Equal(t, 3, client.reconnectAttempts, "should have attempted 3 times (initial + 2 retries)")
+	assert.Equal(t, int64(3), client.reconnectAttempts.Load(),
+		"should have attempted 3 times (initial + 2 retries)")
 }
 
 func TestClient_ReconnectWithBackoff_Success(t *testing.T) {
@@ -1334,14 +1334,14 @@ func TestClient_ReconnectWithBackoff_Success(t *testing.T) {
 
 	// Initialize stop channel
 	client.stopCh = make(chan struct{})
-	client.reconnectAttempts = 0
+	client.reconnectAttempts.Store(0)
 
 	// Start reconnect
-	result := client.reconnectWithBackoff(context.Background())
+	result := client.reconnectWithBackoff(context.Background(), client.stopCh)
 
 	// Should return true on successful reconnection
 	assert.True(t, result, "reconnectWithBackoff should return true on success")
-	assert.Equal(t, 0, client.reconnectAttempts, "reconnectAttempts should be reset to 0")
+	assert.Equal(t, int64(0), client.reconnectAttempts.Load(), "reconnectAttempts should be reset to 0")
 	assert.True(t, client.IsConnected(), "client should be connected")
 
 	// Clean up

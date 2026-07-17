@@ -153,7 +153,17 @@ spec:
             - name: REDIS_SENTINEL_AUTH_PASSWORD_VAULT_PATH
               value: {{ .Values.redisEnv.sentinelAuthPasswordVaultPath | quote }}
             {{- end }}
-            {{- if .Values.vault.enabled }}
+            {{- /*
+              VAULT_* environment injection. Gated on vault.enabled AND the
+              vault.injectEnv flag (default true). Setting vault.injectEnv=false
+              suppresses the deployment-injected VAULT_* env while keeping PKI
+              issuance (vault.pki) volume mounts, ports and the tls.vault config
+              blocks intact — the gateway then sources its Vault CLIENT
+              connection (address/auth) solely from the spec.vault section
+              rendered into the ConfigMap via gateway.vault (ENV > file > default
+              per-field, so with no env the file is authoritative).
+            */ -}}
+            {{- if and .Values.vault.enabled (ne .Values.vault.injectEnv false) }}
             - name: VAULT_ADDR
               value: {{ .Values.vault.address | quote }}
             - name: VAULT_AUTH_METHOD

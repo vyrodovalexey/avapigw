@@ -2,12 +2,103 @@ package config
 
 import "time"
 
+// RateLimitStore constants for rate limiter state store types.
+const (
+	// RateLimitStoreMemory keeps token buckets in process memory (default).
+	RateLimitStoreMemory = "memory"
+
+	// RateLimitStoreRedis shares token buckets across gateway instances
+	// through Redis (standalone or Sentinel).
+	RateLimitStoreRedis = "redis"
+)
+
 // RateLimitConfig represents rate limiting configuration.
 type RateLimitConfig struct {
 	Enabled           bool `yaml:"enabled" json:"enabled"`
 	RequestsPerSecond int  `yaml:"requestsPerSecond" json:"requestsPerSecond"`
 	Burst             int  `yaml:"burst" json:"burst"`
 	PerClient         bool `yaml:"perClient,omitempty" json:"perClient,omitempty"`
+
+	// Store is the rate limiter state store: "memory" (default) or "redis".
+	// "redis" enables distributed rate limiting shared across gateway
+	// instances through Redis standalone or Redis Sentinel.
+	Store string `yaml:"store,omitempty" json:"store,omitempty"`
+
+	// Redis contains Redis connection configuration for the distributed
+	// rate limiter. Required when Store is "redis".
+	Redis *RateLimitRedisConfig `yaml:"redis,omitempty" json:"redis,omitempty"`
+}
+
+// GetEffectiveStore returns the effective rate limiter store (default: memory).
+func (c *RateLimitConfig) GetEffectiveStore() string {
+	if c == nil || c.Store == "" {
+		return RateLimitStoreMemory
+	}
+	return c.Store
+}
+
+// RateLimitRedisConfig configures the Redis connection used by the
+// distributed rate limiter. Either URL (standalone) or Sentinel must be
+// configured; the two modes are mutually exclusive.
+type RateLimitRedisConfig struct {
+	// URL is the Redis connection URL for standalone mode.
+	// Format: redis://[user:password@]host:port[/db]
+	// Mutually exclusive with Sentinel configuration.
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
+
+	// Sentinel contains Redis Sentinel configuration for high availability.
+	// Mutually exclusive with standalone Redis URL.
+	Sentinel *RedisSentinelConfig `yaml:"sentinel,omitempty" json:"sentinel,omitempty"`
+
+	// PoolSize is the maximum number of connections in the pool.
+	PoolSize int `yaml:"poolSize,omitempty" json:"poolSize,omitempty"`
+
+	// ConnectTimeout is the timeout for establishing connections.
+	ConnectTimeout Duration `yaml:"connectTimeout,omitempty" json:"connectTimeout,omitempty"`
+
+	// ReadTimeout is the timeout for read operations. It also bounds a
+	// single rate limit decision so Redis latency never adds unbounded
+	// delay to requests (default 100ms).
+	ReadTimeout Duration `yaml:"readTimeout,omitempty" json:"readTimeout,omitempty"`
+
+	// WriteTimeout is the timeout for write operations.
+	WriteTimeout Duration `yaml:"writeTimeout,omitempty" json:"writeTimeout,omitempty"`
+
+	// KeyPrefix is a prefix added to all rate limiter keys.
+	KeyPrefix string `yaml:"keyPrefix,omitempty" json:"keyPrefix,omitempty"`
+
+	// TLS contains TLS configuration for Redis connections.
+	TLS *TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+
+	// PasswordVaultPath is the Vault path for the Redis password (standalone mode).
+	// The secret should have a "password" key. Format: mount/path.
+	PasswordVaultPath string `yaml:"passwordVaultPath,omitempty" json:"passwordVaultPath,omitempty"`
+
+	// Retry contains retry configuration for the initial connection.
+	Retry *RedisRetryConfig `yaml:"retry,omitempty" json:"retry,omitempty"`
+
+	// FailOpen controls the behavior when Redis is unavailable.
+	// When true (default), requests are allowed through and a failure
+	// metric is incremented; when false, requests are rejected with 429.
+	FailOpen *bool `yaml:"failOpen,omitempty" json:"failOpen,omitempty"`
+}
+
+// GetEffectiveFailOpen returns the effective failOpen value (default: true).
+func (c *RateLimitRedisConfig) GetEffectiveFailOpen() bool {
+	if c == nil || c.FailOpen == nil {
+		return true
+	}
+	return *c.FailOpen
+}
+
+// IsEmpty returns true if the RateLimitRedisConfig has no connection
+// configuration. A config is non-empty when either a standalone URL or a
+// Sentinel master name is configured.
+func (c *RateLimitRedisConfig) IsEmpty() bool {
+	if c == nil {
+		return true
+	}
+	return c.URL == "" && c.Sentinel.IsEmpty()
 }
 
 // CircuitBreakerConfig represents circuit breaker configuration.
@@ -97,6 +188,12 @@ type OpenAPIValidationConfig struct {
 	// SpecURL is the URL to fetch the OpenAPI specification from.
 	SpecURL string `yaml:"specURL,omitempty" json:"specURL,omitempty"`
 
+	// SpecInline is the inline OpenAPI specification content. It is populated by
+	// the operator when the source APIRoute references the spec via a ConfigMap
+	// (specConfigMapRef); the operator resolves the ConfigMap and inlines the
+	// content so the gateway can validate requests without cluster access.
+	SpecInline string `yaml:"specInline,omitempty" json:"specInline,omitempty"`
+
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.
 	FailOnError *bool `yaml:"failOnError,omitempty" json:"failOnError,omitempty"`
@@ -162,6 +259,11 @@ type ProtoValidationConfig struct {
 	// DescriptorFile is the path to the proto descriptor file.
 	DescriptorFile string `yaml:"descriptorFile,omitempty" json:"descriptorFile,omitempty"`
 
+	// DescriptorInline is the inline, base64-encoded proto descriptor content.
+	// It is populated by the operator when the source GRPCRoute references the
+	// descriptor via a ConfigMap (descriptorConfigMapRef).
+	DescriptorInline string `yaml:"descriptorInline,omitempty" json:"descriptorInline,omitempty"`
+
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.
 	FailOnError *bool `yaml:"failOnError,omitempty" json:"failOnError,omitempty"`
@@ -193,6 +295,11 @@ type GraphQLSchemaValidationConfig struct {
 
 	// SchemaFile is the path to the GraphQL schema file.
 	SchemaFile string `yaml:"schemaFile,omitempty" json:"schemaFile,omitempty"`
+
+	// SchemaInline is the inline GraphQL schema content. It is populated by the
+	// operator when the source GraphQLRoute references the schema via a
+	// ConfigMap (schemaConfigMapRef).
+	SchemaInline string `yaml:"schemaInline,omitempty" json:"schemaInline,omitempty"`
 
 	// FailOnError rejects requests that fail validation (default: true).
 	// When false, validation errors are logged but requests are allowed through.

@@ -309,6 +309,16 @@ func TestRunOperatorMode_ValidConfigCreatesClient(t *testing.T) {
 
 	logger := observability.NopLogger()
 
+	// The operator client now retries the initial connect/register with a
+	// bounded exponential backoff (operatorStartOverallDeadline, 3m in
+	// production) instead of failing fatally on the first error. Against an
+	// unreachable operator runOperatorMode therefore blocks for the full retry
+	// window before calling exitFunc(1). Shrink the deadline so this reaches the
+	// fatal-exit assertion quickly. The retry/backoff semantics themselves are
+	// covered deterministically by
+	// TestStartOperatorClientWithRetry_{RecoversAfterTransientFailures,FailsAfterExhaustion}.
+	defer withShortOperatorStartDeadline()()
+
 	// Valid config - will pass validation, create minimal config, init app,
 	// create operator client, then fail at operator client Start
 	// (because there's no real operator server)

@@ -44,7 +44,15 @@ func TestValidateOpenAPIValidationConfig(t *testing.T) {
 			wantError: false,
 		},
 		{
-			name: "enabled without specFile or specURL",
+			name: "enabled with inline spec resolved from ConfigMap",
+			cfg: &OpenAPIValidationConfig{
+				Enabled:    true,
+				SpecInline: "openapi: 3.0.0",
+			},
+			wantError: false,
+		},
+		{
+			name: "enabled without specFile, specURL or inline spec",
 			cfg: &OpenAPIValidationConfig{
 				Enabled: true,
 			},
@@ -121,7 +129,15 @@ func TestValidateProtoValidationConfig(t *testing.T) {
 			wantError: false,
 		},
 		{
-			name: "enabled without descriptorFile",
+			name: "enabled with inline descriptor resolved from ConfigMap",
+			cfg: &ProtoValidationConfig{
+				Enabled:          true,
+				DescriptorInline: "AAECAw==",
+			},
+			wantError: false,
+		},
+		{
+			name: "enabled without descriptorFile or inline descriptor",
 			cfg: &ProtoValidationConfig{
 				Enabled: true,
 			},
@@ -179,7 +195,15 @@ func TestValidateGraphQLSchemaValidationConfig(t *testing.T) {
 			wantError: false,
 		},
 		{
-			name: "enabled without schemaFile",
+			name: "enabled with inline schema resolved from ConfigMap",
+			cfg: &GraphQLSchemaValidationConfig{
+				Enabled:      true,
+				SchemaInline: "type Query { hello: String }",
+			},
+			wantError: false,
+		},
+		{
+			name: "enabled without schemaFile or inline schema",
 			cfg: &GraphQLSchemaValidationConfig{
 				Enabled: true,
 			},

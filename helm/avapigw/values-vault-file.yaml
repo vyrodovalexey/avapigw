@@ -1,0 +1,62 @@
+# =============================================================================
+# SPEC.VAULT IN-CLUSTER PROOF OVERLAY (Phase 7b/7c)
+# =============================================================================
+# Purpose: prove the CONFIG-FILE path for the Vault CLIENT connection works
+# end-to-end in-cluster, independent of the legacy VAULT_* environment
+# injection.
+#
+# How it works:
+#   * vault.injectEnv=false suppresses the deployment-injected VAULT_* env,
+#     so NONE of VAULT_ADDR/VAULT_AUTH_METHOD/VAULT_K8S_ROLE/... are present
+#     in the gateway pod.
+#   * gateway.vault renders a full spec.vault section into the gateway
+#     ConfigMap (via _helpers.tpl gateway.vault branch, Phase 7a).
+#   * With no VAULT_* env, applyVaultEnv is a no-op overlay, so the EFFECTIVE
+#     vault client config == the file section verbatim (ENV > file > default).
+#   * vault.enabled=true + vault.pki.enabled=true is retained ONLY to render
+#     the tls.vault PKI-issuance blocks and mount the https/grpcs ports; the
+#     client that PKI uses is now built from the FILE section, proving the
+#     file path drives real behavior (PKI cert issuance / mTLS backend).
+#
+# Apply on top of values-local.yaml:
+#   helm upgrade --install avapigw helm/avapigw \
+#     -f helm/avapigw/values-local.yaml \
+#     -f helm/avapigw/values-vault-file.yaml \
+#     --set operator.enabled=true -n avapigw-test --wait
+#
+# STATUS: intended as a temporary proof overlay. After proving the file path,
+# revert to the env-driven default (do NOT keep injectEnv=false committed as
+# the standard state). Retained in-tree as a documented example of the
+# file-sourced spec.vault client configuration.
+# =============================================================================
+
+vault:
+  # Keep vault enabled so PKI issuance blocks (tls.vault) and volume mounts /
+  # https+grpcs ports are still rendered — the gateway must build a Vault
+  # client for PKI regardless of spec.vault.enabled (RequiresVaultTLS()).
+  enabled: true
+  # Suppress the deployment-injected VAULT_* env: the ConfigMap spec.vault
+  # section becomes the SOLE source of the Vault client connection config.
+  injectEnv: false
+
+gateway:
+  # Full spec.vault section, rendered verbatim into the gateway ConfigMap via
+  # the _helpers.tpl `if .Values.gateway.vault` branch. This is the client
+  # connection (how the gateway reaches & authenticates to Vault), distinct
+  # from the per-listener tls.vault PKI-issuance blocks.
+  vault:
+    enabled: true
+    address: "http://host.docker.internal:8200"
+    authMethod: kubernetes
+    kubernetes:
+      role: avapigw
+      mountPath: kubernetes
+      tokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
+    # Startup auth retry knobs — expressible ONLY via the file section (no
+    # env equivalent), giving a second, positive proof that the file was
+    # honored beyond the mere absence of VAULT_* env.
+    auth:
+      maxRetries: 5
+      initialBackoff: 2s
+      maxBackoff: 20s
+      timeout: 60s

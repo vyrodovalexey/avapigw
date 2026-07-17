@@ -16,6 +16,18 @@ import (
 // metricsNamespace is the Prometheus namespace for reload metrics.
 const metricsNamespace = "gateway"
 
+// Label values for the vault section of the component reload counter.
+// spec.vault is never hot-reloaded (the client is constructed once at
+// startup); a detected change is counted as "skipped".
+const (
+	// reloadComponentVault labels vault-section reload observations.
+	reloadComponentVault = "vault"
+
+	// reloadResultSkipped marks a component whose changes were detected but
+	// intentionally not applied at runtime.
+	reloadResultSkipped = "skipped"
+)
+
 // reloadMetrics holds Prometheus metrics for configuration reload
 // operations. All collectors are registered with the gateway's custom
 // registry so they appear on the /metrics endpoint.
@@ -129,6 +141,10 @@ func (rm *reloadMetrics) Init() {
 			rm.configReloadComponentTotal.WithLabelValues(c, r)
 		}
 	}
+
+	// spec.vault is never hot-reloaded; pre-create its skip counter so the
+	// metric line is visible on /metrics before the first skipped reload.
+	rm.configReloadComponentTotal.WithLabelValues(reloadComponentVault, reloadResultSkipped)
 }
 
 // ensureReloadMetrics returns the application's reload metrics,
@@ -159,7 +175,16 @@ func startConfigWatcher(
 	watcher, err := config.NewWatcher(configPath, func(newCfg *config.GatewayConfig) {
 		logger.Info("configuration changed, reloading")
 		reloadComponents(ctx, app, newCfg, logger)
-	}, config.WithLogger(logger))
+	},
+		config.WithLogger(logger),
+		// Validate the EFFECTIVE config on every load: apply the same Vault
+		// env overlay used at boot before the watcher validates a changed
+		// file. Env-mixed deployments (e.g. address only in VAULT_ADDR)
+		// would otherwise fail raw-file validation and lose hot reload
+		// entirely. The callback then receives the effective config,
+		// consistent with what boot handed to initApplication.
+		config.WithPreValidateTransform(vaultEnvPreValidateTransform(logger)),
+	)
 
 	if err != nil {
 		logger.Warn("failed to create config watcher", observability.Error(err))
@@ -193,6 +218,21 @@ func reloadComponents(
 ) {
 	start := time.Now()
 	rm := ensureReloadMetrics(app)
+
+	// The config watcher already hands us the EFFECTIVE config (its
+	// pre-validate transform applies the Vault env overlay — see
+	// startConfigWatcher). Re-applying the overlay here is idempotent
+	// (the environment is process-stable) and keeps the
+	// effective-vs-effective change-detection invariant for direct callers
+	// that bypass the watcher (tests, alternative wiring).
+	newCfg.Spec.Vault = applyVaultEnv(newCfg.Spec.Vault, logger)
+
+	// spec.vault is NOT hot-reloaded: the client pointer is held by the
+	// backend registries, the cache factory, and the route middleware
+	// manager; recreating it here would orphan the token-renewal goroutine
+	// and strand consumers on a closed client. Detect, warn, count as
+	// skipped, and keep the running client unchanged.
+	warnVaultConfigChanged(app, newCfg, logger, rm)
 
 	// Reload gateway config (atomic pointer swap)
 	if err := app.gateway.Reload(newCfg); err != nil {
@@ -469,4 +509,30 @@ func auditConfigChanged(oldCfg, newCfg *config.GatewayConfig) bool {
 		return oldCfg != newCfg
 	}
 	return configSectionChanged(oldCfg.Spec.Audit, newCfg.Spec.Audit)
+}
+
+// vaultConfigChanged checks if the effective vault configuration has changed
+// between configs.
+func vaultConfigChanged(oldCfg, newCfg *config.GatewayConfig) bool {
+	if oldCfg == nil || newCfg == nil {
+		return oldCfg != newCfg
+	}
+	return configSectionChanged(oldCfg.Spec.Vault, newCfg.Spec.Vault)
+}
+
+// warnVaultConfigChanged logs a warning and increments the vault "skipped"
+// component counter when the effective spec.vault section changed. The
+// running Vault client is intentionally left untouched — its settings apply
+// only at startup (see reloadComponents for the ownership rationale).
+func warnVaultConfigChanged(
+	app *application,
+	newCfg *config.GatewayConfig,
+	logger observability.Logger,
+	rm *reloadMetrics,
+) {
+	if !vaultConfigChanged(app.config, newCfg) {
+		return
+	}
+	logger.Warn("spec.vault changed; vault client settings apply at startup — restart required")
+	rm.configReloadComponentTotal.WithLabelValues(reloadComponentVault, reloadResultSkipped).Inc()
 }

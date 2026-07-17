@@ -1,0 +1,170 @@
+openapi: "3.0.3"
+info:
+  title: Items API (local perf validated routes)
+  version: "1.0.0"
+  description: >
+    OpenAPI spec for the PT local perf gateway. Contains the exact request
+    paths of the validated feature routes so kin-openapi FindRoute matches
+    every perf request and validation genuinely executes per request
+    (query params limit/offset are schema-validated).
+paths:
+  /api/v1/validated/items:
+    get:
+      operationId: listItemsBasic
+      summary: Validated baseline (backend basic-auth) items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemList"
+    post:
+      operationId: createItemBasic
+      summary: Create item through validated route
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateItemRequest"
+      responses:
+        "201":
+          description: Item created.
+  /api/v1/validated/apikey/items:
+    get:
+      operationId: listItemsApiKey
+      summary: Validated API-key items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+  /api/v1/validated/oidc/items:
+    get:
+      operationId: listItemsOIDC
+      summary: Validated OIDC items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+  /api/v1/validated/ratelimit/items:
+    get:
+      operationId: listItemsRateLimit
+      summary: Validated rate-limited items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+        "429":
+          description: Rate limited.
+  /api/v1/validated/transform/items:
+    get:
+      operationId: listItemsTransform
+      summary: Validated transformed items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+  /api/v1/validated/encoding/items:
+    get:
+      operationId: listItemsEncoding
+      summary: Validated encoded items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+  /api/v1/validated/cache/items:
+    get:
+      operationId: listItemsCache
+      summary: Validated cached items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+  /api/v1/validated/cors/items:
+    get:
+      operationId: listItemsCORS
+      summary: Validated CORS items
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A list of items.
+components:
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+  schemas:
+    ItemList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Item"
+        total:
+          type: integer
+    Item:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 1000
+        price:
+          type: number
+          format: double
+          minimum: 0
+    CreateItemRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 1000
+        price:
+          type: number
+          format: double
+          minimum: 0

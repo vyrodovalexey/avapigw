@@ -10,53 +10,198 @@ This document provides a comprehensive reference for configuring Vault PKI integ
 
 ## Vault Configuration
 
-### Global Vault Settings
+### Vault Client Connection (`spec.vault`)
+
+The gateway-wide Vault **client connection** — how the gateway reaches and
+authenticates against the Vault server — is configured through the
+`spec.vault` section of the gateway configuration file, overlaid by `VAULT_*`
+environment variables. This is **distinct** from the per-listener, per-route,
+and per-backend [`tls.vault` PKI blocks](#listener-level-tls-configuration)
+documented below: `tls.vault` requests certificate **issuance** from Vault PKI
+and *requires* the client connection defined here.
+
+> **`spec.vault` (client connection) vs. `tls.vault` (PKI issuance)**
+>
+> - `spec.vault` — one gateway-wide block: server address, auth method, TLS to
+>   Vault, caching, retries. Consumed at startup to build the Vault client.
+> - `tls.vault` — per-listener/route/backend blocks (`pkiMount`, `role`,
+>   `commonName`, …) that issue serving/client certificates. They use the
+>   client that `spec.vault` (or `VAULT_ADDR`) establishes.
+
+The Vault client is initialized when `spec.vault.enabled` is `true`, when
+`VAULT_ADDR` is set, or when any listener/route enables `tls.vault` PKI
+issuance.
+
+> **Operator note:** `spec.vault` is a **gateway-only** section. The operator
+> configures its Vault client exclusively through `VAULT_*` environment
+> variables and flags (see the [operator configuration](operator/configuration.md)).
+
+#### `spec.vault` fields
+
+Duration fields are strings such as `"5m"` or `"100ms"`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Turns the Vault client on. Absent section preserves legacy env-only behavior |
+| `address` | string | - | Vault server address (e.g. `https://vault.example.com:8200`). Required when `enabled` (unless `VAULT_ADDR` is set) |
+| `namespace` | string | - | Vault Enterprise namespace |
+| `authMethod` | enum | `token` | `token`, `kubernetes`, or `approle` |
+| `token` | string | - | Inline token for `token` auth. **Discouraged** in files (validation warning); prefer `tokenFile`/`VAULT_TOKEN`. Mutually exclusive with `tokenFile` |
+| `tokenFile` | string | - | Path to a file containing the token (preferred file reference). Mutually exclusive with `token` |
+| `kubernetes.role` | string | - | Vault role for `kubernetes` auth. **Required** for `kubernetes` |
+| `kubernetes.mountPath` | string | `kubernetes` | Mount path of the Kubernetes auth method |
+| `kubernetes.tokenPath` | string | `/var/run/secrets/kubernetes.io/serviceaccount/token` | ServiceAccount token file path |
+| `appRole.roleId` | string | - | AppRole role ID. **Required** for `approle` |
+| `appRole.secretId` | string | - | Inline AppRole secret ID. **Discouraged** in files (validation warning); prefer `secretIdFile`/`VAULT_APPROLE_SECRET_ID`. Mutually exclusive with `secretIdFile` |
+| `appRole.secretIdFile` | string | - | Path to a file containing the secret ID (preferred). Mutually exclusive with `secretId` |
+| `appRole.mountPath` | string | `approle` | Mount path of the AppRole auth method |
+| `tls.caCert` | string | - | Path to a CA certificate file for verifying the Vault server |
+| `tls.caPath` | string | - | Path to a directory of CA certificates |
+| `tls.clientCert` | string | - | Client certificate for mTLS to Vault (requires `clientKey`) |
+| `tls.clientKey` | string | - | Client key for mTLS to Vault (requires `clientCert`) |
+| `tls.serverName` | string | host of `address` | TLS SNI/server name used to verify the Vault server certificate |
+| `tls.skipVerify` | bool | `false` | Skip TLS verification of the Vault server (insecure; testing only) |
+| `cache.enabled` | bool | `false` | Enable client-side secret caching |
+| `cache.ttl` | duration | `5m` | Cache time-to-live |
+| `cache.maxSize` | int | `1000` | Maximum number of cached entries |
+| `retry.maxRetries` | int | `3` | Maximum request retry attempts |
+| `retry.backoffBase` | duration | `100ms` | Base duration for exponential backoff |
+| `retry.backoffMax` | duration | `5s` | Maximum backoff duration |
+| `auth.maxRetries` | int | `3` | Maximum startup authentication retries |
+| `auth.initialBackoff` | duration | `1s` | Initial backoff between authentication retries |
+| `auth.maxBackoff` | duration | `10s` | Maximum backoff between authentication retries |
+| `auth.timeout` | duration | `30s` | Overall timeout for the startup authentication retry loop |
+
+Example (`spec.vault` with Kubernetes auth):
 
 ```yaml
-apiVersion: gateway.avapigw.io/v1
-kind: Gateway
-metadata:
-  name: vault-gateway
 spec:
   vault:
-    # Vault server configuration
-    address: "https://vault.example.com:8200"
-    authMethod: kubernetes  # kubernetes, token, approle, aws, gcp
-    role: gateway-role
-    
-    # Optional: Static token (development only)
-    token: "hvs.CAESIJ..."
-    
-    # Optional: AppRole authentication
-    appRole:
-      roleId: "role-id"
-      secretId: "secret-id"
-    
-    # Optional: AWS authentication
-    aws:
-      role: "vault-role"
-      region: "us-west-2"
-    
-    # Optional: GCP authentication
-    gcp:
-      role: "vault-role"
-      serviceAccount: "gateway@project.iam.gserviceaccount.com"
-    
-    # TLS configuration for Vault connection
+    enabled: true
+    address: https://vault.example.com:8200
+    authMethod: kubernetes
+    kubernetes:
+      role: gateway-role
     tls:
+      caCert: /etc/vault/ca.crt
+    cache:
       enabled: true
-      caFile: "/etc/ssl/certs/vault-ca.crt"
-      certFile: "/etc/ssl/certs/vault-client.crt"
-      keyFile: "/etc/ssl/private/vault-client.key"
-      serverName: "vault.example.com"
-      insecureSkipVerify: false
-    
-    # Connection settings
-    timeout: 30s
-    retries: 3
-    retryDelay: 1s
-    maxRetryDelay: 30s
+      ttl: 5m
+    retry:
+      maxRetries: 3
+      backoffBase: 100ms
+      backoffMax: 5s
 ```
+
+Vault authentication is retried with exponential backoff at startup (defaults:
+3 retries, 1s–10s backoff, 30s overall timeout — tunable via `spec.vault.auth`),
+so a briefly unavailable Vault does not fail gateway startup immediately.
+
+#### Environment variable overlay and precedence
+
+Each `spec.vault` field can be overridden by a `VAULT_*` environment variable.
+The overlay is applied by `cmd/gateway` **before validation**, so the validated
+(and running) configuration is always the *effective* one. Precedence is
+**per-field**: `ENV > config file > defaults`.
+
+| Environment Variable | Overrides | Default | Notes |
+|-----------------------|-----------|---------|-------|
+| `VAULT_ADDR` | `spec.vault.address` | - | Also **forces `enabled: true`** (legacy trigger) |
+| `VAULT_AUTH_METHOD` | `spec.vault.authMethod` | `token` | |
+| `VAULT_TOKEN` | `spec.vault.token` | - | **Clears `tokenFile`** so the env token wins per-field |
+| `VAULT_NAMESPACE` | `spec.vault.namespace` | - | |
+| `VAULT_CACERT` | `spec.vault.tls.caCert` | - | |
+| `VAULT_CAPATH` | `spec.vault.tls.caPath` | - | |
+| `VAULT_CLIENT_CERT` | `spec.vault.tls.clientCert` | - | |
+| `VAULT_CLIENT_KEY` | `spec.vault.tls.clientKey` | - | |
+| `VAULT_SKIP_VERIFY` | `spec.vault.tls.skipVerify` | `false` | Accepts `true/false/yes/no/1/0/on/off`; invalid values warn and keep the previous value |
+| `VAULT_K8S_ROLE` | `spec.vault.kubernetes.role` | - | Applied only when the effective auth method is `kubernetes` |
+| `VAULT_K8S_MOUNT_PATH` | `spec.vault.kubernetes.mountPath` | `kubernetes` | |
+| `VAULT_K8S_TOKEN_PATH` | `spec.vault.kubernetes.tokenPath` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | |
+| `VAULT_APPROLE_ROLE_ID` | `spec.vault.appRole.roleId` | - | Applied only when the effective auth method is `approle` |
+| `VAULT_APPROLE_SECRET_ID` | `spec.vault.appRole.secretId` | - | **Clears `secretIdFile`** so the env secret ID wins per-field |
+| `VAULT_APPROLE_MOUNT_PATH` | `spec.vault.appRole.mountPath` | `approle` | |
+
+Only field **names** are logged when an override is applied — token/secret
+**values** are never logged.
+
+**Mixed-mode example** (Helm injects `VAULT_TOKEN` via a Secret-backed env; the
+rest of the client lives in the file):
+
+```yaml
+# spec.vault in the gateway config file
+spec:
+  vault:
+    enabled: true
+    address: https://vault.example.com:8200
+    authMethod: token
+    # No token / tokenFile here — supplied by the environment.
+```
+
+```bash
+# Injected into the deployment (e.g. from a mounted Secret)
+export VAULT_TOKEN="s.xxxxxxxxxxxxxxxx"
+```
+
+The effective config authenticates with the env-supplied token while every
+other field comes from the file.
+
+#### Validation rules
+
+Validation runs on the **effective** (post-overlay) configuration:
+
+- `authMethod` must be one of `token`, `kubernetes`, `approle` (empty defaults
+  to `token`).
+- `address` is required when `enabled` (or when `VAULT_ADDR` is set).
+- Per-method required fields:
+  - `token`: exactly one of `token` **or** `tokenFile`.
+  - `kubernetes`: `kubernetes.role`.
+  - `approle`: `appRole.roleId` **plus** exactly one of `secretId` **or**
+    `secretIdFile`.
+- Mutual exclusions: `token`/`tokenFile` and `secretId`/`secretIdFile` cannot
+  both be set (error).
+- An inline `token` or `secretId` present in the file emits a **warning** (not
+  an error) recommending `tokenFile`/`secretIdFile`, the corresponding
+  environment variable (Secret-mounted), or Kubernetes auth.
+- `tls.clientCert` and `tls.clientKey` must be supplied together.
+- Durations/counters (`cache`, `retry`, `auth`) cannot be negative and are
+  type-checked even when the section is disabled.
+- Sub-blocks for a non-selected auth method (e.g. `appRole` while
+  `authMethod: kubernetes`) emit a **warning** that they are ignored.
+- `enabled: false` while a `tls.vault` PKI block is configured is an **error**
+  (`spec.vault.enabled`): PKI issuance needs the client. Because `VAULT_ADDR`
+  forces `enabled: true` during the overlay, env-driven setups never hit this.
+
+#### No hot-reload — restart required
+
+The Vault client is created **once at startup**. Changing `spec.vault` on a
+configuration reload logs a warning
+(`spec.vault changed; vault client settings apply at startup — restart required`)
+and is **skipped** — the running client keeps its startup settings. The skip is
+counted by
+`gateway_config_reload_component_total{component="vault",result="skipped"}`
+(the counter line is pre-created at zero so it is visible on `/metrics` before
+the first skipped reload). Apply Vault client changes by restarting the gateway.
+
+The config watcher validates the **effective** configuration: the same
+`VAULT_*` overlay used at boot is applied before each reload's validation, so an
+env-mixed deployment (e.g. `VAULT_ADDR` only in the environment) does not fail
+raw-file validation on every file change — hot reload keeps working for all
+**other** sections. See
+[Hot-Reload Limitations](hot-reload-limitations.md).
+
+#### Backward compatibility
+
+Omitting `spec.vault` preserves today's env-only behavior byte-for-byte: when
+the section is absent and `VAULT_ADDR` is set, a client is synthesized purely
+from the environment exactly as before.
+
+> **Note:** The Helm chart's top-level `vault.*` values control the injection of
+> the `VAULT_*` environment variables into the gateway deployment, gated by the
+> `vault.injectEnv` flag (default `true`). Set `vault.injectEnv: false` and use
+> `gateway.vault` to source the client connection purely from the rendered
+> `spec.vault` file section. See [Helm Values Reference](#helm-values-reference)
+> and the chart [README](../helm/avapigw/README.md).
 
 ## Listener-Level TLS Configuration
 
@@ -80,15 +225,11 @@ spec:
           pkiMount: "pki"                    # PKI secrets engine mount path
           role: "gateway-server"             # PKI role name
           commonName: "gateway.example.com"  # Certificate common name
-          altNames:                          # Subject Alternative Names
+          altNames:                          # Subject Alternative Names (DNS)
             - "api.example.com"
             - "www.example.com"
             - "*.api.example.com"
-          ipSans:                            # IP Subject Alternative Names
-            - "10.0.1.100"
-            - "192.168.1.100"
           ttl: "24h"                         # Certificate TTL
-          renewBefore: "1h"                  # Renew before expiry
           
         # Optional: Custom cipher suites
         cipherSuites:
@@ -128,27 +269,15 @@ spec:
             - "api.example.com"
             - "admin.example.com"
           ttl: "12h"
-          renewBefore: "30m"
-          
-          # Optional: Custom certificate parameters
-          excludeCnFromSans: false
-          format: "pem"
-          privateKeyFormat: "pkcs8"
-          
-        # Client certificate validation
-        clientValidation:
-          enabled: true
-          vault:
-            enabled: true
-            pkiMount: "pki-client"
-            role: "client-ca"
-          requireClientCert: true
-          allowedCNs:
-            - "client.example.com"
-            - "admin.example.com"
-          allowedSANs:
-            - "*.client.example.com"
+
+        # Client certificate validation (MUTUAL mode)
+        caFile: "/etc/ssl/certs/client-ca.crt"
+        requireClientCert: true
 ```
+
+> **Note:** per-CN/SAN client filtering (`clientValidation` with
+> `allowedCNs`/`allowedSANs`) is available at the **route** level — see
+> [Route-Level TLS Configuration](#route-level-tls-configuration).
 
 ## Route-Level TLS Configuration
 
@@ -177,7 +306,6 @@ spec:
             - "api.tenant-a.example.com"
             - "www.tenant-a.example.com"
           ttl: "24h"
-          renewBefore: "2h"
         
         # SNI hostnames for certificate selection
         sniHosts:
@@ -236,10 +364,7 @@ spec:
         minVersion: "1.3"
         clientValidation:
           enabled: true
-          vault:
-            enabled: true
-            pkiMount: "pki-client"
-            role: "tenant-a-clients"
+          caFile: "/etc/ssl/certs/tenant-a-client-ca.crt"
           requireClientCert: true
           allowedCNs:
             - "client.tenant-a.example.com"
@@ -260,7 +385,6 @@ spec:
           role: "web-server"
           commonName: "tenant-b.example.com"
           ttl: "6h"
-          renewBefore: "30m"
         sniHosts:
           - "tenant-b.example.com"
         minVersion: "1.2"
@@ -324,7 +448,6 @@ spec:
             - "gateway.internal"
             - "client.gateway.internal"
           ttl: "24h"
-          renewBefore: "1h"
         
         # Server verification
         serverName: "secure-api.example.com"
@@ -375,36 +498,20 @@ spec:
 
 ## VaultTLSConfig Reference
 
+The same `vault` block shape is accepted under listener `tls`, gRPC listener
+`tls`, route `tls`, and backend `tls` sections.
+
 ### Complete Configuration Schema
 
 ```yaml
 vault:
-  enabled: boolean                    # Enable Vault PKI integration
-  pkiMount: string                    # PKI secrets engine mount path
-  role: string                        # PKI role name
-  commonName: string                  # Certificate common name
-  altNames: []string                  # Subject Alternative Names (DNS)
-  ipSans: []string                    # IP Subject Alternative Names
-  uriSans: []string                   # URI Subject Alternative Names
-  otherSans: []string                 # Other Subject Alternative Names
-  ttl: duration                       # Certificate TTL (e.g., "24h", "720h")
-  renewBefore: duration               # Renew before expiry (e.g., "1h", "30m")
-  format: string                      # Certificate format ("pem", "der", "pem_bundle")
-  privateKeyFormat: string            # Private key format ("der", "pkcs8")
-  excludeCnFromSans: boolean          # Exclude CN from SANs
-  
-  # Advanced options
-  serialNumber: string                # Certificate serial number
-  keyType: string                     # Key type ("rsa", "ec", "ed25519")
-  keyBits: integer                    # Key size in bits (for RSA)
-  keyUsage: []string                  # Key usage extensions
-  extKeyUsage: []string               # Extended key usage
-  
-  # Renewal settings
-  autoRenew: boolean                  # Enable automatic renewal (default: true)
-  renewJitter: duration               # Random jitter for renewal timing
-  maxRetries: integer                 # Max renewal retry attempts
-  retryDelay: duration                # Delay between retry attempts
+  enabled: true                       # Enable Vault PKI integration
+  pkiMount: "pki"                     # PKI secrets engine mount path
+  role: "gateway-server"              # PKI role name
+  commonName: "gateway.example.com"   # Certificate common name
+  altNames:                           # Subject Alternative Names (DNS)
+    - "api.example.com"
+  ttl: "24h"                          # Certificate TTL (e.g., "24h", "720h")
 ```
 
 ### Field Descriptions
@@ -416,20 +523,28 @@ vault:
 | `role` | string | Yes | - | PKI role name for certificate issuance |
 | `commonName` | string | Yes | - | Certificate common name (CN) |
 | `altNames` | []string | No | [] | DNS Subject Alternative Names |
-| `ipSans` | []string | No | [] | IP Subject Alternative Names |
-| `uriSans` | []string | No | [] | URI Subject Alternative Names |
-| `otherSans` | []string | No | [] | Other Subject Alternative Names |
-| `ttl` | duration | No | 24h | Certificate time-to-live |
-| `renewBefore` | duration | No | 1h | Renew certificate before expiry |
-| `format` | string | No | pem | Certificate format |
-| `privateKeyFormat` | string | No | pkcs8 | Private key format |
-| `excludeCnFromSans` | boolean | No | false | Exclude CN from SANs |
-| `autoRenew` | boolean | No | true | Enable automatic renewal |
-| `renewJitter` | duration | No | 5m | Random jitter for renewal |
-| `maxRetries` | integer | No | 3 | Max renewal retry attempts |
-| `retryDelay` | duration | No | 30s | Delay between retries |
+| `ttl` | duration string | No | provider default | Certificate time-to-live |
+
+Certificate renewal is automatic: the Vault provider renews certificates
+before expiry (10 minutes before expiry by default, with exponential backoff
+on renewal failures) and the listener hot-reloads the renewed certificate
+without a restart. Key type and SAN policy beyond `altNames` are controlled
+by the **Vault PKI role**, not by gateway configuration.
 
 ## Helm Values Reference
+
+The Helm chart's top-level `vault.*` values control **environment variable
+injection** into the gateway deployment (`VAULT_ADDR`, `VAULT_AUTH_METHOD`,
+`VAULT_K8S_ROLE`, ...) plus the Vault PKI blocks rendered into the generated
+gateway configuration. The `vault.injectEnv` flag (default `true`) gates the
+`VAULT_*` env injection.
+
+To express the Vault client connection as a file section instead, set
+`gateway.vault` (rendered verbatim as [`spec.vault`](#vault-client-connection-specvault)
+in the generated ConfigMap). For a file-only setup, combine `gateway.vault`
+with `vault.injectEnv: false` so no `VAULT_*` env is injected — see the
+`values-vault-file.yaml` example shipped with the chart and the chart
+[README](../helm/avapigw/README.md).
 
 ### Complete Vault PKI Configuration
 
@@ -437,16 +552,17 @@ vault:
 # values.yaml
 vault:
   enabled: true
-  address: "https://vault.example.com:8200"
-  authMethod: kubernetes
-  role: gateway-role
-  
+  address: "https://vault.example.com:8200"   # -> VAULT_ADDR
+  authMethod: kubernetes                      # -> VAULT_AUTH_METHOD
+  role: gateway-role                          # -> VAULT_K8S_ROLE
+  kubernetesMountPath: kubernetes             # -> VAULT_K8S_MOUNT_PATH
+
   # TLS for Vault connection
   tls:
     enabled: true
     caSecretName: vault-ca-cert
-    skipVerify: false
-  
+    skipVerify: false                         # -> VAULT_SKIP_VERIFY
+
   # Vault PKI for listener TLS
   pki:
     enabled: true
@@ -458,27 +574,15 @@ vault:
       - "*.api.example.com"
     ttl: "24h"
     renewBefore: "1h"
-    format: "pem"
-    privateKeyFormat: "pkcs8"
-    autoRenew: true
-    renewJitter: "5m"
-    maxRetries: 3
-    retryDelay: "30s"
+    # gRPC listener PKI overrides (inherit from vault.pki.* when empty)
+    grpc:
+      pkiMount: ""
+      role: ""
+      commonName: ""
+      altNames: []
+      ttl: ""
 
 gateway:
-  listeners:
-    https:
-      enabled: true
-      port: 8443
-      tls:
-        enabled: true
-        vault:
-          enabled: true
-        minVersion: "1.2"
-        hsts:
-          enabled: true
-          maxAge: 31536000
-
   routes:
     - name: tenant-a
       match:
@@ -497,7 +601,6 @@ gateway:
           altNames:
             - api.tenant-a.example.com
           ttl: 24h
-          renewBefore: 2h
         sniHosts:
           - tenant-a.example.com
           - api.tenant-a.example.com
@@ -542,9 +645,6 @@ vault:
       - "*.api.prod.example.com"
     ttl: "24h"
     renewBefore: "2h"
-    autoRenew: true
-    maxRetries: 5
-    retryDelay: "1m"
     grpc:
       enabled: true
       pkiMount: "pki-grpc-prod"
@@ -559,9 +659,7 @@ vault:
 
 - `commonName`: Must be a valid DNS name or IP address
 - `altNames`: Each entry must be a valid DNS name
-- `ipSans`: Each entry must be a valid IP address
 - `ttl`: Must be a valid duration string (e.g., "24h", "30m")
-- `renewBefore`: Must be less than `ttl`
 
 ### TLS Version Validation
 
@@ -683,6 +781,36 @@ spec:
           - "/api/v1/secure/metrics"
 ```
 
+#### HMAC Shared-Secret JWT (HS256/HS384/HS512)
+
+For HMAC algorithms, configure a shared secret instead of a JWKS URL. The
+`secret` value may be a raw string or a symmetric (`oct`) JWK:
+
+```yaml
+spec:
+  routes:
+    - name: hmac-api
+      match:
+        - uri:
+            prefix: /api/v1/hmac
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          algorithm: "HS256"            # HS256, HS384, or HS512
+          secret: "shared-hmac-secret"  # Raw secret or oct JWK
+          issuer: "https://auth.example.com"
+```
+
+- Tokens without a `kid` header fall back to the single configured HMAC key;
+  tokens with a `kid` must match the configured key ID.
+- Algorithm-confusion protection: asymmetric public keys are never accepted
+  as HMAC secrets, so tokens re-signed with a public key under an `HS*`
+  algorithm are rejected.
+- JWKS-based validation is resilient to identity provider outages: refreshes
+  are coalesced (singleflight) and bounded to 30 seconds, so one slow IdP
+  cannot stall gateway-wide authentication.
+
 ### API Key Authentication
 
 ```yaml
@@ -698,9 +826,32 @@ spec:
           enabled: true
           header: "X-API-Key"           # Header name for API key
           query: "api_key"              # Alternative: query parameter
-          hashAlgorithm: "sha256"       # Hash algorithm for stored keys
+          hashAlgorithm: "sha256"       # sha256 (default), sha512, bcrypt, plaintext (dev only)
           vaultPath: "secret/api-keys"  # Vault path for key storage
 ```
+
+API key validation rules:
+
+- **Hash-only static keys** (gateway-level `authentication.apiKey.store.keys`)
+  may omit the raw `key` and carry only a pre-computed `hash`: a 64-hex SHA-256
+  digest, a 128-hex SHA-512 digest (both case-insensitive), or a bcrypt hash
+  (looked up by key `id` and verified against the presented key).
+- **Load-time validation**: entries with neither a usable `key` nor a hash
+  compatible with the configured `hashAlgorithm` are rejected when the
+  configuration is loaded (previously they were accepted and silently failed
+  every lookup).
+- **Vault store matrix**: the Vault store addresses secrets by the
+  deterministic digest of the presented key, so it supports `sha256` and
+  `sha512` only; `hashAlgorithm: bcrypt` combined with the Vault store is
+  rejected at load time (bcrypt hashes are salted and cannot address Vault
+  paths).
+- **Store outages vs. unknown keys**: Vault outages during validation surface
+  as `gateway_apikey_validation_total{reason="store_error"}` (previously
+  reported as `not_found`) — alert on `store_error` separately from
+  genuine key misses.
+- **Cache bound**: the validation cache honors `cache.maxSize` with LRU
+  eviction; with `hashAlgorithm: plaintext` a warning is logged once at
+  startup.
 
 ### mTLS Authentication
 
@@ -965,7 +1116,15 @@ spec:
 
 ## Backend Caching
 
-Backend caching improves performance by caching responses at the backend level.
+Response caching is configured at the **route level** (`routes[].cache`,
+`grpcRoutes[].cache`, `graphqlRoutes[].cache` in gateway configuration, or
+`spec.cache` on the corresponding CRDs). The redis examples in this section
+show the cache schema, which is identical across those route kinds.
+
+> **Note:** backend-level caching (CRD `Backend`/`GRPCBackend` `spec.cache`)
+> is RESERVED — it is accepted with an admission warning but is not wired to
+> the gateway data path. The gateway's file-based `backends[]` section has no
+> `cache` field. Use route-level caching instead.
 
 ### Redis Cache Features
 
@@ -982,6 +1141,7 @@ The gateway provides advanced Redis caching features for improved performance an
 - Prevents key length issues with Redis key size limits
 - Provides privacy by obscuring cache key contents
 - Maintains cache key uniqueness while reducing storage overhead
+- With `hashKeys: true`, trace span attributes and logs record the hashed key instead of the raw key, so sensitive key components (e.g. Authorization-derived values) never leak into telemetry
 
 **Vault Password Integration**
 - Secure password management using HashiCorp Vault KV secrets
@@ -990,89 +1150,99 @@ The gateway provides advanced Redis caching features for improved performance an
 - Vault path format: `mount/path` (e.g., `secret/redis`)
 - Secret must contain a `password` key
 
-### HTTP Backend Caching
+### HTTP Route Caching
 
 ```yaml
 spec:
-  backends:
-    - name: cached-backend
-      hosts:
-        - address: api.internal
-          port: 8080
+  routes:
+    - name: cached-route
+      match:
+        - uri:
+            prefix: /api/v1
+      route:
+        - destination:
+            host: api.internal
+            port: 8080
       cache:
         enabled: true
         ttl: "10m"                     # Cache for 10 minutes
-        keyComponents:
-          - "path"                     # Include request path
-          - "query"                    # Include query parameters
-          - "headers.Authorization"    # Include auth header
-          - "headers.X-Tenant-ID"      # Include tenant header
-          - "headers.Accept-Language"  # Include language header
+        keyConfig:
+          includeMethod: true          # Include HTTP method
+          includePath: true            # Include request path
+          includeQueryParams:          # Query parameters to include
+            - "page"
+            - "limit"
+          includeHeaders:              # Headers to include
+            - "Authorization"
+            - "X-Tenant-ID"
+            - "Accept-Language"
         staleWhileRevalidate: "2m"     # Serve stale for 2 minutes while revalidating
         type: "memory"                 # Use in-memory cache
+        maxEntries: 10000              # Bound for the memory cache
 ```
 
-### Redis Backend Caching
+### Redis Route Caching
 
 #### Redis Standalone Configuration
 
 ```yaml
 spec:
-  backends:
-    - name: redis-cached-backend
-      hosts:
-        - address: api.internal
-          port: 8080
+  routes:
+    - name: redis-cached-route
+      match:
+        - uri:
+            prefix: /api/v1
+      route:
+        - destination:
+            host: api.internal
+            port: 8080
       cache:
         enabled: true
         ttl: "1h"
-        keyComponents:
-          - "path"
-          - "query"
-          - "headers.Authorization"
         staleWhileRevalidate: "5m"
         type: "redis"
-          redis:
-            address: "redis.cache.svc.cluster.local:6379"
-            password: "redis-password"
-            # Vault password integration
-            passwordVaultPath: "secret/redis"
-            db: 0
+        redis:
+          url: "redis://redis.cache.svc.cluster.local:6379/0"
+          # Vault password integration
+          passwordVaultPath: "secret/redis"
+          poolSize: 10
+          keyPrefix: "avapigw:cache:"
+          # TTL jitter to prevent thundering herd
+          ttlJitter: 0.1  # ±10% jitter on TTL values
+          # Hash cache keys for privacy and length control
+          hashKeys: true
+          retry:
             maxRetries: 3
-            poolSize: 10
-            keyPrefix: "avapigw:cache:"
-            # TTL jitter to prevent thundering herd
-            ttlJitter: 0.1  # ±10% jitter on TTL values
-            # Hash cache keys for privacy and length control
-            hashKeys: true
-            tls:
-              enabled: true
-              caFile: "/etc/ssl/certs/redis-ca.crt"
-              certFile: "/etc/ssl/certs/redis-client.crt"
-              keyFile: "/etc/ssl/private/redis-client.key"
-              insecureSkipVerify: false
+            initialBackoff: "100ms"
+            maxBackoff: "30s"
+          tls:
+            enabled: true
+            caFile: "/etc/ssl/certs/redis-ca.crt"
+            certFile: "/etc/ssl/certs/redis-client.crt"
+            keyFile: "/etc/ssl/private/redis-client.key"
+            insecureSkipVerify: false
 ```
 
 #### Redis Sentinel Configuration
 
 ```yaml
 spec:
-  backends:
-    - name: redis-sentinel-cached-backend
-      hosts:
-        - address: api.internal
-          port: 8080
+  routes:
+    - name: redis-sentinel-cached-route
+      match:
+        - uri:
+            prefix: /api/v1
+      route:
+        - destination:
+            host: api.internal
+            port: 8080
       cache:
         enabled: true
         ttl: "1h"
-        keyComponents:
-          - "path"
-          - "query"
-          - "headers.Authorization"
         staleWhileRevalidate: "5m"
         type: "redis"
         redis:
-          # Redis Sentinel configuration takes precedence over standalone
+          # Sentinel mode is mutually exclusive with the standalone url
           sentinel:
             masterName: "mymaster"
             sentinelAddrs:
@@ -1086,13 +1256,16 @@ spec:
             passwordVaultPath: "secret/redis-master"
             db: 0
           # Connection pool settings
-          maxRetries: 3
           poolSize: 10
           keyPrefix: "avapigw:cache:"
           # TTL jitter to prevent thundering herd
           ttlJitter: 0.1  # ±10% jitter on TTL values
           # Hash cache keys for privacy and length control
           hashKeys: true
+          retry:
+            maxRetries: 3
+            initialBackoff: "100ms"
+            maxBackoff: "30s"
           # TLS configuration for Redis connections
           tls:
             enabled: true
@@ -1186,27 +1359,29 @@ spec:
             insecureSkipVerify: false
 ```
 
-### gRPC Backend Caching
+### gRPC Route Caching
 
 ```yaml
 spec:
-  grpcBackends:
-    - name: grpc-cached-backend
-      hosts:
-        - address: grpc-service.internal
-          port: 9000
+  grpcRoutes:
+    - name: grpc-cached-route
+      match:
+        - service:
+            exact: "api.v1.UserService"
+      route:
+        - destination:
+            host: grpc-service.internal
+            port: 9000
       cache:
         enabled: true
         ttl: "5m"
-        keyComponents:
-          - "service"                  # gRPC service name
-          - "method"                   # gRPC method name
-          - "metadata.x-tenant-id"     # Tenant metadata
-          - "metadata.authorization"   # Auth metadata
-          - "request.user_id"          # Request field
         staleWhileRevalidate: "1m"
         type: "memory"
 ```
+
+> On GRPCRoute/GraphQLRoute CRDs, `cache.type: redis` is accepted for
+> forward compatibility and produces an admission warning — redis-backed
+> route caching is currently applied in the HTTP (APIRoute) data path.
 
 ## Backend Encoding
 
@@ -1404,6 +1579,37 @@ kubectl logs -l app=avapigw | grep "unsafe redirect"
 # Monitor redirect-related errors
 curl http://localhost:9090/metrics | grep redirect
 ```
+
+### WebSocket Origin Allowlist
+
+`spec.websocket.allowedOrigins` protects WebSocket routes against cross-site
+WebSocket hijacking (CSWSH) by restricting which browser origins may complete
+the upgrade handshake:
+
+```yaml
+spec:
+  websocket:
+    allowedOrigins:
+      - "https://app.example.com"   # scheme://host[:port] entry
+      - "internal.example.com"      # bare host[:port] entry (any scheme)
+      # - "*"                       # explicit allow-all
+```
+
+#### Origin Matching Rules
+
+| Configuration | Behavior |
+|---------------|----------|
+| Omitted / empty list | Every origin accepted (backward compatible); one warning logged at startup |
+| Non-empty list | Only listed origins **and same-origin requests** accepted; others rejected with **403** during the handshake, before any backend connection |
+| `"*"` entry | Explicitly allow every origin (no startup warning) |
+| No `Origin` header | Always allowed (non-browser clients) |
+
+Entries take the form `scheme://host[:port]` or bare `host[:port]`; `ws`/`wss`
+schemes are normalized to `http`/`https` (browsers send the page origin during
+the handshake). Wildcard hosts (e.g. `*.example.com`) are not supported —
+entries with a wildcard in the host are rejected by configuration validation;
+only the standalone `"*"` entry allows all origins. The allowlist applies to
+both proxied WebSocket routes and GraphQL subscription (graphql-ws) upgrades.
 
 ## GraphQL Configuration
 
@@ -1914,14 +2120,19 @@ spec:
 
 ### Dependency Upgrades
 
-The following dependencies have been upgraded for improved performance and security:
+The project targets the **Go 1.26.5** toolchain (see `go.mod`, the Docker images, and CI). The
+following dependencies have been upgraded for improved performance, security, and compatibility
+with Go 1.26.5:
 
 **Go Dependencies:**
 - `github.com/redis/go-redis/v9` upgraded to v9.21.0 (from v9.20.1) - Enhanced Redis client with improved connection pooling and Sentinel support
 - `protobuf` upgraded to v1.36.11 - Latest Protocol Buffers implementation with performance improvements
 - **OpenTelemetry** upgraded to v1.44.0 - Latest observability framework with enhanced tracing capabilities and performance improvements. The v1.44.0 SDK line carries semantic-convention schema **v1.41.0**, so the tracer resource is built against `go.opentelemetry.io/otel/semconv/v1.41.0` (see [Observability](#opentelemetry-semconv-version) note below)
-- `github.com/getkin/kin-openapi` upgraded to v0.140.0 - OpenAPI request/response validation (transitively pulls `github.com/oasdiff/yaml` v0.1.0)
-- `github.com/vektah/gqlparser/v2` upgraded to v2.5.35 - GraphQL schema/query parser used by the GraphQL proxy
+- `github.com/getkin/kin-openapi` upgraded to v0.142.0 (from v0.140.0) - OpenAPI request/response validation (transitively pulls `github.com/oasdiff/yaml` v0.1.0; `github.com/go-openapi/swag` and other transitive patch bumps came along)
+- `github.com/vektah/gqlparser/v2` upgraded to v2.5.36 (from v2.5.35) - GraphQL schema/query parser used by the GraphQL proxy
+- `github.com/google/cel-go` upgraded to v0.29.2 (from v0.28.1) - CEL expression evaluation used by ABAC authorization
+- `github.com/golang-jwt/jwt/v5` upgraded to v5.3.1 (from v5.3.0) - JWT parsing and validation
+- `github.com/lestrrat-go/jwx/v2` upgraded to v2.1.7 (from v2.1.6) - JWKS handling and JOSE primitives
 - `golang.org/x/crypto` upgraded to v0.53.0 - Cryptographic primitives (TLS, JWT signing, certificate handling)
 - `golang.org/x/text` upgraded to v0.38.0 - Text processing and encoding utilities
 - `k8s.io/api`, `k8s.io/apimachinery`, and `k8s.io/client-go` upgraded to v0.36.2 - Kubernetes API types and client used by the operator and CRD modes
@@ -1999,7 +2210,9 @@ spec:
       # TLS metrics configuration
       tls:
         enabled: true
-        handshakes: true       # TLS handshake metrics
+        handshakes: true       # TLS handshake metrics: connections total and
+                               # gateway_tls_handshake_duration_seconds, recorded
+                               # for HTTPS listener AND gRPC TLS listener handshakes
         certificates: true     # Certificate lifecycle metrics
         
       # Vault metrics configuration
@@ -2309,8 +2522,22 @@ spec:
   rateLimit:
     enabled: true
     requestsPerSecond: 1000
-    burst: 2000
+    burst: 2000                    # Must be >= 1 when enabled
     perClient: true
+    # Distributed rate limiting: share token buckets across gateway
+    # instances through Redis standalone or Redis Sentinel.
+    # store: redis                 # memory (default) | redis
+    # redis:
+    #   url: "redis://redis.cache.svc:6379/0"     # or sentinel: {...}
+    #   readTimeout: 100ms         # Bounds each rate limit decision
+    #   keyPrefix: "avapigw:"
+    #   failOpen: true             # true (default): allow on Redis outage;
+    #                              # false: reject with 429, fail hard at
+    #                              # startup if Redis is unreachable
+    #   retry:
+    #     maxRetries: 3
+    #     initialBackoff: 100ms
+    #     maxBackoff: 30s
   
   # Circuit breaker (global middleware chain)
   circuitBreaker:
@@ -2362,6 +2589,14 @@ spec:
       cors:
         allowOrigins: ["https://app.example.com"]
         allowMethods: ["GET", "POST"]
+      
+      # Rate limiting (per-route middleware; enforced for HTTP routes,
+      # supports store: memory (default) or redis for distributed limiting)
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+        perClient: true
       
       # Request limits (per-route middleware)
       requestLimits:
@@ -2434,9 +2669,20 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 
 #### Per-Route Middleware Chain
 ```
-Security Headers → CORS → Body Limit → Headers → Cache → 
-Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+OpenAPI Validation → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
+
+Authentication runs first (closest to the client), authorization needs the
+identity from context, and rate limiting runs after auth so unauthenticated
+requests get 401 before 429. If a route's authentication or authorization
+middleware cannot be constructed, the route **fails closed**: every request
+receives 503 Service Unavailable,
+`gateway_route_auth_failures_total{reason="construction_failed"}` increments,
+and the ERROR log `failed to build route security middleware, failing closed`
+is emitted (treat it as page-worthy — the route stays unavailable until a
+configuration reload yields a constructible middleware). Other routes keep
+serving normally.
 
 ### Middleware Features and Limits
 
@@ -2446,6 +2692,16 @@ Transform → Encoding → [proxy to backend]
 - **Cache-Control**: Respects Cache-Control headers (no-store, no-cache)
 - **Per-Route Isolation**: Each route gets its own cache namespace
 - **Thread Safety**: Thread-safe cache factory with lazy initialization
+- **Per-Request Header Stripping**: CORS headers (`Access-Control-*`), `Set-Cookie`, and hop-by-hop headers are stripped from cached entries; the live middleware headers win on replay, so a cache entry filled by one request never leaks another request's CORS grants or cookies
+- **Decoupled Cache Fill**: the cache write is detached from the client's request context and bounded to 5 seconds, so a client disconnect cannot abort or poison the fill
+
+#### Rate Limit Middleware
+- **Token Bucket**: `requestsPerSecond` refill rate with `burst` capacity (`burst` must be >= 1)
+- **Per-Client Buckets**: `perClient: true` keys buckets by client IP
+- **Stores**: `memory` (per-instance, default) or `redis` (atomic Lua token bucket shared across gateway instances via Redis standalone or Sentinel)
+- **Failure Policy**: `redis.failOpen: true` (default) allows requests on Redis outage with a rate-limited WARN and `gateway_middleware_redis_rate_limit_errors_total{policy="fail_open"}`; `failOpen: false` rejects with 429 and fails construction hard when Redis is unreachable at startup
+- **Decision Bound**: each redis rate limit decision is bounded by `redis.readTimeout` (default 100ms)
+- **Enforcement Scope**: the redis store applies to the gateway-level limit and HTTP/GraphQL route-level limits (GraphQL routes reuse the shared per-route chain); gRPC routes keep the in-memory limiter
 
 #### Transform Middleware
 - **Body Size Limit**: 10MB maximum request/response body size for transformation
@@ -2520,10 +2776,12 @@ gateway_config_reload_total{status="failure"} 1
 # Configuration reload duration
 gateway_config_reload_duration_seconds 0.050
 
-# Component-specific reload operations
-gateway_config_reload_component_total{component="cors",status="success"} 8
-gateway_config_reload_component_total{component="security",status="success"} 6
-gateway_config_reload_component_total{component="audit",status="success"} 4
+# Component-specific reload operations (label is `result`, not `status`)
+gateway_config_reload_component_total{component="cors",result="success"} 8
+gateway_config_reload_component_total{component="routes",result="success"} 6
+gateway_config_reload_component_total{component="audit",result="success"} 4
+# spec.vault is never hot-reloaded; a change is counted as skipped
+gateway_config_reload_component_total{component="vault",result="skipped"} 0
 
 # Configuration watcher status
 gateway_config_watcher_running 1

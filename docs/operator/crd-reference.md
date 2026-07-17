@@ -1155,8 +1155,32 @@ spec:
   rateLimit:
     enabled: true
     requestsPerSecond: 100         # Requests per second
-    burst: 200                     # Burst capacity
+    burst: 200                     # Burst capacity (must be >= 1)
     perClient: true                # Per-client rate limiting
+    # Distributed rate limiting: share token buckets across gateway
+    # replicas through Redis or Redis Sentinel (enforced for APIRoutes;
+    # url and sentinel are mutually exclusive)
+    store: redis                   # memory (default) | redis
+    redis:
+      # url: "redis://redis.cache.svc:6379/0"
+      sentinel:
+        masterName: "mymaster"
+        sentinelAddrs:
+          - "sentinel1.cache.svc.cluster.local:26379"
+          - "sentinel2.cache.svc.cluster.local:26379"
+        passwordVaultPath: "secret/redis-master"
+        sentinelPasswordVaultPath: "secret/redis-sentinel"
+      poolSize: 10
+      connectTimeout: "5s"
+      readTimeout: "100ms"         # Also bounds each rate limit decision
+      writeTimeout: "3s"
+      keyPrefix: "avapigw:"
+      failOpen: true               # true (default): allow on Redis outage;
+                                   # false: reject with 429
+      retry:
+        maxRetries: 3
+        initialBackoff: "100ms"
+        maxBackoff: "30s"
   
   maxSessions:
     enabled: true
@@ -1240,6 +1264,31 @@ spec:
       - "query"
       - "headers.Authorization"
     staleWhileRevalidate: "1m"     # Serve stale while revalidating
+    # Distributed cache shared across gateway replicas (route-level;
+    # url and sentinel are mutually exclusive)
+    type: redis                    # memory (default) | redis
+    redis:
+      # url: "redis://redis.cache.svc:6379/0"
+      sentinel:
+        masterName: "mymaster"
+        sentinelAddrs:
+          - "sentinel1.cache.svc.cluster.local:26379"
+          - "sentinel2.cache.svc.cluster.local:26379"
+        db: 0
+        passwordVaultPath: "secret/redis-master"
+        sentinelPasswordVaultPath: "secret/redis-sentinel"
+      poolSize: 10
+      connectTimeout: "5s"
+      readTimeout: "3s"
+      writeTimeout: "3s"
+      keyPrefix: "route-cache:"
+      ttlJitter: 0.1               # ±10% TTL jitter (stampede protection)
+      hashKeys: true               # SHA256-hash cache keys (hashed keys also
+                                   # appear in spans/logs instead of raw keys)
+      retry:
+        maxRetries: 3
+        initialBackoff: "100ms"
+        maxBackoff: "30s"
   
   # Content encoding
   encoding:
@@ -1380,7 +1429,25 @@ spec:
 | `spec.headers.request.remove` | `[]string` | No | Request headers to remove |
 | `spec.rateLimit.enabled` | `bool` | No | Enable rate limiting |
 | `spec.rateLimit.requestsPerSecond` | `int` | No | Requests per second limit |
-| `spec.rateLimit.burst` | `int` | No | Burst capacity |
+| `spec.rateLimit.burst` | `int` | No | Burst capacity (must be >= 1) |
+| `spec.rateLimit.perClient` | `bool` | No | Per-client (IP) buckets |
+| `spec.rateLimit.store` | `string` | No | Limiter store: `memory` (default) or `redis` (distributed) |
+| `spec.rateLimit.redis.url` | `string` | No | Redis URL (standalone; mutually exclusive with sentinel) |
+| `spec.rateLimit.redis.sentinel.masterName` | `string` | Cond. | Sentinel master name (required with sentinel) |
+| `spec.rateLimit.redis.sentinel.sentinelAddrs` | `[]string` | Cond. | Sentinel addresses (required with sentinel) |
+| `spec.rateLimit.redis.sentinel.password` / `passwordVaultPath` | `string` | No | Master password (inline or Vault) |
+| `spec.rateLimit.redis.sentinel.sentinelPassword` / `sentinelPasswordVaultPath` | `string` | No | Sentinel password (inline or Vault) |
+| `spec.rateLimit.redis.sentinel.db` | `int` | No | Redis database number |
+| `spec.rateLimit.redis.poolSize` | `int` | No | Connection pool size |
+| `spec.rateLimit.redis.connectTimeout` | `string` | No | Connect timeout |
+| `spec.rateLimit.redis.readTimeout` | `string` | No | Read timeout; bounds each decision (default 100ms) |
+| `spec.rateLimit.redis.writeTimeout` | `string` | No | Write timeout |
+| `spec.rateLimit.redis.keyPrefix` | `string` | No | Key prefix |
+| `spec.rateLimit.redis.passwordVaultPath` | `string` | No | Vault path for Redis password (standalone) |
+| `spec.rateLimit.redis.failOpen` | `bool` | No | Allow (`true`, default) or 429 (`false`) on Redis outage |
+| `spec.rateLimit.redis.retry.maxRetries` | `int` | No | Initial connection retries (default 3) |
+| `spec.rateLimit.redis.retry.initialBackoff` | `string` | No | Initial retry backoff (default 100ms) |
+| `spec.rateLimit.redis.retry.maxBackoff` | `string` | No | Max retry backoff (default 30s) |
 | `spec.maxSessions.enabled` | `bool` | No | Enable session limiting |
 | `spec.maxSessions.maxConcurrent` | `int` | No | Max concurrent sessions |
 | `spec.cors.allowOrigins` | `[]string` | No | Allowed CORS origins |
@@ -1390,6 +1457,16 @@ spec:
 | `spec.transform.response.allowFields` | `[]string` | No | Fields to include in response |
 | `spec.cache.enabled` | `bool` | No | Enable caching |
 | `spec.cache.ttl` | `string` | No | Cache TTL |
+| `spec.cache.type` | `string` | No | Cache backend: `memory` (default) or `redis` |
+| `spec.cache.redis.url` | `string` | No | Redis URL (standalone; mutually exclusive with sentinel) |
+| `spec.cache.redis.sentinel.*` | - | No | Redis Sentinel connection (same schema as rate limit sentinel) |
+| `spec.cache.redis.poolSize` | `int` | No | Connection pool size |
+| `spec.cache.redis.connectTimeout` / `readTimeout` / `writeTimeout` | `string` | No | Connection/operation timeouts |
+| `spec.cache.redis.keyPrefix` | `string` | No | Cache key prefix |
+| `spec.cache.redis.ttlJitter` | `float64` | No | TTL jitter percentage (0.0-1.0) |
+| `spec.cache.redis.hashKeys` | `bool` | No | SHA256-hash cache keys (hashed keys also used in spans/logs) |
+| `spec.cache.redis.passwordVaultPath` | `string` | No | Vault path for Redis password (standalone) |
+| `spec.cache.redis.retry.*` | - | No | Initial connection retry (maxRetries, initialBackoff, maxBackoff) |
 | `spec.authentication.enabled` | `bool` | No | Enable route authentication |
 | `spec.authentication.jwt.enabled` | `bool` | No | Enable JWT authentication |
 | `spec.authentication.apiKey.enabled` | `bool` | No | Enable API key authentication |
@@ -1399,6 +1476,24 @@ spec:
 | `spec.authorization.rbac.enabled` | `bool` | No | Enable RBAC authorization |
 | `spec.authorization.abac.enabled` | `bool` | No | Enable ABAC authorization |
 | `spec.authorization.external.enabled` | `bool` | No | Enable external authorization |
+
+> **Enforcement notes:**
+> - Route-level rate limiting on HTTP and GraphQL routes is enforced by the
+>   shared per-route middleware chain (earlier releases validated but ignored
+>   it on HTTP routes — review limits before upgrading).
+>   `rateLimit.store: redis` is applied for APIRoutes and GraphQLRoutes;
+>   GRPCRoute keeps the in-memory limiter. `cache.type: redis` is wired for
+>   the HTTP APIRoute data path (GraphQL routes attach the shared cache
+>   middleware but only GET requests are cached). The admission webhook
+>   emits a conservative forward-compatibility **warning** for these redis
+>   options on every kind except APIRoute.
+> - `spec.authentication.mtls` without `caFile` is accepted with an admission
+>   **warning** — valid when the client CA is provided elsewhere (for example
+>   a Vault-managed CA).
+> - If a route's authentication/authorization middleware cannot be
+>   constructed at runtime, the gateway **fails closed**: the route returns
+>   503 and `gateway_route_auth_failures_total{reason="construction_failed"}`
+>   increments.
 
 ## GRPCRoute CRD
 
@@ -1467,7 +1562,8 @@ spec:
       set:
         x-response-time: "{{.ResponseTime}}"
   
-  # Rate limiting
+  # Rate limiting (GRPCRoute uses the in-memory limiter; store: redis is
+  # accepted for forward compatibility and produces an admission warning)
   rateLimit:
     enabled: true
     requestsPerSecond: 100
@@ -1715,7 +1811,10 @@ spec:
         set:
           X-Response-Transform: "applied"
   
-  # Backend caching
+  # Backend caching — RESERVED: accepted with an admission warning but not
+  # wired to the gateway data path yet. Use route-level caching
+  # (APIRoute/GRPCRoute/GraphQLRoute spec.cache) instead, including the
+  # Redis and Redis Sentinel backends.
   cache:
     enabled: true
     ttl: "5m"                      # Cache TTL
@@ -1725,52 +1824,22 @@ spec:
       - "headers.Authorization"
     staleWhileRevalidate: "1m"     # Serve stale while revalidating
     type: "redis"                  # Cache type (memory, redis)
-    
-    # Redis cache configuration
-    redis:
-      # Redis Sentinel configuration (high availability)
-      sentinel:
-        masterName: "mymaster"
-        sentinelAddrs:
-          - "sentinel1.cache.svc.cluster.local:26379"
-          - "sentinel2.cache.svc.cluster.local:26379"
-          - "sentinel3.cache.svc.cluster.local:26379"
-        sentinelPassword: "sentinel-password"
-        password: "redis-master-password"
-        # Vault password integration for sentinel
-        sentinelPasswordVaultPath: "secret/redis-sentinel"
-        passwordVaultPath: "secret/redis-master"
-        db: 0
-      
-      # OR Redis standalone configuration (fallback)
-      address: "redis.cache.svc.cluster.local:6379"
-      password: "redis-password"
-      # Vault password integration for standalone
-      passwordVaultPath: "secret/redis"
+    # Redis Sentinel configuration (high availability)
+    sentinel:
+      masterName: "mymaster"
+      sentinelAddrs:
+        - "sentinel1.cache.svc.cluster.local:26379"
+        - "sentinel2.cache.svc.cluster.local:26379"
+        - "sentinel3.cache.svc.cluster.local:26379"
+      sentinelPasswordVaultPath: "secret/redis-sentinel"
+      passwordVaultPath: "secret/redis-master"
       db: 0
-      
-      # Connection pool settings
-      maxRetries: 3
-      poolSize: 10
-      minIdleConns: 5
-      maxConnAge: "30m"
-      poolTimeout: "5s"
-      idleTimeout: "10m"
-      keyPrefix: "avapigw:cache:"
-      
-      # TTL jitter to prevent thundering herd
-      ttlJitter: 0.1  # ±10% jitter on TTL values
-      
-      # Hash cache keys for privacy and length control
-      hashKeys: true
-      
-      # TLS configuration
-      tls:
-        enabled: true
-        caFile: "/etc/ssl/certs/redis-ca.crt"
-        certFile: "/etc/ssl/certs/redis-client.crt"
-        keyFile: "/etc/ssl/private/redis-client.key"
-        insecureSkipVerify: false
+    # TTL jitter to prevent thundering herd
+    ttlJitter: 0.1                 # ±10% jitter on TTL values
+    # Hash cache keys for privacy and length control
+    hashKeys: true
+    # Vault password integration for standalone mode
+    passwordVaultPath: "secret/redis"
   
   # Backend encoding
   encoding:
@@ -1831,25 +1900,18 @@ spec:
 | `spec.transform.enabled` | `bool` | No | Enable transformation |
 | `spec.transform.request.template` | `string` | No | Request transformation template |
 | `spec.transform.response.allowFields` | `[]string` | No | Response fields to allow |
-| `spec.cache.enabled` | `bool` | No | Enable caching |
-| `spec.cache.ttl` | `string` | No | Cache TTL |
-| `spec.cache.type` | `string` | No | Cache type (memory, redis) |
-| `spec.cache.redis.sentinel.masterName` | `string` | No | Redis Sentinel master name |
-| `spec.cache.redis.sentinel.sentinelAddrs` | `[]string` | No | Redis Sentinel addresses |
-| `spec.cache.redis.sentinel.sentinelPassword` | `string` | No | Redis Sentinel password |
-| `spec.cache.redis.sentinel.password` | `string` | No | Redis master password |
-| `spec.cache.redis.sentinel.sentinelPasswordVaultPath` | `string` | No | Vault path for sentinel password |
-| `spec.cache.redis.sentinel.passwordVaultPath` | `string` | No | Vault path for master password |
-| `spec.cache.redis.sentinel.db` | `int` | No | Redis database number |
-| `spec.cache.redis.address` | `string` | No | Redis standalone address |
-| `spec.cache.redis.password` | `string` | No | Redis standalone password |
-| `spec.cache.redis.passwordVaultPath` | `string` | No | Vault path for Redis password |
-| `spec.cache.redis.db` | `int` | No | Redis standalone database |
-| `spec.cache.redis.poolSize` | `int` | No | Redis connection pool size |
-| `spec.cache.redis.keyPrefix` | `string` | No | Redis key prefix |
-| `spec.cache.redis.ttlJitter` | `float64` | No | TTL jitter percentage (0.0-1.0) |
-| `spec.cache.redis.hashKeys` | `bool` | No | Enable SHA256 key hashing |
-| `spec.cache.redis.tls.enabled` | `bool` | No | Enable Redis TLS |
+| `spec.cache.enabled` | `bool` | No | RESERVED — enable caching (admission warning, not wired to the data path) |
+| `spec.cache.ttl` | `string` | No | RESERVED — cache TTL |
+| `spec.cache.type` | `string` | No | RESERVED — cache type (memory, redis) |
+| `spec.cache.sentinel.masterName` | `string` | No | RESERVED — Redis Sentinel master name |
+| `spec.cache.sentinel.sentinelAddrs` | `[]string` | No | RESERVED — Redis Sentinel addresses |
+| `spec.cache.sentinel.sentinelPassword` / `sentinelPasswordVaultPath` | `string` | No | RESERVED — Sentinel password (inline or Vault) |
+| `spec.cache.sentinel.password` / `passwordVaultPath` | `string` | No | RESERVED — master password (inline or Vault) |
+| `spec.cache.sentinel.db` | `int` | No | RESERVED — Redis database number |
+| `spec.cache.ttlJitter` | `float64` | No | RESERVED — TTL jitter percentage (0.0-1.0) |
+| `spec.cache.hashKeys` | `bool` | No | RESERVED — enable SHA256 key hashing |
+| `spec.cache.passwordVaultPath` | `string` | No | RESERVED — Vault path for Redis password (standalone) |
+| `spec.rateLimit.store` | `string` | No | Accepted with warning — the distributed limiter is not applied at backend level |
 | `spec.encoding.request.contentType` | `string` | No | Request content type |
 | `spec.encoding.response.contentType` | `string` | No | Response content type |
 | `spec.encoding.response.compression` | `string` | No | Response compression (gzip, deflate, br) |
@@ -1986,6 +2048,9 @@ spec:
 | `spec.hosts` | `[]BackendHost` | Yes | Backend host configuration |
 | `spec.healthCheck.enabled` | `bool` | No | Enable gRPC health checking |
 | `spec.healthCheck.service` | `string` | No | Service name for health check |
+| `spec.healthCheck.useHTTP` | `bool` | No | Use HTTP GET instead of gRPC health protocol |
+| `spec.healthCheck.httpPath` | `string` | No | HTTP health path (schema default `/healthz`; must start with `/`). With `useHTTP: false` the schema default is tolerated (inert), but any explicit non-default path is rejected |
+| `spec.healthCheck.httpPort` | `int` | No | HTTP health port (1-65535; defaults to the backend port). Only valid with `useHTTP: true` |
 | `spec.connectionPool.maxIdleConns` | `int` | No | Max idle connections |
 | `spec.connectionPool.maxConnsPerHost` | `int` | No | Max connections per host |
 | `spec.connectionPool.idleConnTimeout` | `string` | No | Idle connection timeout |
@@ -2063,7 +2128,14 @@ status:
 
 ## Redis Sentinel Configuration
 
-The AVAPIGW Operator supports Redis Sentinel for high-availability caching in both Backend and GRPCBackend CRDs. Redis Sentinel provides automatic failover and service discovery for Redis master-replica setups.
+The AVAPIGW Operator supports Redis Sentinel for high availability in
+route-level caching (`spec.cache.redis.sentinel`) and distributed rate
+limiting (`spec.rateLimit.redis.sentinel`). Redis Sentinel provides automatic
+failover and service discovery for Redis master-replica setups.
+
+> Backend-level caching (`Backend`/`GRPCBackend` `spec.cache`) is RESERVED:
+> the Sentinel fields are accepted with an admission warning but are not
+> wired to the gateway data path. Use route-level caching instead.
 
 ### RedisSentinelSpec Fields
 
@@ -2072,39 +2144,34 @@ The AVAPIGW Operator supports Redis Sentinel for high-availability caching in bo
 | `masterName` | `string` | Yes | Redis Sentinel master name |
 | `sentinelAddrs` | `[]string` | Yes | List of Sentinel addresses (host:port) |
 | `sentinelPassword` | `string` | No | Password for Sentinel authentication |
+| `sentinelPasswordVaultPath` | `string` | No | Vault path for the Sentinel password (secret with `password` key) |
 | `password` | `string` | No | Password for Redis master authentication |
+| `passwordVaultPath` | `string` | No | Vault path for the Redis master password (secret with `password` key) |
 | `db` | `int` | No | Redis database number (default: 0) |
 
-### Configuration Precedence
+### Mutual Exclusivity
 
-When both Sentinel and standalone Redis configurations are provided:
+`redis.url` (standalone) and `redis.sentinel` are mutually exclusive; the
+admission webhook rejects configurations declaring both. When Sentinel is
+configured, `masterName` and at least one entry in `sentinelAddrs` are
+required.
 
-1. **Sentinel configuration takes precedence** - If `sentinel` is configured, it will be used
-2. **Standalone fallback** - If Sentinel is not configured or fails, standalone Redis is used
-3. **Environment variable override** - Environment variables override YAML configuration
-
-### Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `REDIS_SENTINEL_MASTER_NAME` | Sentinel master name | `mymaster` |
-| `REDIS_SENTINEL_ADDRS` | Comma-separated sentinel addresses | `sentinel1:26379,sentinel2:26379` |
-| `REDIS_SENTINEL_PASSWORD` | Sentinel authentication password | `sentinel-password` |
-| `REDIS_MASTER_PASSWORD` | Redis master password | `redis-master-password` |
-| `REDIS_SENTINEL_DB` | Redis database number | `0` |
-
-### Example Backend with Redis Sentinel Cache
+### Example APIRoute with Redis Sentinel Cache and Rate Limit
 
 ```yaml
 apiVersion: avapigw.io/v1alpha1
-kind: Backend
+kind: APIRoute
 metadata:
-  name: redis-sentinel-backend
+  name: redis-sentinel-route
   namespace: production
 spec:
-  hosts:
-    - address: "api.example.com"
-      port: 8080
+  match:
+    - uri:
+        prefix: /api/v1
+  route:
+    - destination:
+        host: "api-backend"
+        port: 8080
   cache:
     enabled: true
     ttl: "10m"
@@ -2112,28 +2179,40 @@ spec:
     keyComponents:
       - "path"
       - "query"
-      - "headers.Authorization"
     staleWhileRevalidate: "2m"
     redis:
-      # Redis Sentinel configuration (high availability)
       sentinel:
         masterName: "mymaster"
         sentinelAddrs:
           - "sentinel1.cache.svc.cluster.local:26379"
           - "sentinel2.cache.svc.cluster.local:26379"
           - "sentinel3.cache.svc.cluster.local:26379"
-        sentinelPassword: "sentinel-password"
-        password: "redis-master-password"
+        sentinelPasswordVaultPath: "secret/redis-sentinel"
+        passwordVaultPath: "secret/redis-master"
         db: 0
-      # Connection pool settings
       poolSize: 10
-      maxRetries: 3
       keyPrefix: "avapigw:cache:"
-      # TLS configuration
-      tls:
-        enabled: true
-        caFile: "/etc/ssl/certs/redis-ca.crt"
-        insecureSkipVerify: false
+      ttlJitter: 0.1
+      hashKeys: true
+      retry:
+        maxRetries: 3
+        initialBackoff: "100ms"
+        maxBackoff: "30s"
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+    store: redis
+    redis:
+      sentinel:
+        masterName: "mymaster"
+        sentinelAddrs:
+          - "sentinel1.cache.svc.cluster.local:26379"
+          - "sentinel2.cache.svc.cluster.local:26379"
+        passwordVaultPath: "secret/redis-master"
+      readTimeout: "100ms"
+      failOpen: true
 ```
 
 ### Validation Rules
@@ -2444,9 +2523,25 @@ The operator enforces validation rules through admission webhooks:
 ### Route-Specific Validations
 
 - **URI matching** - exactly one of exact, prefix, or regex must be specified
-- **Duplicate routes** - no two routes can have identical match conditions
+- **Duplicate routes** - only **true duplicates** are rejected: the same match
+  type and path with overlapping methods. Exact-vs-prefix combinations and
+  nested prefixes (e.g. `/` and `/api`) are allowed — the router resolves
+  them by precedence (exact = 1000 > prefix = 500 + prefix length >
+  regex = 100), so catch-all routes coexist with specific routes. The check
+  also applies across kinds sharing the HTTP data path (APIRoute ↔
+  GraphQLRoute), and updating a resource never conflicts with its own
+  previous version
 - **Backend references** - referenced backends must exist in the same namespace
 - **Weight distribution** - weights across destinations must sum to 100
+- **Rate limiting** - `burst` must be >= 1 when rate limiting is enabled;
+  `redis.url` and `redis.sentinel` are mutually exclusive
+- **ABAC CEL expressions** - compiled at admission time against the runtime
+  evaluation environment (`subject`, `request`, `resource` (string),
+  `action`, `environment`, `now`, plus `ip_in_range`/`has_role`);
+  expressions referencing undeclared variables such as `identity.*` are
+  rejected
+- **mTLS `caFile`** - optional; a WARNING (not a rejection) is emitted when
+  absent, since the client CA may be provided elsewhere (e.g. Vault-managed)
 
 ### Backend-Specific Validations
 
@@ -2454,6 +2549,8 @@ The operator enforces validation rules through admission webhooks:
 - **Health check paths** - must start with '/' for HTTP backends
 - **TLS configuration** - certificate files must exist when specified
 - **Authentication** - required fields must be present for each auth type
+- **Reserved cache** - `spec.cache` is accepted with an admission warning but
+  is not applied by the gateway data path yet
 
 ### APIRoute with Full Authentication and Authorization
 

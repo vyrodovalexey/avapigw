@@ -180,6 +180,227 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	if spec.OpenAPIValidation != nil {
 		v.validateOpenAPIValidationConfig(spec.OpenAPIValidation, "spec.openAPIValidation")
 	}
+
+	if spec.WebSocket != nil {
+		v.validateWebSocket(spec.WebSocket, "spec.websocket")
+	}
+
+	v.validateVaultSpec(spec)
+}
+
+// validateVaultSpec validates the gateway-wide Vault client section and its
+// interaction with PKI issuance (tls.vault) requirements. Validation runs on
+// the post-overlay (effective) configuration, so environment-driven values
+// (e.g. VAULT_ADDR) are already reflected here and the validator stays
+// env-free.
+func (v *Validator) validateVaultSpec(spec *GatewaySpec) {
+	if spec.Vault == nil {
+		// Absent section preserves legacy env-only behavior; nothing to check.
+		return
+	}
+
+	v.validateVaultConfig(spec.Vault, "spec.vault")
+
+	// PKI issuance requires the client: an explicitly disabled spec.vault
+	// combined with tls.vault usage would previously surface only as an
+	// opaque runtime auth error. (VAULT_ADDR in the environment forces
+	// Enabled=true during the overlay, so env-driven setups never hit this.)
+	if !spec.Vault.Enabled && spec.RequiresVaultTLS() {
+		v.addError("spec.vault.enabled",
+			"vault TLS certificate issuance (tls.vault) is configured but spec.vault is disabled; "+
+				"enable spec.vault or set VAULT_ADDR")
+	}
+}
+
+// validateVaultConfig validates the spec.vault client connection section.
+// Semantic checks (address, auth method requirements) apply only when the
+// section is enabled; durations and counters are type-checked regardless so
+// a disabled-but-broken section is still surfaced early.
+func (v *Validator) validateVaultConfig(vc *VaultConfig, path string) {
+	v.validateVaultCache(vc.Cache, path+".cache")
+	v.validateVaultRetry(vc.Retry, path+".retry")
+	v.validateVaultAuthRetry(vc.Auth, path+".auth")
+
+	if !vc.Enabled {
+		return
+	}
+
+	if vc.Address == "" {
+		v.addError(path+".address", "address is required when vault is enabled (or set VAULT_ADDR)")
+	}
+
+	v.validateVaultAuthMethod(vc, path)
+	v.validateVaultClientTLS(vc.TLS, path+".tls")
+}
+
+// validateVaultAuthMethod validates the auth method selection, its
+// per-method requirements, and warns about sub-blocks belonging to a
+// non-selected method (copy-paste configuration bugs).
+func (v *Validator) validateVaultAuthMethod(vc *VaultConfig, path string) {
+	method := vc.EffectiveAuthMethod()
+
+	switch method {
+	case VaultAuthMethodToken:
+		v.validateVaultTokenAuth(vc, path)
+	case VaultAuthMethodKubernetes:
+		v.validateVaultKubernetesAuth(vc, path)
+	case VaultAuthMethodAppRole:
+		v.validateVaultAppRoleAuth(vc, path)
+	default:
+		v.addError(path+".authMethod",
+			fmt.Sprintf("invalid auth method: %s (must be token, kubernetes, or approle)", vc.AuthMethod))
+		return
+	}
+
+	v.warnVaultUnusedAuthBlocks(vc, method, path)
+}
+
+// validateVaultTokenAuth enforces exactly one of token|tokenFile and warns
+// about inline tokens in the configuration file.
+func (v *Validator) validateVaultTokenAuth(vc *VaultConfig, path string) {
+	hasToken := vc.Token != ""
+	hasFile := vc.TokenFile != ""
+
+	switch {
+	case hasToken && hasFile:
+		v.addError(path+".token", "token and tokenFile are mutually exclusive")
+	case !hasToken && !hasFile:
+		v.addError(path+".token", "one of token or tokenFile is required for token authentication")
+	case hasToken:
+		v.addWarning(path+".token",
+			"inline token in configuration file is discouraged; prefer tokenFile, "+
+				"the VAULT_TOKEN environment variable (Secret-mounted), or kubernetes auth")
+	}
+}
+
+// validateVaultKubernetesAuth enforces the kubernetes auth requirements.
+func (v *Validator) validateVaultKubernetesAuth(vc *VaultConfig, path string) {
+	if vc.Kubernetes == nil {
+		v.addError(path+".kubernetes", "kubernetes configuration is required for kubernetes authentication")
+		return
+	}
+	if vc.Kubernetes.Role == "" {
+		v.addError(path+".kubernetes.role", "role is required for kubernetes authentication")
+	}
+}
+
+// validateVaultAppRoleAuth enforces the approle auth requirements: roleId
+// plus exactly one of secretId|secretIdFile, warning on inline secretId.
+func (v *Validator) validateVaultAppRoleAuth(vc *VaultConfig, path string) {
+	if vc.AppRole == nil {
+		v.addError(path+".appRole", "appRole configuration is required for approle authentication")
+		return
+	}
+	if vc.AppRole.RoleID == "" {
+		v.addError(path+".appRole.roleId", "roleId is required for approle authentication")
+	}
+
+	hasSecret := vc.AppRole.SecretID != ""
+	hasFile := vc.AppRole.SecretIDFile != ""
+
+	switch {
+	case hasSecret && hasFile:
+		v.addError(path+".appRole.secretId", "secretId and secretIdFile are mutually exclusive")
+	case !hasSecret && !hasFile:
+		v.addError(path+".appRole.secretId",
+			"one of secretId or secretIdFile is required for approle authentication")
+	case hasSecret:
+		v.addWarning(path+".appRole.secretId",
+			"inline secretId in configuration file is discouraged; prefer secretIdFile or "+
+				"the VAULT_APPROLE_SECRET_ID environment variable (Secret-mounted)")
+	}
+}
+
+// warnVaultUnusedAuthBlocks warns when a sub-block for a non-selected auth
+// method is present, which usually indicates a copy-paste mistake. Warnings
+// (not errors) keep configuration merges working.
+func (v *Validator) warnVaultUnusedAuthBlocks(vc *VaultConfig, method, path string) {
+	if method != VaultAuthMethodKubernetes && vc.Kubernetes != nil {
+		v.addWarning(path+".kubernetes",
+			fmt.Sprintf("kubernetes auth configuration ignored: authMethod=%s", method))
+	}
+	if method != VaultAuthMethodAppRole && vc.AppRole != nil {
+		v.addWarning(path+".appRole",
+			fmt.Sprintf("appRole auth configuration ignored: authMethod=%s", method))
+	}
+}
+
+// validateVaultClientTLS enforces clientCert⇔clientKey pairing for the TLS
+// connection to the Vault server.
+func (v *Validator) validateVaultClientTLS(tls *VaultClientTLSConfig, path string) {
+	if tls == nil {
+		return
+	}
+	if tls.ClientCert != "" && tls.ClientKey == "" {
+		v.addError(path+".clientKey", "clientKey is required when clientCert is provided")
+	}
+	if tls.ClientKey != "" && tls.ClientCert == "" {
+		v.addError(path+".clientCert", "clientCert is required when clientKey is provided")
+	}
+}
+
+// validateVaultCache type-checks the cache block.
+func (v *Validator) validateVaultCache(cache *VaultClientCacheConfig, path string) {
+	if cache == nil {
+		return
+	}
+	if cache.TTL.Duration() < 0 {
+		v.addError(path+".ttl", "ttl cannot be negative")
+	}
+	if cache.MaxSize < 0 {
+		v.addError(path+".maxSize", "maxSize cannot be negative")
+	}
+}
+
+// validateVaultRetry type-checks the retry block.
+func (v *Validator) validateVaultRetry(retry *VaultClientRetryConfig, path string) {
+	if retry == nil {
+		return
+	}
+	if retry.MaxRetries < 0 {
+		v.addError(path+".maxRetries", "maxRetries cannot be negative")
+	}
+	if retry.BackoffBase.Duration() < 0 {
+		v.addError(path+".backoffBase", "backoffBase cannot be negative")
+	}
+	if retry.BackoffMax.Duration() < 0 {
+		v.addError(path+".backoffMax", "backoffMax cannot be negative")
+	}
+	if retry.BackoffBase.Duration() > 0 && retry.BackoffMax.Duration() > 0 &&
+		retry.BackoffBase.Duration() > retry.BackoffMax.Duration() {
+		v.addError(path+".backoffBase", "backoffBase cannot be greater than backoffMax")
+	}
+}
+
+// validateVaultAuthRetry type-checks the startup authentication retry block.
+func (v *Validator) validateVaultAuthRetry(auth *VaultAuthRetryConfig, path string) {
+	if auth == nil {
+		return
+	}
+	if auth.MaxRetries < 0 {
+		v.addError(path+".maxRetries", "maxRetries cannot be negative")
+	}
+	if auth.InitialBackoff.Duration() < 0 {
+		v.addError(path+".initialBackoff", "initialBackoff cannot be negative")
+	}
+	if auth.MaxBackoff.Duration() < 0 {
+		v.addError(path+".maxBackoff", "maxBackoff cannot be negative")
+	}
+	if auth.Timeout.Duration() < 0 {
+		v.addError(path+".timeout", "timeout cannot be negative")
+	}
+}
+
+// validateWebSocket validates WebSocket configuration.
+func (v *Validator) validateWebSocket(ws *WebSocketConfig, path string) {
+	for i, origin := range ws.AllowedOrigins {
+		if strings.TrimSpace(origin) == WSOriginWildcard {
+			continue
+		}
+		if _, _, err := ParseWSOrigin(origin); err != nil {
+			v.addError(fmt.Sprintf("%s.allowedOrigins[%d]", path, i), err.Error())
+		}
+	}
 }
 
 // validateListeners validates listener configurations.
@@ -391,6 +612,10 @@ func (v *Validator) validateRouteOptions(route *Route, path string) {
 
 	if route.RateLimit != nil {
 		v.validateRateLimit(route.RateLimit, path+".rateLimit")
+	}
+
+	if route.Cache != nil {
+		v.validateCacheConfig(route.Cache, path+".cache")
 	}
 
 	if route.MaxSessions != nil {
@@ -636,15 +861,110 @@ func (v *Validator) validateDirectResponse(dr *DirectResponseConfig, path string
 }
 
 // validateRateLimit validates rate limit configuration.
+// Burst must be at least 1 when rate limiting is enabled, aligned with the
+// operator webhook validation: a zero burst means the token bucket starts
+// empty and — with the redis store in particular — every request is
+// silently denied.
 func (v *Validator) validateRateLimit(rl *RateLimitConfig, path string) {
 	if rl.Enabled {
 		if rl.RequestsPerSecond <= 0 {
 			v.addError(path+".requestsPerSecond", "requestsPerSecond must be positive when enabled")
 		}
 
-		if rl.Burst < 0 {
-			v.addError(path+".burst", "burst cannot be negative")
+		if rl.Burst < 1 {
+			v.addError(path+".burst", "burst must be at least 1 when enabled")
 		}
+	}
+
+	v.validateRateLimitStore(rl, path)
+}
+
+// validateRateLimitStore validates the rate limiter store selection and the
+// Redis connection configuration of the distributed rate limiter.
+func (v *Validator) validateRateLimitStore(rl *RateLimitConfig, path string) {
+	switch rl.Store {
+	case "", RateLimitStoreMemory:
+		if rl.Redis != nil {
+			v.addError(path+".redis", "redis configuration is only valid when store is 'redis'")
+		}
+		return
+	case RateLimitStoreRedis:
+		// Valid store; connection configuration is validated below.
+	default:
+		v.addError(path+".store", fmt.Sprintf("invalid store: %s (must be 'memory' or 'redis')", rl.Store))
+		return
+	}
+
+	if rl.Redis == nil || (rl.Redis.URL == "" && rl.Redis.Sentinel == nil) {
+		v.addError(path+".redis", "redis configuration with url or sentinel is required when store is 'redis'")
+		return
+	}
+
+	v.validateRedisConnection(rl.Redis.URL, rl.Redis.Sentinel, path+".redis")
+
+	if rl.Redis.ReadTimeout.Duration() < 0 {
+		v.addError(path+".redis.readTimeout", "readTimeout cannot be negative")
+	}
+}
+
+// validateRedisConnection validates the shared standalone-vs-sentinel Redis
+// connection rules used by cache and rate limit configurations:
+// url and sentinel are mutually exclusive, and sentinel requires a master
+// name plus at least one sentinel address.
+func (v *Validator) validateRedisConnection(url string, sentinel *RedisSentinelConfig, path string) {
+	hasURL := url != ""
+	hasSentinel := !sentinel.IsEmpty()
+
+	if hasURL && hasSentinel {
+		v.addError(path, "url and sentinel are mutually exclusive")
+	}
+
+	if sentinel == nil {
+		return
+	}
+
+	if sentinel.MasterName == "" {
+		v.addError(path+".sentinel.masterName", "masterName is required for sentinel mode")
+	}
+	if len(sentinel.SentinelAddrs) == 0 {
+		v.addError(path+".sentinel.sentinelAddrs", "at least one sentinel address is required")
+	}
+	for i, addr := range sentinel.SentinelAddrs {
+		if addr == "" {
+			v.addError(fmt.Sprintf("%s.sentinel.sentinelAddrs[%d]", path, i), "sentinel address cannot be empty")
+		}
+	}
+}
+
+// validateCacheConfig validates route-level cache configuration, including
+// the Redis backend selection rules.
+func (v *Validator) validateCacheConfig(cache *CacheConfig, path string) {
+	if cache.TTL.Duration() < 0 {
+		v.addError(path+".ttl", "ttl cannot be negative")
+	}
+
+	switch cache.Type {
+	case "", CacheTypeMemory:
+		if cache.Redis != nil {
+			v.addError(path+".redis", "redis configuration is only valid when type is 'redis'")
+		}
+		return
+	case CacheTypeRedis:
+		// Valid type; connection configuration is validated below.
+	default:
+		v.addError(path+".type", fmt.Sprintf("invalid type: %s (must be 'memory' or 'redis')", cache.Type))
+		return
+	}
+
+	if cache.Redis == nil || (cache.Redis.URL == "" && cache.Redis.Sentinel == nil) {
+		v.addError(path+".redis", "redis configuration with url or sentinel is required when type is 'redis'")
+		return
+	}
+
+	v.validateRedisConnection(cache.Redis.URL, cache.Redis.Sentinel, path+".redis")
+
+	if cache.Redis.TTLJitter < 0 || cache.Redis.TTLJitter > 1 {
+		v.addError(path+".redis.ttlJitter", "ttlJitter must be between 0.0 and 1.0")
 	}
 }
 
@@ -1837,7 +2157,7 @@ func (v *Validator) validateOpenAPIValidationConfig(cfg *OpenAPIValidationConfig
 		return
 	}
 
-	if cfg.SpecFile == "" && cfg.SpecURL == "" {
+	if cfg.SpecFile == "" && cfg.SpecURL == "" && cfg.SpecInline == "" {
 		v.addError(path, "either specFile or specURL is required when OpenAPI validation is enabled")
 	}
 
@@ -1858,7 +2178,7 @@ func (v *Validator) validateProtoValidationConfig(cfg *ProtoValidationConfig, pa
 		return
 	}
 
-	if cfg.DescriptorFile == "" {
+	if cfg.DescriptorFile == "" && cfg.DescriptorInline == "" {
 		v.addError(path+".descriptorFile", "descriptorFile is required when proto validation is enabled")
 	}
 }
@@ -1869,7 +2189,7 @@ func (v *Validator) validateGraphQLSchemaValidationConfig(cfg *GraphQLSchemaVali
 		return
 	}
 
-	if cfg.SchemaFile == "" {
+	if cfg.SchemaFile == "" && cfg.SchemaInline == "" {
 		v.addError(path+".schemaFile", "schemaFile is required when GraphQL schema validation is enabled")
 	}
 }

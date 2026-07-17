@@ -92,9 +92,14 @@ func TestGatewayConfigApplier_ApplyGraphQLRoutes_NilRouter(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestGatewayConfigApplier_ApplyGraphQLRoutes_LoadError(t *testing.T) {
+// TestGatewayConfigApplier_ApplyGraphQLRoutes_DuplicateNamesAccepted pins the
+// GraphQL router's duplicate-name semantics: unlike the HTTP and gRPC routers
+// (which reject duplicate names), the GraphQL router compiles duplicate-named
+// routes without error and keeps both — matching is ordered by specificity
+// with a name tie-break, so the load stays deterministic.
+func TestGatewayConfigApplier_ApplyGraphQLRoutes_DuplicateNamesAccepted(t *testing.T) {
 	logger := observability.NopLogger()
-	cfg := createTestGatewayConfigGQL("test-gql-routes-err")
+	cfg := createTestGatewayConfigGQL("test-gql-routes-dup-names")
 
 	gw, err := gateway.New(cfg, gateway.WithLogger(logger))
 	require.NoError(t, err)
@@ -116,7 +121,6 @@ func TestGatewayConfigApplier_ApplyGraphQLRoutes_LoadError(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	// Routes with duplicate names should cause an error
 	routes := []config.GraphQLRoute{
 		{
 			Name: "dup-route",
@@ -139,9 +143,10 @@ func TestGatewayConfigApplier_ApplyGraphQLRoutes_LoadError(t *testing.T) {
 	}
 
 	err = applier.ApplyGraphQLRoutes(ctx, routes)
-	// May or may not error depending on router implementation
-	// The important thing is we exercise the code path
-	_ = err
+	require.NoError(t, err,
+		"duplicate GraphQL route names are accepted (no name-uniqueness check)")
+	assert.Equal(t, 2, gqlRouter.RouteCount(),
+		"both duplicate-named routes must be loaded")
 }
 
 // ============================================================================

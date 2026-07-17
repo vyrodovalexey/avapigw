@@ -85,6 +85,18 @@ spec:
 
 **Note**: Only one of `specFile` or `specURL` should be specified. If both are provided, `specFile` takes precedence.
 
+#### Spec Loading Safeguards
+
+- **Fetch timeout**: `specURL` fetches are bounded to 30 seconds.
+- **External `$ref` denied (SSRF guard)**: references to locations other than
+  the spec's own root URI are rejected unless the loader is explicitly
+  configured to allow external references, protecting against SSRF and
+  local-file reads via `$ref` in untrusted documents. A denied reference
+  fails the load with `encountered disallowed external reference`.
+- **Per-load byte cache**: fetched spec bytes are cached only for the
+  duration of one load, so invalidating/reloading a spec genuinely refetches
+  it instead of serving stale bytes.
+
 ## gRPC Proto Validation
 
 For gRPC routes, use proto descriptor-based validation:
@@ -113,7 +125,9 @@ spec:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable proto descriptor validation |
-| `descriptorFile` | string | - | Path to proto descriptor file |
+| `descriptorConfigMapRef.name` | string | - | Name of ConfigMap (in the route's namespace) containing the proto descriptor. Resolved and inlined (base64) by the operator. |
+| `descriptorConfigMapRef.key` | string | - | Key in ConfigMap (optional; if empty the ConfigMap must have exactly one key) |
+| `descriptorFile` | string | - | Path to proto descriptor file (file/URL modes) |
 | `failOnError` | boolean | `true` | Reject requests that fail validation |
 | `validateRequestMessage` | boolean | `true` | Validate request message structure |
 
@@ -145,13 +159,49 @@ spec:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable GraphQL schema validation |
-| `schemaFile` | string | - | Path to GraphQL schema file |
+| `schemaConfigMapRef.name` | string | - | Name of ConfigMap (in the route's namespace) containing the GraphQL schema. Resolved and inlined by the operator. |
+| `schemaConfigMapRef.key` | string | - | Key in ConfigMap (optional; if empty the ConfigMap must have exactly one key) |
+| `schemaFile` | string | - | Path to GraphQL schema file (file/URL modes) |
 | `failOnError` | boolean | `true` | Reject requests that fail validation |
 | `validateVariables` | boolean | `true` | Validate GraphQL variables |
 
 ## Kubernetes CRD Support
 
 When using the AVAPIGW Operator, configure OpenAPI validation through Custom Resource Definitions:
+
+### How ConfigMap-referenced specs are resolved (operator mode)
+
+In operator mode, the gateway receives its configuration from the operator rather than
+reading files or ConfigMaps directly. Because of this, `specConfigMapRef` (and the gRPC
+`descriptorConfigMapRef` and GraphQL `schemaConfigMapRef` equivalents) are **fully
+supported and resolved by the operator** before the configuration is pushed to the gateway:
+
+1. When an `APIRoute` sets `openAPIValidation.specConfigMapRef`, the operator reads the
+   referenced ConfigMap and inlines the spec content into the configuration it delivers to
+   the gateway. The gateway then loads the spec from that inline content — it never needs
+   cluster access to the ConfigMap.
+2. The referenced ConfigMap **must live in the same namespace as the route**. Cross-namespace
+   references are rejected; the operator always resolves the ConfigMap from the route's own
+   namespace as a defense against privilege escalation.
+3. If `specConfigMapRef.key` is omitted, the ConfigMap must contain exactly one key, which
+   the operator uses automatically. If the ConfigMap has multiple keys, you must specify
+   `key` explicitly.
+4. gRPC (`protoValidation.descriptorConfigMapRef`) and GraphQL
+   (`schemaValidation.schemaConfigMapRef`) references are resolved the same way. Because a
+   proto descriptor is binary, the operator base64-encodes it during resolution.
+
+> **Note:** Earlier releases required `specFile`/`specURL` in gateway configuration and the
+> gateway rejected routes that used `specConfigMapRef`. The operator now resolves these
+> references itself, so `specConfigMapRef` is the recommended way to supply specs in
+> operator mode.
+>
+> The resolved content is carried on internal `specInline` / `descriptorInline` /
+> `schemaInline` fields that the operator populates automatically. These fields are an
+> internal transport and are **not** intended to be set directly by users.
+
+To read the referenced ConfigMaps, the operator's ClusterRole grants `configmaps`
+`get`, `list`, and `watch` (see [RBAC for ConfigMaps](#rbac-for-configmaps)). This is
+already included in the generated `config/rbac/role.yaml` and the Helm chart.
 
 ### APIRoute with OpenAPI Validation
 
@@ -261,8 +311,8 @@ data:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable OpenAPI request validation |
-| `specConfigMapRef.name` | string | - | Name of ConfigMap containing spec |
-| `specConfigMapRef.key` | string | - | Key in ConfigMap (optional, uses first key if empty) |
+| `specConfigMapRef.name` | string | - | Name of ConfigMap (in the route's namespace) containing the spec. Resolved and inlined by the operator. |
+| `specConfigMapRef.key` | string | - | Key in ConfigMap (optional; if empty the ConfigMap must have exactly one key) |
 | `specFile` | string | - | Path to OpenAPI specification file |
 | `specURL` | string | - | URL to fetch OpenAPI specification from |
 | `failOnError` | boolean | `true` | Reject requests that fail validation |
@@ -470,15 +520,16 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 
 ### Per-Route Middleware Chain
 ```
-Security Headers → CORS → Body Limit → **OpenAPI Validation** → 
-Headers → Cache → Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+**OpenAPI Validation** → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
 
 This positioning ensures that:
 1. **Authentication/Authorization** happens before validation
-2. **Request limits** are enforced before processing large payloads
-3. **Validation** occurs before expensive operations like caching and transformation
-4. **Header manipulation** can modify requests after validation
+2. **Rate limiting** sheds load before body/validation work (401 before 429 for unauthenticated requests)
+3. **Request limits** are enforced before processing large payloads
+4. **Validation** occurs before expensive operations like caching and transformation
+5. **Header manipulation** can modify requests after validation
 
 ## Prometheus Metrics
 
@@ -489,15 +540,15 @@ OpenAPI validation provides comprehensive metrics for monitoring and alerting:
 ```prometheus
 # Request validation results
 gateway_openapi_validation_requests_total{route="items-api", result="success"} 1500
-gateway_openapi_validation_requests_total{route="items-api", result="failed"} 25
+gateway_openapi_validation_requests_total{route="items-api", result="failure"} 25
 
 # Validation duration
 gateway_openapi_validation_duration_seconds{route="items-api"} 0.002
 
 # Validation errors by type
-gateway_openapi_validation_errors_total{route="items-api", error_type="body_invalid"} 15
-gateway_openapi_validation_errors_total{route="items-api", error_type="param_missing"} 8
-gateway_openapi_validation_errors_total{route="items-api", error_type="header_invalid"} 2
+gateway_openapi_validation_errors_total{route="items-api", error_type="body"} 15
+gateway_openapi_validation_errors_total{route="items-api", error_type="params"} 8
+gateway_openapi_validation_errors_total{route="items-api", error_type="headers"} 2
 ```
 
 ### Metric Labels
@@ -510,12 +561,11 @@ gateway_openapi_validation_errors_total{route="items-api", error_type="header_in
 
 ### Error Types
 
-- `body_invalid` - Request body validation failed
-- `param_missing` - Required parameter missing
-- `param_invalid` - Parameter validation failed
-- `header_invalid` - Header validation failed
-- `security_failed` - Security requirement validation failed
-- `spec_load_error` - OpenAPI spec loading failed
+- `body` - Request body validation failed
+- `params` - Query or path parameter validation failed (missing or invalid)
+- `headers` - Header parameter validation failed
+- `security` - Security requirement validation failed
+- `unknown` - Any other validation failure
 
 ### Monitoring Queries
 
@@ -535,7 +585,7 @@ topk(5, sum by (error_type) (
 
 # Routes with highest validation failure rate
 topk(10, sum by (route) (
-  rate(gateway_openapi_validation_requests_total{result="failed"}[5m])
+  rate(gateway_openapi_validation_requests_total{result="failure"}[5m])
 ))
 ```
 
@@ -759,6 +809,29 @@ openAPIValidation:
 ```
 
 ### RBAC for ConfigMaps
+
+In operator mode the **operator** (not the gateway) reads the ConfigMaps referenced by
+`specConfigMapRef` / `descriptorConfigMapRef` / `schemaConfigMapRef` and inlines their
+content before delivering configuration to the gateway. The operator therefore needs
+`configmaps` `get`, `list`, and `watch`. This is already included in the operator's
+generated ClusterRole (`config/rbac/role.yaml`) and the Helm chart CRDs:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: avapigw-operator-role
+rules:
+- apiGroups: [""]
+  resources:
+  - configmaps
+  - endpoints
+  - services
+  verbs: ["get", "list", "watch"]
+```
+
+If you instead mount specs into the gateway directly (file mode, without the operator),
+scope a namespaced `Role` to the specific ConfigMaps the gateway consumes:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1

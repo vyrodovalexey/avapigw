@@ -19,11 +19,22 @@ const (
 	stateOpen        = "open"
 )
 
+// Redis rate limiter failure-policy label values.
+const (
+	failPolicyOpen   = "fail_open"
+	failPolicyClosed = "fail_closed"
+)
+
 // MiddlewareMetrics holds Prometheus metrics for middleware
 // operations.
 type MiddlewareMetrics struct {
 	rateLimitAllowed  *prometheus.CounterVec
 	rateLimitRejected *prometheus.CounterVec
+
+	redisRateLimitAllowed  *prometheus.CounterVec
+	redisRateLimitDenied   *prometheus.CounterVec
+	redisRateLimitErrors   *prometheus.CounterVec
+	redisRateLimitDuration *prometheus.HistogramVec
 
 	circuitBreakerRequests    *prometheus.CounterVec
 	circuitBreakerTransitions *prometheus.CounterVec
@@ -66,6 +77,10 @@ func (m *MiddlewareMetrics) MustRegister(registry *prometheus.Registry) {
 	registry.MustRegister(
 		m.rateLimitAllowed,
 		m.rateLimitRejected,
+		m.redisRateLimitAllowed,
+		m.redisRateLimitDenied,
+		m.redisRateLimitErrors,
+		m.redisRateLimitDuration,
 		m.circuitBreakerRequests,
 		m.circuitBreakerTransitions,
 		m.timeoutsTotal,
@@ -88,6 +103,12 @@ func (m *MiddlewareMetrics) Init() {
 	for _, route := range []string{"default"} {
 		m.rateLimitAllowed.WithLabelValues(route)
 		m.rateLimitRejected.WithLabelValues(route)
+		m.redisRateLimitAllowed.WithLabelValues(route)
+		m.redisRateLimitDenied.WithLabelValues(route)
+		m.redisRateLimitDuration.WithLabelValues(route)
+		for _, policy := range []string{failPolicyOpen, failPolicyClosed} {
+			m.redisRateLimitErrors.WithLabelValues(route, policy)
+		}
 		m.timeoutsTotal.WithLabelValues(route)
 		m.retryAttemptsTotal.WithLabelValues(route)
 		m.retrySuccessTotal.WithLabelValues(route)
@@ -127,6 +148,51 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 				Name:      "rate_limit_rejected_total",
 				Help: "Total number of requests " +
 					"rejected by rate limiter",
+			},
+			[]string{labelRoute},
+		),
+		redisRateLimitAllowed: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
+				Name:      "redis_rate_limit_allowed_total",
+				Help: "Total number of requests " +
+					"allowed by the redis rate limiter",
+			},
+			[]string{labelRoute},
+		),
+		redisRateLimitDenied: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
+				Name:      "redis_rate_limit_denied_total",
+				Help: "Total number of requests " +
+					"denied by the redis rate limiter",
+			},
+			[]string{labelRoute},
+		),
+		redisRateLimitErrors: promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
+				Name:      "redis_rate_limit_errors_total",
+				Help: "Total number of redis rate " +
+					"limiter errors by failure policy",
+			},
+			[]string{labelRoute, "policy"},
+		),
+		redisRateLimitDuration: promauto.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
+				Name: "redis_rate_limit_" +
+					"duration_seconds",
+				Help: "Duration of redis rate limit " +
+					"decisions in seconds",
+				Buckets: []float64{
+					.0005, .001, .0025, .005,
+					.01, .025, .05, .1, .25,
+				},
 			},
 			[]string{labelRoute},
 		),

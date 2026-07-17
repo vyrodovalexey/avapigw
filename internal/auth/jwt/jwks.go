@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
@@ -31,6 +32,14 @@ const (
 
 	// DefaultHTTPClientTimeout is the default timeout for HTTP client operations.
 	DefaultHTTPClientTimeout = 30 * time.Second
+
+	// backoffJitterFactor is the maximum fraction of the retry interval that is
+	// added as random jitter to prevent thundering herd on the JWKS endpoint.
+	backoffJitterFactor = 0.25
+
+	// refreshFlightKey is the singleflight key used to coalesce concurrent
+	// JWKS refreshes into a single in-flight fetch.
+	refreshFlightKey = "jwks-refresh"
 )
 
 // RetryConfig contains configuration for retry with exponential backoff.
@@ -74,9 +83,16 @@ type JWKSKeySet struct {
 	cacheTTL    time.Duration
 	retryConfig RetryConfig
 
+	// mu guards keys and lastRefresh. The write lock is only taken to swap in
+	// a freshly fetched key set; it is never held across network I/O, so key
+	// lookups stay fast even while a refresh is in flight.
 	mu          sync.RWMutex
 	keys        jwk.Set
 	lastRefresh time.Time
+
+	// refreshGroup coalesces concurrent refresh requests into a single
+	// in-flight JWKS fetch so an IdP outage cannot stall every caller.
+	refreshGroup singleflight.Group
 
 	// Background refresh
 	stopCh    chan struct{}
@@ -156,40 +172,47 @@ func (ks *JWKSKeySet) Start(ctx context.Context) error {
 }
 
 // GetKey returns a key by ID.
+//
+// The lookup runs under a read lock only. When the key set has not been
+// loaded yet, or the key ID is unknown, a singleflight-coalesced refresh is
+// triggered so concurrent callers share one fetch instead of serializing on
+// the write mutex.
 func (ks *JWKSKeySet) GetKey(ctx context.Context, keyID string) (crypto.PublicKey, error) {
+	if key, found := ks.lookupKey(keyID); found {
+		return extractPublicKey(keyID, key)
+	}
+
+	// Key set not loaded or unknown kid: trigger a coalesced refresh. When
+	// the cached key set is still fresh, Refresh is a no-op, which bounds
+	// unknown-kid lookups to at most one fetch per refresh window.
+	if err := ks.Refresh(ctx); err != nil {
+		return nil, err
+	}
+
+	key, found := ks.lookupKey(keyID)
+	if !found {
+		return nil, NewKeyError(keyID, "key not found", ErrKeyNotFound)
+	}
+
+	return extractPublicKey(keyID, key)
+}
+
+// lookupKey returns the JWK with the given key ID from the cached key set.
+// Only a read lock is taken.
+func (ks *JWKSKeySet) lookupKey(keyID string) (jwk.Key, bool) {
 	ks.mu.RLock()
 	keys := ks.keys
 	ks.mu.RUnlock()
 
 	if keys == nil {
-		if err := ks.Refresh(ctx); err != nil {
-			return nil, err
-		}
-		ks.mu.RLock()
-		keys = ks.keys
-		ks.mu.RUnlock()
+		return nil, false
 	}
 
-	if keys == nil {
-		return nil, ErrKeyNotFound
-	}
+	return keys.LookupKeyID(keyID)
+}
 
-	key, found := keys.LookupKeyID(keyID)
-	if !found {
-		// Try refreshing and looking again
-		if err := ks.Refresh(ctx); err != nil {
-			return nil, err
-		}
-		ks.mu.RLock()
-		keys = ks.keys
-		ks.mu.RUnlock()
-
-		key, found = keys.LookupKeyID(keyID)
-		if !found {
-			return nil, NewKeyError(keyID, "key not found", ErrKeyNotFound)
-		}
-	}
-
+// extractPublicKey extracts the raw public key from a JWK.
+func extractPublicKey(keyID string, key jwk.Key) (crypto.PublicKey, error) {
 	var rawKey interface{}
 	if err := key.Raw(&rawKey); err != nil {
 		return nil, NewKeyError(keyID, "failed to extract raw key", err)
@@ -219,29 +242,80 @@ func (ks *JWKSKeySet) GetKeyForAlgorithm(ctx context.Context, keyID, algorithm s
 }
 
 // Refresh refreshes the key set from the JWKS URL with retry and exponential backoff.
+//
+// The freshness check runs under a read lock and the HTTP fetch happens
+// outside any lock; the write lock is only taken to swap in the new key set.
+// Concurrent callers are coalesced into a single in-flight fetch, and each
+// caller stops waiting as soon as its own context is done, even if the shared
+// fetch is still in progress.
 func (ks *JWKSKeySet) Refresh(ctx context.Context) error {
-	ks.mu.Lock()
-	defer ks.mu.Unlock()
+	// Fail fast if the caller is already canceled to avoid starting a flight.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	// Check if refresh is needed
-	if ks.keys != nil && time.Since(ks.lastRefresh) < ks.cacheTTL/2 {
+	if ks.isFresh() {
 		return nil
 	}
 
+	resultCh := ks.refreshGroup.DoChan(refreshFlightKey, func() (interface{}, error) {
+		return nil, ks.refreshFlight(ctx)
+	})
+
+	select {
+	case res := <-resultCh:
+		return res.Err
+	case <-ctx.Done():
+		// The shared fetch continues in the background for other callers;
+		// this caller stops waiting to honor its own deadline.
+		return ctx.Err()
+	}
+}
+
+// isFresh reports whether the cached key set is recent enough to skip a
+// refresh. Only a read lock is taken.
+func (ks *JWKSKeySet) isFresh() bool {
+	ks.mu.RLock()
+	defer ks.mu.RUnlock()
+
+	return ks.keys != nil && time.Since(ks.lastRefresh) < ks.cacheTTL/2
+}
+
+// refreshFlight is the body of the singleflight-coalesced refresh. It is
+// detached from the initiating caller's cancellation so one canceled caller
+// cannot poison the shared fetch for the other coalesced waiters.
+func (ks *JWKSKeySet) refreshFlight(callerCtx context.Context) error {
+	// Double-check freshness: a previous flight may have refreshed the keys
+	// between the caller's staleness check and this execution.
+	if ks.isFresh() {
+		return nil
+	}
+
+	// Detach from the initiating caller (context values such as trace
+	// metadata are preserved) and bound the whole retry loop.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(callerCtx), DefaultJWKSRefreshTimeout)
+	defer cancel()
+
+	return ks.fetchWithRetry(ctx)
+}
+
+// fetchWithRetry fetches the JWKS with retry and exponential backoff. It runs
+// entirely outside the key-set lock.
+func (ks *JWKSKeySet) fetchWithRetry(ctx context.Context) error {
 	var lastErr error
 	interval := ks.retryConfig.InitialInterval
 
 	for attempt := 0; attempt < ks.retryConfig.MaxAttempts; attempt++ {
 		// Check context before each attempt
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			ks.errors.Add(1)
+			return fmt.Errorf("%w: %w", ErrJWKSFetchFailed, err)
 		}
 
 		// Attempt to fetch JWKS
-		err := ks.fetchJWKS(ctx)
+		keys, err := ks.fetchJWKS(ctx)
 		if err == nil {
+			ks.storeKeys(keys)
 			return nil
 		}
 
@@ -255,21 +329,11 @@ func (ks *JWKSKeySet) Refresh(ctx context.Context) error {
 
 		// Don't sleep after the last attempt
 		if attempt < ks.retryConfig.MaxAttempts-1 {
-			// Add jitter to prevent thundering herd
-			jitter := time.Duration(float64(interval) * 0.25 * secureRandomFloat())
-			sleepDuration := interval + jitter
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(sleepDuration):
+			if err := sleepWithJitter(ctx, interval); err != nil {
+				ks.errors.Add(1)
+				return fmt.Errorf("%w: %w", ErrJWKSFetchFailed, err)
 			}
-
-			// Calculate next interval with exponential backoff
-			interval = time.Duration(float64(interval) * ks.retryConfig.Multiplier)
-			if interval > ks.retryConfig.MaxInterval {
-				interval = ks.retryConfig.MaxInterval
-			}
+			interval = ks.nextInterval(interval)
 		}
 	}
 
@@ -277,43 +341,76 @@ func (ks *JWKSKeySet) Refresh(ctx context.Context) error {
 	return fmt.Errorf("%w after %d attempts: %w", ErrJWKSFetchFailed, ks.retryConfig.MaxAttempts, lastErr)
 }
 
-// fetchJWKS performs a single JWKS fetch attempt.
-func (ks *JWKSKeySet) fetchJWKS(ctx context.Context) error {
+// sleepWithJitter waits for the interval plus random jitter, honoring context
+// cancellation. Jitter prevents thundering herd against the JWKS endpoint.
+func sleepWithJitter(ctx context.Context, interval time.Duration) error {
+	jitter := time.Duration(float64(interval) * backoffJitterFactor * secureRandomFloat())
+	timer := time.NewTimer(interval + jitter)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// nextInterval computes the next exponential backoff interval, capped at the
+// configured maximum.
+func (ks *JWKSKeySet) nextInterval(interval time.Duration) time.Duration {
+	next := time.Duration(float64(interval) * ks.retryConfig.Multiplier)
+	if next > ks.retryConfig.MaxInterval {
+		next = ks.retryConfig.MaxInterval
+	}
+
+	return next
+}
+
+// fetchJWKS performs a single JWKS fetch attempt and returns the parsed key
+// set without mutating any shared state.
+func (ks *JWKSKeySet) fetchJWKS(ctx context.Context) (jwk.Set, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ks.url, http.NoBody)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	resp, err := ks.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	keys, err := jwk.Parse(body)
 	if err != nil {
-		return fmt.Errorf("failed to parse JWKS: %w", err)
+		return nil, fmt.Errorf("failed to parse JWKS: %w", err)
 	}
 
+	return keys, nil
+}
+
+// storeKeys swaps in a freshly fetched key set. This is the only place the
+// write lock is taken, and it is never held across network I/O.
+func (ks *JWKSKeySet) storeKeys(keys jwk.Set) {
+	ks.mu.Lock()
 	ks.keys = keys
 	ks.lastRefresh = time.Now()
-	ks.refreshes.Add(1)
+	ks.mu.Unlock()
 
+	ks.refreshes.Add(1)
 	ks.logger.Debug("JWKS refreshed",
 		observability.String("url", ks.url),
 		observability.Int("key_count", keys.Len()),
 	)
-
-	return nil
 }
 
 // secureRandomFloat returns a cryptographically secure random float64 between 0 and 1.
@@ -419,12 +516,24 @@ func NewStaticKeySet(keys []StaticKey, logger observability.Logger) (*StaticKeyS
 }
 
 // GetKey returns a key by ID.
+//
+// Tokens signed with a single shared key (HMAC in particular) commonly omit
+// the "kid" header. When no key ID is requested and exactly one static key
+// is configured, that key is unambiguous and is returned. A non-empty
+// unknown key ID still fails: an explicit kid mismatch must never silently
+// fall back to a different key.
 func (ks *StaticKeySet) GetKey(_ context.Context, keyID string) (crypto.PublicKey, error) {
-	key, ok := ks.keys[keyID]
-	if !ok {
-		return nil, NewKeyError(keyID, "key not found", ErrKeyNotFound)
+	if key, ok := ks.keys[keyID]; ok {
+		return key, nil
 	}
-	return key, nil
+
+	if keyID == "" && len(ks.keys) == 1 {
+		for _, key := range ks.keys {
+			return key, nil
+		}
+	}
+
+	return nil, NewKeyError(keyID, "key not found", ErrKeyNotFound)
 }
 
 // GetKeyForAlgorithm returns a key suitable for the given algorithm.
@@ -465,6 +574,11 @@ func parseStaticKey(key StaticKey) (crypto.PublicKey, error) {
 		return nil, fmt.Errorf("key or keyFile is required")
 	}
 
+	// HMAC algorithms use symmetric secrets, not JWK/PEM public keys.
+	if isHMACAlgorithm(key.Algorithm) {
+		return parseHMACKey(key, keyData)
+	}
+
 	// Try to parse as JWK first
 	jwkKey, err := jwk.ParseKey(keyData)
 	if err == nil {
@@ -479,7 +593,62 @@ func parseStaticKey(key StaticKey) (crypto.PublicKey, error) {
 	}
 
 	// Try to parse as PEM
-	return parsePEMKey(keyData)
+	pubKey, pemErr := parsePEMKey(keyData)
+	if pemErr != nil {
+		return nil, fmt.Errorf(
+			"algorithm %s requires a JWK or PEM key: %w", key.Algorithm, pemErr,
+		)
+	}
+	return pubKey, nil
+}
+
+// isHMACAlgorithm reports whether alg is a symmetric HMAC signing algorithm.
+func isHMACAlgorithm(alg string) bool {
+	return alg == AlgHS256 || alg == AlgHS384 || alg == AlgHS512
+}
+
+// parseHMACKey builds the symmetric key for HS256/HS384/HS512 static keys.
+// The key material may be a JWK "oct" key or a raw shared secret (the common
+// case for authentication.jwt.secret in gateway configuration). Raw secrets
+// are normalized through jwk.FromRaw — mirroring how asymmetric keys flow
+// through jwx — with the algorithm and key ID attached, then the raw bytes
+// used by the HMAC verifier are extracted.
+func parseHMACKey(key StaticKey, keyData []byte) (crypto.PublicKey, error) {
+	// Accept JWK-formatted symmetric keys ({"kty":"oct","k":"..."}) so
+	// explicitly provisioned oct keys keep working.
+	if jwkKey, err := jwk.ParseKey(keyData); err == nil {
+		var raw interface{}
+		if rawErr := jwkKey.Raw(&raw); rawErr != nil {
+			return nil, fmt.Errorf("failed to extract JWK key material: %w", rawErr)
+		}
+		if secret, ok := raw.([]byte); ok {
+			return secret, nil
+		}
+		return nil, fmt.Errorf(
+			"algorithm %s requires a symmetric (oct) key, got asymmetric JWK", key.Algorithm,
+		)
+	}
+
+	// Raw shared secret: build a jwx symmetric key to validate the material
+	// (rejects empty secrets) and carry alg/kid metadata consistently.
+	symKey, err := jwk.FromRaw(keyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct symmetric key for %s: %w", key.Algorithm, err)
+	}
+	if err := symKey.Set(jwk.AlgorithmKey, key.Algorithm); err != nil {
+		return nil, fmt.Errorf("failed to set algorithm on symmetric key: %w", err)
+	}
+	if key.KeyID != "" {
+		if err := symKey.Set(jwk.KeyIDKey, key.KeyID); err != nil {
+			return nil, fmt.Errorf("failed to set key ID on symmetric key: %w", err)
+		}
+	}
+
+	var secret []byte
+	if err := symKey.Raw(&secret); err != nil {
+		return nil, fmt.Errorf("failed to extract symmetric key bytes: %w", err)
+	}
+	return secret, nil
 }
 
 // parsePEMKey parses a PEM-encoded key.
@@ -572,6 +741,13 @@ func validateKeyAlgorithm(key crypto.PublicKey, algorithm string) error {
 	case AlgEdDSA, AlgEd25519:
 		if _, ok := key.(ed25519.PublicKey); !ok {
 			return fmt.Errorf("algorithm %s requires Ed25519 key", algorithm)
+		}
+	case AlgHS256, AlgHS384, AlgHS512:
+		// HMAC requires a symmetric secret. Rejecting asymmetric keys here
+		// prevents algorithm-confusion attacks where a public key is abused
+		// as an HMAC secret.
+		if _, ok := key.([]byte); !ok {
+			return fmt.Errorf("algorithm %s requires a symmetric key", algorithm)
 		}
 	}
 	return nil

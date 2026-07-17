@@ -59,15 +59,20 @@ func (m *CacheMetrics) MustRegister(registry *prometheus.Registry) {
 // *Vec types only emit metric lines after WithLabelValues() is called at
 // least once. This method is idempotent and safe to call multiple times.
 func (m *CacheMetrics) Init() {
-	for _, backend := range []string{"memory", "redis"} {
+	for _, backend := range []string{"memory", redisBackend} {
 		m.hitsTotal.WithLabelValues(backend)
 		m.missesTotal.WithLabelValues(backend)
 		m.evictionsTotal.WithLabelValues(backend)
 		m.sizeGauge.WithLabelValues(backend)
-		for _, op := range []string{"get", "set", "delete", "exists"} {
+		for _, op := range []string{opGet, opSet, opDelete, opExists} {
 			m.operationDuration.WithLabelValues(backend, op)
 			m.errorsTotal.WithLabelValues(backend, op)
 		}
+	}
+	// Redis-only operations (not implemented by the memory backend).
+	for _, op := range []string{opGetWithTTL, opSetNX, opExpire} {
+		m.operationDuration.WithLabelValues(redisBackend, op)
+		m.errorsTotal.WithLabelValues(redisBackend, op)
 	}
 }
 

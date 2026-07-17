@@ -532,6 +532,12 @@ func (s *Server) configureGRPCTLS(tlsConfig *tls.Config) {
 	if s.requireALPN {
 		s.configureALPNVerification(tlsConfig)
 	}
+
+	// Wire the TLS handshake duration histogram on the final config. Installed
+	// last so the per-connection observation wraps the fully configured
+	// verification chain, including ALPN enforcement.
+	onSuccess, onFailure := tlspkg.NewHandshakeRecorder(s.tlsManager, s.tlsMetrics)
+	tlspkg.InstrumentHandshakeTiming(tlsConfig, onSuccess, onFailure)
 }
 
 // configureALPNVerification adds ALPN protocol verification to TLS config.

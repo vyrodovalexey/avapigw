@@ -87,7 +87,7 @@ func TestInitVaultClient_SuccessfulTokenAuth(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 	require.NotNil(t, client, "initVaultClient should return a non-nil client")
 	assert.True(t, client.IsEnabled(), "client should be enabled")
 
@@ -149,7 +149,7 @@ func TestInitVaultClient_AuthFailure(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&exitCode))
 	assert.Nil(t, client)
@@ -200,7 +200,7 @@ func TestInitVaultClient_WithNamespace(t *testing.T) {
 
 	logger := observability.NopLogger()
 
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 	require.NotNil(t, client)
 
 	_ = client.Close()
@@ -293,6 +293,12 @@ func TestInitApplication_WithVaultTLS(t *testing.T) {
 			Backends: []config.Backend{},
 		},
 	}
+
+	// Production loaders (loadAndValidateConfig / loadOperatorInitialConfig)
+	// apply the Vault env overlay before initApplication; mirror that
+	// contract here so the env-driven client is built from the effective
+	// config.
+	cfg.Spec.Vault = applyVaultEnv(cfg.Spec.Vault, logger)
 
 	app := initApplication(cfg, logger)
 	require.NotNil(t, app)

@@ -69,7 +69,13 @@ func main() {
 }
 
 // parseFlags parses command line flags.
+//
+// Boolean env defaults are parsed before the configured logger exists, so
+// invalid values are reported through the process-wide fallback logger
+// (observability.L()) instead of being silently ignored.
 func parseFlags() cliFlags {
+	envLogger := observability.L()
+
 	configPath := flag.String("config", getEnvOrDefault("GATEWAY_CONFIG_PATH", "configs/gateway.yaml"),
 		"Path to configuration file")
 	logLevel := flag.String("log-level", getEnvOrDefault("GATEWAY_LOG_LEVEL", "info"),
@@ -79,7 +85,7 @@ func parseFlags() cliFlags {
 	showVersion := flag.Bool("version", false, "Show version information")
 
 	// Operator mode flags
-	operatorMode := flag.Bool("operator-mode", getEnvBool("GATEWAY_OPERATOR_MODE", false),
+	operatorMode := flag.Bool("operator-mode", getEnvBool("GATEWAY_OPERATOR_MODE", false, envLogger),
 		"Enable operator mode (receive configuration from operator)")
 	operatorAddress := flag.String("operator-address", getEnvOrDefault("GATEWAY_OPERATOR_ADDRESS", ""),
 		"Operator gRPC server address (host:port)")
@@ -87,7 +93,7 @@ func parseFlags() cliFlags {
 		"Gateway name for operator registration")
 	gatewayNamespace := flag.String("gateway-namespace", getEnvOrDefault("GATEWAY_NAMESPACE", "default"),
 		"Gateway namespace for operator registration")
-	operatorTLS := flag.Bool("operator-tls", getEnvBool("GATEWAY_OPERATOR_TLS", false),
+	operatorTLS := flag.Bool("operator-tls", getEnvBool("GATEWAY_OPERATOR_TLS", false, envLogger),
 		"Enable TLS for operator connection")
 	operatorCAFile := flag.String("operator-ca-file", getEnvOrDefault("GATEWAY_OPERATOR_CA_FILE", ""),
 		"CA certificate file for operator TLS")
@@ -98,7 +104,7 @@ func parseFlags() cliFlags {
 	operatorNamespaces := flag.String("operator-namespaces", getEnvOrDefault("GATEWAY_OPERATOR_NAMESPACES", ""),
 		"Comma-separated list of namespaces to watch (empty = all)")
 	operatorTLSInsecureSkipVerify := flag.Bool("operator-tls-insecure",
-		getEnvBool("GATEWAY_OPERATOR_TLS_INSECURE", false),
+		getEnvBool("GATEWAY_OPERATOR_TLS_INSECURE", false, envLogger),
 		"Skip TLS certificate verification for operator connection (dev/test only)")
 
 	flag.Parse()

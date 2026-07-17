@@ -103,18 +103,29 @@ setup_pki() {
         }" > /dev/null
 
     # Create server role (for backend servers)
+    #
+    # IMPORTANT: this role definition is kept in sync with the canonical
+    # 'test-role' in test/performance/scripts/setup-vault-k8s.sh (configure_pki).
+    # Both scripts write the SAME role name on the SAME 'pki' mount, so whichever
+    # runs last wins. The k8s gateway (helm/avapigw/values-local.yaml) issues its
+    # listener certs from this role with altName 'host.docker.internal' — the
+    # 'docker.internal' allowed domain (+ allow_subdomains) MUST stay present or
+    # re-running this script crash-loops the k8s gateway on cert renewal.
+    # Compose-only additions to the canonical set: bare domains 'rest_api_4' and
+    # 'grpc_3' (backend server CNs issued below) and max_ttl 8760h (CERT_TTL
+    # default issues 1-year backend certs; k8s requests 720h, under the cap).
     log_info "Creating server PKI role '${PKI_ROLE_SERVER}'..."
     vault_api POST "${PKI_MOUNT}/roles/${PKI_ROLE_SERVER}" \
         -d '{
-            "allowed_domains": "localhost,rest_api_4,grpc_3",
+            "allowed_domains": "localhost,local,test,avapigw.local,avapigw-test.local,docker.internal,rest_api_4,grpc_3",
             "allow_bare_domains": true,
             "allow_subdomains": true,
             "allow_localhost": true,
-            "allow_any_name": true,
             "allow_ip_sans": true,
+            "allowed_uri_sans": "spiffe://*",
+            "allow_any_name": false,
             "enforce_hostnames": false,
-            "server_flag": true,
-            "client_flag": false,
+            "require_cn": false,
             "max_ttl": "8760h",
             "key_type": "rsa",
             "key_bits": 2048

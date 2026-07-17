@@ -210,7 +210,7 @@ func TestAPIRouteValidator_ValidateCreate_WithDuplicateChecker(t *testing.T) {
 		DuplicateChecker: NewDuplicateChecker(fakeClient),
 	}
 
-	// Test creating a duplicate route
+	// Test creating a true duplicate route (identical prefix + same methods)
 	newRoute := &avapigwv1alpha1.APIRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "new-route",
@@ -220,7 +220,7 @@ func TestAPIRouteValidator_ValidateCreate_WithDuplicateChecker(t *testing.T) {
 			Match: []avapigwv1alpha1.RouteMatch{
 				{
 					URI: &avapigwv1alpha1.URIMatch{
-						Prefix: "/api/v1/users",
+						Prefix: "/api/v1",
 					},
 					Methods: []string{"GET"},
 				},
@@ -307,7 +307,7 @@ func TestAPIRouteValidator_ValidateUpdate_WithDuplicateChecker(t *testing.T) {
 		DuplicateChecker: NewDuplicateChecker(fakeClient),
 	}
 
-	// Test updating to a conflicting route
+	// Test updating to a true duplicate of the existing route (identical prefix)
 	updatedRoute := &avapigwv1alpha1.APIRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "another-route",
@@ -317,7 +317,7 @@ func TestAPIRouteValidator_ValidateUpdate_WithDuplicateChecker(t *testing.T) {
 			Match: []avapigwv1alpha1.RouteMatch{
 				{
 					URI: &avapigwv1alpha1.URIMatch{
-						Prefix: "/api/v1/users",
+						Prefix: "/api/v1",
 					},
 				},
 			},
@@ -889,9 +889,18 @@ func TestDuplicateChecker_GRPCMethodsOverlap(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "prefix overlap",
+			// Nested prefixes resolve deterministically by longest-prefix
+			// specificity in the gRPC router — no longer a conflict.
+			name:     "nested prefixes admitted (specificity ordering)",
 			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
 			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "GetUser"}},
+			expected: false,
+		},
+		{
+			// Identical prefixes have identical specificity — true duplicate.
+			name:     "identical prefixes rejected",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
 			expected: true,
 		},
 		{
@@ -1046,7 +1055,11 @@ func TestDuplicateChecker_GRPCBackendsConflict(t *testing.T) {
 	}
 }
 
-func TestDuplicateChecker_ExactAndPrefixOverlap(t *testing.T) {
+// TestDuplicateChecker_MatchConditionsOverlap_Specificity verifies the
+// specificity-aware overlap semantics: combinations resolved deterministically
+// by the router (exact vs prefix, nested prefixes) are NOT conflicts; only
+// same-type same-path combinations with overlapping methods are.
+func TestDuplicateChecker_MatchConditionsOverlap_Specificity(t *testing.T) {
 	checker := &DuplicateChecker{}
 
 	tests := []struct {
@@ -1056,19 +1069,9 @@ func TestDuplicateChecker_ExactAndPrefixOverlap(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "exact within prefix",
+			name: "exact within prefix allowed (exact-first precedence)",
 			a: &avapigwv1alpha1.RouteMatch{
 				URI: &avapigwv1alpha1.URIMatch{Exact: "/api/v1/users"},
-			},
-			b: &avapigwv1alpha1.RouteMatch{
-				URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
-			},
-			expected: true,
-		},
-		{
-			name: "exact not within prefix",
-			a: &avapigwv1alpha1.RouteMatch{
-				URI: &avapigwv1alpha1.URIMatch{Exact: "/api/v2/users"},
 			},
 			b: &avapigwv1alpha1.RouteMatch{
 				URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
@@ -1076,14 +1079,56 @@ func TestDuplicateChecker_ExactAndPrefixOverlap(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "prefix within exact (reversed)",
+			name: "prefix within exact (reversed) allowed",
 			a: &avapigwv1alpha1.RouteMatch{
 				URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
 			},
 			b: &avapigwv1alpha1.RouteMatch{
 				URI: &avapigwv1alpha1.URIMatch{Exact: "/api/v1/users"},
 			},
+			expected: false,
+		},
+		{
+			name: "nested prefixes allowed (longest-prefix precedence)",
+			a: &avapigwv1alpha1.RouteMatch{
+				URI: &avapigwv1alpha1.URIMatch{Prefix: "/"},
+			},
+			b: &avapigwv1alpha1.RouteMatch{
+				URI: &avapigwv1alpha1.URIMatch{Prefix: "/api"},
+			},
+			expected: false,
+		},
+		{
+			name: "identical exact paths conflict",
+			a: &avapigwv1alpha1.RouteMatch{
+				URI: &avapigwv1alpha1.URIMatch{Exact: "/api/v1/users"},
+			},
+			b: &avapigwv1alpha1.RouteMatch{
+				URI: &avapigwv1alpha1.URIMatch{Exact: "/api/v1/users"},
+			},
 			expected: true,
+		},
+		{
+			name: "identical prefixes conflict",
+			a: &avapigwv1alpha1.RouteMatch{
+				URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
+			},
+			b: &avapigwv1alpha1.RouteMatch{
+				URI: &avapigwv1alpha1.URIMatch{Prefix: "/api/v1"},
+			},
+			expected: true,
+		},
+		{
+			name: "identical exact paths with disjoint methods allowed",
+			a: &avapigwv1alpha1.RouteMatch{
+				URI:     &avapigwv1alpha1.URIMatch{Exact: "/api/v1/users"},
+				Methods: []string{"GET"},
+			},
+			b: &avapigwv1alpha1.RouteMatch{
+				URI:     &avapigwv1alpha1.URIMatch{Exact: "/api/v1/users"},
+				Methods: []string{"POST"},
+			},
+			expected: false,
 		},
 		{
 			name: "no exact or prefix",
@@ -1099,9 +1144,9 @@ func TestDuplicateChecker_ExactAndPrefixOverlap(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := checker.exactAndPrefixOverlap(tt.a, tt.b)
+			result := checker.matchConditionsOverlap(tt.a, tt.b)
 			if result != tt.expected {
-				t.Errorf("exactAndPrefixOverlap() = %v, want %v", result, tt.expected)
+				t.Errorf("matchConditionsOverlap() = %v, want %v", result, tt.expected)
 			}
 		})
 	}

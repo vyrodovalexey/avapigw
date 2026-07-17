@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 
@@ -17,13 +19,20 @@ import (
 // enabling per-message metrics tracking.
 type websocketProxy struct {
 	logger observability.Logger
+
+	// originPolicy validates the Origin header during the upgrade
+	// handshake. A nil policy preserves the historical permissive
+	// behavior (used by directly constructed instances in tests).
+	originPolicy *wsOriginPolicy
 }
 
-// upgrader upgrades HTTP connections to WebSocket.
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Origin is validated by CORS middleware
-	},
+// checkOrigin reports whether the request's Origin header is allowed by
+// the configured origin allowlist policy.
+func (wp *websocketProxy) checkOrigin(r *http.Request) bool {
+	if wp.originPolicy == nil {
+		return true
+	}
+	return wp.originPolicy.allow(r)
 }
 
 // proxyWebSocket upgrades the client connection, dials the backend,
@@ -35,6 +44,19 @@ func (wp *websocketProxy) proxyWebSocket(
 	target *url.URL,
 	transport http.RoundTripper,
 ) (sent int64, received int64, err error) {
+	// Enforce the origin allowlist before any backend work so rejected
+	// cross-origin handshakes never consume backend resources.
+	if !wp.checkOrigin(r) {
+		origin := r.Header.Get("Origin")
+		wp.logger.Warn("websocket origin rejected",
+			observability.String("origin", origin),
+			observability.String("host", r.Host),
+			observability.String("path", r.URL.Path),
+		)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return 0, 0, fmt.Errorf("websocket origin %q rejected: %w", origin, ErrWSOriginNotAllowed)
+	}
+
 	// Build backend WebSocket URL
 	backendURL := wp.buildBackendWSURL(target, r)
 
@@ -57,8 +79,10 @@ func (wp *websocketProxy) proxyWebSocket(
 	}
 	defer backendConn.Close()
 
-	// Upgrade client connection
+	// Upgrade client connection. CheckOrigin re-applies the origin policy
+	// as defense in depth behind the pre-dial gate above.
 	responseHeader := wp.buildResponseHeaders(resp)
+	upgrader := websocket.Upgrader{CheckOrigin: wp.checkOrigin}
 	clientConn, upgradeErr := upgrader.Upgrade(w, r, responseHeader)
 	if upgradeErr != nil {
 		return 0, 0, fmt.Errorf("failed to upgrade client connection: %w", upgradeErr)
@@ -95,58 +119,73 @@ func (wp *websocketProxy) handleDialError(
 
 // relay copies messages between client and backend connections.
 // Returns counts of messages sent to client and received from client.
+//
+// The message counters are atomic because each direction increments its
+// counter from a dedicated goroutine; both goroutines are joined before
+// the final counts are loaded so the returned values are complete.
 func (wp *websocketProxy) relay(
 	clientConn, backendConn *websocket.Conn,
 ) (sent int64, received int64) {
+	var (
+		sentCount     atomic.Int64
+		receivedCount atomic.Int64
+		wg            sync.WaitGroup
+	)
+	// Buffered so both goroutines can report their terminal error
+	// without blocking, even after the first one has been consumed.
 	errCh := make(chan error, 2)
-	var sentCount, receivedCount int64
+
+	wg.Add(2)
 
 	// Backend -> Client (messages "sent" to client)
 	go func() {
-		for {
-			msgType, msg, readErr := backendConn.ReadMessage()
-			if readErr != nil {
-				// Send close message to client
-				_ = clientConn.WriteMessage(
-					websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-				)
-				errCh <- readErr
-				return
-			}
-			sentCount++
-			if writeErr := clientConn.WriteMessage(msgType, msg); writeErr != nil {
-				errCh <- writeErr
-				return
-			}
-		}
+		defer wg.Done()
+		wp.relayDirection(backendConn, clientConn, &sentCount, errCh)
 	}()
 
 	// Client -> Backend (messages "received" from client)
 	go func() {
-		for {
-			msgType, msg, readErr := clientConn.ReadMessage()
-			if readErr != nil {
-				// Send close message to backend
-				_ = backendConn.WriteMessage(
-					websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-				)
-				errCh <- readErr
-				return
-			}
-			receivedCount++
-			if writeErr := backendConn.WriteMessage(msgType, msg); writeErr != nil {
-				errCh <- writeErr
-				return
-			}
-		}
+		defer wg.Done()
+		wp.relayDirection(clientConn, backendConn, &receivedCount, errCh)
 	}()
 
-	// Wait for one direction to finish
+	// Wait for one direction to finish, then close both connections to
+	// unblock the peer goroutine's blocking ReadMessage call.
 	<-errCh
+	_ = clientConn.Close()
+	_ = backendConn.Close()
 
-	return sentCount, receivedCount
+	// Join both goroutines so the counters are stable before loading them.
+	wg.Wait()
+
+	return sentCount.Load(), receivedCount.Load()
+}
+
+// relayDirection copies messages from src to dst until a read or write
+// error occurs, incrementing counter for every message read from src.
+// The terminal error is reported on errCh (buffered by the caller).
+func (wp *websocketProxy) relayDirection(
+	src, dst *websocket.Conn,
+	counter *atomic.Int64,
+	errCh chan<- error,
+) {
+	for {
+		msgType, msg, readErr := src.ReadMessage()
+		if readErr != nil {
+			// Propagate the close handshake to the destination peer.
+			_ = dst.WriteMessage(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			)
+			errCh <- readErr
+			return
+		}
+		counter.Add(1)
+		if writeErr := dst.WriteMessage(msgType, msg); writeErr != nil {
+			errCh <- writeErr
+			return
+		}
+	}
 }
 
 // buildBackendWSURL constructs the WebSocket URL for the backend.

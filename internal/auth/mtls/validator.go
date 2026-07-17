@@ -143,9 +143,13 @@ func NewValidator(config *Config, opts ...ValidatorOption) (Validator, error) {
 		v.caPool = pool
 	}
 
-	// Initialize metrics if not provided
+	// Initialize metrics if not provided. Default to the process-wide
+	// shared singleton (the one cmd/gateway registers with the /metrics
+	// registry): a fresh NewMetrics instance lives on its own private
+	// registry, so recordings would be invisible on the metrics endpoint
+	// (gateway_mtls_validation_total stuck at 0).
 	if v.metrics == nil {
-		v.metrics = NewMetrics("gateway")
+		v.metrics = GetSharedMetrics()
 	}
 
 	return v, nil

@@ -543,7 +543,14 @@ spec:
       level: {{ .Values.gateway.observability.logging.level | default "info" }}
       format: {{ .Values.gateway.observability.logging.format | default "json" }}
 
-  {{- if and .Values.vault .Values.vault.enabled }}
+  {{- if .Values.gateway.vault }}
+  # Gateway-wide Vault client connection (spec.vault), rendered verbatim from
+  # the gateway.vault values. Deployment-injected VAULT_* environment
+  # variables (driven by the top-level vault.* values) override these fields
+  # per-field: ENV > config file > defaults.
+  vault:
+    {{- toYaml .Values.gateway.vault | nindent 4 }}
+  {{- else if and .Values.vault .Values.vault.enabled }}
   # NOTE: The vault section below is for reference/documentation only.
   # The Go gateway reads Vault configuration exclusively from environment
   # variables (VAULT_ADDR, VAULT_TOKEN, VAULT_AUTH_METHOD, etc.) set in

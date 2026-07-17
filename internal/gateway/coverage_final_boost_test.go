@@ -608,7 +608,7 @@ func TestCleanupListenersOnError_WithHTTPListeners(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should not panic
-	gw.cleanupListenersOnError([]*Listener{l1, l2}, nil)
+	gw.cleanupListenersOnError(context.Background(), []*Listener{l1, l2}, nil)
 }
 
 func TestCleanupListenersOnError_WithGRPCListeners_Coverage(t *testing.T) {
@@ -629,7 +629,7 @@ func TestCleanupListenersOnError_WithGRPCListeners_Coverage(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should not panic
-	gw.cleanupListenersOnError(nil, []*GRPCListener{gl1})
+	gw.cleanupListenersOnError(context.Background(), nil, []*GRPCListener{gl1})
 }
 
 func TestCleanupListenersOnError_WithBothTypes(t *testing.T) {
@@ -653,7 +653,7 @@ func TestCleanupListenersOnError_WithBothTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should not panic
-	gw.cleanupListenersOnError([]*Listener{l1}, []*GRPCListener{gl1})
+	gw.cleanupListenersOnError(context.Background(), []*Listener{l1}, []*GRPCListener{gl1})
 }
 
 // ============================================================================

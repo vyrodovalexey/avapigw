@@ -1,20 +1,32 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/vyrodovalexey/avapigw/internal/audit"
 	"github.com/vyrodovalexey/avapigw/internal/auth"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/middleware"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
+
+// rateLimitInitTimeout bounds redis rate limiter initialization (Vault
+// password reads plus the retried connectivity check). It mirrors the
+// redis cache initialization bound.
+const rateLimitInitTimeout = 45 * time.Second
+
+// globalRateLimitScope is the redis bucket scope for the gateway-level
+// rate limiter (route-level limiters use their route name as scope).
+const globalRateLimitScope = "global"
 
 // middlewareChainResult holds the result of building the middleware chain.
 type middlewareChainResult struct {
 	handler            http.Handler
-	rateLimiter        *middleware.RateLimiter
+	rateLimiter        middleware.RateLimiterHandle
 	maxSessionsLimiter *middleware.MaxSessionsLimiter
 }
 
@@ -25,7 +37,8 @@ type middlewareChainResult struct {
 //
 // Tracing runs before Audit so that trace context (TraceID/SpanID)
 // is available in the request context when audit events are created.
-// Returns an error if auth is explicitly enabled but fails to initialize.
+// Returns an error if auth is explicitly enabled but fails to initialize,
+// or if a required (fail-closed) redis rate limiter cannot be constructed.
 func buildMiddlewareChain(
 	handler http.Handler,
 	cfg *config.GatewayConfig,
@@ -35,9 +48,10 @@ func buildMiddlewareChain(
 	auditLogger audit.Logger,
 	authCfg *config.AuthenticationConfig,
 	authMetrics *auth.Metrics,
+	vaultClient vault.Client,
 ) (middlewareChainResult, error) {
 	h := handler
-	var rateLimiter *middleware.RateLimiter
+	var rateLimiter middleware.RateLimiterHandle
 	var maxSessionsLimiter *middleware.MaxSessionsLimiter
 
 	// Body limit middleware wraps the handler closest to the proxy (innermost,
@@ -61,13 +75,24 @@ func buildMiddlewareChain(
 	}
 
 	if cfg.Spec.RateLimit != nil && cfg.Spec.RateLimit.Enabled {
-		var rateLimitMiddleware func(http.Handler) http.Handler
-		rateLimitMiddleware, rateLimiter = middleware.RateLimitFromConfig(
-			cfg.Spec.RateLimit, logger,
-			middleware.WithRateLimitHitCallback(func(route string) {
-				metrics.RecordRateLimitHit(route)
-			}),
+		// Bound redis limiter initialization (Vault reads + retried ping);
+		// the in-memory store ignores the context.
+		ctx, cancel := context.WithTimeout(context.Background(), rateLimitInitTimeout)
+		defer cancel()
+
+		rateLimitMiddleware, handle, rlErr := middleware.NewRateLimitMiddleware(
+			ctx, cfg.Spec.RateLimit, globalRateLimitScope, logger,
+			middleware.RateLimitDeps{
+				VaultClient: vaultClient,
+				HitCallback: func(route string) {
+					metrics.RecordRateLimitHit(route)
+				},
+			},
 		)
+		if rlErr != nil {
+			return middlewareChainResult{}, fmt.Errorf("rate limit middleware initialization failed: %w", rlErr)
+		}
+		rateLimiter = handle
 		h = rateLimitMiddleware(h)
 	}
 

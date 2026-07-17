@@ -37,6 +37,11 @@ func TestRunOperatorGateway_BackendStartError_Target90(t *testing.T) {
 	origExit := exitFunc
 	defer func() { exitFunc = origExit }()
 
+	// The mock operator client's Start returns an error, which now drives the
+	// bounded retry loop; shrink the deadline so the fatal-exit path is reached
+	// quickly instead of after the full ~2m production retry window.
+	defer withShortOperatorStartDeadline()()
+
 	var exitCode int32
 	exitFunc = func(code int) {
 		atomic.StoreInt32(&exitCode, int32(code))

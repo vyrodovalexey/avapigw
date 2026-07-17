@@ -34,6 +34,7 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 | Observability (tracing, metrics) | ❌ Restart required | ❌ Preserved from initial config | Initialized once |
 | Global auth middleware | ❌ Restart required | ❌ Preserved from initial config | Static handler chain |
 | Trusted proxies | ❌ Restart required | ❌ Preserved from initial config | `initClientIPExtractor()` once |
+| Vault client (`spec.vault`) | ❌ Restart required (change skipped + warn) | ❌ Preserved from initial config | Client built once at startup; skip counted via `gateway_config_reload_component_total{component="vault",result="skipped"}` |
 
 ## File-Based Config Mode
 
@@ -82,6 +83,11 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 - Global, route-level, and backend-level rate limiting
 - Thresholds, burst sizes, per-client configuration
 - Updated via `rateLimiter.UpdateConfig()` (reload.go:214-217)
+- Redis (distributed) limiter: `requestsPerSecond`/`burst`/`perClient` are
+  hot-reloaded; **connection settings** (`store`, `url`, `sentinel`, pool,
+  timeouts, `failOpen`) are intentionally not hot-swapped and require a
+  restart. Invalid updates (rps or burst < 1) are rejected with a logged
+  error and the previous configuration stays in effect
 
 ✅ **Max Sessions Limiter**
 - Global, route-level, and backend-level max sessions
@@ -109,6 +115,12 @@ The AV API Gateway supports hot configuration reload through two distinct modes,
 
 ❌ **Security Headers Middleware**
 - Warning logged: "security configuration has changed but security middleware is NOT hot-reloaded" (reload.go:273-276)
+
+❌ **Vault Client (`spec.vault`)**
+- Warning logged: "spec.vault changed; vault client settings apply at startup — restart required" (reload.go:536)
+- The running Vault client is left untouched; its settings apply only at startup
+- Change counted via `gateway_config_reload_component_total{component="vault",result="skipped"}` (reload.go:537); the counter is pre-created at zero so the line is visible on `/metrics` before the first skipped reload (reload.go:145-147)
+- Comparison is against the **effective** section (env overlay already applied), so an env-only override does not register as a file change
 
 ### What Requires Restart (Silently Ignored)
 
@@ -255,6 +267,15 @@ Route-level CORS is now hot-reloaded because `UpdateGlobalConfig()` updates the 
 
 **Technical Reason**: Client IP extractor is initialized once at startup via `initClientIPExtractor()`.
 
+### Vault Client Connection (`spec.vault`)
+❌ **Always Requires Restart** (change logged as a warning and skipped)
+- Vault server address, auth method, credentials, TLS-to-Vault, caching, retries
+- A change on reload logs `spec.vault changed; vault client settings apply at startup — restart required` and increments `gateway_config_reload_component_total{component="vault",result="skipped"}`
+
+**Technical Reason**: The Vault client is created once at startup and owned outside the reload path. The per-listener/route/backend `tls.vault` PKI **certificates** it issues still hot-reload on renewal; only the client **connection** settings require a restart.
+
+**Effective-config validation**: The file watcher applies the same `VAULT_*` environment overlay used at boot *before* validating each reloaded config. Without this, a deployment whose Vault address lives only in `VAULT_ADDR` (an env-mixed pattern: `spec.vault` enabled with a `tokenFile` but no `address`) would fail raw-file validation on every file change and silently disable hot reload for **all** sections. The overlay is applied to a defensive copy, so the raw parsed configuration is never mutated.
+
 ## Technical Architecture
 
 ### Atomic Configuration Updates
@@ -334,7 +355,8 @@ The gateway exposes these hot-reload metrics:
 - `gateway_config_reload_last_success_timestamp` (gauge)
 - `gateway_config_watcher_running` (gauge, 1=running, 0=stopped)
 - `gateway_config_reload_component_total` with labels `component` and `result`
-  - Components: "rate_limiter", "max_sessions", "routes", "backends", "audit", "grpc_routes", "grpc_backends", "cors"
+  - Components: "rate_limiter", "max_sessions", "routes", "backends", "audit", "cors", "grpc_routes", "grpc_backends", "graphql_routes", "graphql_backends", "vault"
+  - `result` values: "success", "error", and "skipped" (the "vault" component is only ever reported as "skipped")
 
 ### Grafana Dashboard Queries
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -92,15 +93,34 @@ func (v *GRPCRouteValidator) ValidateCreate(
 }
 
 // ValidateUpdate implements admission.CustomValidator.
+//
+// Two lifecycle short-circuits prevent the webhook/finalizer deadlock:
+// deleting objects are admitted unconditionally, and metadata-only updates
+// (semantically unchanged spec) run local spec validation only, skipping
+// duplicate conflict checks.
 func (v *GRPCRouteValidator) ValidateUpdate(
 	ctx context.Context,
-	_, newObj *avapigwv1alpha1.GRPCRoute,
+	oldObj, newObj *avapigwv1alpha1.GRPCRoute,
 ) (admission.Warnings, error) {
+	// The object is being deleted; admit so metadata updates (for example
+	// finalizer removal) always proceed.
+	if newObj.GetDeletionTimestamp() != nil {
+		return nil, nil
+	}
+
 	start := time.Now()
 	warnings, err := v.validate(newObj)
 	if err != nil {
 		GetWebhookMetrics().RecordValidation("GRPCRoute", "update", "rejected", time.Since(start), len(warnings))
 		return warnings, err
+	}
+
+	// Metadata-only update: the spec is unchanged, so this update cannot
+	// introduce new duplicate conflicts. Local spec validation (above)
+	// still applies.
+	if apiequality.Semantic.DeepEqual(oldObj.Spec, newObj.Spec) {
+		GetWebhookMetrics().RecordValidation("GRPCRoute", "update", "allowed", time.Since(start), len(warnings))
+		return warnings, nil
 	}
 
 	// Check for duplicates (excluding self)
@@ -167,7 +187,7 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 
 	// Validate cache configuration
 	if spec.Cache != nil {
-		if err := v.validateCache(spec.Cache); err != nil {
+		if err := validateRouteCacheConfig(spec.Cache); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -221,15 +241,28 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 		}
 	}
 
-	// Security warnings for plaintext secrets in authentication config
+	// Security warnings for plaintext secrets in authentication config,
+	// plus a warning when mTLS is enabled without an explicit caFile
+	// (valid only with a gateway-level CA source such as Vault-managed PKI).
 	if spec.Authentication != nil {
 		warnings = append(warnings, warnPlaintextAuthSecrets(spec.Authentication)...)
+		warnings = append(warnings, warnMTLSMissingCAFile(spec.Authentication)...)
 	}
 
 	// Security warnings for plaintext secrets in authorization cache sentinel config
 	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
 		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
 	}
+
+	// Security warnings for plaintext secrets in route cache and rate limiter
+	// Redis Sentinel configurations
+	warnings = append(warnings, warnRouteCacheSentinelSecrets(spec.Cache)...)
+	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
+
+	// Transparency warnings: redis-backed stores are not applied in the
+	// gRPC route data path yet (in-memory rate limiting, no caching).
+	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, "GRPCRoute")...)
+	warnings = append(warnings, warnRouteCacheRedisTypeUnapplied(spec.Cache, "GRPCRoute")...)
 
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
@@ -361,23 +394,6 @@ func (v *GRPCRouteValidator) validateGRPCRetryPolicy(policy *avapigwv1alpha1.GRP
 			if !validConditions[cond] {
 				return fmt.Errorf("retries.retryOn contains invalid gRPC status: %q", cond)
 			}
-		}
-	}
-
-	return nil
-}
-
-// validateCache validates cache configuration.
-func (v *GRPCRouteValidator) validateCache(cache *avapigwv1alpha1.CacheConfig) error {
-	if cache.TTL != "" {
-		if err := validateDuration(string(cache.TTL)); err != nil {
-			return fmt.Errorf("cache.ttl is invalid: %w", err)
-		}
-	}
-
-	if cache.StaleWhileRevalidate != "" {
-		if err := validateDuration(string(cache.StaleWhileRevalidate)); err != nil {
-			return fmt.Errorf("cache.staleWhileRevalidate is invalid: %w", err)
 		}
 	}
 

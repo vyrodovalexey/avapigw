@@ -49,25 +49,44 @@ snap() { # $1=label
 import sys, json, urllib.request, urllib.parse
 vm, out = sys.argv[1], sys.argv[2]
 queries = {
-  "requests_total": "sum(gateway_requests_total)",
-  "request_duration_p95": "histogram_quantile(0.95, sum(rate(gateway_request_duration_seconds_bucket[1m])) by (le))",
-  "request_duration_p99": "histogram_quantile(0.99, sum(rate(gateway_request_duration_seconds_bucket[1m])) by (le))",
+  # GAP-P1 FIX: use the metric names the gateway ACTUALLY emits (verified by
+  # scraping the live pod :9090/metrics). Per-route request counter is the
+  # canonical traffic signal; feature liveness uses each feature's real counter.
+  "requests_total": "sum(gateway_route_requests_total)",
+  "requests_total_legacy": "sum(gateway_requests_total)",
+  "request_duration_p95": "histogram_quantile(0.95, sum(rate(gateway_route_request_duration_seconds_bucket[1m])) by (le))",
+  "request_duration_p99": "histogram_quantile(0.99, sum(rate(gateway_route_request_duration_seconds_bucket[1m])) by (le))",
+  "backend_requests_total": "sum(gateway_backend_requests_total)",
   "aggregate_requests_total": "gateway_aggregate_requests_total",
   "aggregate_targets_total": "gateway_aggregate_targets_total",
   "aggregate_results_success": 'gateway_aggregate_results_total{result="success"}',
   "aggregate_results_error": 'gateway_aggregate_results_total{result="error"}',
   "aggregate_duration_count": "gateway_aggregate_duration_seconds_count",
-  "auth_requests": "sum(gateway_auth_requests_total)",
-  "auth_requests_grpc": 'sum(gateway_auth_requests_total{method="grpc"})',
-  "cache_ops": "sum(gateway_cache_operations_total)",
-  "grpc_direct_requests": "sum(gateway_grpc_proxy_direct_requests_total)",
+  "aggregate_merge_count": "gateway_aggregate_merge_duration_seconds_count",
+  # auth: route-level success/failure counters + legacy auth request counter
+  "auth_successes": "sum(gateway_route_auth_successes_total)",
+  "auth_failures": "sum(gateway_route_auth_failures_total)",
+  "auth_requests_legacy": "sum(gateway_auth_requests_total)",
+  # cache: route-level hits/misses (no gateway_cache_operations_total counter)
+  "cache_hits": "sum(gateway_route_cache_hits_total)",
+  "cache_misses": "sum(gateway_route_cache_misses_total)",
+  # grpc streaming: real stream metrics (no gateway_grpc_proxy_direct_requests_total)
   "grpc_stream_count": "sum(gateway_grpc_stream_duration_seconds_count)",
+  "grpc_stream_active": "sum(gateway_grpc_stream_active)",
+  "grpc_stream_msgs_sent": "sum(gateway_grpc_stream_messages_sent_total)",
   "grpc_ratelimit_rejected": "sum(gateway_grpc_proxy_rate_limit_rejected_total)",
-  "ws_connections": "sum(gateway_websocket_proxy_connections_total)",
-  "transform_count": "sum(gateway_transform_requests_total)",
-  "encoding_count": "sum(gateway_encoding_requests_total)",
-  "cors_count": "sum(gateway_cors_requests_total)",
-  "openapi_count": "sum(gateway_openapi_validation_total)",
+  # rate limiting: route-level ratelimit hits (redis sentinel backed)
+  "route_ratelimit_hits": "sum(gateway_route_ratelimit_hits_total)",
+  # websocket: real ws connection counter (no gateway_websocket_proxy_connections_total)
+  "ws_connections": "sum(gateway_ws_connections_total)",
+  "ws_connections_active": "sum(gateway_ws_connections_active)",
+  # transform / encoding / cors: real feature counters (not *_requests_total)
+  "transform_count": "sum(gateway_transform_operations_total)",
+  "encoding_count": "sum(gateway_encoding_encode_total)",
+  "cors_count": "sum(gateway_middleware_cors_requests_total)",
+  # openapi: gateway emits no dedicated openapi validation counter on this build;
+  # verify openapi-validated route liveness via its per-route request counter.
+  "openapi_route_requests": 'sum(gateway_route_requests_total{route=~".*(validated|openapi).*"})',
 }
 res = {}
 for k, q in queries.items():
@@ -79,7 +98,7 @@ for k, q in queries.items():
     except Exception as e:
         res[k] = f"ERR:{e}"
 json.dump(res, open(out, "w"), indent=2)
-print("  snap", out, json.dumps({k: res[k] for k in ("requests_total","aggregate_requests_total")}))
+print("  snap", out, json.dumps({k: res[k] for k in ("requests_total","backend_requests_total","aggregate_requests_total")}))
 PY
 }
 

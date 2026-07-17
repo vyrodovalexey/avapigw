@@ -3,7 +3,7 @@
 [![CI](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vyrodovalexey/avapigw)](https://goreportcard.com/report/github.com/vyrodovalexey/avapigw)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/go-1.26.4-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26.5-blue.svg)](https://golang.org/dl/)
 
 A high-performance, production-ready API Gateway built with Go and gin-gonic. Designed for cloud-native environments with comprehensive traffic management, observability, and reliability features.
 
@@ -54,6 +54,8 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Backend Authentication** - JWT, Basic Auth, and mTLS authentication for backend connections
 - **X-Forwarded-For Security** - TrustedProxies configuration for secure client IP handling
 - **Open Redirect Protection** - Automatic validation and blocking of unsafe redirect URLs (javascript:, data:, vbscript: schemes)
+- **WebSocket Origin Allowlist** - Cross-site WebSocket hijacking (CSWSH) protection via `spec.websocket.allowedOrigins`; rejected handshakes return 403 before any backend connection is made
+- **Fail-Closed Route Security** - Routes whose authentication/authorization middleware cannot be constructed return 503 instead of serving traffic unauthenticated
 
 ### Authentication & Authorization
 - **Global Authentication Middleware** - Applied to all requests in the global middleware chain
@@ -73,6 +75,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Load Balancing** - Round-robin, weighted, least connections, and capacity-aware load balancing algorithms
 - **Backend Health Checking** - Automatic health monitoring with configurable thresholds
 - **Rate Limiting** - Token bucket rate limiting with per-client support (global, route-level, and backend-level)
+- **Distributed Rate Limiting** - Redis/Redis Sentinel-backed token buckets shared across gateway instances (atomic Lua script, configurable fail-open/fail-closed policy); enforced for the gateway-level limit and HTTP/GraphQL route-level limits
 - **Max Sessions** - Concurrent connection limiting with queueing support (global, route-level, and backend-level)
 - **Circuit Breaker** - Automatic failure detection and recovery (global and backend-level)
 - **Retry Policies** - Exponential backoff with configurable retry conditions
@@ -168,7 +171,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 
 #### Two-Tier Middleware Architecture
 - **Global Middleware Chain**: Recovery → RequestID → Logging → Tracing → Audit → Metrics → CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
-- **Per-Route Middleware Chain**: Security Headers → CORS → Body Limit → **OpenAPI Validation** → Headers → Cache → Transform → Encoding → [proxy to backend]
+- **Per-Route Middleware Chain**: Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → **OpenAPI Validation** → Headers → Cache → Transform → Encoding → [proxy to backend]
 - **RouteMiddlewareApplier Interface**: Decoupled proxy from gateway package to avoid import cycles while enabling per-route middleware
 - **Thread-Safe Cache Factory**: Per-route cache instances with lazy initialization and double-check locking
 
@@ -178,7 +181,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Integration Tests**: 739 tests passed (4 documented skips)
 - **E2E Tests**: 521 tests passed (18 documented skips)
 - **Quality Gates**: `go build`, `go vet`, `golangci-lint` (0 issues), and `govulncheck` (no vulnerabilities) all pass
-- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.4)
+- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.5)
 - **Lint Clean**: Zero linting issues across the entire codebase
 
 #### Performance Validation
@@ -231,7 +234,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.26.4 (for building from source)
+- Go 1.26.5 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -478,40 +481,40 @@ spec:
             host: user-service
             port: 8080
     
-     # Header-based routing
-     - name: mobile-api
-       match:
-         - uri:
-             prefix: /api
-           headers:
-             - name: User-Agent
-               regex: "Mobile|Android|iPhone"
-       route:
-         - destination:
-             host: mobile-backend
-             port: 8080
-     
-     # Route with custom request limits, CORS, and security headers
-     - name: api-route-with-overrides
-       match:
-         - uri:
-             prefix: /api/v1/upload
-           methods: [POST]
-       route:
-         - destination:
-             host: upload-backend
-             port: 8080
-       # Route-level request limits (overrides global)
-       requestLimits:
-         maxBodySize: 52428800    # 50MB for file uploads
-         maxHeaderSize: 1048576   # 1MB for headers
-       # Route-level CORS (overrides global)
-       cors:
-         allowOrigins: ["https://app.example.com", "https://admin.example.com"]
-         allowMethods: ["POST", "OPTIONS"]
-         allowHeaders: ["Content-Type", "Authorization", "X-Upload-Token"]
-         maxAge: 3600
-         allowCredentials: true
+    # Header-based routing
+    - name: mobile-api
+      match:
+        - uri:
+            prefix: /api
+          headers:
+            - name: User-Agent
+              regex: "Mobile|Android|iPhone"
+      route:
+        - destination:
+            host: mobile-backend
+            port: 8080
+
+    # Route with custom request limits, CORS, and security headers
+    - name: api-route-with-overrides
+      match:
+        - uri:
+            prefix: /api/v1/upload
+          methods: [POST]
+      route:
+        - destination:
+            host: upload-backend
+            port: 8080
+      # Route-level request limits (overrides global)
+      requestLimits:
+        maxBodySize: 52428800    # 50MB for file uploads
+        maxHeaderSize: 1048576   # 1MB for headers
+      # Route-level CORS (overrides global)
+      cors:
+        allowOrigins: ["https://app.example.com", "https://admin.example.com"]
+        allowMethods: ["POST", "OPTIONS"]
+        allowHeaders: ["Content-Type", "Authorization", "X-Upload-Token"]
+        maxAge: 3600
+        allowCredentials: true
       # Route-level security headers (overrides global)
       security:
         enabled: true
@@ -549,108 +552,106 @@ spec:
         timeout: 5s
         healthyThreshold: 2
         unhealthyThreshold: 3
-        headers:
-          Authorization: "Bearer health-token"
-        loadBalancer:
-          algorithm: roundRobin  # or weighted, leastConn, random
-        # Backend-level max sessions
-        maxSessions:
+      loadBalancer:
+        algorithm: roundRobin  # or weighted, leastConn, random
+      # Backend-level max sessions
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      # Backend-level rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+
+    # Backend with circuit breaker and JWT authentication
+    - name: secure-api-backend
+      hosts:
+        - address: secure-api.example.com
+          port: 443
+          weight: 1
+      # Backend-level circuit breaker
+      circuitBreaker:
+        enabled: true
+        threshold: 5
+        timeout: 30s
+        halfOpenRequests: 3
+      # Backend authentication with JWT from OIDC
+      authentication:
+        type: jwt
+        jwt:
           enabled: true
-          maxConcurrent: 500
-        # Backend-level rate limiting
-        rateLimit:
+          tokenSource: oidc
+          oidc:
+            issuerUrl: https://keycloak.example.com/realms/myrealm
+            clientId: gateway-client
+            clientSecret: secret-key
+            scopes: ["openid", "profile"]
+          headerName: Authorization
+          headerPrefix: Bearer
+      # TLS configuration for backend
+      tls:
+        enabled: true
+        mode: SIMPLE
+        caFile: /etc/ssl/certs/ca.crt
+        serverName: secure-api.example.com
+
+    # Backend with Basic authentication from Vault
+    - name: legacy-backend
+      hosts:
+        - address: legacy.internal.com
+          port: 8080
+          weight: 1
+      # Backend authentication with Basic auth from Vault
+      authentication:
+        type: basic
+        basic:
           enabled: true
-          requestsPerSecond: 100
-          burst: 200
-     
-     # Backend with circuit breaker and JWT authentication
-     - name: secure-api-backend
-       hosts:
-         - address: secure-api.example.com
-           port: 443
-           weight: 1
-       # Backend-level circuit breaker
-       circuitBreaker:
-         enabled: true
-         threshold: 5
-         timeout: 30s
-         halfOpenRequests: 3
-       # Backend authentication with JWT from OIDC
-       authentication:
-         type: jwt
-         jwt:
-           enabled: true
-           tokenSource: oidc
-           oidc:
-             issuerUrl: https://keycloak.example.com/realms/myrealm
-             clientId: gateway-client
-             clientSecret: secret-key
-             scopes: ["openid", "profile"]
-           headerName: Authorization
-           headerPrefix: Bearer
-       # TLS configuration for backend
-       tls:
-         enabled: true
-         mode: SIMPLE
-         caFile: /etc/ssl/certs/ca.crt
-         serverName: secure-api.example.com
-     
-     # Backend with Basic authentication from Vault
-     - name: legacy-backend
-       hosts:
-         - address: legacy.internal.com
-           port: 8080
-           weight: 1
-       # Backend authentication with Basic auth from Vault
-       authentication:
-         type: basic
-         basic:
-           enabled: true
-           vaultPath: secret/legacy-backend
-           usernameKey: username
-           passwordKey: password
-     
-     # Backend with mTLS authentication
-     - name: mtls-backend
-       hosts:
-         - address: mtls.example.com
-           port: 443
-           weight: 1
-       # Backend authentication with mTLS
-       authentication:
-         type: mtls
-         mtls:
-           enabled: true
-           certFile: /etc/ssl/certs/client.crt
-           keyFile: /etc/ssl/private/client.key
-           caFile: /etc/ssl/certs/backend-ca.crt
-        # TLS configuration for mTLS
-        tls:
+          vaultPath: secret/legacy-backend
+          usernameKey: username
+          passwordKey: password
+
+    # Backend with mTLS authentication
+    - name: mtls-backend
+      hosts:
+        - address: mtls.example.com
+          port: 443
+          weight: 1
+      # Backend authentication with mTLS
+      authentication:
+        type: mtls
+        mtls:
           enabled: true
-          mode: MUTUAL
-          caFile: /etc/ssl/certs/backend-ca.crt
           certFile: /etc/ssl/certs/client.crt
           keyFile: /etc/ssl/private/client.key
-      
-      # Backend with max sessions and rate limiting
-      - name: high-traffic-backend
-        hosts:
-          - address: 10.0.1.20
-            port: 8080
-          - address: 10.0.1.21
-            port: 8080
-        # Backend-level max sessions
-        maxSessions:
-          enabled: true
-          maxConcurrent: 500
-        # Backend-level rate limiting
-        rateLimit:
-          enabled: true
-          requestsPerSecond: 100
-          burst: 200
-        # Capacity-aware load balancing
-        loadBalancer:
-          algorithm: leastConn
+          caFile: /etc/ssl/certs/backend-ca.crt
+      # TLS configuration for mTLS
+      tls:
+        enabled: true
+        mode: MUTUAL
+        caFile: /etc/ssl/certs/backend-ca.crt
+        certFile: /etc/ssl/certs/client.crt
+        keyFile: /etc/ssl/private/client.key
+
+    # Backend with max sessions and rate limiting
+    - name: high-traffic-backend
+      hosts:
+        - address: 10.0.1.20
+          port: 8080
+        - address: 10.0.1.21
+          port: 8080
+      # Backend-level max sessions
+      maxSessions:
+        enabled: true
+        maxConcurrent: 500
+      # Backend-level rate limiting
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+      # Capacity-aware load balancing
+      loadBalancer:
+        algorithm: leastConn
 ```
 
 ### Rate Limiting Configuration
@@ -662,7 +663,7 @@ spec:
   rateLimit:
     enabled: true
     requestsPerSecond: 100
-    burst: 200
+    burst: 200               # Must be >= 1 when rate limiting is enabled
     perClient: true          # Rate limit per client IP
     skipSuccessfulRequests: false
     skipFailedRequests: false
@@ -671,6 +672,58 @@ spec:
       - X-RateLimit-Remaining
       - X-RateLimit-Reset
 ```
+
+#### Distributed Rate Limiting (Redis / Redis Sentinel)
+
+Set `store: redis` to share token buckets across all gateway instances. Buckets
+are maintained by an atomic Lua token-bucket script in Redis; `perClient: true`
+keys buckets by client IP. The same `store`/`redis` block is available on
+route-level `rateLimit`, enforced for HTTP routes and GraphQL routes (GraphQL
+routes reuse the shared per-route middleware chain); gRPC routes keep the
+in-memory limiter (the operator admission webhook emits a forward-compatibility
+warning for `store: redis` on non-APIRoute kinds):
+
+```yaml
+spec:
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: true
+    store: redis                          # memory (default) | redis
+    redis:
+      # Standalone mode (mutually exclusive with sentinel):
+      # url: "redis://redis.cache.svc:6379/0"
+      # passwordVaultPath: "secret/redis"   # Vault secret with "password" key
+
+      # Sentinel mode for high availability:
+      sentinel:
+        masterName: "mymaster"
+        sentinelAddrs:
+          - "redis-sentinel-0.redis.svc:26379"
+          - "redis-sentinel-1.redis.svc:26379"
+        db: 0
+        passwordVaultPath: "secret/redis-master"
+        sentinelPasswordVaultPath: "secret/redis-sentinel"
+      poolSize: 10
+      connectTimeout: 5s
+      readTimeout: 100ms                  # Also bounds each rate limit decision (default 100ms)
+      writeTimeout: 3s
+      keyPrefix: "avapigw:"
+      failOpen: true                      # true (default): allow requests on Redis outage
+                                          # false: reject with 429; construction fails hard
+                                          # when Redis is unreachable at startup
+      retry:                              # Initial connection retry (exponential backoff)
+        maxRetries: 3
+        initialBackoff: 100ms
+        maxBackoff: 30s
+```
+
+Failure policy: with `failOpen: true` a Redis outage lets requests through
+(a rate-limited WARN is logged and
+`gateway_middleware_redis_rate_limit_errors_total{policy="fail_open"}`
+increments); with `failOpen: false` requests are rejected with 429 and the
+gateway refuses to start if Redis is unreachable during initialization.
 
 ### Max Sessions Configuration
 
@@ -727,6 +780,34 @@ spec:
     allowCredentials: true
 ```
 
+### WebSocket Configuration
+
+Restrict which browser origins may open WebSocket connections through the
+gateway (cross-site WebSocket hijacking protection):
+
+```yaml
+spec:
+  websocket:
+    allowedOrigins:
+      - "https://app.example.com"     # scheme://host[:port] match
+      - "internal.example.com"        # bare host[:port] matches any scheme
+      # - "*"                         # explicitly allow every origin
+```
+
+Behavior:
+
+- **Empty / omitted (default)** - every origin is accepted for backward
+  compatibility and a single warning is logged at startup.
+- **Non-empty** - only listed origins and same-origin requests are accepted;
+  other origins are rejected during the handshake with HTTP 403 **before** any
+  backend connection is made.
+- **`"*"` entry** - explicitly allows all origins (no startup warning).
+- Requests without an `Origin` header (non-browser clients) are always allowed.
+- `ws://`/`wss://` scheme entries are normalized to `http`/`https`, matching
+  the page origin browsers send during the WebSocket handshake.
+- The allowlist applies to both proxied WebSocket routes and GraphQL
+  subscription (graphql-ws) upgrades.
+
 ### Observability Configuration
 
 Configure metrics, tracing, and logging:
@@ -776,6 +857,9 @@ gateway_start_time_seconds 1708000000
 # Rate limiting and circuit breaker metrics
 gateway_middleware_rate_limit_allowed_total{route="api-v1"} 1450
 gateway_middleware_rate_limit_rejected_total{route="api-v1"} 50
+gateway_middleware_redis_rate_limit_allowed_total{route="api-v1"} 1450
+gateway_middleware_redis_rate_limit_denied_total{route="api-v1"} 50
+gateway_middleware_redis_rate_limit_errors_total{route="api-v1",policy="fail_open"} 3
 gateway_middleware_circuit_breaker_requests_total{name="backend-1",state="closed"} 1200
 gateway_middleware_circuit_breaker_transitions_total{name="backend-1",from="closed",to="open"} 1
 gateway_middleware_request_timeouts_total{route="api-v1"} 5
@@ -855,8 +939,8 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 #### Per-Route Middleware Chain
 Applied to specific routes based on configuration:
 ```
-Security Headers → CORS → Body Limit → **OpenAPI Validation** → Headers → Cache → 
-Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+**OpenAPI Validation** → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
 
 ### Key Architectural Features
@@ -864,7 +948,8 @@ Transform → Encoding → [proxy to backend]
 - **Import Cycle Avoidance** - RouteMiddlewareApplier interface pattern decouples proxy from gateway package
 - **Thread-Safe Caching** - Middleware chains cached with double-check locking for performance
 - **Per-Route Isolation** - Each route gets its own cache namespace and middleware configuration
-- **Graceful Degradation** - Middleware failures don't crash requests, they pass through
+- **Fail-Closed Security** - If a route's auth/authz middleware cannot be constructed, the route returns 503 instead of serving traffic unauthenticated (`gateway_route_auth_failures_total{reason="construction_failed"}`, ERROR log `failed to build route security middleware, failing closed`)
+- **Graceful Degradation** - Non-security middleware failures don't crash requests, they pass through
 - **Comprehensive Metrics** - All middleware operations tracked with Prometheus metrics
 
 ### Middleware Components
@@ -874,6 +959,8 @@ Transform → Encoding → [proxy to backend]
 - **GET-Only Caching** - Only GET requests are cached by default
 - **Cache-Control Support** - Respects `no-store` and `no-cache` directives
 - **Per-Route Cache Factory** - Thread-safe lazy cache creation per route
+- **Per-Request Header Stripping** - CORS headers, `Set-Cookie`, and hop-by-hop headers are never stored in cache entries; live middleware headers win on replay
+- **Decoupled Cache Fill** - Cache writes are detached from the client's request context and bounded to 5 seconds
 
 #### Transform Middleware (`internal/middleware/transform.go`)
 - **10MB Body Limit** - Maximum request/response body size for transformation
@@ -1173,8 +1260,8 @@ spec:
 OpenAPI validation is positioned strategically in the per-route middleware chain:
 
 ```
-Security Headers → CORS → Body Limit → **OpenAPI Validation** → 
-Headers → Cache → Transform → Encoding → [proxy to backend]
+Auth → Authz → RateLimit → Security Headers → CORS → Body Limit → 
+**OpenAPI Validation** → Headers → Cache → Transform → Encoding → [proxy to backend]
 ```
 
 This ensures validation occurs after authentication/authorization but before expensive operations like caching and transformation.
@@ -1871,8 +1958,30 @@ When the same option is configured at multiple levels, the more specific level t
 |--------|:------:|:-----:|:-------:|:---------:|:-----------:|-------------|
 | `rateLimit.enabled` | ✅ | ✅ | ✅ | ✅ | ✅ | Enable rate limiting |
 | `rateLimit.requestsPerSecond` | ✅ | ✅ | ✅ | ✅ | ✅ | Requests per second limit |
-| `rateLimit.burst` | ✅ | ✅ | ✅ | ✅ | ✅ | Burst size (token bucket) |
+| `rateLimit.burst` | ✅ | ✅ | ✅ | ✅ | ✅ | Burst size (token bucket, must be >= 1) |
 | `rateLimit.perClient` | ✅ | ✅ | ✅ | ✅ | ✅ | Apply rate limit per client IP |
+| `rateLimit.store` | ✅ | ✅ | - | ✅ | - | Limiter state store: `memory` (default) or `redis` (distributed) |
+| `rateLimit.redis.url` | ✅ | ✅ | - | ✅ | - | Redis URL for standalone mode (mutually exclusive with sentinel) |
+| `rateLimit.redis.sentinel.*` | ✅ | ✅ | - | ✅ | - | Redis Sentinel connection (masterName, sentinelAddrs, db, passwords/Vault paths) |
+| `rateLimit.redis.poolSize` | ✅ | ✅ | - | ✅ | - | Maximum connections in the pool |
+| `rateLimit.redis.connectTimeout` | ✅ | ✅ | - | ✅ | - | Connection establishment timeout |
+| `rateLimit.redis.readTimeout` | ✅ | ✅ | - | ✅ | - | Read timeout; also bounds each rate limit decision (default 100ms) |
+| `rateLimit.redis.writeTimeout` | ✅ | ✅ | - | ✅ | - | Write timeout |
+| `rateLimit.redis.keyPrefix` | ✅ | ✅ | - | ✅ | - | Prefix for rate limiter keys |
+| `rateLimit.redis.passwordVaultPath` | ✅ | ✅ | - | ✅ | - | Vault path for the Redis password (standalone mode) |
+| `rateLimit.redis.failOpen` | ✅ | ✅ | - | ✅ | - | Allow (`true`, default) or reject with 429 (`false`) on Redis outage |
+| `rateLimit.redis.retry.*` | ✅ | ✅ | - | ✅ | - | Initial connection retry (maxRetries, initialBackoff, maxBackoff) |
+
+> Distributed (`store: redis`) enforcement applies to the gateway-level rate
+> limit and HTTP/GraphQL route-level rate limits (GraphQL routes reuse the
+> shared per-route middleware chain). gRPC routes keep the in-memory limiter
+> and backend-level rate limits accept the configuration for forward
+> compatibility. In operator mode the admission webhook emits a
+> forward-compatibility warning for `store: redis` on every kind except
+> APIRoute. Route-level HTTP rate limiting is enforced by the per-route
+> middleware chain (in earlier releases route-level `rateLimit` on HTTP routes
+> was validated but not enforced — configurations that relied on it being
+> ignored now take effect).
 
 ### Max Sessions Configuration
 
@@ -2455,7 +2564,6 @@ spec:
         path: /health
         interval: 10s
         timeout: 5s
-            ttl: 24h
       # TLS configuration for mTLS
       tls:
         enabled: true
@@ -3506,6 +3614,10 @@ export TLS_KEY_FILE=/app/certs/tls.key
 export TLS_MIN_VERSION=1.2
 
 # Vault integration
+# These VAULT_* variables override the corresponding spec.vault fields
+# per-field (ENV > file > defaults). The gateway-wide Vault client can also be
+# configured in the config file under spec.vault — see
+# docs/configuration-reference.md#vault-client-connection-specvault.
 export VAULT_ENABLED=true
 export VAULT_ADDR=https://vault.example.com:8200
 export VAULT_AUTH_METHOD=kubernetes
@@ -3682,6 +3794,40 @@ spec:
 | HS256, HS384, HS512 | HMAC | HMAC signatures with SHA-256/384/512 |
 | Ed25519 | EdDSA | EdDSA signatures with Ed25519 |
 
+#### HMAC Shared-Secret Validation
+
+For HS256/HS384/HS512, configure a shared secret instead of a JWKS URL. The
+secret can be a raw string or a symmetric (`oct`) JWK:
+
+```yaml
+spec:
+  routes:
+    - name: hmac-protected
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          algorithm: HS256
+          secret: "shared-hmac-secret"    # raw secret or oct JWK
+          issuer: "https://auth.example.com"
+```
+
+HMAC validation notes:
+
+- Tokens **without** a `kid` header are validated against the single
+  configured HMAC key (kid-less fallback); tokens carrying a `kid` must match
+  the configured key ID.
+- Algorithm-confusion protection: asymmetric public keys (RSA/ECDSA/Ed25519)
+  are never accepted as HMAC secrets, so an attacker cannot re-sign a token
+  with a public key using an `HS*` algorithm.
+
+#### JWKS Resilience
+
+JWKS refresh is coalesced (singleflight) and bounded to 30 seconds, so an
+identity provider outage no longer stalls gateway-wide authentication —
+concurrent requests share one refresh attempt instead of piling up behind the
+unavailable JWKS endpoint.
+
 #### JWT Claims Validation
 
 ```yaml
@@ -3725,34 +3871,43 @@ spec:
           name: x-api-key
       
       # Key hashing for secure storage
-      hashAlgorithm: sha256        # sha256, bcrypt, none
+      hashAlgorithm: sha256        # sha256 (default), sha512, bcrypt, plaintext (dev only)
       
       # Rate limiting per API key
       rateLimit:
         enabled: true
         requestsPerSecond: 100
         burst: 200
-        window: 1h
+      
+      # Validation result cache (LRU-bounded)
+      cache:
+        enabled: true
+        ttl: 5m
+        maxSize: 10000             # Entries beyond maxSize are evicted (LRU)
       
       # Vault KV integration for key storage
       vault:
         enabled: true
         kvMount: secret
         path: api-keys
-        keyField: key
-        metadataFields:
-          - name
-          - permissions
-          - rate_limit
       
-      # Static keys (for development/testing)
-      staticKeys:
-        - key: "dev-key-12345"
-          name: "Development Key"
-          permissions: [read, write]
-        - key: "test-key-67890"
-          name: "Test Key"
-          permissions: [read]
+      # Static keys (memory store)
+      store:
+        type: memory               # memory (default), file, vault
+        keys:
+          # Raw key (hashed in memory using hashAlgorithm at load time)
+          - id: "dev-key"
+            key: "dev-key-12345"
+            name: "Development Key"
+            scopes: [read, write]
+            roles: [developer]
+            enabled: true
+          # Hash-only key: the raw value never appears in configuration
+          - id: "prod-key"
+            hash: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+            name: "Production Key"
+            scopes: [read]
+            enabled: true
 ```
 
 #### API Key Hashing
@@ -3760,16 +3915,53 @@ spec:
 For security, API keys can be hashed before storage:
 
 ```yaml
-# SHA-256 hashing
+# SHA-256 hashing (default)
 hashAlgorithm: sha256
 
-# bcrypt hashing (more secure, slower)
-hashAlgorithm: bcrypt
-bcryptCost: 12
+# SHA-512 hashing
+hashAlgorithm: sha512
 
-# No hashing (not recommended for production)
-hashAlgorithm: none
+# bcrypt hashing (more secure, slower; not supported with the vault store)
+hashAlgorithm: bcrypt
+
+# No hashing (dev only, not recommended for production)
+hashAlgorithm: plaintext
 ```
+
+#### Hash-Only Static Keys
+
+Static key entries may omit the raw `key` and carry only a pre-computed
+`hash`, so plaintext key material never has to appear in gateway
+configuration:
+
+- `sha256`: 64-character hex digest (case-insensitive)
+- `sha512`: 128-character hex digest (case-insensitive)
+- `bcrypt`: bcrypt hash string; lookup is by key `id`, the presented key is
+  verified against the stored hash
+
+Configuration validation is strict at load time: an entry with neither a
+usable `key` nor a hash compatible with the configured `hashAlgorithm` is
+**rejected** (previously such entries were accepted and silently failed every
+lookup). With `hashAlgorithm: plaintext`, static keys are compared raw and a
+warning is logged at startup that plaintext comparison is not recommended for
+production.
+
+#### Store / Algorithm Support Matrix
+
+| Store | sha256 | sha512 | bcrypt | plaintext |
+|-------|:------:|:------:|:------:|:---------:|
+| `memory` | ✅ | ✅ | ✅ | ✅ (dev only) |
+| `file` | ✅ | ✅ | ✅ | ✅ (dev only) |
+| `vault` | ✅ | ✅ | ❌ rejected at load time | ❌ |
+
+The Vault store addresses secrets by the deterministic digest of the
+presented key, so only `sha256`/`sha512` work with it; `bcrypt` embeds a
+random salt and can never address a Vault path — that combination is rejected
+when the configuration is loaded. Vault outages during validation are
+reported distinctly from unknown keys: the
+`gateway_apikey_validation_total` metric uses `reason="store_error"` for
+outages (previously reported as `not_found`), so alerting can distinguish an
+unavailable store from an invalid key.
 
 ### mTLS Authentication
 
@@ -3985,8 +4177,9 @@ gateway_jwt_validation_total{status, issuer}
 gateway_jwt_cache_hits_total
 gateway_jwt_cache_misses_total
 
-# API key validation
-gateway_apikey_validation_total{status}
+# API key validation (reason distinguishes store outages from unknown keys:
+# valid, empty_key, not_found, store_error, invalid, disabled, expired)
+gateway_apikey_validation_total{status, reason}
 
 # mTLS validation
 gateway_mtls_validation_total{status}
@@ -4812,7 +5005,26 @@ match:
 
 ### Route Priority
 
-Routes are evaluated in the order they appear in the configuration. More specific routes should be placed before general ones.
+Routes are matched in **deterministic specificity order**, independent of the
+order they appear in the configuration (or of Kubernetes resource ordering in
+operator mode). The router computes a priority for every route:
+
+- **Exact path match**: 1000
+- **Prefix path match**: 500 + prefix length (longer prefixes win)
+- **Regex path match**: 100
+- **Method restriction**: +50
+- **Header conditions**: +10 each
+- **Query parameter conditions**: +5 each
+- **No match conditions (catch-all)**: 0
+
+Higher priority wins; routes with **equal priority are ordered by route name
+(ascending)**, so first-match-wins is a stable total order and reloads or
+cross-namespace merges cannot reorder equal-priority routes. The gRPC router
+uses the same scheme (service exact = 1000 / prefix = 500 + length / regex =
+100; method exact = 500 / prefix = 250 + length / regex = 50; +10 per
+metadata condition) including the name tie-break, and GraphQL routes are
+sorted by their own specificity formula (see
+[docs/graphql.md](docs/graphql.md)).
 
 ### Path Parameters
 
@@ -5015,8 +5227,7 @@ rateLimit:
   enabled: true
   requestsPerSecond: 1000
   burst: 2000
-  perClient: true
-  keyExtractor: "metadata:user-id"        # Extract from gRPC metadata
+  perClient: true                         # Per-client-IP token buckets
 ```
 
 #### Circuit Breaker
@@ -5154,8 +5365,9 @@ spec:
             host: order-service
             port: 50051
       rateLimit:
+        enabled: true
         requestsPerSecond: 100
-        keyExtractor: "metadata:tenant-id"
+        perClient: true
   
   grpcBackends:
     - name: user-service
@@ -5339,8 +5551,7 @@ rateLimit:
   enabled: true
   requestsPerSecond: 100
   burst: 200
-  perClient: true
-  keyExtractor: "ip"  # ip, header, query
+  perClient: true   # Per-client-IP token buckets (default: shared bucket)
 ```
 
 ### Circuit Breaker
@@ -5488,6 +5699,10 @@ The gateway exposes comprehensive metrics:
 
 #### Rate Limiting Metrics
 - `gateway_rate_limit_hits_total{route}` - Rate limit hits (no client_ip label for cardinality control)
+- `gateway_middleware_redis_rate_limit_allowed_total{route}` - Requests allowed by the distributed redis limiter
+- `gateway_middleware_redis_rate_limit_denied_total{route}` - Requests denied by the distributed redis limiter
+- `gateway_middleware_redis_rate_limit_errors_total{route, policy}` - Redis limiter errors by failure policy (`fail_open`/`fail_closed`)
+- `gateway_middleware_redis_rate_limit_duration_seconds{route}` - Redis rate limit decision duration
 
 #### Authentication Metrics
 - `gateway_auth_requests_total{method, status, auth_type}` - Authentication attempts
@@ -5495,7 +5710,7 @@ The gateway exposes comprehensive metrics:
 - `gateway_jwt_validation_total{status, issuer}` - JWT validation results
 - `gateway_jwt_cache_hits_total` - JWT cache hits
 - `gateway_jwt_cache_misses_total` - JWT cache misses
-- `gateway_apikey_validation_total{status}` - API key validation results
+- `gateway_apikey_validation_total{status, reason}` - API key validation results (`reason="store_error"` marks store outages, distinct from `not_found`)
 - `gateway_mtls_validation_total{status}` - mTLS validation results
 - `gateway_oidc_token_validation_total{provider, status}` - OIDC token validation
 
@@ -6964,7 +7179,7 @@ name: CI
 on: [push, pull_request]
 
 env:
-  GO_VERSION: '1.26.4'
+  GO_VERSION: '1.26.5'
   GOLANGCI_LINT_VERSION: 'v2.12.2'
 
 jobs:
@@ -7305,25 +7520,30 @@ See: [test/performance/README.md](test/performance/README.md)
 
 ## ⚠️ Known Issues / Follow-ups
 
-The following items are **pre-existing** findings surfaced during the Go 1.26.4 upgrade
-and validation cycle. They are not regressions introduced by the upgrade; they are
-tracked here as follow-ups.
+The following items track behavior changes and remaining follow-ups from recent
+release cycles.
 
-### HTTP per-route rate limiting falls back to the global limit
+### HTTP per-route rate limiting is now enforced (behavior change)
 
-For HTTP routes, the per-route rate limit is currently not enforced because the route
-label resolves to `unknown`, so matching traffic falls back to the **global** rate
-limit instead of the route-specific limit. Per-route **gRPC** rate limiting works
-correctly. Until this is fixed, rely on the global rate limit for HTTP routes or use
-gRPC routes when per-route limiting is required.
+Route-level `rateLimit` on HTTP routes is now enforced by the per-route
+middleware chain (previously the configuration was validated but the route
+label resolved to `unknown` and traffic fell back to the **global** limit).
+Both the in-memory and the distributed redis store are supported at route
+level for HTTP routes. **Migration note:** configurations that declared
+route-level HTTP rate limits and implicitly relied on them being ignored now
+have those limits applied — review `requestsPerSecond`/`burst` values before
+upgrading. Per-route **gRPC** rate limiting continues to work as before
+(in-memory store).
 
-### GraphQL observability gap on the gateway-level handler
+### GraphQL routes now enforce route middleware (behavior change)
 
-`/graphql` requests are served correctly and return valid data, but the gateway-level
-GraphQL handler bypasses the metrics/middleware chain, so it does **not** increment the
-`avapigw_graphql_*` / `gateway_requests_*` counters. GraphQL **subscription** proxying
-(over WebSocket) **does** record metrics. Treat the absence of GraphQL request counters
-as an observability gap, not a traffic failure.
+`/graphql` requests now flow through the matched route's middleware chain, so
+route-level authentication, rate limiting, CORS, and transforms configured on
+GraphQL routes are enforced, and GraphQL request metrics are recorded.
+**Migration note:** this is a breaking change for clients that relied on the
+previous bypass — GraphQL routes with `authentication.enabled: true` now
+reject unauthenticated requests that formerly passed through. GraphQL
+**subscription** proxying (over WebSocket) records metrics as before.
 
 ### HTTP Basic Auth is not a first-class CRD auth method
 

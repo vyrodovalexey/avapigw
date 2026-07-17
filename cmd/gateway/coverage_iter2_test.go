@@ -262,7 +262,7 @@ func TestInitVaultClient_MissingAddress(t *testing.T) {
 	logger := observability.NopLogger()
 
 	// initVaultClient should fail because VAULT_ADDR is empty
-	client := initVaultClient(logger)
+	client := initVaultClient(applyVaultEnv(nil, logger), logger)
 
 	// The vault client creation should fail (empty address)
 	// and call fatalWithSync -> exitFunc(1)

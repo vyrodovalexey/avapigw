@@ -127,28 +127,37 @@ func TestFunctional_WebSocket_DetectionLogic(t *testing.T) {
 		fmt.Sscanf(backendURL.Port(), "%d", &port)
 	}
 
-	r := router.New()
 	logger := observability.NopLogger()
-	registry := backend.NewRegistry(logger)
 
-	route := config.Route{
-		Name: "ws-detect-route",
-		Match: []config.RouteMatch{
-			{URI: &config.URIMatch{Prefix: "/ws-detect"}},
-		},
-		Route: []config.RouteDestination{
-			{
-				Destination: config.Destination{
-					Host: backendURL.Hostname(),
-					Port: port,
+	// newProxy builds an isolated router + proxy (and therefore its own
+	// http.Transport) per subtest. The parallel subtests below drive different
+	// code paths (WebSocket upgrade vs plain HTTP) which lazily initialize the
+	// shared transport (onceSetNextProtoDefaults) while the WebSocket dialer
+	// reads TLSClientConfig from it. Sharing a single proxy/transport across
+	// parallel subtests therefore trips the race detector on that stdlib
+	// lazy-init. Per-subtest isolation removes the shared mutable state without
+	// weakening any assertion.
+	newProxy := func(t *testing.T) *proxy.ReverseProxy {
+		t.Helper()
+		r := router.New()
+		registry := backend.NewRegistry(logger)
+		route := config.Route{
+			Name: "ws-detect-route",
+			Match: []config.RouteMatch{
+				{URI: &config.URIMatch{Prefix: "/ws-detect"}},
+			},
+			Route: []config.RouteDestination{
+				{
+					Destination: config.Destination{
+						Host: backendURL.Hostname(),
+						Port: port,
+					},
 				},
 			},
-		},
+		}
+		require.NoError(t, r.AddRoute(route))
+		return proxy.NewReverseProxy(r, registry)
 	}
-	err = r.AddRoute(route)
-	require.NoError(t, err)
-
-	p := proxy.NewReverseProxy(r, registry)
 
 	tests := []struct {
 		name          string
@@ -203,6 +212,8 @@ func TestFunctional_WebSocket_DetectionLogic(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
+			p := newProxy(t)
 
 			req := httptest.NewRequest(http.MethodGet, "/ws-detect/test", nil)
 			if tt.upgradeHeader != "" {

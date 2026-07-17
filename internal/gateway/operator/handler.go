@@ -7,16 +7,29 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	graphqlrouter "github.com/vyrodovalexey/avapigw/internal/graphql/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	operatorv1alpha1 "github.com/vyrodovalexey/avapigw/proto/operator/v1alpha1"
 )
+
+// snapshotRegressionWindow is the post-(re)connect stabilization window
+// during which FULL_SYNC snapshots whose resource count REGRESSES versus the
+// running configuration are deferred instead of applied. Right after an
+// operator restart the store may still be mid-seed, and applying its partial
+// snapshots shrinks the route set (observed live as ~30s of 404s while
+// routes dropped 25→3→11→25). Growing snapshots are always applied, and a
+// genuine shrink is honored once the window has passed.
+const snapshotRegressionWindow = 30 * time.Second
 
 // ConfigApplier is the interface for applying configuration changes.
 type ConfigApplier interface {
@@ -48,6 +61,11 @@ type ConfigHandler struct {
 	logger           observability.Logger
 	tracer           trace.Tracer
 	cacheInvalidator CacheInvalidator
+
+	// reconnectedAt holds the UnixNano timestamp of the most recent operator
+	// (re)connect (see MarkReconnected). Zero means no reconnect was ever
+	// signaled, which disables the snapshot regression window entirely.
+	reconnectedAt atomic.Int64
 
 	// Current state tracking
 	mu              sync.RWMutex
@@ -529,66 +547,72 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 		observability.Int("total_resources", int(snapshot.TotalResources)),
 	)
 
-	// Clear existing state
+	// Defensive safeguard: never wipe a non-empty running configuration in
+	// favor of an EMPTY snapshot. An empty FULL_SYNC is almost always the
+	// result of an operator restart whose store has not been re-seeded by the
+	// controllers yet (the proto carries no "intentionally empty" flag to
+	// distinguish the two cases). Keep serving the last-known-good
+	// configuration; the operator pushes a fresh FULL_SYNC as soon as its
+	// store is populated, which is applied normally. Trade-off: deleting the
+	// very last resource in the cluster is also skipped until the next
+	// non-empty snapshot or a gateway restart — a deliberate
+	// availability-over-consistency choice for the data plane.
+	if snapshotIsEmpty(snapshot) && h.hasRunningConfig() {
+		h.logger.Warn("received empty configuration snapshot while running configuration is non-empty; "+
+			"keeping last-known-good configuration",
+			observability.String("version", snapshot.Version),
+			observability.String("checksum", snapshot.Checksum),
+		)
+		span.AddEvent("empty snapshot skipped: last-known-good configuration retained")
+		return nil
+	}
+
+	// Post-reconnect regression guard: right after an operator restart the
+	// operator's store may still be mid-seed, and its FULL_SYNC snapshots
+	// carry PARTIAL (shrinking) resource sets. Defer applying any snapshot
+	// whose resource count regresses versus the running configuration while
+	// inside the stabilization window; the operator pushes a complete
+	// snapshot as soon as its store finishes seeding, which grows the count
+	// again and is applied normally. Trade-off (mirroring the empty-snapshot
+	// guard above): a GENUINE shrink pushed within the window is deferred
+	// until the next FULL_SYNC after the window — availability over
+	// consistency for the data plane.
+	if newCount, runningCount, deferred := h.shouldDeferRegressingSnapshot(snapshot); deferred {
+		h.logger.Warn("received regressing configuration snapshot within post-reconnect window; "+
+			"keeping last-known-good configuration",
+			observability.String("version", snapshot.Version),
+			observability.String("checksum", snapshot.Checksum),
+			observability.Int("snapshot_resources", newCount),
+			observability.Int("running_resources", runningCount),
+		)
+		span.AddEvent("regressing snapshot deferred: last-known-good configuration retained")
+		return nil
+	}
+
+	// Decode every resource type before touching state so an undecodable
+	// snapshot never leaves the handler half-cleared.
+	routes, routeKeys := decodeResources[config.Route](h.logger, "route", snapshot.ApiRoutes)
+	backends, backendKeys := decodeResources[config.Backend](h.logger, "backend", snapshot.Backends)
+	grpcRoutes, grpcRouteKeys := decodeResources[config.GRPCRoute](h.logger, "gRPC route", snapshot.GrpcRoutes)
+	grpcBackends, grpcBackendKeys := decodeResources[config.GRPCBackend](
+		h.logger, "gRPC backend", snapshot.GrpcBackends)
+	graphqlRoutes, graphqlRouteKeys := decodeResources[config.GraphQLRoute](
+		h.logger, "GraphQL route", snapshot.GraphqlRoutes)
+	graphqlBackends, graphqlBackendKeys := decodeResources[config.GraphQLBackend](
+		h.logger, "GraphQL backend", snapshot.GraphqlBackends)
+
+	// Replace the tracked state in a single atomic swap under one lock so
+	// concurrent readers never observe a half-cleared configuration. State
+	// is keyed by the SAME composite namespace/name key incremental updates
+	// use (see HandleUpdate): a FULL_SYNC followed by an incremental
+	// MODIFY/DELETE for the same resource must address the same map entry.
 	h.mu.Lock()
-	h.routes = make(map[string]*config.Route)
-	h.backends = make(map[string]*config.Backend)
-	h.grpcRoutes = make(map[string]*config.GRPCRoute)
-	h.grpcBackends = make(map[string]*config.GRPCBackend)
-	h.graphqlRoutes = make(map[string]*config.GraphQLRoute)
-	h.graphqlBackends = make(map[string]*config.GraphQLBackend)
-	h.mu.Unlock()
-
-	// Process API routes
-	routes := h.parseRoutes(snapshot.ApiRoutes)
-
-	// Process backends
-	backends := h.parseBackends(snapshot.Backends)
-
-	// Process gRPC routes
-	grpcRoutes := h.parseGRPCRoutes(snapshot.GrpcRoutes)
-
-	// Process gRPC backends
-	grpcBackends := h.parseGRPCBackends(snapshot.GrpcBackends)
-
-	// Process GraphQL routes
-	graphqlRoutes := h.parseGraphQLRoutes(snapshot.GraphqlRoutes)
-
-	// Process GraphQL backends
-	graphqlBackends := h.parseGraphQLBackends(snapshot.GraphqlBackends)
-
-	// Store in state
-	h.mu.Lock()
-	for _, r := range routes {
-		route := r
-		key := resourceKey("", route.Name)
-		h.routes[key] = &route
-	}
-	for _, b := range backends {
-		backend := b
-		key := resourceKey("", backend.Name)
-		h.backends[key] = &backend
-	}
-	for _, r := range grpcRoutes {
-		route := r
-		key := resourceKey("", route.Name)
-		h.grpcRoutes[key] = &route
-	}
-	for _, b := range grpcBackends {
-		backend := b
-		key := resourceKey("", backend.Name)
-		h.grpcBackends[key] = &backend
-	}
-	for _, r := range graphqlRoutes {
-		route := r
-		key := resourceKey("", route.Name)
-		h.graphqlRoutes[key] = &route
-	}
-	for _, b := range graphqlBackends {
-		backend := b
-		key := resourceKey("", backend.Name)
-		h.graphqlBackends[key] = &backend
-	}
+	h.routes = stateMap(routes, routeKeys)
+	h.backends = stateMap(backends, backendKeys)
+	h.grpcRoutes = stateMap(grpcRoutes, grpcRouteKeys)
+	h.grpcBackends = stateMap(grpcBackends, grpcBackendKeys)
+	h.graphqlRoutes = stateMap(graphqlRoutes, graphqlRouteKeys)
+	h.graphqlBackends = stateMap(graphqlBackends, graphqlBackendKeys)
 	h.mu.Unlock()
 
 	// Apply full configuration if applier supports it
@@ -624,172 +648,173 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 	return nil
 }
 
-// parseRoutes parses configuration resources into routes.
-func (h *ConfigHandler) parseRoutes(
+// decodeResources decodes each resource's SpecJson into T. Successfully
+// decoded items are returned in input order together with their composite
+// state keys (resourceKey(namespace, name)), the SAME key shape incremental
+// updates use in HandleUpdate, so snapshot-seeded and incrementally updated
+// state address identical map entries. Undecodable resources are logged with
+// the given kind label and skipped.
+func decodeResources[T any](
+	logger observability.Logger,
+	kind string,
 	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.Route {
-	routes := make([]config.Route, 0, len(resources))
+) (items []T, keys []string) {
+	items = make([]T, 0, len(resources))
+	keys = make([]string, 0, len(resources))
 	for _, r := range resources {
-		var route config.Route
-		if err := json.Unmarshal(r.SpecJson, &route); err != nil {
-			h.logger.Error("failed to parse route",
+		var item T
+		if err := json.Unmarshal(r.SpecJson, &item); err != nil {
+			logger.Error("failed to parse "+kind,
 				observability.String("name", r.Name),
 				observability.Error(err),
 			)
 			continue
 		}
-		routes = append(routes, route)
+		items = append(items, item)
+		keys = append(keys, resourceKey(r.Namespace, r.Name))
 	}
-	return routes
+	return items, keys
 }
 
-// parseBackends parses configuration resources into backends.
-func (h *ConfigHandler) parseBackends(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.Backend {
-	backends := make([]config.Backend, 0, len(resources))
-	for _, r := range resources {
-		var backend config.Backend
-		if err := json.Unmarshal(r.SpecJson, &backend); err != nil {
-			h.logger.Error("failed to parse backend",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		backends = append(backends, backend)
+// stateMap builds a state map from decoded items and their composite keys
+// (parallel slices produced by decodeResources). Items are copied so state
+// entries stay isolated from the slices handed to the applier.
+func stateMap[T any](items []T, keys []string) map[string]*T {
+	m := make(map[string]*T, len(items))
+	for i := range items {
+		item := items[i]
+		m[keys[i]] = &item
 	}
-	return backends
+	return m
 }
 
-// parseGRPCRoutes parses configuration resources into gRPC routes.
-func (h *ConfigHandler) parseGRPCRoutes(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GRPCRoute {
-	routes := make([]config.GRPCRoute, 0, len(resources))
-	for _, r := range resources {
-		var route config.GRPCRoute
-		if err := json.Unmarshal(r.SpecJson, &route); err != nil {
-			h.logger.Error("failed to parse gRPC route",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		routes = append(routes, route)
+// collectSorted flattens a resource state map into a slice ordered by the
+// composite state key (namespace/name). Go map iteration order is
+// randomized, and the collected slices are pushed into routers/registries
+// and logged — keys are unique, so key order keeps route loading, apply
+// logs, and config diffs deterministic across processes and restarts.
+func collectSorted[T any](m map[string]*T) []T {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	return routes
+	sort.Strings(keys)
+
+	items := make([]T, 0, len(m))
+	for _, k := range keys {
+		items = append(items, *m[k])
+	}
+	return items
 }
 
-// parseGRPCBackends parses configuration resources into gRPC backends.
-func (h *ConfigHandler) parseGRPCBackends(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GRPCBackend {
-	backends := make([]config.GRPCBackend, 0, len(resources))
-	for _, r := range resources {
-		var backend config.GRPCBackend
-		if err := json.Unmarshal(r.SpecJson, &backend); err != nil {
-			h.logger.Error("failed to parse gRPC backend",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		backends = append(backends, backend)
-	}
-	return backends
-}
-
-// collectRoutes collects all routes from the state.
+// collectRoutes collects all routes from the state in deterministic order.
 func (h *ConfigHandler) collectRoutes() []config.Route {
-	routes := make([]config.Route, 0, len(h.routes))
-	for _, r := range h.routes {
-		routes = append(routes, *r)
-	}
-	return routes
+	return collectSorted(h.routes)
 }
 
-// collectBackends collects all backends from the state.
+// collectBackends collects all backends from the state in deterministic order.
 func (h *ConfigHandler) collectBackends() []config.Backend {
-	backends := make([]config.Backend, 0, len(h.backends))
-	for _, b := range h.backends {
-		backends = append(backends, *b)
-	}
-	return backends
+	return collectSorted(h.backends)
 }
 
-// collectGRPCRoutes collects all gRPC routes from the state.
+// collectGRPCRoutes collects all gRPC routes from the state in deterministic order.
 func (h *ConfigHandler) collectGRPCRoutes() []config.GRPCRoute {
-	routes := make([]config.GRPCRoute, 0, len(h.grpcRoutes))
-	for _, r := range h.grpcRoutes {
-		routes = append(routes, *r)
-	}
-	return routes
+	return collectSorted(h.grpcRoutes)
 }
 
-// collectGRPCBackends collects all gRPC backends from the state.
+// collectGRPCBackends collects all gRPC backends from the state in deterministic order.
 func (h *ConfigHandler) collectGRPCBackends() []config.GRPCBackend {
-	backends := make([]config.GRPCBackend, 0, len(h.grpcBackends))
-	for _, b := range h.grpcBackends {
-		backends = append(backends, *b)
-	}
-	return backends
+	return collectSorted(h.grpcBackends)
 }
 
-// parseGraphQLRoutes parses configuration resources into GraphQL routes.
-func (h *ConfigHandler) parseGraphQLRoutes(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GraphQLRoute {
-	routes := make([]config.GraphQLRoute, 0, len(resources))
-	for _, r := range resources {
-		var route config.GraphQLRoute
-		if err := json.Unmarshal(r.SpecJson, &route); err != nil {
-			h.logger.Error("failed to parse GraphQL route",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		routes = append(routes, route)
-	}
-	return routes
-}
-
-// parseGraphQLBackends parses configuration resources into GraphQL backends.
-func (h *ConfigHandler) parseGraphQLBackends(
-	resources []*operatorv1alpha1.ConfigurationResource,
-) []config.GraphQLBackend {
-	backends := make([]config.GraphQLBackend, 0, len(resources))
-	for _, r := range resources {
-		var backend config.GraphQLBackend
-		if err := json.Unmarshal(r.SpecJson, &backend); err != nil {
-			h.logger.Error("failed to parse GraphQL backend",
-				observability.String("name", r.Name),
-				observability.Error(err),
-			)
-			continue
-		}
-		backends = append(backends, backend)
-	}
-	return backends
-}
-
-// collectGraphQLRoutes collects all GraphQL routes from the state.
+// collectGraphQLRoutes collects all GraphQL routes from the state, ordered by
+// the SAME exported specificity function the GraphQL data-plane router uses
+// in LoadRoutes (graphqlrouter.SortRoutesBySpecificity), so operator-applied
+// route order, apply logs, and the router's matching order never diverge.
 func (h *ConfigHandler) collectGraphQLRoutes() []config.GraphQLRoute {
-	routes := make([]config.GraphQLRoute, 0, len(h.graphqlRoutes))
-	for _, r := range h.graphqlRoutes {
-		routes = append(routes, *r)
-	}
+	routes := collectSorted(h.graphqlRoutes)
+	graphqlrouter.SortRoutesBySpecificity(routes)
 	return routes
 }
 
-// collectGraphQLBackends collects all GraphQL backends from the state.
+// collectGraphQLBackends collects all GraphQL backends from the state in
+// deterministic order.
 func (h *ConfigHandler) collectGraphQLBackends() []config.GraphQLBackend {
-	backends := make([]config.GraphQLBackend, 0, len(h.graphqlBackends))
-	for _, b := range h.graphqlBackends {
-		backends = append(backends, *b)
+	return collectSorted(h.graphqlBackends)
+}
+
+// snapshotIsEmpty reports whether the snapshot carries no resources of any
+// type. Resource slices are checked directly instead of trusting the
+// TotalResources counter so a miscounted snapshot cannot bypass the
+// empty-snapshot safeguard.
+func snapshotIsEmpty(snapshot *operatorv1alpha1.ConfigurationSnapshot) bool {
+	return len(snapshot.ApiRoutes) == 0 &&
+		len(snapshot.Backends) == 0 &&
+		len(snapshot.GrpcRoutes) == 0 &&
+		len(snapshot.GrpcBackends) == 0 &&
+		len(snapshot.GraphqlRoutes) == 0 &&
+		len(snapshot.GraphqlBackends) == 0
+}
+
+// hasRunningConfig reports whether the handler currently tracks any resources.
+func (h *ConfigHandler) hasRunningConfig() bool {
+	return h.runningResourceCount() > 0
+}
+
+// runningResourceCount returns the total number of resources currently
+// tracked by the handler across all resource types. Incremental updates keep
+// the maps current, so this is always the size of the running configuration.
+func (h *ConfigHandler) runningResourceCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.routes) + len(h.backends) +
+		len(h.grpcRoutes) + len(h.grpcBackends) +
+		len(h.graphqlRoutes) + len(h.graphqlBackends)
+}
+
+// countSnapshotResources counts the resources carried by a snapshot across
+// all resource types. Resource slices are counted directly instead of
+// trusting the TotalResources field, mirroring snapshotIsEmpty.
+func countSnapshotResources(snapshot *operatorv1alpha1.ConfigurationSnapshot) int {
+	return len(snapshot.ApiRoutes) + len(snapshot.Backends) +
+		len(snapshot.GrpcRoutes) + len(snapshot.GrpcBackends) +
+		len(snapshot.GraphqlRoutes) + len(snapshot.GraphqlBackends)
+}
+
+// MarkReconnected records an operator (re)connect and arms the snapshot
+// regression window (see snapshotRegressionWindow). It is wired to the
+// operator client's reconnect listener so both the initial connect and every
+// stream re-establishment restart the window.
+func (h *ConfigHandler) MarkReconnected() {
+	h.reconnectedAt.Store(time.Now().UnixNano())
+	h.logger.Debug("operator (re)connect recorded; snapshot regression window armed",
+		observability.Duration("window", snapshotRegressionWindow),
+	)
+}
+
+// withinReconnectWindow reports whether the handler is inside the
+// post-(re)connect stabilization window. A zero timestamp (no reconnect ever
+// signaled, e.g. embedded use without the listener wiring) keeps the window
+// permanently inactive so snapshots always apply.
+func (h *ConfigHandler) withinReconnectWindow() bool {
+	markedAt := h.reconnectedAt.Load()
+	if markedAt == 0 {
+		return false
 	}
-	return backends
+	return time.Since(time.Unix(0, markedAt)) <= snapshotRegressionWindow
+}
+
+// shouldDeferRegressingSnapshot reports whether a FULL_SYNC snapshot must be
+// deferred because its resource count regresses versus the running
+// configuration while inside the post-reconnect stabilization window. The
+// returned counts are exposed for logging.
+func (h *ConfigHandler) shouldDeferRegressingSnapshot(
+	snapshot *operatorv1alpha1.ConfigurationSnapshot,
+) (newCount, runningCount int, deferred bool) {
+	newCount = countSnapshotResources(snapshot)
+	runningCount = h.runningResourceCount()
+	deferred = newCount < runningCount && h.withinReconnectWindow()
+	return newCount, runningCount, deferred
 }
 
 // invalidateCache calls the cache invalidation callback if configured.

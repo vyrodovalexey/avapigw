@@ -822,10 +822,21 @@ func TestValidateGRPCHealthCheck(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name: "httpPath set when useHTTP is false",
+			// The API server applies the CRD schema default
+			// (httpPath="/healthz") before the webhook runs, so the
+			// defaulted value must be admitted even when useHTTP is false.
+			name: "CRD-defaulted httpPath tolerated when useHTTP is false",
 			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
 				UseHTTP:  false,
 				HTTPPath: "/healthz",
+			},
+			wantError: false,
+		},
+		{
+			name: "explicit non-default httpPath set when useHTTP is false",
+			healthCheck: &avapigwv1alpha1.GRPCHealthCheckConfig{
+				UseHTTP:  false,
+				HTTPPath: "/custom-health",
 			},
 			wantError: true,
 		},
@@ -1687,12 +1698,37 @@ func TestValidateAuthentication(t *testing.T) {
 			wantError: true,
 		},
 		{
-			name: "mTLS enabled but missing CA file",
+			// A missing caFile is valid when the gateway resolves the CA from
+			// a gateway-level source (e.g. Vault-managed PKI); the webhook
+			// surfaces a WARNING instead of rejecting (see warnMTLSMissingCAFile).
+			name: "mTLS enabled but missing CA file admitted",
 			auth: &avapigwv1alpha1.AuthenticationConfig{
 				Enabled: true,
 				MTLS: &avapigwv1alpha1.MTLSAuthConfig{
 					Enabled: true,
-					// Missing CAFile
+					// Missing CAFile — warning, not rejection
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "mTLS with vault-managed CA style config (enabled + extractIdentity)",
+			auth: &avapigwv1alpha1.AuthenticationConfig{
+				Enabled: true,
+				MTLS: &avapigwv1alpha1.MTLSAuthConfig{
+					Enabled:         true,
+					ExtractIdentity: "cn",
+				},
+			},
+			wantError: false,
+		},
+		{
+			name: "mTLS with invalid extractIdentity still rejected",
+			auth: &avapigwv1alpha1.AuthenticationConfig{
+				Enabled: true,
+				MTLS: &avapigwv1alpha1.MTLSAuthConfig{
+					Enabled:         true,
+					ExtractIdentity: "spiffe",
 				},
 			},
 			wantError: true,
@@ -1927,11 +1963,22 @@ func TestValidateRouteMTLSAuth(t *testing.T) {
 			wantError: false,
 		},
 		{
-			name: "missing CA file",
+			// caFile is optional: the CA may come from a gateway-level source
+			// (e.g. Vault-managed PKI) the webhook cannot see. A warning is
+			// emitted instead (see TestWarnMTLSMissingCAFile).
+			name: "missing CA file admitted",
 			mtls: &avapigwv1alpha1.MTLSAuthConfig{
 				Enabled: true,
 			},
-			wantError: true,
+			wantError: false,
+		},
+		{
+			name: "vault-managed CA style: enabled with extractIdentity only",
+			mtls: &avapigwv1alpha1.MTLSAuthConfig{
+				Enabled:         true,
+				ExtractIdentity: "cn",
+			},
+			wantError: false,
 		},
 		{
 			name: "valid extract identity cn",
@@ -2143,7 +2190,7 @@ func TestValidateAuthorization(t *testing.T) {
 					Policies: []avapigwv1alpha1.ABACPolicyConfig{
 						{
 							Name:       "owner-policy",
-							Expression: "request.user == resource.owner",
+							Expression: "request.user == subject.name",
 							Effect:     "allow",
 						},
 					},
@@ -2334,7 +2381,7 @@ func TestValidateABACConfig(t *testing.T) {
 				Policies: []avapigwv1alpha1.ABACPolicyConfig{
 					{
 						Name:       "owner-policy",
-						Expression: "request.user == resource.owner",
+						Expression: "request.user == subject.name",
 						Effect:     "allow",
 					},
 				},
@@ -2348,7 +2395,7 @@ func TestValidateABACConfig(t *testing.T) {
 				Policies: []avapigwv1alpha1.ABACPolicyConfig{
 					{
 						Name:       "",
-						Expression: "request.user == resource.owner",
+						Expression: "request.user == subject.name",
 						Effect:     "allow",
 					},
 				},
@@ -2432,12 +2479,80 @@ func TestValidateABACConfig(t *testing.T) {
 				Policies: []avapigwv1alpha1.ABACPolicyConfig{
 					{
 						Name:       "complex-policy",
-						Expression: "identity.roles.exists(r, r == 'admin') || request.user == resource.owner",
+						Expression: "subject.roles.exists(r, r == 'admin') || request.user == subject.name",
 						Effect:     "allow",
 					},
 				},
 			},
 			wantError: false,
+		},
+		{
+			// Regression: the gateway runtime declares 'subject' — the webhook
+			// must compile against the same environment (previously rejected
+			// with "undeclared reference to 'subject'").
+			name: "subject-based expression admitted (runtime env parity)",
+			abac: &avapigwv1alpha1.ABACConfig{
+				Enabled: true,
+				Policies: []avapigwv1alpha1.ABACPolicyConfig{
+					{
+						Name:       "subject-policy",
+						Expression: "subject.role == 'admin'",
+						Effect:     "allow",
+					},
+				},
+			},
+			wantError: false,
+		},
+		{
+			// The runtime env declares 'environment', 'now', 'resource'
+			// (string) and the custom functions ip_in_range/has_role.
+			name: "runtime env variables and functions admitted",
+			abac: &avapigwv1alpha1.ABACConfig{
+				Enabled: true,
+				Policies: []avapigwv1alpha1.ABACPolicyConfig{
+					{
+						Name: "env-policy",
+						Expression: "resource == 'orders' && has_role('ops') && " +
+							"ip_in_range(string(environment.client_ip), '10.0.0.0/8') && " +
+							"now < timestamp('2100-01-01T00:00:00Z')",
+						Effect: "allow",
+					},
+				},
+			},
+			wantError: false,
+		},
+		{
+			// 'identity' is NOT declared at runtime (the runtime variable is
+			// 'subject'); admitting it would only defer the failure to the
+			// gateway. It must be rejected at admission.
+			name: "identity-based expression rejected (not declared at runtime)",
+			abac: &avapigwv1alpha1.ABACConfig{
+				Enabled: true,
+				Policies: []avapigwv1alpha1.ABACPolicyConfig{
+					{
+						Name:       "identity-policy",
+						Expression: "identity.role == 'admin'",
+						Effect:     "allow",
+					},
+				},
+			},
+			wantError: true,
+		},
+		{
+			// 'resource' is a string at runtime — field selection on it must
+			// be rejected, mirroring the runtime compilation failure.
+			name: "field selection on string resource rejected",
+			abac: &avapigwv1alpha1.ABACConfig{
+				Enabled: true,
+				Policies: []avapigwv1alpha1.ABACPolicyConfig{
+					{
+						Name:       "resource-field-policy",
+						Expression: "resource.owner == 'me'",
+						Effect:     "allow",
+					},
+				},
+			},
+			wantError: true,
 		},
 	}
 

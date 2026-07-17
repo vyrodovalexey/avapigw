@@ -82,6 +82,11 @@ func TestRunOperatorGateway_OperatorClientStartError90(t *testing.T) {
 	origExit := exitFunc
 	defer func() { exitFunc = origExit }()
 
+	// Operator client Start now retries with bounded backoff; shrink the
+	// deadline so the fatal-exit path is reached quickly instead of after the
+	// full ~2m production retry window.
+	defer withShortOperatorStartDeadline()()
+
 	var exitCode int32
 	exitFunc = func(code int) {
 		atomic.StoreInt32(&exitCode, int32(code))

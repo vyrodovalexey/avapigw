@@ -11,6 +11,13 @@ scrape_configs:
           component: 'gateway'
     metrics_path: /metrics
 
+  # Static scrape of the in-cluster gateway via a fixed metrics NodePort (31918,
+  # pinned in helm/avapigw/values-local.yaml service.metricsNodePort). This works on
+  # Docker-Desktop-native Kubernetes, where NodePorts are published to the host.
+  # On kind-based clusters (e.g. desktop-control-plane) NodePorts are NOT published
+  # to the host, so this target stays down; in that case the in-cluster vmagent
+  # (test/monitoring/vmagent) scrapes the gateway pod directly and remote-writes the
+  # gateway metrics here — the gateway 'up' series is available via job=kubernetes-pods.
   - job_name: 'avapigw-gateway-k8s'
     static_configs:
       - targets: ['host.docker.internal:31918']
