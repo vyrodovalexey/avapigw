@@ -25,6 +25,11 @@ type PKIClient interface {
 	// GetCA returns the CA certificate.
 	GetCA(ctx context.Context, mount string) (*x509.CertPool, error)
 
+	// GetCAPEM returns the raw PEM-encoded CA certificate chain.
+	// Unlike GetCA, the PEM form is suitable for distribution (for
+	// example webhook caBundle injection) without re-encoding.
+	GetCAPEM(ctx context.Context, mount string) ([]byte, error)
+
 	// GetCRL returns the certificate revocation list.
 	GetCRL(ctx context.Context, mount string) ([]byte, error)
 
@@ -305,6 +310,63 @@ func (p *pkiClient) GetCA(ctx context.Context, mount string) (*x509.CertPool, er
 	return pool, nil
 }
 
+// GetCAPEM returns the raw PEM-encoded CA certificate chain from the
+// PKI mount's /cert/ca endpoint. The response is cached alongside the
+// parsed pool cache used by GetCA.
+func (p *pkiClient) GetCAPEM(ctx context.Context, mount string) ([]byte, error) {
+	if mount == "" {
+		return nil, NewVaultError("pki_get_ca_pem", "", "mount is required")
+	}
+
+	start := time.Now()
+	path := fmt.Sprintf("%s/cert/ca", mount)
+	cacheKey := path + "#pem"
+
+	// Check cache first
+	if p.client.cache != nil {
+		if cached, ok := p.client.cache.get(cacheKey); ok {
+			p.client.metrics.RecordCacheHit()
+			if pemBytes, ok := cached.([]byte); ok {
+				return pemBytes, nil
+			}
+		}
+		p.client.metrics.RecordCacheMiss()
+	}
+
+	secret, err := p.client.api.Logical().ReadWithContext(ctx, path)
+	if err != nil {
+		p.client.metrics.RecordRequest("pki_get_ca_pem", "error", time.Since(start))
+		return nil, NewVaultErrorWithCause("pki_get_ca_pem", path, "failed to get CA certificate", err)
+	}
+
+	if secret == nil || secret.Data == nil {
+		p.client.metrics.RecordRequest("pki_get_ca_pem", "error", time.Since(start))
+		return nil, NewVaultError("pki_get_ca_pem", path, "no data in response")
+	}
+
+	caPEM, ok := secret.Data["certificate"].(string)
+	if !ok || caPEM == "" {
+		p.client.metrics.RecordRequest("pki_get_ca_pem", "error", time.Since(start))
+		return nil, NewVaultError("pki_get_ca_pem", path, "certificate not found in response")
+	}
+
+	// Validate that the returned PEM parses before handing it out.
+	if block, _ := pem.Decode([]byte(caPEM)); block == nil {
+		p.client.metrics.RecordRequest("pki_get_ca_pem", "error", time.Since(start))
+		return nil, NewVaultError("pki_get_ca_pem", path, "failed to parse CA certificate PEM")
+	}
+
+	pemBytes := []byte(caPEM)
+
+	// Cache the result
+	if p.client.cache != nil {
+		p.client.cache.set(cacheKey, pemBytes)
+	}
+
+	p.client.metrics.RecordRequest("pki_get_ca_pem", "success", time.Since(start))
+	return pemBytes, nil
+}
+
 // GetCRL returns the certificate revocation list.
 func (p *pkiClient) GetCRL(ctx context.Context, mount string) ([]byte, error) {
 	if mount == "" {
@@ -479,6 +541,10 @@ func (c *disabledPKIClient) SignCSR(_ context.Context, _ []byte, _ *PKISignOptio
 }
 
 func (c *disabledPKIClient) GetCA(_ context.Context, _ string) (*x509.CertPool, error) {
+	return nil, ErrVaultDisabled
+}
+
+func (c *disabledPKIClient) GetCAPEM(_ context.Context, _ string) ([]byte, error) {
 	return nil, ErrVaultDisabled
 }
 

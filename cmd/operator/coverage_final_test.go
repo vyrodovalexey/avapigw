@@ -41,7 +41,7 @@ func TestSetupGRPCServerIfEnabled_Enabled_Final(t *testing.T) {
 	// Create a self-signed cert manager
 	certManager, err := setupCertManager(ctx, &Config{
 		CertProvider: "selfsigned",
-	})
+	}, nil)
 	require.NoError(t, err)
 	defer certManager.Close()
 
@@ -76,7 +76,7 @@ func TestSetupCertManager_VaultWithShortTimeout_Final(t *testing.T) {
 	}
 
 	// Should fail due to timeout
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	assert.Error(t, err)
 }
 

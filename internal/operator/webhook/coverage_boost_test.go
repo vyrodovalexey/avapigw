@@ -602,7 +602,8 @@ func TestGRPCRouteValidator_ValidateUpdate_WithDuplicateChecker(t *testing.T) {
 		DuplicateChecker: NewDuplicateChecker(fakeClient),
 	}
 
-	// Test updating to a conflicting route
+	// Test updating to a conflicting route (identical specificity and
+	// coverage: same exact service, nil method on both sides).
 	updatedRoute := &avapigwv1alpha1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "another-route",
@@ -612,7 +613,6 @@ func TestGRPCRouteValidator_ValidateUpdate_WithDuplicateChecker(t *testing.T) {
 			Match: []avapigwv1alpha1.GRPCRouteMatch{
 				{
 					Service: &avapigwv1alpha1.StringMatch{Exact: "service.v1.UserService"},
-					Method:  &avapigwv1alpha1.StringMatch{Exact: "GetUser"},
 				},
 			},
 			Route: []avapigwv1alpha1.RouteDestination{
@@ -849,8 +849,11 @@ func TestGRPCBackendValidator_ValidateUpdate_WithDuplicateChecker(t *testing.T) 
 // Additional DuplicateChecker Edge Cases
 // ============================================================================
 
-func TestDuplicateChecker_GRPCMethodsOverlap(t *testing.T) {
+func TestDuplicateChecker_GRPCMatchConditionsOverlap_MethodDimension(t *testing.T) {
 	checker := &DuplicateChecker{}
+	service := func() *avapigwv1alpha1.StringMatch {
+		return &avapigwv1alpha1.StringMatch{Exact: "svc.v1.User"}
+	}
 
 	tests := []struct {
 		name     string
@@ -859,108 +862,185 @@ func TestDuplicateChecker_GRPCMethodsOverlap(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:     "both nil method",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: nil},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: nil},
+			name:     "both nil method on same service is a true duplicate",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: nil},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: nil},
 			expected: true,
 		},
 		{
-			name:     "a nil method",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: nil},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
+			// A nil-method route no longer blocks method-specific routes:
+			// the method adds +500 specificity so the router orders them.
+			name:     "nil method vs exact method admitted (specificity ordering)",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: nil},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
+			expected: false,
+		},
+		{
+			name:     "same exact method on same service rejected",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
 			expected: true,
 		},
 		{
-			name:     "b nil method",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: nil},
-			expected: true,
-		},
-		{
-			name:     "same exact",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			expected: true,
-		},
-		{
-			name:     "different exact",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "CreateUser"}},
+			name:     "different exact methods admitted (disjoint values)",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Exact: "CreateUser"}},
 			expected: false,
 		},
 		{
 			// Nested prefixes resolve deterministically by longest-prefix
-			// specificity in the gRPC router — no longer a conflict.
-			name:     "nested prefixes admitted (specificity ordering)",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "GetUser"}},
+			// specificity in the gRPC router — not a conflict.
+			name:     "nested method prefixes admitted (specificity ordering)",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Prefix: "GetUser"}},
 			expected: false,
 		},
 		{
 			// Identical prefixes have identical specificity — true duplicate.
-			name:     "identical prefixes rejected",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
+			name:     "identical method prefixes rejected",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
 			expected: true,
 		},
 		{
-			name:     "prefix no overlap",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Create"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
+			// Same length prefixes with disjoint values: identical
+			// specificity but no request satisfies both.
+			name:     "equal-length disjoint method prefixes admitted",
+			a:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Prefix: "Del"}},
+			b:        &avapigwv1alpha1.GRPCRouteMatch{Service: service(), Method: &avapigwv1alpha1.StringMatch{Prefix: "Get"}},
 			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := checker.grpcMethodsOverlap(tt.a, tt.b)
+			result := checker.grpcMatchConditionsOverlap(tt.a, tt.b)
 			if result != tt.expected {
-				t.Errorf("grpcMethodsOverlap() = %v, want %v", result, tt.expected)
+				t.Errorf("grpcMatchConditionsOverlap() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestDuplicateChecker_GRPCMethodsOverlapForPrefix(t *testing.T) {
-	checker := &DuplicateChecker{}
+func TestDuplicateChecker_GRPCMetadataValuesCompatible(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
 
 	tests := []struct {
 		name     string
-		a        *avapigwv1alpha1.GRPCRouteMatch
-		b        *avapigwv1alpha1.GRPCRouteMatch
+		a        avapigwv1alpha1.MetadataMatch
+		b        avapigwv1alpha1.MetadataMatch
 		expected bool
 	}{
 		{
-			name:     "both nil method",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: nil},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: nil},
+			name:     "identical exacts compatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "basic"},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "basic"},
 			expected: true,
 		},
 		{
-			name:     "a nil method",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: nil},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			expected: true,
-		},
-		{
-			name:     "same exact method",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			expected: true,
-		},
-		{
-			name:     "different exact method",
-			a:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "GetUser"}},
-			b:        &avapigwv1alpha1.GRPCRouteMatch{Method: &avapigwv1alpha1.StringMatch{Exact: "CreateUser"}},
+			name:     "disjoint exacts incompatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "basic"},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "cached"},
 			expected: false,
+		},
+		{
+			name:     "exact carrying required prefix compatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "cached-v1"},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Prefix: "cached"},
+			expected: true,
+		},
+		{
+			name:     "exact not carrying prefix incompatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "basic"},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Prefix: "cached"},
+			expected: false,
+		},
+		{
+			name:     "nested prefixes compatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Prefix: "cache"},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Prefix: "cached"},
+			expected: true,
+		},
+		{
+			name:     "disjoint prefixes incompatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Prefix: "basic"},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Prefix: "cached"},
+			expected: false,
+		},
+		{
+			name:     "absent vs exact value incompatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Absent: boolPtr(true)},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "basic"},
+			expected: false,
+		},
+		{
+			name:     "present vs absent incompatible (either side)",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Present: boolPtr(true)},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Absent: boolPtr(true)},
+			expected: false,
+		},
+		{
+			name:     "both absent compatible",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Absent: boolPtr(true)},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Absent: boolPtr(true)},
+			expected: true,
+		},
+		{
+			name:     "regex on either side compatible (undecidable)",
+			a:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Regex: "^ba.*$"},
+			b:        avapigwv1alpha1.MetadataMatch{Name: "x-scenario", Exact: "basic"},
+			expected: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := checker.grpcMethodsOverlapForPrefix(tt.a, tt.b)
+			result := grpcMetadataValuesCompatible(&tt.a, &tt.b)
 			if result != tt.expected {
-				t.Errorf("grpcMethodsOverlapForPrefix() = %v, want %v", result, tt.expected)
+				t.Errorf("grpcMetadataValuesCompatible() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDuplicateChecker_GRPCMetadataSetsCompatible(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        []avapigwv1alpha1.MetadataMatch
+		b        []avapigwv1alpha1.MetadataMatch
+		expected bool
+	}{
+		{
+			name:     "empty sets compatible",
+			a:        nil,
+			b:        nil,
+			expected: true,
+		},
+		{
+			name:     "different keys independent — compatible",
+			a:        []avapigwv1alpha1.MetadataMatch{{Name: "x-a", Exact: "1"}},
+			b:        []avapigwv1alpha1.MetadataMatch{{Name: "x-b", Exact: "2"}},
+			expected: true,
+		},
+		{
+			name:     "same key case-insensitive with disjoint exacts — incompatible",
+			a:        []avapigwv1alpha1.MetadataMatch{{Name: "X-Scenario", Exact: "basic"}},
+			b:        []avapigwv1alpha1.MetadataMatch{{Name: "x-scenario", Exact: "cached"}},
+			expected: false,
+		},
+		{
+			name:     "same key identical exacts — compatible",
+			a:        []avapigwv1alpha1.MetadataMatch{{Name: "x-scenario", Exact: "basic"}},
+			b:        []avapigwv1alpha1.MetadataMatch{{Name: "x-scenario", Exact: "basic"}},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := grpcMetadataSetsCompatible(tt.a, tt.b)
+			if result != tt.expected {
+				t.Errorf("grpcMetadataSetsCompatible() = %v, want %v", result, tt.expected)
 			}
 		})
 	}

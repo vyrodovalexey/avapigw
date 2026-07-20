@@ -103,6 +103,10 @@ func (m *mockPKIClient) GetCA(_ context.Context, _ string) (*x509.CertPool, erro
 	return m.caPool, nil
 }
 
+func (m *mockPKIClient) GetCAPEM(_ context.Context, _ string) ([]byte, error) {
+	return nil, nil
+}
+
 func (m *mockPKIClient) GetCRL(_ context.Context, _ string) ([]byte, error) {
 	if m.getCRLErr != nil {
 		return nil, m.getCRLErr

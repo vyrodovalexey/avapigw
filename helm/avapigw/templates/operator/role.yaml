@@ -11,20 +11,9 @@ rules:
   # Leader Election Resources (namespace-scoped)
   # ==========================================================================
   
-  # ConfigMaps - legacy leader election mechanism
-  # Used by controller-runtime for leader election when Leases are not available
-  - apiGroups:
-      - ""
-    resources:
-      - configmaps
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
+  # NOTE: legacy ConfigMap-based leader election grants removed - the
+  # controller-runtime manager uses the default Leases resource lock
+  # (coordination.k8s.io/v1); ConfigMap write access is not required.
   
   # Leases - preferred leader election mechanism (coordination.k8s.io/v1)
   # Used by controller-runtime for leader election in HA deployments

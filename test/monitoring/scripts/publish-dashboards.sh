@@ -11,6 +11,7 @@
 #   GRAFANA_PASSWORD  — Grafana admin password    (default: admin)
 #   DASHBOARD_DIR     — Path to dashboard JSONs   (default: monitoring/grafana)
 #   DATASOURCE_UID    — VictoriaMetrics datasource UID (default: victoriametrics)
+#   FOLDER_NAME       — Grafana folder for dashboards (default: avapigw)
 
 set -euo pipefail
 
@@ -22,8 +23,10 @@ GRAFANA_USER="${GRAFANA_USER:-${2:-admin}}"
 GRAFANA_PASSWORD="${GRAFANA_PASSWORD:-${3:-admin}}"
 DASHBOARD_DIR="${DASHBOARD_DIR:-monitoring/grafana}"
 DATASOURCE_UID="${DATASOURCE_UID:-victoriametrics}"
+FOLDER_NAME="${FOLDER_NAME:-avapigw}"
 
 GRAFANA_AUTH="${GRAFANA_USER}:${GRAFANA_PASSWORD}"
+FOLDER_UID=""
 FAILED=0
 PASSED=0
 TOTAL=0
@@ -112,6 +115,40 @@ create_tempo_datasource() {
 }
 
 # ---------------------------------------------------------------------------
+# Ensure the target Grafana folder exists (idempotent); sets FOLDER_UID
+# ---------------------------------------------------------------------------
+ensure_folder() {
+  log "Ensuring Grafana folder '${FOLDER_NAME}' exists..."
+
+  # Look up by title among existing folders
+  FOLDER_UID=$(curl -s -u "${GRAFANA_AUTH}" "${GRAFANA_URL}/api/folders" \
+    | jq -r --arg t "${FOLDER_NAME}" '.[] | select(.title == $t) | .uid' | head -1)
+
+  if [ -n "${FOLDER_UID}" ]; then
+    ok "Folder '${FOLDER_NAME}' exists (uid=${FOLDER_UID})"
+    return 0
+  fi
+
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" \
+    -u "${GRAFANA_AUTH}" \
+    -X POST "${GRAFANA_URL}/api/folders" \
+    -H "Content-Type: application/json" \
+    -d "{\"title\": \"${FOLDER_NAME}\"}")
+  http_code=$(echo "${response}" | tail -1)
+  body=$(echo "${response}" | sed '$d')
+
+  if [ "${http_code}" = "200" ]; then
+    FOLDER_UID=$(echo "${body}" | jq -r '.uid')
+    ok "Folder '${FOLDER_NAME}' created (uid=${FOLDER_UID})"
+    return 0
+  fi
+
+  fail "Folder '${FOLDER_NAME}' creation returned HTTP ${http_code}"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Publish a single dashboard
 # ---------------------------------------------------------------------------
 publish_dashboard() {
@@ -132,11 +169,11 @@ publish_dashboard() {
   # "Argument list too long" errors for large dashboard JSON files that
   # exceed the OS ARG_MAX limit (~128-256 KB on Linux).
   local response http_code body
-  response=$(jq -c '{
+  response=$(jq -c --arg folderUid "${FOLDER_UID}" '{
     dashboard: .,
-    overwrite: true,
-    folderId: 0
-  }' "${file}" | curl -s -w "\n%{http_code}" \
+    overwrite: true
+  } + (if $folderUid != "" then {folderUid: $folderUid} else {folderId: 0} end)' \
+    "${file}" | curl -s -w "\n%{http_code}" \
     -u "${GRAFANA_AUTH}" \
     -X POST "${GRAFANA_URL}/api/dashboards/db" \
     -H "Content-Type: application/json" \
@@ -240,6 +277,7 @@ main() {
   wait_for_grafana || exit 1
   create_datasource
   create_tempo_datasource
+  ensure_folder
   echo ""
 
   # Publish all dashboards

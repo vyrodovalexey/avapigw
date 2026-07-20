@@ -1378,3 +1378,49 @@ spec:
     validateRequestParams: true
     validateRequestHeaders: false
     validateSecurity: false
+
+---
+# =============================================================================
+# CORS ROUTE
+# =============================================================================
+
+# Route: CORS-enabled items API
+# Features: route-level CORS with a specific allowed origin so both the
+# allowed and denied preflight paths are verifiable:
+#   - OPTIONS with Origin https://cors-test.example.com -> CORS headers echoed
+#   - OPTIONS with any other Origin                     -> no CORS allow headers
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: cors-route
+  namespace: avapigw-test
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/cors/
+      methods:
+        - GET
+        - POST
+        - OPTIONS
+  route:
+    - destination:
+        host: rest-backend-noauth-1
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  cors:
+    allowOrigins:
+      - https://cors-test.example.com
+    allowMethods:
+      - GET
+      - POST
+      - OPTIONS
+    allowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Request-ID
+    exposeHeaders:
+      - X-Request-ID
+    maxAge: 3600
+    allowCredentials: false

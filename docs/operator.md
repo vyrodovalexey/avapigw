@@ -732,11 +732,9 @@ operator:
   # gRPC server configuration
   grpc:
     port: 9444
+    requireClientCert: false
     tls:
-      mode: selfsigned  # selfsigned, vault, cert-manager
-    keepalive:
-      time: 30s
-      timeout: 10s
+      mode: selfsigned  # selfsigned, vault
   
   # Metrics and health
   metrics:
@@ -858,25 +856,20 @@ avapigw_operator_webhook_cross_validation_duration_seconds 0.003
 
 #### Certificate Management Metrics
 ```prometheus
-# Certificate lifecycle
-avapigw_operator_cert_renewals_total{mode="selfsigned",status="success"} 5
-avapigw_operator_cert_renewals_total{mode="vault",status="success"} 8
-avapigw_operator_cert_renewals_total{mode="cert-manager",status="success"} 3
-avapigw_operator_cert_renewal_errors_total{mode="vault",error_type="auth_failed"} 1
-avapigw_operator_cert_renewal_duration_seconds{mode="selfsigned"} 0.150
-avapigw_operator_cert_expiry_seconds{cert_type="webhook"} 2073600
-avapigw_operator_cert_expiry_seconds{cert_type="grpc"} 2073600
+# Certificate lifecycle (providers: selfsigned | vault | file)
+avapigw_operator_cert_issued_total{provider="vault"} 15
+avapigw_operator_cert_rotations_total{provider="vault"} 8
+avapigw_operator_cert_errors_total{provider="vault",operation="issue"} 1
+avapigw_operator_cert_expiry_seconds{common_name="avapigw-operator-webhook.avapigw-test.svc"} 2073600
 
-# CA injection metrics
-avapigw_operator_webhook_ca_injections_total{status="success"} 10
-avapigw_operator_webhook_ca_injections_total{status="error"} 1
+# Selfsigned CA persistence (Secret-backed CA reuse/adoption)
+avapigw_operator_cert_ca_reuse_total{provider="selfsigned"} 1
+avapigw_operator_cert_secret_sync_total{operation="update",result="success"} 2
+
+# Webhook CA injection (CA PEM published to the ValidatingWebhookConfiguration)
+avapigw_operator_webhook_ca_injections_total{result="success"} 10
 avapigw_operator_webhook_ca_injection_duration_seconds 0.050
-avapigw_operator_webhook_ca_injection_errors_total{error_type="api_server_error"} 1
-
-# Certificate provider metrics
-avapigw_operator_cert_provider_requests_total{provider="vault",operation="issue"} 15
-avapigw_operator_cert_provider_requests_total{provider="selfsigned",operation="generate"} 8
-avapigw_operator_cert_provider_errors_total{provider="vault",error_type="pki_unavailable"} 1
+avapigw_operator_webhook_last_ca_injection_timestamp 1784500000
 ```
 
 #### Ingress Controller Metrics (when enabled)

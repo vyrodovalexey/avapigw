@@ -28,11 +28,13 @@ data:
         endpoint: {{ .Values.exporters.prometheusremotewrite.endpoint | quote }}
         tls:
           insecure: true
-      {{- if index .Values.exporters "otlp/tempo" }}
+      {{- with index .Values.exporters "otlp/tempo" }}
       otlp/tempo:
-        endpoint: {{ index .Values.exporters "otlp/tempo" "endpoint" | quote }}
+        endpoint: {{ .endpoint | quote }}
         tls:
-          insecure: {{ index .Values.exporters "otlp/tempo" "tls" "insecure" }}
+          # dig tolerates a deleted/absent exporters."otlp/tempo".tls block
+          # (nil-safe); default is plaintext for the local test Tempo.
+          insecure: {{ dig "tls" "insecure" true . }}
       {{- end }}
       debug:
         verbosity: {{ .Values.exporters.debug.verbosity }}
@@ -52,4 +54,15 @@ data:
         logs:
           level: info
         metrics:
-          address: 0.0.0.0:8888
+          # 'metrics::address' was deprecated in collector v0.104 and removed
+          # in the v0.120+ line; internal telemetry is now configured through
+          # OpenTelemetry SDK 'readers'. A pull/prometheus reader serves the
+          # collector's own metrics on 0.0.0.0:8888 (the port exposed by the
+          # deployment/service and scraped via prometheus.io annotations).
+          level: {{ .Values.telemetry.metrics.level | default "normal" }}
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888

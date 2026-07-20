@@ -379,6 +379,11 @@ spec:
               healthCheck:
                 description: HealthCheck contains health check configuration.
                 properties:
+                  grpcService:
+                    description: |-
+                      GRPCService is the service name for gRPC health check requests.
+                      An empty string checks overall server health.
+                    type: string
                   healthyThreshold:
                     default: 2
                     description: HealthyThreshold is the number of consecutive successes
@@ -390,9 +395,18 @@ spec:
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
                     type: string
                   path:
-                    description: Path is the health check path.
+                    description: |-
+                      Path is the health check path. Ignored when UseGRPC is true (gRPC
+                      health checks address the grpc.health.v1.Health service instead).
                     minLength: 1
                     type: string
+                  port:
+                    description: |-
+                      Port overrides the backend host port for health checks. Useful for
+                      backends that expose a separate monitoring/probe port.
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
                   timeout:
                     description: Timeout is the health check timeout.
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
@@ -403,6 +417,11 @@ spec:
                       to mark unhealthy.
                     minimum: 1
                     type: integer
+                  useGRPC:
+                    description: |-
+                      UseGRPC enables native gRPC health checking using
+                      grpc.health.v1.Health/Check instead of HTTP GET.
+                    type: boolean
                 required:
                 - path
                 type: object
@@ -586,6 +605,46 @@ spec:
                         required:
                         - masterName
                         - sentinelAddrs
+                        type: object
+                      tls:
+                        description: TLS contains TLS configuration for the Redis
+                          connection.
+                        properties:
+                          caFile:
+                            description: CAFile is the path to the CA certificate
+                              file for server verification.
+                            type: string
+                          certFile:
+                            description: CertFile is the path to the client certificate
+                              file (mTLS).
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables TLS for the Redis connection.
+                            type: boolean
+                          insecureSkipVerify:
+                            description: InsecureSkipVerify skips server certificate
+                              verification (dev only).
+                            type: boolean
+                          keyFile:
+                            description: KeyFile is the path to the client private
+                              key file (mTLS).
+                            type: string
+                          maxVersion:
+                            description: MaxVersion is the maximum TLS version.
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                          minVersion:
+                            description: MinVersion is the minimum TLS version (TLS12,
+                              TLS13).
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                        required:
+                        - enabled
                         type: object
                       url:
                         description: |-

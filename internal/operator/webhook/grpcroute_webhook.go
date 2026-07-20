@@ -249,10 +249,12 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 		warnings = append(warnings, warnMTLSMissingCAFile(spec.Authentication)...)
 	}
 
-	// Security warnings for plaintext secrets in authorization cache sentinel config
-	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
-		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
-	}
+	// Security warnings for plaintext secrets in authorization cache
+	// (both redis.sentinel and the deprecated sentinel block), plus
+	// transparency warnings for deprecated/unusable authz cache config.
+	warnings = append(warnings, warnAuthzCacheSecrets(spec.Authorization)...)
+	warnings = append(warnings, warnAuthzCacheSentinelDeprecated(spec.Authorization)...)
+	warnings = append(warnings, warnAuthzCacheRedisWithoutConnection(spec.Authorization, kindGRPCRoute)...)
 
 	// Security warnings for plaintext secrets in route cache and rate limiter
 	// Redis Sentinel configurations
@@ -261,8 +263,18 @@ func (v *GRPCRouteValidator) validate(grpcRoute *avapigwv1alpha1.GRPCRoute) (adm
 
 	// Transparency warnings: redis-backed stores are not applied in the
 	// gRPC route data path yet (in-memory rate limiting, no caching).
-	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, "GRPCRoute")...)
-	warnings = append(warnings, warnRouteCacheRedisTypeUnapplied(spec.Cache, "GRPCRoute")...)
+	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, kindGRPCRoute)...)
+	warnings = append(warnings, warnRouteCacheRedisTypeUnapplied(spec.Cache, kindGRPCRoute)...)
+
+	// Transparency warnings: fields with no counterpart on the gateway's
+	// gRPC route configuration type, plus the deprecated cache.keyComponents.
+	if spec.MaxSessions != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.maxSessions", kindGRPCRoute)...)
+	}
+	if spec.RequestLimits != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.requestLimits", kindGRPCRoute)...)
+	}
+	warnings = append(warnings, warnCacheKeyComponentsUnapplied(spec.Cache, kindGRPCRoute)...)
 
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))

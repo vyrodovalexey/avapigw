@@ -457,7 +457,7 @@ func TestSetupCertManager_VaultWithTimeout(t *testing.T) {
 	// Wait for context to expire
 	time.Sleep(10 * time.Millisecond)
 
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	// Should fail due to timeout or connection error
 	assert.Error(t, err)
 }

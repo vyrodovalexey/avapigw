@@ -4,6 +4,7 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,6 +86,11 @@ const (
 	seedReasonRevision     = "revision_advanced"
 	seedReasonTimeout      = "timeout"
 	seedReasonCanceled     = "context_canceled"
+	// seedReasonShutdown is reported when the server began shutting down
+	// while the caller was parked waiting for the store seed (or for leader
+	// election). Parked RPCs count as active for GracefulStop, so they must
+	// unpark immediately on shutdown instead of pinning the graceful wait.
+	seedReasonShutdown = "shutdown"
 	// seedReasonAwaitingLeadership is reported when the caller's context ended
 	// while the replica was still waiting to be elected leader. On such a
 	// replica the controllers never run and the store stays empty, so the
@@ -139,6 +145,12 @@ type Server struct {
 	logger      observability.Logger
 	metrics     *serverMetrics
 
+	// servingCert holds the current TLS serving certificate. It is read
+	// per-handshake via tls.Config.GetCertificate, so UpdateCertificate can
+	// swap it atomically for zero-downtime rotation (new handshakes pick up
+	// the new certificate; established connections are unaffected).
+	servingCert atomic.Pointer[tls.Certificate]
+
 	// Configuration storage
 	mu              sync.RWMutex
 	apiRoutes       map[string][]byte
@@ -180,6 +192,15 @@ type Server struct {
 	// Lifecycle
 	started bool
 	closed  bool
+
+	// shutdownCh is closed by signalShutdown when server shutdown begins.
+	// Long-lived RPC handlers (StreamConfiguration) and background loops
+	// (gateway reaper, store-seed waits) select on it so a graceful stop
+	// completes promptly instead of waiting out the full shutdown timeout:
+	// grpc.Server.GracefulStop only WAITS for active RPCs, it never cancels
+	// them, and configuration streams are long-lived by design.
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 }
 
 // gatewayConnection represents a connected gateway.
@@ -199,6 +220,8 @@ type serverMetrics struct {
 	cancelledOps      *prometheus.CounterVec
 	operationDuration *prometheus.HistogramVec
 	retryAttempts     *prometheus.CounterVec
+	shutdownDuration  *prometheus.HistogramVec
+	reapedGateways    prometheus.Counter
 }
 
 // initServerMetrics initializes the singleton server metrics instance with the
@@ -290,6 +313,24 @@ func newServerMetricsWithFactory(factory promauto.Factory) *serverMetrics {
 			},
 			[]string{labelOperation, labelType, "result"},
 		),
+		shutdownDuration: factory.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
+				Name:      "shutdown_duration_seconds",
+				Help:      "Duration of gRPC server shutdown in seconds",
+				Buckets:   []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60},
+			},
+			[]string{"outcome"},
+		),
+		reapedGateways: factory.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: subsystemGRPC,
+				Name:      "reaped_gateways_total",
+				Help:      "Total number of stale gateway registrations reaped",
+			},
+		),
 	}
 }
 
@@ -372,6 +413,7 @@ func newServerInternal(config *ServerConfig, metrics *serverMetrics) (*Server, e
 		configNotify:    make(chan struct{}),
 		storeSeededCh:   make(chan struct{}),
 		gateways:        make(map[string]*gatewayConnection),
+		shutdownCh:      make(chan struct{}),
 	}
 
 	return s, nil
@@ -419,14 +461,22 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Add TLS if certificate is provided
 	if s.config.Certificate != nil {
-		tlsCert, err := tls.X509KeyPair(s.config.Certificate.CertificatePEM, s.config.Certificate.PrivateKeyPEM)
-		if err != nil {
+		if err := s.UpdateCertificate(s.config.Certificate); err != nil {
 			return fmt.Errorf("failed to create TLS certificate: %w", err)
 		}
 
 		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-			MinVersion:   tls.VersionTLS12,
+			// The certificate is resolved per-handshake so certificate
+			// rotation (UpdateCertificate) takes effect without restarting
+			// the listener.
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				cert := s.servingCert.Load()
+				if cert == nil {
+					return nil, fmt.Errorf("no serving certificate available")
+				}
+				return cert, nil
+			},
+			MinVersion: tls.VersionTLS12,
 		}
 
 		// Add client CA if available
@@ -476,6 +526,9 @@ func (s *Server) Start(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		s.logger.Info("shutting down gRPC server")
+		// Signal long-lived configuration streams to terminate so
+		// GracefulStop (which only waits, never cancels) can complete.
+		s.signalShutdown()
 		s.grpcServer.GracefulStop()
 		return ctx.Err()
 	case err := <-errCh:
@@ -498,16 +551,31 @@ func (s *Server) Stop() {
 // StopWithContext stops the gRPC server with context-based cancellation.
 // It attempts a graceful shutdown and falls back to a forced stop if the
 // context is canceled or its deadline is exceeded.
+//
+// The state mutex is only held to flip the closed flag and snapshot the
+// server reference — NEVER across the graceful wait — so concurrent
+// Apply*/Delete*/Has*/buildSnapshot callers are not blocked while the
+// shutdown drains. Long-lived configuration streams are signaled to
+// terminate (via the shutdown channel) BEFORE GracefulStop is invoked:
+// GracefulStop only waits for active RPCs, so without the signal a single
+// connected gateway stream would pin the graceful wait until the full
+// shutdown timeout and then be force-stopped.
 func (s *Server) StopWithContext(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	start := time.Now()
 
+	s.mu.Lock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
+	grpcSrv := s.grpcServer
+	s.mu.Unlock()
 
-	if s.grpcServer == nil {
+	// Wake all long-lived streams and background loops.
+	s.signalShutdown()
+
+	if grpcSrv == nil {
 		s.logger.Info("gRPC server stopped")
 		return nil
 	}
@@ -515,22 +583,84 @@ func (s *Server) StopWithContext(ctx context.Context) error {
 	// Use a channel to signal graceful shutdown completion
 	done := make(chan struct{})
 	go func() {
-		s.grpcServer.GracefulStop()
+		grpcSrv.GracefulStop()
 		close(done)
 	}()
 
 	// Wait for graceful shutdown or context cancellation
 	select {
 	case <-done:
-		s.logger.Info("gRPC server gracefully stopped")
+		duration := time.Since(start)
+		s.metrics.shutdownDuration.WithLabelValues("graceful").Observe(duration.Seconds())
+		s.logger.Info("gRPC server gracefully stopped",
+			observability.Duration("shutdown_duration", duration),
+		)
 		return nil
 	case <-ctx.Done():
-		s.logger.Warn("shutdown canceled, forcing stop",
+		grpcSrv.Stop() // Force stop
+		duration := time.Since(start)
+		s.metrics.shutdownDuration.WithLabelValues("forced").Observe(duration.Seconds())
+		s.logger.Warn("shutdown canceled, forced stop",
+			observability.Duration("shutdown_duration", duration),
 			observability.Error(ctx.Err()),
 		)
-		s.grpcServer.Stop() // Force stop
 		return ctx.Err()
 	}
+}
+
+// UpdateCertificate swaps the TLS serving certificate. New TLS handshakes
+// pick up the new certificate immediately via tls.Config.GetCertificate;
+// established connections keep their negotiated certificate. Used by the
+// operator's certificate rotation loop to renew the serving certificate
+// before expiry without a listener restart.
+func (s *Server) UpdateCertificate(c *cert.Certificate) error {
+	if c == nil {
+		return fmt.Errorf("certificate is required")
+	}
+
+	tlsCert, err := tls.X509KeyPair(c.CertificatePEM, c.PrivateKeyPEM)
+	if err != nil {
+		return fmt.Errorf("invalid certificate/key pair: %w", err)
+	}
+
+	s.servingCert.Store(&tlsCert)
+
+	s.logger.Info("gRPC serving certificate updated",
+		observability.String("serial", c.SerialNumber),
+		observability.Time("expiration", c.Expiration),
+	)
+
+	return nil
+}
+
+// ServingCertificateExpiration returns the expiration time of the current
+// serving certificate, or the zero time when TLS is not configured. The
+// rotation loop uses it to compute the next renewal deadline.
+func (s *Server) ServingCertificateExpiration() time.Time {
+	tlsCert := s.servingCert.Load()
+	if tlsCert == nil || len(tlsCert.Certificate) == 0 {
+		return time.Time{}
+	}
+	leaf, err := x509.ParseCertificate(tlsCert.Certificate[0])
+	if err != nil {
+		return time.Time{}
+	}
+	return leaf.NotAfter
+}
+
+// signalShutdown closes the shutdown channel exactly once, broadcasting the
+// shutdown to all long-lived streams and background loops.
+func (s *Server) signalShutdown() {
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+	})
+}
+
+// ShutdownSignal returns a channel that is closed when server shutdown
+// begins. Long-lived streaming handlers select on it so graceful shutdown is
+// not pinned by design-long-lived RPCs.
+func (s *Server) ShutdownSignal() <-chan struct{} {
+	return s.shutdownCh
 }
 
 // ApplyAPIRoute applies an API route configuration.
@@ -1185,6 +1315,79 @@ func (s *Server) GetGatewayCount() int {
 	return len(s.gateways)
 }
 
+// StartGatewayReaper starts a background goroutine that periodically removes
+// gateway registrations whose last heartbeat is older than ttl, so
+// avapigw_operator_grpc_active_gateways reflects gateways that actually
+// disappeared (crashed, network-partitioned, or scaled down) instead of
+// growing forever. Nothing else unregisters gateways: the service layer
+// never calls UnregisterGateway in production.
+//
+// interval defaults to DefaultGatewayReapInterval and ttl to
+// DefaultGatewayStaleTTL (three missed heartbeats) when non-positive. The
+// reaper stops when ctx is canceled or server shutdown begins.
+func (s *Server) StartGatewayReaper(ctx context.Context, interval, ttl time.Duration) {
+	if interval <= 0 {
+		interval = DefaultGatewayReapInterval
+	}
+	if ttl <= 0 {
+		ttl = DefaultGatewayStaleTTL
+	}
+
+	s.logger.Info("starting gateway registry reaper",
+		observability.Duration("interval", interval),
+		observability.Duration("stale_ttl", ttl),
+	)
+
+	go s.runGatewayReaper(ctx, interval, ttl)
+}
+
+// runGatewayReaper is the gateway registry reaper loop.
+func (s *Server) runGatewayReaper(ctx context.Context, interval, ttl time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.shutdownCh:
+			return
+		case <-ticker.C:
+			s.reapStaleGateways(ttl)
+		}
+	}
+}
+
+// reapStaleGateways removes gateway registrations whose last heartbeat is
+// older than ttl and returns the number of reaped registrations.
+func (s *Server) reapStaleGateways(ttl time.Duration) int {
+	now := time.Now()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	reaped := 0
+	for key, gw := range s.gateways {
+		if now.Sub(gw.lastSeen) <= ttl {
+			continue
+		}
+		delete(s.gateways, key)
+		reaped++
+		s.metrics.reapedGateways.Inc()
+		s.logger.Warn("reaped stale gateway registration",
+			observability.String("name", gw.name),
+			observability.String("namespace", gw.namespace),
+			observability.Duration("last_seen_age", now.Sub(gw.lastSeen)),
+			observability.Duration("stale_ttl", ttl),
+		)
+	}
+
+	if reaped > 0 {
+		s.metrics.activeGateways.Set(float64(len(s.gateways)))
+	}
+	return reaped
+}
+
 // NotifyConfigChanged broadcasts a configuration change to all waiting streams.
 // It closes the current configNotify channel (waking all goroutines blocked on it),
 // replaces it with a fresh channel for the next broadcast cycle, and increments
@@ -1359,6 +1562,8 @@ func (s *Server) WaitForStoreSeeded(ctx context.Context, timeout time.Duration) 
 		select {
 		case <-ctx.Done():
 			return false, seedReasonAwaitingLeadership
+		case <-s.shutdownCh:
+			return false, seedReasonShutdown
 		case <-s.storeSeededCh:
 			return true, seedReasonSeeded
 		case <-elected:
@@ -1383,6 +1588,8 @@ func (s *Server) WaitForStoreSeeded(ctx context.Context, timeout time.Duration) 
 	select {
 	case <-ctx.Done():
 		return false, seedReasonCanceled
+	case <-s.shutdownCh:
+		return false, seedReasonShutdown
 	case <-s.storeSeededCh:
 		return true, seedReasonSeeded
 	case <-timer.C:

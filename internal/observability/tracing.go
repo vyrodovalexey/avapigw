@@ -103,8 +103,13 @@ func NewTracer(cfg TracerConfig) (*Tracer, error) {
 	var err error
 
 	if cfg.OTLPEndpoint != "" {
-		// Build OTLP exporter options with retry configuration
-		opts := buildOTLPExporterOptions(cfg)
+		// Build OTLP exporter options with retry configuration. TLS
+		// misconfiguration (unreadable cert/key/CA) is a hard error rather
+		// than a silent fallback to system trust.
+		opts, optsErr := buildOTLPExporterOptions(cfg)
+		if optsErr != nil {
+			return nil, optsErr
+		}
 
 		exporter, err = otlptracegrpc.New(ctx, opts...)
 		if err != nil {
@@ -161,8 +166,10 @@ func createSampler(rate float64) sdktrace.Sampler {
 	}
 }
 
-// buildOTLPExporterOptions builds OTLP gRPC exporter options with retry configuration.
-func buildOTLPExporterOptions(cfg TracerConfig) []otlptracegrpc.Option {
+// buildOTLPExporterOptions builds OTLP gRPC exporter options with retry
+// configuration. Configured-but-unloadable TLS material yields an error so
+// misconfiguration never silently degrades to system-trust-only TLS.
+func buildOTLPExporterOptions(cfg TracerConfig) ([]otlptracegrpc.Option, error) {
 	// Preallocate with capacity for all options (4 base + 1 retry + 1 TLS)
 	opts := make([]otlptracegrpc.Option, 0, 6)
 	opts = append(opts,
@@ -176,7 +183,10 @@ func buildOTLPExporterOptions(cfg TracerConfig) []otlptracegrpc.Option {
 		opts = append(opts, otlptracegrpc.WithInsecure())
 	} else {
 		tlsCfg, err := buildOTLPTLSConfig(cfg)
-		if err == nil && tlsCfg != nil {
+		if err != nil {
+			return nil, err
+		}
+		if tlsCfg != nil {
 			opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
 		}
 		// If no TLS files are configured and insecure is false,
@@ -187,7 +197,7 @@ func buildOTLPExporterOptions(cfg TracerConfig) []otlptracegrpc.Option {
 	retryConfig := buildRetryConfig(cfg.RetryConfig)
 	opts = append(opts, otlptracegrpc.WithRetry(retryConfig))
 
-	return opts
+	return opts, nil
 }
 
 // buildOTLPTLSConfig builds a TLS configuration from the provided cert/key/CA files.

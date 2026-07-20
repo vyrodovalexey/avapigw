@@ -18,6 +18,10 @@ const (
 	// DefaultRotateBefore is the default duration before expiry to rotate certificates (7 days).
 	DefaultRotateBefore = 7 * 24 * time.Hour
 
+	// DefaultVaultRotateBefore is the default rotation lead time for
+	// Vault-issued certificates (1 hour, matching the 24h default TTL).
+	DefaultVaultRotateBefore = 1 * time.Hour
+
 	// DefaultKeySize is the default RSA key size in bits.
 	// 4096 bits provides strong security for production use.
 	DefaultKeySize = 4096

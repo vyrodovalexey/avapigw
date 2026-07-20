@@ -64,6 +64,7 @@ type application struct {
 	graphqlRouter       *graphqlrouter.Router
 	graphqlProxy        *graphqlproxy.Proxy
 	graphqlHandler      *gateway.GraphQLHandler
+	readinessChecks     *readinessRegistry
 }
 
 // initApplication initializes all application components.
@@ -180,6 +181,12 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 	middlewareResult, mwErr := buildMiddlewareChain(
 		dispatcher, cfg, logger, metrics, tracer, auditLogger,
 		cfg.Spec.Authentication, authMetrics, vaultClient,
+		middlewareChainDeps{
+			// Give route-level CORS policies precedence over the global
+			// CORS middleware (route match is hot-reload safe: r and
+			// gqlRouter instances are stable across config reloads).
+			routeCORSSkip: gateway.NewRouteCORSSkipper(r, gqlRouter, gateway.GraphQLPathFromConfig(cfg)),
+		},
 	)
 	if mwErr != nil {
 		fatalWithSync(logger, "failed to build middleware chain", observability.Error(mwErr))

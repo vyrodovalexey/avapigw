@@ -94,8 +94,11 @@ The test infrastructure includes mock backend services for realistic testing:
 - **Methods:** 
   - `Echo` (unary)
   - `ServerStream` (server streaming)
-  - `ClientStream` (client streaming)
   - `BidiStream` (bidirectional streaming)
+
+> The reference backend no longer implements a client-streaming method; the
+> `grpc-client-streaming.yaml` performance config was removed and
+> client-to-server streaming is covered by the bidirectional scenario.
 
 ### Test Environment
 
@@ -398,7 +401,6 @@ make perf-test-grpc-unary
 # Streaming tests
 make perf-test-grpc-streaming
 ./test/performance/scripts/run-grpc-test.sh grpc-server-streaming
-./test/performance/scripts/run-grpc-test.sh grpc-client-streaming
 ./test/performance/scripts/run-grpc-test.sh grpc-bidi-streaming
 ```
 
@@ -602,9 +604,36 @@ make perf-generate-charts
 
 ## Performance Benchmarks
 
-### PT Matrix Results (July 2026)
+### PT Suite Results — Operator-Mode Kubernetes (2026-07-20)
 
-The most recent full run covers the six PT scenario groups (~180 s steady
+The most recent full run executed all six PT scenario groups (≥180 s steady
+state each) against the **operator-mode** gateway in the `avapigw-test`
+namespace (kind-based Docker Desktop Kubernetes, distroless images,
+verified operator TLS via Vault PKI), with per-group metric-delta
+verification in VictoriaMetrics and Tempo trace checks. The SUT was
+configured entirely through CRDs: 43 baseline CRs plus the 24-CR PT fixture
+set [`test/performance/operator/crds-pt-k8s.yaml`](../test/performance/operator/crds-pt-k8s.yaml).
+Full report:
+[`test/performance/results/perftest-report_pt-suite_20260720_025531.md`](../test/performance/results/perftest-report_pt-suite_20260720_025531.md).
+
+| Test | Scenarios | Duration | Σ RPS | p95 (typ.) | p99 (typ.) | Errors (excl. expected 429) |
+|------|-----------|----------|-------|------------|------------|------------------------------|
+| PT-01 gRPC & streaming | unary/serverstream/bidistream + OIDC-JWT + backend-mTLS (Vault PKI) | 181 s | 2,727 | 104–201 ms | 149–211 ms | 0.04–0.07% |
+| PT-02 TLS gRPC & streaming | tls_unary/tls_serverstream/mtls_stream/tls_OIDC + aggregate probe | 181 s | 2,343 | 93–197 ms | 103–210 ms | 0.03–0.09% |
+| PT-03 HTTP & WS | auth + sentinel RL/cache + transform + encoding + CORS + OpenAPI + WS | 198 s | 2,955 offered | 207–213 ms | 297–353 ms | 0 × 5xx |
+| PT-04 HTTPS & WSS | PT-03 stack + REST/NDJSON aggregates over TLS | 194 s | 3,045 offered | 280–291 ms | 380–411 ms | 0 × 5xx |
+| PT-05 GraphQL & WS | auth (401-enforcing) + sentinel RL + transform + CORS + WS | 186 s | 3,388 offered | 103–105 ms | 179–189 ms | 0 × 5xx |
+| PT-06 TLS GraphQL & WSS | PT-05 stack + GraphQL aggregate (deep merge) + WSS | 187 s | 3,349 offered | 169–176 ms | 208–220 ms | 0 × 5xx |
+
+Sentinel rate-limit scenarios delivered exactly their 5 rps Redis budget;
+backend-mTLS gRPC throughput matched the plaintext backend (609 vs 594
+rps); 2xx throughput of the HTTP/GraphQL groups was capped by the
+deployment's global rate limiter through a single port-forward client
+(`values-local.yaml` has since moved to 5000 rps / 10000 burst).
+
+### PT Matrix Results (July 2026, compose-network gateway)
+
+An earlier full run covered the six PT scenario groups (~180 s steady
 state each, scenarios per group run concurrently) against a locally built
 gateway container attached to the compose network, with monitoring-metric
 verification in VictoriaMetrics after every group. See the full report at
@@ -938,6 +967,5 @@ go tool pprof http://localhost:9090/debug/pprof/goroutine
 ## Related Documentation
 
 - **[Performance Test Infrastructure](../test/performance/README.md)** - Detailed testing infrastructure documentation
-- **[Configuration Reference](configuration-reference.md)** - Gateway configuration options
 - **[Configuration Reference](configuration-reference.md)** - Gateway configuration options including observability settings
-- **[Troubleshooting Guide](../docs/troubleshooting.md)** - General troubleshooting information
+- **[Operator Troubleshooting Guide](operator/troubleshooting.md)** - Operator-mode troubleshooting information

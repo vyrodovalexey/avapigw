@@ -112,12 +112,39 @@ func convertExternalConfig(src *config.ExternalAuthzConfig) *external.Config {
 	return extCfg
 }
 
-// convertCacheConfig converts config.AuthzCacheConfig to authz.CacheConfig.
+// convertCacheConfig converts config.AuthzCacheConfig to authz.CacheConfig,
+// carrying the Redis connection configuration for the external decision
+// cache when the cache type is "redis".
 func convertCacheConfig(src *config.AuthzCacheConfig) *CacheConfig {
 	return &CacheConfig{
 		Enabled: true,
 		TTL:     time.Duration(src.TTL),
 		MaxSize: src.MaxSize,
 		Type:    src.Type,
+		Redis:   convertAuthzRedisConfig(src),
 	}
+}
+
+// convertAuthzRedisConfig folds the two accepted serialization shapes of the
+// authorization cache Redis connection into one config.RedisCacheConfig:
+//
+//   - `cache.redis` (file-config shape, may itself embed `sentinel`);
+//   - `cache.sentinel` (the shape the operator CRD serializes at the cache
+//     level, see api/v1alpha1 AuthzCacheConfig).
+//
+// The result is a deep copy so later password resolution can never mutate
+// the caller's shared configuration tree.
+func convertAuthzRedisConfig(src *config.AuthzCacheConfig) *config.RedisCacheConfig {
+	if src.Redis == nil && src.Sentinel == nil {
+		return nil
+	}
+
+	redisCfg := src.Redis.Clone()
+	if redisCfg == nil {
+		redisCfg = &config.RedisCacheConfig{}
+	}
+	if redisCfg.Sentinel == nil && src.Sentinel != nil {
+		redisCfg.Sentinel = src.Sentinel.Clone()
+	}
+	return redisCfg
 }

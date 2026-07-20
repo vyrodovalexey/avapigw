@@ -19,6 +19,13 @@ receivers:
       http:
         endpoint: "0.0.0.0:4318"
 
+# Exporter targets: the docker-compose VictoriaMetrics (:8428) and Tempo
+# OTLP (:4317) on the HOST. host.docker.internal resolves from in-cluster
+# pods on Docker Desktop (macOS/Windows) clusters. On other platforms
+# override the endpoints at install, e.g.:
+#   --set exporters.prometheusremotewrite.endpoint=http://<host-IP>:8428/api/v1/write \
+#   --set exporters.otlp/tempo.endpoint=<host-IP>:4317
+# (kind/minikube on Linux: docker bridge gateway 172.17.0.1 or the host LAN IP)
 exporters:
   prometheusremotewrite:
     endpoint: "http://host.docker.internal:8428/api/v1/write"
@@ -33,6 +40,12 @@ processors:
   batch:
     timeout: 10s
     send_batch_size: 1024
+
+# Collector internal telemetry (service::telemetry).
+# metrics.level: none | basic | normal | detailed
+telemetry:
+  metrics:
+    level: normal
 
 pipelines:
   traces:

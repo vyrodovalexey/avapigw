@@ -1,12 +1,29 @@
 package middleware
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 )
+
+// corsOwnedHeaders are the CORS response headers owned by the gateway when
+// a CORS policy is configured: the configured policy is authoritative, so
+// values produced by inner handlers (proxied backends in particular) are
+// replaced by the gateway's own grant decision. When no CORS policy is
+// configured on a route, this middleware is absent from the chain and
+// backend CORS headers pass through untouched.
+var corsOwnedHeaders = []string{
+	"Access-Control-Allow-Origin",
+	"Access-Control-Allow-Methods",
+	"Access-Control-Allow-Headers",
+	"Access-Control-Allow-Credentials",
+	"Access-Control-Expose-Headers",
+	"Access-Control-Max-Age",
+}
 
 // CORSConfig contains CORS configuration.
 type CORSConfig struct {
@@ -139,7 +156,7 @@ func (h *corsHeaders) setCORSHeaders(w http.ResponseWriter, origin string) {
 		// Always echo the specific origin for better security and compatibility
 		// This also handles the case where credentials are allowed (which requires specific origin)
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Vary", "Origin")
+		addVaryOrigin(w.Header())
 	}
 
 	if h.hasAllowMethods {
@@ -163,16 +180,57 @@ func (h *corsHeaders) setCORSHeaders(w http.ResponseWriter, origin string) {
 	}
 }
 
-// CORS returns a middleware that handles CORS.
+// addVaryOrigin appends "Origin" to the Vary header unless it is already
+// listed. Backend Vary values (e.g. Accept-Encoding) are preserved: Vary
+// has broader caching semantics than CORS, so it is merged, never replaced.
+func addVaryOrigin(h http.Header) {
+	for _, v := range h.Values("Vary") {
+		for _, member := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(member), "Origin") {
+				return
+			}
+		}
+	}
+	h.Add("Vary", "Origin")
+}
+
+// CORS returns a middleware that handles CORS. The configured policy is
+// authoritative for the Access-Control-* response headers: on actual
+// (non-preflight) requests, headers produced by inner handlers — proxied
+// backend responses in particular — are stripped and replaced by the
+// gateway's own grant decision just before the response headers are
+// written, so a denied origin can never receive a backend-issued grant
+// through the gateway.
 func CORS(cfg CORSConfig) func(http.Handler) http.Handler {
+	return CORSWithSkipper(cfg, nil)
+}
+
+// CORSWithSkipper returns a CORS middleware like CORS, except requests for
+// which skip returns true bypass this policy entirely: no preflight answer
+// and no header authority. The gateway uses this at the GLOBAL middleware
+// layer so routes that define their own route-level CORS policy are handled
+// exclusively by the route chain's CORS middleware — the route policy takes
+// precedence for both preflight OPTIONS and actual requests, while routes
+// without a route policy keep the global behavior. A nil skip never skips.
+func CORSWithSkipper(cfg CORSConfig, skip func(*http.Request) bool) func(http.Handler) http.Handler {
 	headers := newCORSHeaders(cfg)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			headers.setCORSHeaders(w, r.Header.Get("Origin"))
+			if skip != nil && skip(r) {
+				// The matched route owns CORS end-to-end (preflight
+				// short-circuit and authority semantics) via its own
+				// route-level CORS middleware.
+				next.ServeHTTP(w, r)
+				return
+			}
 
-			// Handle preflight request
+			origin := r.Header.Get("Origin")
+
+			// Handle preflight request: answered entirely by the gateway,
+			// the inner handler never runs.
 			if r.Method == http.MethodOptions {
+				headers.setCORSHeaders(w, origin)
 				GetMiddlewareMetrics().corsRequestsTotal.WithLabelValues(
 					"preflight",
 				).Inc()
@@ -180,21 +238,117 @@ func CORS(cfg CORSConfig) func(http.Handler) http.Handler {
 				return
 			}
 
-			if r.Header.Get("Origin") != "" {
+			if origin != "" {
 				GetMiddlewareMetrics().corsRequestsTotal.WithLabelValues(
 					"actual",
 				).Inc()
 			}
 
-			next.ServeHTTP(w, r)
+			// Defer the policy application to response-write time so
+			// upstream Access-Control-* values are replaced, not merged.
+			aw := newCORSAuthorityWriter(w, headers, origin)
+			next.ServeHTTP(aw, r)
+			// Handlers that return without writing rely on net/http's
+			// implicit 200; the headers are still mutable here.
+			aw.enforcePolicy()
 		})
 	}
 }
 
+// corsAuthorityWriter wraps the response writer to apply the gateway's
+// CORS policy exactly once, immediately before response headers are
+// flushed. It removes Access-Control-* headers set by inner handlers
+// (backend responses copied by the reverse proxy) and applies the
+// configured policy, making the gateway authoritative for CORS.
+type corsAuthorityWriter struct {
+	http.ResponseWriter
+	headers  *corsHeaders
+	origin   string
+	enforced bool
+}
+
+// newCORSAuthorityWriter wraps w with write-time CORS policy enforcement
+// for the given request origin.
+func newCORSAuthorityWriter(w http.ResponseWriter, h *corsHeaders, origin string) *corsAuthorityWriter {
+	return &corsAuthorityWriter{ResponseWriter: w, headers: h, origin: origin}
+}
+
+// enforcePolicy strips upstream Access-Control-* headers and applies the
+// gateway policy. It is idempotent; only the first call has effect.
+func (w *corsAuthorityWriter) enforcePolicy() {
+	if w.enforced {
+		return
+	}
+	w.enforced = true
+
+	h := w.ResponseWriter.Header()
+	dropped := false
+	for _, name := range corsOwnedHeaders {
+		if _, ok := h[name]; ok {
+			h.Del(name)
+			dropped = true
+		}
+	}
+	if dropped {
+		GetMiddlewareMetrics().corsUpstreamHeadersDropped.Inc()
+	}
+
+	w.headers.setCORSHeaders(w.ResponseWriter, w.origin)
+}
+
+// WriteHeader applies the CORS policy, then writes the status code.
+func (w *corsAuthorityWriter) WriteHeader(code int) {
+	w.enforcePolicy()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Write applies the CORS policy (covering the implicit 200 path), then
+// writes the body bytes.
+func (w *corsAuthorityWriter) Write(b []byte) (int, error) {
+	w.enforcePolicy()
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush implements http.Flusher for streaming responses (SSE, chunked).
+func (w *corsAuthorityWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack implements http.Hijacker so WebSocket upgrades keep working on
+// routes with a CORS policy configured.
+func (w *corsAuthorityWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+// Unwrap exposes the underlying writer for http.ResponseController.
+func (w *corsAuthorityWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// Compile-time interface assertions.
+var (
+	_ http.Flusher  = (*corsAuthorityWriter)(nil)
+	_ http.Hijacker = (*corsAuthorityWriter)(nil)
+)
+
 // CORSFromConfig creates CORS middleware from gateway config.
 func CORSFromConfig(cfg *config.CORSConfig) func(http.Handler) http.Handler {
+	return CORSFromConfigWithSkipper(cfg, nil)
+}
+
+// CORSFromConfigWithSkipper creates CORS middleware from gateway config
+// with a request skipper (see CORSWithSkipper for the semantics).
+func CORSFromConfigWithSkipper(
+	cfg *config.CORSConfig,
+	skip func(*http.Request) bool,
+) func(http.Handler) http.Handler {
 	if cfg == nil {
-		return CORS(DefaultCORSConfig())
+		return CORSWithSkipper(DefaultCORSConfig(), skip)
 	}
 
 	corsConfig := CORSConfig{
@@ -217,5 +371,5 @@ func CORSFromConfig(cfg *config.CORSConfig) func(http.Handler) http.Handler {
 		corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Request-ID"}
 	}
 
-	return CORS(corsConfig)
+	return CORSWithSkipper(corsConfig, skip)
 }

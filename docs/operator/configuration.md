@@ -8,6 +8,7 @@ This guide covers all configuration options for the AVAPIGW Operator, including 
 - [Deployment Configuration](#deployment-configuration)
 - [Operator Configuration](#operator-configuration)
 - [gRPC Server Configuration](#grpc-server-configuration)
+- [Certificate Providers](#certificate-providers)
 - [Webhook Configuration](#webhook-configuration)
 - [Vault Integration](#vault-integration)
 - [Monitoring Configuration](#monitoring-configuration)
@@ -254,27 +255,114 @@ grpc:
 
 ### gRPC Server Advanced Configuration
 
+The environment overrides the operator actually consumes for the gRPC
+server are:
+
 ```yaml
 extraEnv:
-  # gRPC server settings
-  - name: GRPC_MAX_RECV_MSG_SIZE
-    value: "4194304"               # 4MB max receive message size
-  - name: GRPC_MAX_SEND_MSG_SIZE
-    value: "4194304"               # 4MB max send message size
-  - name: GRPC_MAX_CONCURRENT_STREAMS
-    value: "100"                   # Max concurrent streams
-  - name: GRPC_KEEPALIVE_TIME
-    value: "30s"                   # Keepalive time
-  - name: GRPC_KEEPALIVE_TIMEOUT
-    value: "10s"                   # Keepalive timeout
-  - name: GRPC_MAX_CONNECTION_IDLE
-    value: "5m"                    # Max connection idle time
-  - name: GRPC_MAX_CONNECTION_AGE
-    value: "30m"                   # Max connection age
-  - name: GRPC_MAX_CONNECTION_AGE_GRACE
-    value: "5s"                    # Max connection age grace
-  - name: GRPC_GRACEFUL_SHUTDOWN_TIMEOUT
-    value: "30s"                   # Graceful shutdown timeout (default: 30s)
+  - name: GRPC_PORT
+    value: "9444"                  # gRPC server port
+  - name: ENABLE_GRPC_SERVER
+    value: "true"                  # Enable/disable the gRPC server
+  - name: GRPC_REQUIRE_CLIENT_CERT
+    value: "false"                 # Require client certificates (mTLS)
+```
+
+Message-size, keepalive, connection-age, and graceful-shutdown settings use
+the server's built-in defaults (e.g. graceful shutdown timeout 30s) and are
+not currently exposed as environment variables.
+
+## Certificate Providers
+
+One certificate manager (selected by the `--cert-provider` flag /
+`CERT_PROVIDER` env) serves **both** the webhook server (called by the
+Kubernetes API server) and the gRPC ConfigurationService (dialed by the
+gateway), so the certificate's SAN list must cover both service names. The
+Helm chart renders the provider from `operator.webhook.tls.mode` (when
+webhooks are enabled) or `operator.grpc.tls.mode`, and supplies the
+identity through `CERT_SERVICE_NAME`/`CERT_DNS_NAMES`/`CERT_NAMESPACE`.
+
+| Provider | Source | Rotation |
+|----------|--------|----------|
+| `selfsigned` (default) | Operator-generated CA + serving certificate; CA and serving cert are **persisted to a Kubernetes Secret** and reused/adopted across restarts when `--cert-secret-name` is set | Internal rotation loop (`RotateBefore` 7 days before expiry) |
+| `vault` | Vault PKI issuance (kubernetes auth) | Internal rotation loop (1 hour before expiry, matching the default 24h TTL) |
+| `file` | Pre-provisioned PEM files (`--cert-file`/`--key-file`, optional `--ca-file`) — e.g. a mounted Secret | Reloaded from disk on change/approaching expiry (external rotation) |
+| `cert-manager` | cert-manager-provisioned Secret mounted at the webhook cert dir | controller-runtime certwatcher (external rotation) |
+
+### Self-Signed Provider with CA Persistence
+
+Without persistence, the self-signed provider regenerates an in-memory CA on
+every start, so clients can never pin a stable CA. With
+`--cert-secret-name` (chart: rendered automatically as
+`CERT_SECRET_NAME=<operator-fullname>-grpc-cert` for the selfsigned
+provider) the provider:
+
+1. **Loads** a previously persisted CA from the Secret (`ca.crt`/`ca.key`)
+   and reuses it (`avapigw_operator_cert_ca_reuse_total`), also priming the
+   persisted serving certificate when still valid;
+2. **Adopts** a CA seeded by Helm (`templates/operator/grpc-cert-secret.yaml`
+   generates the Secret with `genCA` on first install and reuses it via
+   `lookup` on upgrades);
+3. **Persists** a newly generated CA and each issued/rotated serving
+   certificate back to the Secret
+   (`avapigw_operator_cert_secret_sync_total{operation,result}`).
+
+The gateway can then verify the operator connection against the stable
+`ca.crt` in that Secret. RBAC for the Secret writes comes from the chart's
+namespaced `operator/cert-secret-role.yaml` (rendered only for the
+selfsigned provider). `--cert-secret-namespace` defaults to `POD_NAMESPACE`,
+then the cert namespace.
+
+### File Provider
+
+```bash
+avapigw-operator \
+  --cert-provider=file \
+  --cert-file=/etc/operator/certs/tls.crt \
+  --key-file=/etc/operator/certs/tls.key \
+  --ca-file=/etc/operator/certs/ca.crt        # optional
+```
+
+- `certFile`/`keyFile` are required; `caFile` is optional (when empty, the
+  CA bundle is derived from extra certificate blocks in `certFile`, if any).
+- The initial load is eager, so misconfiguration fails fast at startup.
+- Files are re-read when they change on disk or approach expiry, matching
+  controller-runtime's certwatcher behavior — rotation is owned by whoever
+  provisions the files (cert-manager, Vault agent, Helm).
+- For webhooks, the certificate directory is derived from the cert/key
+  paths (they must share a directory) unless `--webhook-cert-dir` is set
+  explicitly.
+
+### cert-manager Provider
+
+`--cert-provider=cert-manager` treats the webhook certificates as externally
+provisioned: the operator serves whatever cert-manager mounts into the
+webhook cert dir (`--webhook-cert-dir`, defaulting to the conventional
+`/tmp/k8s-webhook-server/serving-certs` with `tls.crt`/`tls.key`), and
+controller-runtime watches the files for rotation. Internal provisioning
+never overrides an explicitly configured `WebhookCertDir`.
+
+### Serving-Certificate Rotation Loop
+
+For the internally provisioned providers (`selfsigned`, `vault`) the
+operator runs a rotation loop that checks the serving certificate every
+minute (with up to 20% jitter to desynchronize HA replicas) and re-issues it
+inside the rotate-before window (7 days for selfsigned, 1 hour for vault).
+The rotated certificate is hot-swapped into the gRPC server (via the
+`tls.Config.GetCertificate` pattern) and rewritten into the webhook cert
+directory (controller-runtime's certwatcher reloads the files natively) — no
+restart required. Rotation failures are logged and retried on the next tick.
+External providers (`file`, `cert-manager`) rotate on disk and skip the loop.
+
+### Certificate Metrics
+
+```prometheus
+avapigw_operator_cert_issued_total{provider}            # Certificates issued
+avapigw_operator_cert_rotations_total{provider}         # Rotations performed
+avapigw_operator_cert_errors_total{provider,operation}  # issue/rotate/renew/load errors
+avapigw_operator_cert_expiry_seconds{common_name}       # Time until expiry
+avapigw_operator_cert_ca_reuse_total{provider}          # Persisted CA reused
+avapigw_operator_cert_secret_sync_total{operation,result} # Secret persistence ops
 ```
 
 ## Webhook Configuration
@@ -639,46 +727,70 @@ export LEADER_ELECT=0
 export LEADER_ELECT=off
 ```
 
-### gRPC Configuration Variables
+### gRPC and Webhook Configuration Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `GRPC_PORT` | gRPC server port | `9444` |
-| `GRPC_TLS_MODE` | TLS mode (selfsigned, vault) | `selfsigned` |
-| `GRPC_MAX_RECV_MSG_SIZE` | Max receive message size | `4194304` |
-| `GRPC_MAX_SEND_MSG_SIZE` | Max send message size | `4194304` |
-| `GRPC_MAX_CONCURRENT_STREAMS` | Max concurrent streams | `100` |
+| `ENABLE_GRPC_SERVER` | Enable the gRPC configuration server (boolean) | `true` |
+| `GRPC_REQUIRE_CLIENT_CERT` | Require client certificates (mTLS, boolean) | `false` |
+| `WEBHOOK_PORT` | Webhook server port | `9443` |
+| `ENABLE_WEBHOOKS` | Enable admission webhooks (boolean) | `true` |
+| `WEBHOOK_CERT_DIR` | Directory with webhook TLS certificates (external providers) | `""` |
+| `WEBHOOK_CONFIG_NAME` | ValidatingWebhookConfiguration name | `avapigw-operator-validating-webhook-configuration` |
+| `ENABLE_CLUSTER_WIDE_DUPLICATE_CHECK` | Cluster-wide duplicate detection (boolean) | `false` |
+| `DUPLICATE_CACHE_ENABLED` | Cache duplicate-detection lookups (boolean) | `true` |
+| `DUPLICATE_CACHE_TTL` | Duplicate-detection cache TTL | `30s` |
 
-### Webhook Configuration Variables
+> The gRPC/webhook **TLS provider** is not a dedicated env variable — it is
+> the shared `CERT_PROVIDER` (see below), rendered by the Helm chart from
+> `operator.webhook.tls.mode` / `operator.grpc.tls.mode` as the
+> `--cert-provider` flag.
+
+### Certificate Provider Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `WEBHOOK_PORT` | Webhook server port | `9443` |
-| `WEBHOOK_TLS_MODE` | TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |
-| `WEBHOOK_TIMEOUT` | Webhook timeout | `10s` |
-| `WEBHOOK_FAILURE_POLICY` | Failure policy (Fail, Ignore) | `Fail` |
+| `CERT_PROVIDER` | Certificate provider (`selfsigned`, `vault`, `file`, `cert-manager`) | `selfsigned` |
+| `CERT_FILE` | PEM serving certificate path (file provider) | `""` |
+| `KEY_FILE` | PEM private key path (file provider) | `""` |
+| `CA_FILE` | PEM CA bundle path (file provider, optional) | `""` |
+| `CERT_SECRET_NAME` | Secret persisting the selfsigned CA + serving cert (empty disables persistence) | `""` |
+| `CERT_SECRET_NAMESPACE` | Namespace of the persistence Secret | `POD_NAMESPACE`, then cert namespace |
+| `CERT_SERVICE_NAME` | Service name / certificate CN | `avapigw-operator` |
+| `CERT_DNS_NAMES` | Comma-separated SAN override (must cover webhook AND gRPC services) | derived from service name |
+| `CERT_NAMESPACE` | Namespace for default certificate DNS names | `avapigw-system` |
 
 ### Vault Configuration Variables
+
+The operator's Vault certificate provider authenticates with **Kubernetes
+auth only** (ServiceAccount JWT):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `VAULT_ADDR` | Vault server address | `""` |
-| `VAULT_AUTH_METHOD` | Authentication method | `kubernetes` |
-| `VAULT_ROLE` | Vault role | `""` |
-| `VAULT_TOKEN` | Vault token (dev only) | `""` |
-| `VAULT_KUBERNETES_MOUNT_PATH` | Kubernetes auth mount path | `kubernetes` |
-| `VAULT_APPROLE_MOUNT_PATH` | AppRole auth mount path | `approle` |
-| `VAULT_ROLE_ID` | AppRole role ID | `""` |
-| `VAULT_SECRET_ID` | AppRole secret ID | `""` |
+| `VAULT_PKI_MOUNT` | Vault PKI mount path | `pki` |
+| `VAULT_PKI_ROLE` | Vault PKI role name | `operator` |
+| `VAULT_K8S_ROLE` | Vault role for Kubernetes authentication | `""` |
+| `VAULT_K8S_MOUNT_PATH` | Kubernetes auth mount path | `kubernetes` |
+| `VAULT_INIT_TIMEOUT` | Vault certificate manager init timeout | `30s` |
 
-### Reconciliation Configuration Variables
+### Observability Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `RECONCILE_TIMEOUT` | Max reconciliation time | `10m` |
-| `RECONCILE_WORKERS` | Number of worker goroutines | `5` |
-| `RECONCILE_RATE_LIMIT_QPS` | Rate limit QPS | `20` |
-| `RECONCILE_RATE_LIMIT_BURST` | Rate limit burst | `30` |
+| `ENABLE_TRACING` | Enable OpenTelemetry tracing (boolean) | `false` |
+| `OTLP_ENDPOINT` | OTLP exporter endpoint | `""` |
+| `TRACING_SAMPLING_RATE` | Trace sampling rate (0.0–1.0) | `1.0` |
+
+### Invalid Values Warn Instead of Being Silently Ignored
+
+Non-string environment overrides (int/float/duration/boolean) that fail to
+parse are **logged as warnings** after logger setup (variable name, invalid
+value, and the retained fallback) and the flag/default value stays in
+effect — parity with the gateway's env handling. Example:
+`GRPC_PORT=not-a-number` keeps `9444` and logs
+`WARNING: ignoring invalid environment variable value; keeping current setting`.
 
 ## Configuration Examples
 
@@ -866,4 +978,8 @@ extraEnv:
     value: "/etc/ssl/certs:/etc/ssl/certs/custom"
 ```
 
-For more configuration examples and advanced setups, see the [examples/operator/](../../examples/operator/) directory.
+For more configuration examples and advanced setups, see the operator-mode
+values overlays shipped with the Helm chart
+([`helm/avapigw/values-local.yaml`](../../helm/avapigw/values-local.yaml),
+[`helm/avapigw/values-vault-file.yaml`](../../helm/avapigw/values-vault-file.yaml))
+and the CRD samples in [`test/crd-samples/`](../../test/crd-samples/).

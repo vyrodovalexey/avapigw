@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
+	"github.com/vyrodovalexey/avapigw/internal/httputil"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
@@ -35,6 +35,18 @@ const (
 	DefaultOIDCTimeout      = 30 * time.Second
 	DefaultHeaderName       = "Authorization"
 	DefaultHeaderPrefix     = "Bearer"
+)
+
+// External IdP response read bounds.
+const (
+	// maxIDPResponseBytes bounds OIDC discovery/token-endpoint success
+	// responses so a misbehaving IdP cannot inflate gateway memory.
+	maxIDPResponseBytes = httputil.DefaultMaxResponseBytes
+
+	// maxIDPErrorBodyBytes caps the IdP error body embedded in provider
+	// error strings (usually a small OAuth error JSON; anything larger is
+	// truncated before it reaches logs).
+	maxIDPErrorBodyBytes = 2 * 1024
 )
 
 // JWTProvider implements JWT authentication for backend connections.
@@ -383,11 +395,17 @@ func (p *JWTProvider) discoverTokenEndpoint(ctx context.Context) (string, error)
 		return "", NewProviderError(p.name, "oidc_discovery", msg)
 	}
 
+	// Bounded read: over-limit discovery documents are rejected.
+	body, err := httputil.ReadAllLimited(resp.Body, maxIDPResponseBytes)
+	if err != nil {
+		return "", NewProviderErrorWithCause(p.name, "oidc_discovery", "failed to read discovery document", err)
+	}
+
 	var discovery struct {
 		TokenEndpoint string `json:"token_endpoint"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&discovery); err != nil {
+	if err := json.Unmarshal(body, &discovery); err != nil {
 		return "", NewProviderErrorWithCause(p.name, "oidc_discovery", "failed to parse discovery document", err)
 	}
 
@@ -425,9 +443,17 @@ func (p *JWTProvider) requestOIDCToken(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		// Truncated read: the IdP error body flows into the provider error
+		// string (and logs), so cap it instead of embedding unbounded data.
+		body := httputil.ReadAllTruncated(resp.Body, maxIDPErrorBodyBytes)
 		msg := fmt.Sprintf("token request failed with status %d: %s", resp.StatusCode, string(body))
 		return "", time.Time{}, NewProviderError(p.name, "oidc_token", msg)
+	}
+
+	// Bounded read: over-limit token responses are rejected.
+	body, err := httputil.ReadAllLimited(resp.Body, maxIDPResponseBytes)
+	if err != nil {
+		return "", time.Time{}, NewProviderErrorWithCause(p.name, "oidc_token", "failed to read token response", err)
 	}
 
 	var tokenResp struct {
@@ -436,7 +462,7 @@ func (p *JWTProvider) requestOIDCToken(
 		TokenType   string `json:"token_type"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return "", time.Time{}, NewProviderErrorWithCause(p.name, "oidc_token", "failed to parse token response", err)
 	}
 

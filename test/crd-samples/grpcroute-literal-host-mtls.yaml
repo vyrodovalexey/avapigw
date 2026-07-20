@@ -1,0 +1,46 @@
+# Literal-host destination + backend feature attach sample (director fix).
+#
+# The destination below references the mTLS gRPC backend by its LITERAL
+# host:port (host.docker.internal:8813) instead of the GRPCBackend resource
+# name. The gRPC director resolves the destination by name first and then
+# falls back to any GRPCBackend whose hosts[] declare the endpoint, so this
+# route attaches grpc-backend-mtls's features (MUTUAL TLS client cert from
+# Vault PKI, pools, LB) exactly like a name-based destination would.
+# Previously literal-host destinations dialed PLAINTEXT and failed against
+# the TLS-only backend with "error reading server preface: EOF".
+#
+# The match also demonstrates the metadata-aware duplicate checker: this
+# route coexists with the full-test grpc-cached route (same exact service,
+# nil method + authorization metadata) because their specificity differs —
+# the old checker rejected ANY second api.v1.TestService route.
+#
+# Prerequisites: full-test set applied (test/k8s/crds-full-test.yaml —
+# provides GRPCBackend grpc-backend-mtls on host.docker.internal:8813) and
+# the docker-compose mTLS gRPC backend grpc_3 (:8813) running.
+#
+# Verify through the gateway TLS listener (port-forward 19443 -> svc 9443):
+#   grpcurl -insecure -proto test/performance/proto/test_service.proto \
+#     -H 'x-test-scenario: addr-mtls' -d '{"message":"literal-host-mtls"}' \
+#     localhost:19443 api.v1.TestService/Unary
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: literal-host-mtls-route
+  namespace: avapigw-test
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+      method:
+        exact: Unary
+      metadata:
+        - name: x-test-scenario
+          exact: addr-mtls
+  route:
+    - destination:
+        # LITERAL address:port of GRPCBackend grpc-backend-mtls — resolved
+        # by the director's address fallback, attaching Vault PKI mTLS.
+        host: host.docker.internal
+        port: 8813
+      weight: 100
+  timeout: 30s

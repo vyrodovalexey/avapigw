@@ -21,11 +21,55 @@ The performance testing suite includes:
 
 ## Latest Performance Test Results
 
-### PT Matrix Run (2026-07-16, local compose-network gateway, current HEAD)
+### PT Suite Run (2026-07-20, operator-mode Kubernetes, current HEAD)
 
-The most recent full run covers the six PT scenario groups (~180 s steady
-state each, scenarios per group run concurrently) against a locally built
-gateway container attached to the compose network, with monitoring-metric
+The most recent full run executed all six PT scenario groups against the
+**operator-mode** gateway in the `avapigw-test` namespace (kind-based Docker
+Desktop Kubernetes, distroless images, verified operator TLS via Vault PKI),
+≥180 s steady state per group, with per-group metric verification in
+VictoriaMetrics and Tempo trace checks. Full report:
+[`results/perftest-report_pt-suite_20260720_025531.md`](results/perftest-report_pt-suite_20260720_025531.md)
+(charts in `results/charts-pt-suite_20260720_025531/`). Drivers ghz/hey/k6
+ran on the host via `kubectl port-forward` (18443 HTTPS / 19443 gRPC-TLS).
+
+The SUT configuration is CRD-based: the 43 baseline CRs from
+`test/k8s/crds-full-test.yaml` plus the **24-CR PT fixture set**
+[`operator/crds-pt-k8s.yaml`](operator/crds-pt-k8s.yaml) (NEW) — validated
+HTTP feature routes (sentinel rate limit/cache, OpenAPI ConfigMap,
+transform, encoding, CORS), authenticated WebSocket routes, REST/NDJSON
+aggregates, method+metadata-differentiated gRPC routes, a Vault-PKI mTLS
+gRPC backend, and header-matched GraphQL routes. Apply/delete instructions
+are in the fixture header; the suite leaves the cluster at the 43-CR
+baseline afterwards.
+
+| Test | Scenarios | Duration | Σ RPS | Error % (excl. expected 429) | Verdict |
+|------|-----------|----------|-------|------------------------------|---------|
+| PT-01 gRPC & streaming | unary / serverstream / bidistream / OIDC-JWT / backend-mTLS (Vault PKI) | 181 s | 2,727 | 0.04–0.07% (teardown churn only) | PASS |
+| PT-02 TLS gRPC & streaming | tls_unary / tls_serverstream / mtls_stream / tls_OIDC + aggregate probe | 181 s | 2,343 | 0.03–0.09% | PASS |
+| PT-03 HTTP & WS | basic/apikey/OIDC auth + sentinel RL + transform + encoding + sentinel cache + CORS + OpenAPI + WS×3 | 198 s | 2,955 offered | 0 × 5xx | PASS |
+| PT-04 HTTPS & WSS | PT-03 stack + REST aggregate + NDJSON aggregate (10 HTTP + 3 WSS) | 194 s | 3,045 offered | 0 × 5xx | PASS |
+| PT-05 GraphQL & WS | basic/apikey/OIDC (401-enforcing) + sentinel RL + transform + CORS + WS | 186 s | 3,388 offered | 0 × 5xx | PASS |
+| PT-06 TLS GraphQL & WSS | PT-05 stack + GraphQL aggregate (deep merge) + WSS | 187 s | 3,349 offered | 0 × 5xx | PASS |
+
+Key proof points: sentinel rate-limit scenarios delivered exactly their
+5 rps Redis budget; backend-mTLS gRPC throughput ≈ plaintext-backend (609
+vs 594 rps); per-group metric deltas verified in VictoriaMetrics
+(route/auth/RL/cache/transform/encoding/CORS/OpenAPI/WS/aggregate/GraphQL/
+TLS-handshake families, `avapigw_operator_grpc_active_gateways` = 1
+throughout). 2xx throughput of the HTTP/GraphQL groups was capped by the
+deployment's **global rate limiter** through a single port-forward client —
+`values-local.yaml` has since moved to 5000 rps / 10000 burst.
+
+Monitoring pipeline for the run: in-cluster `vmagent` + `otel-collector`
+charts (`test/monitoring/`, deployed to `avapigw-test`) remote-writing to
+the compose VictoriaMetrics `:8428` and forwarding traces to Tempo `:4317`
+on the host (`host.docker.internal` value overrides).
+
+### Previous PT Matrix Run (2026-07-16, local compose-network gateway)
+
+This run covers the six PT scenario groups (~180 s steady state each,
+scenarios per group run concurrently) against a locally built gateway
+container attached to the compose network, with monitoring-metric
 verification in VictoriaMetrics after every group. Full report:
 [`results/perftest-report_pt-local-docker_20260716_032156.md`](results/perftest-report_pt-local-docker_20260716_032156.md)
 (charts in `results/charts-pt-local_20260716_032156/`). Driver:
@@ -149,8 +193,11 @@ The test backends (REST API and gRPC) support the following features:
 **gRPC Backends (ports 8803, 8804):**
 - Unary RPC: `api.v1.TestService/Echo`
 - Server Streaming: `api.v1.TestService/ServerStream` - Server sends multiple responses
-- Client Streaming: `api.v1.TestService/ClientStream` - Client sends multiple requests
 - Bidirectional Streaming: `api.v1.TestService/BidiStream` - Both sides stream messages
+
+> The reference backend no longer implements `ClientStream`; the
+> `grpc-client-streaming.yaml` config was removed. Client-to-server
+> streaming is exercised through the bidirectional streaming scenario.
 
 ### TLS and Authentication Tests
 
@@ -313,7 +360,6 @@ test/performance/
 │   ├── grpc/                   # gRPC test configurations
 │   │   ├── grpc-unary.yaml     # Unary RPC throughput test (5min)
 │   │   ├── grpc-server-streaming.yaml  # Server streaming test
-│   │   ├── grpc-client-streaming.yaml  # Client streaming test
 │   │   ├── grpc-bidi-streaming.yaml    # Bidirectional streaming test
 │   │   ├── grpc-tls-unary.yaml # gRPC unary test with TLS
 │   │   └── grpc-auth-unary.yaml # gRPC unary test with JWT auth
@@ -323,6 +369,9 @@ test/performance/
 │       ├── websocket-concurrent.js     # Concurrent connections test
 │       ├── websocket-tls-message.js    # WSS message test with TLS
 │       └── websocket-auth-message.js   # WS message test with JWT auth
+├── operator/                   # Operator-mode (CRD) fixtures + tests
+│   ├── crds-pt-k8s.yaml        # 24-CR PT fixture set for the k8s PT suite
+│   └── crds-*.yaml, *_test.go  # Feature-specific CR sets and operator perf tests
 ├── ammo/                       # Ammo files for HTTP load generation
 │   ├── http-get.txt            # GET requests (URI-style)
 │   ├── http-post.txt           # POST requests with JSON payload
@@ -1059,7 +1108,6 @@ make perf-test-grpc-streaming
 
 # Individual streaming tests
 ./test/performance/scripts/run-grpc-test.sh grpc-server-streaming
-./test/performance/scripts/run-grpc-test.sh grpc-client-streaming
 ./test/performance/scripts/run-grpc-test.sh grpc-bidi-streaming
 ```
 

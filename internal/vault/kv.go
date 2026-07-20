@@ -203,7 +203,15 @@ func (k *kvClient) List(ctx context.Context, mount, path string) ([]string, erro
 	start := time.Now()
 	fullPath := fmt.Sprintf("%s/metadata/%s", mount, path)
 
-	secret, err := k.client.api.Logical().ListWithContext(ctx, fullPath)
+	// Execute with retry (exponential backoff + IsRetryable classification),
+	// matching the resilience of the Read/Write/Delete siblings.
+	var secret *vaultapi.Secret
+	err := k.client.executeWithRetry(ctx, func() error {
+		var listErr error
+		secret, listErr = k.client.api.Logical().ListWithContext(ctx, fullPath)
+		return listErr
+	})
+
 	if err != nil {
 		k.client.metrics.RecordRequest("kv_list", "error", time.Since(start))
 		return nil, NewVaultErrorWithCause("kv_list", fullPath, "failed to list secrets", err)

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -774,11 +776,30 @@ func (b *ServiceBackend) RefreshAuth(ctx context.Context) error {
 
 // Registry manages multiple backends.
 type Registry struct {
-	backends    map[string]Backend
+	backends map[string]Backend
+	// hostIndex maps a normalized "address:port" endpoint to the sorted
+	// names of the backends that declare it, enabling address-based
+	// resolution of route destinations that reference a backend by its
+	// host endpoint instead of its resource name.
+	hostIndex   map[string][]string
 	mu          sync.RWMutex
 	logger      observability.Logger
 	metrics     *observability.Metrics
 	vaultClient vault.Client
+}
+
+// hostLister is the optional capability a Backend can implement to expose
+// its configured hosts for endpoint indexing (ServiceBackend implements it).
+type hostLister interface {
+	GetHosts() []*Host
+}
+
+// HostPortKey normalizes an endpoint to its canonical "address:port" index
+// key. Addresses are lowercased (DNS names are case-insensitive) and IPv6
+// literals are bracketed via net.JoinHostPort so lookups from any caller
+// produce identical keys.
+func HostPortKey(address string, port int) string {
+	return net.JoinHostPort(strings.ToLower(address), strconv.Itoa(port))
 }
 
 // RegistryOption is a functional option for configuring a Registry.
@@ -807,8 +828,9 @@ func NewRegistry(
 	opts ...RegistryOption,
 ) *Registry {
 	r := &Registry{
-		backends: make(map[string]Backend),
-		logger:   logger,
+		backends:  make(map[string]Backend),
+		hostIndex: make(map[string][]string),
+		logger:    logger,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -827,6 +849,7 @@ func (r *Registry) Register(backend Backend) error {
 	}
 
 	r.backends[name] = backend
+	r.rebuildHostIndexLocked()
 	r.logger.Info("registered backend",
 		observability.String("name", name),
 	)
@@ -844,6 +867,7 @@ func (r *Registry) Unregister(name string) error {
 	}
 
 	delete(r.backends, name)
+	r.rebuildHostIndexLocked()
 	r.logger.Info("unregistered backend",
 		observability.String("name", name),
 	)
@@ -858,6 +882,53 @@ func (r *Registry) Get(name string) (Backend, bool) {
 
 	backend, exists := r.backends[name]
 	return backend, exists
+}
+
+// GetByHostPort returns the backend whose configured hosts include the
+// given "address:port" endpoint. When several backends declare the same
+// endpoint, the lexicographically smallest backend name is chosen so the
+// result is deterministic; matches reports how many backends declared the
+// endpoint so callers can surface the ambiguity. ok is false when no
+// backend declares the endpoint.
+func (r *Registry) GetByHostPort(address string, port int) (b Backend, matches int, ok bool) {
+	key := HostPortKey(address, port)
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := r.hostIndex[key]
+	if len(names) == 0 {
+		return nil, 0, false
+	}
+	// Names are kept sorted by rebuildHostIndexLocked — first is the
+	// deterministic winner.
+	backend, exists := r.backends[names[0]]
+	if !exists {
+		return nil, 0, false
+	}
+	return backend, len(names), true
+}
+
+// rebuildHostIndexLocked recomputes the endpoint index from the current
+// backend set. Callers must hold the write lock. Mutations (register,
+// unregister, reload) are rare, so a full rebuild keeps the per-request
+// lookup O(1) without incremental bookkeeping.
+func (r *Registry) rebuildHostIndexLocked() {
+	index := make(map[string][]string)
+	for name, b := range r.backends {
+		lister, hasHosts := b.(hostLister)
+		if !hasHosts {
+			continue
+		}
+		for _, host := range lister.GetHosts() {
+			key := HostPortKey(host.Address, host.Port)
+			index[key] = append(index[key], name)
+		}
+	}
+	for key := range index {
+		sort.Strings(index[key])
+	}
+	r.hostIndex = index
 }
 
 // GetAll returns all backends.
@@ -1001,6 +1072,7 @@ func (r *Registry) ReloadFromConfig(
 	r.mu.Lock()
 	oldMap := r.backends
 	r.backends = newMap
+	r.rebuildHostIndexLocked()
 	r.mu.Unlock()
 
 	// 3. Stop old backends outside the lock.

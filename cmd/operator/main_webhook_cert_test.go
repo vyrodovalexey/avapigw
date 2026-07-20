@@ -153,6 +153,13 @@ func (m *mockCertManagerForWebhook) GetCA(_ context.Context) (*x509.CertPool, er
 	return x509.NewCertPool(), nil
 }
 
+func (m *mockCertManagerForWebhook) GetCAPEM(_ context.Context) ([]byte, error) {
+	if m.getCAErr != nil {
+		return nil, m.getCAErr
+	}
+	return []byte("test-ca-pem"), nil
+}
+
 func (m *mockCertManagerForWebhook) RotateCertificate(ctx context.Context, req *cert.CertificateRequest) (*cert.Certificate, error) {
 	return m.GetCertificate(ctx, req)
 }

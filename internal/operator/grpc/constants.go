@@ -38,3 +38,15 @@ const (
 	// DefaultMaxConcurrentStreams is the default maximum number of concurrent streams.
 	DefaultMaxConcurrentStreams = 100
 )
+
+// Gateway registry staleness reaper defaults.
+const (
+	// DefaultGatewayReapInterval is the default interval between
+	// stale-gateway registry sweeps.
+	DefaultGatewayReapInterval = 30 * time.Second
+
+	// DefaultGatewayStaleTTL is the default age of a gateway registration's
+	// last heartbeat after which the registration is considered stale and
+	// reaped (three missed heartbeat intervals).
+	DefaultGatewayStaleTTL = 3 * defaultHeartbeatInterval
+)

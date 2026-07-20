@@ -144,6 +144,13 @@ func (m *mockCertManagerFor90) GetCA(_ context.Context) (*x509.CertPool, error) 
 	return x509.NewCertPool(), nil
 }
 
+func (m *mockCertManagerFor90) GetCAPEM(_ context.Context) ([]byte, error) {
+	if m.getCAErr != nil {
+		return nil, m.getCAErr
+	}
+	return []byte("test-ca-pem"), nil
+}
+
 func (m *mockCertManagerFor90) RotateCertificate(ctx context.Context, req *cert.CertificateRequest) (*cert.Certificate, error) {
 	return m.GetCertificate(ctx, req)
 }
@@ -435,7 +442,7 @@ func TestSetupCertManager_VaultContextTimeout_90(t *testing.T) {
 		VaultInitTimeout: 1 * time.Millisecond,
 	}
 
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	// Should fail due to timeout or connection error
 	assert.Error(t, err)
 }
@@ -452,7 +459,7 @@ func TestSetupCertManager_VaultWithValidConfig_90(t *testing.T) {
 		VaultInitTimeout: 50 * time.Millisecond,
 	}
 
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	// Should fail due to connection error (no vault server)
 	assert.Error(t, err)
 }

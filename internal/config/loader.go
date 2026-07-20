@@ -228,6 +228,12 @@ func MergeConfigs(configs ...*GatewayConfig) *GatewayConfig {
 }
 
 // mergeTwo merges two configurations, with the second taking precedence.
+//
+// EVERY config.GatewaySpec field MUST be handled here (resource lists are
+// appended, scalar lists replace when set, pointer sections override when
+// non-nil). The reflection guard test in loader_merge_guard_test.go fails
+// the build when a newly added GatewaySpec field is not carried through this
+// merge, preventing silent section drops for include-based configurations.
 func mergeTwo(base, override *GatewayConfig) *GatewayConfig {
 	if override == nil {
 		return base
@@ -238,18 +244,30 @@ func mergeTwo(base, override *GatewayConfig) *GatewayConfig {
 
 	result := *base
 
-	// Override basic fields
+	mergeRootFields(&result, override)
+	mergeMetadata(&result, override)
+	mergeSpecResources(&result.Spec, &override.Spec)
+	mergeSpecSections(&result.Spec, &override.Spec)
+
+	return &result
+}
+
+// mergeRootFields overrides apiVersion/kind when set on the override config.
+func mergeRootFields(result, override *GatewayConfig) {
 	if override.APIVersion != "" {
 		result.APIVersion = override.APIVersion
 	}
 	if override.Kind != "" {
 		result.Kind = override.Kind
 	}
+}
+
+// mergeMetadata merges metadata name, labels, and annotations.
+func mergeMetadata(result, override *GatewayConfig) {
 	if override.Metadata.Name != "" {
 		result.Metadata.Name = override.Metadata.Name
 	}
 
-	// Merge labels
 	if result.Metadata.Labels == nil {
 		result.Metadata.Labels = make(map[string]string)
 	}
@@ -257,46 +275,80 @@ func mergeTwo(base, override *GatewayConfig) *GatewayConfig {
 		result.Metadata.Labels[k] = v
 	}
 
-	// Merge annotations
 	if result.Metadata.Annotations == nil {
 		result.Metadata.Annotations = make(map[string]string)
 	}
 	for k, v := range override.Metadata.Annotations {
 		result.Metadata.Annotations[k] = v
 	}
+}
 
-	// Override listeners (replace entirely if provided)
-	if len(override.Spec.Listeners) > 0 {
-		result.Spec.Listeners = override.Spec.Listeners
+// mergeSpecResources merges the resource collections: listeners and
+// trustedProxies replace entirely when provided (positional semantics),
+// route/backend lists append so includes can contribute resources.
+func mergeSpecResources(result, override *GatewaySpec) {
+	if len(override.Listeners) > 0 {
+		result.Listeners = override.Listeners
+	}
+	if len(override.TrustedProxies) > 0 {
+		result.TrustedProxies = override.TrustedProxies
 	}
 
-	// Merge routes (append)
-	result.Spec.Routes = append(result.Spec.Routes, override.Spec.Routes...)
+	result.Routes = append(result.Routes, override.Routes...)
+	result.Backends = append(result.Backends, override.Backends...)
+	result.GRPCRoutes = append(result.GRPCRoutes, override.GRPCRoutes...)
+	result.GRPCBackends = append(result.GRPCBackends, override.GRPCBackends...)
+	result.GraphQLRoutes = append(result.GraphQLRoutes, override.GraphQLRoutes...)
+	result.GraphQLBackends = append(result.GraphQLBackends, override.GraphQLBackends...)
+}
 
-	// Merge backends (append)
-	result.Spec.Backends = append(result.Spec.Backends, override.Spec.Backends...)
-
-	// Override rate limit if provided
-	if override.Spec.RateLimit != nil {
-		result.Spec.RateLimit = override.Spec.RateLimit
+// mergeSpecSections overrides every pointer-typed spec section when the
+// override provides it. Sections are carried as whole blocks (no per-field
+// deep merge), matching the documented include semantics: the later file
+// wins for a section it defines.
+func mergeSpecSections(result, override *GatewaySpec) {
+	if override.RateLimit != nil {
+		result.RateLimit = override.RateLimit
 	}
-
-	// Override circuit breaker if provided
-	if override.Spec.CircuitBreaker != nil {
-		result.Spec.CircuitBreaker = override.Spec.CircuitBreaker
+	if override.CircuitBreaker != nil {
+		result.CircuitBreaker = override.CircuitBreaker
 	}
-
-	// Override CORS if provided
-	if override.Spec.CORS != nil {
-		result.Spec.CORS = override.Spec.CORS
+	if override.CORS != nil {
+		result.CORS = override.CORS
 	}
-
-	// Override observability if provided
-	if override.Spec.Observability != nil {
-		result.Spec.Observability = override.Spec.Observability
+	if override.Observability != nil {
+		result.Observability = override.Observability
 	}
-
-	return &result
+	if override.Authentication != nil {
+		result.Authentication = override.Authentication
+	}
+	if override.Authorization != nil {
+		result.Authorization = override.Authorization
+	}
+	if override.Security != nil {
+		result.Security = override.Security
+	}
+	if override.Audit != nil {
+		result.Audit = override.Audit
+	}
+	if override.RequestLimits != nil {
+		result.RequestLimits = override.RequestLimits
+	}
+	if override.MaxSessions != nil {
+		result.MaxSessions = override.MaxSessions
+	}
+	if override.GraphQL != nil {
+		result.GraphQL = override.GraphQL
+	}
+	if override.OpenAPIValidation != nil {
+		result.OpenAPIValidation = override.OpenAPIValidation
+	}
+	if override.WebSocket != nil {
+		result.WebSocket = override.WebSocket
+	}
+	if override.Vault != nil {
+		result.Vault = override.Vault
+	}
 }
 
 // ResolveConfigPath resolves a configuration file path, checking common locations.

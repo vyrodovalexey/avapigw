@@ -270,7 +270,20 @@ func (v *GRPCBackendValidator) validate(grpcBackend *avapigwv1alpha1.GRPCBackend
 
 	// Distributed rate limiting is not enforced in the backend data path.
 	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
-	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, "GRPCBackend")...)
+	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, kindGRPCBackend)...)
+
+	// Transparency warnings: fields with no counterpart on the gateway's
+	// gRPC backend configuration type are accepted but not applied.
+	warnings = append(warnings, warnBackendRateLimitUnapplied(spec.RateLimit, kindGRPCBackend)...)
+	if spec.MaxSessions != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.maxSessions", kindGRPCBackend)...)
+	}
+	if spec.Transform != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.transform", kindGRPCBackend)...)
+	}
+	if spec.Encoding != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.encoding", kindGRPCBackend)...)
+	}
 
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))

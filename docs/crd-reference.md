@@ -174,43 +174,81 @@ spec:
 
 #### Data Transformation
 
+The transform JSON shape matches the gateway's transform configuration, so
+CRD fields round-trip to the data plane unchanged.
+
 ```yaml
 spec:
-  # Request transformation
   transform:
+    # Request transformation
     request:
-      template: |                       # Go template for request
+      template: |                       # Go template for the request body
         {
           "user_id": "{{.user_id}}",
           "timestamp": "{{now}}"
         }
-    
+      passthroughBody: false            # Pass body unchanged to the backend
+      staticHeaders:                    # Headers with static values
+        X-Source: "gateway"
+      dynamicHeaders:                   # Headers sourced from request context
+        - name: X-User-ID
+          source: jwt.claim.sub         # jwt.claim.*, context.*, metadata.*
+      injectFields:                     # Inject fields into the request body
+        - field: metadata.request_id
+          source: context.request_id    # Dynamic value from context
+        - field: metadata.source
+          value: "gateway"              # Static JSON value
+      removeFields:                     # Remove fields (dot notation)
+        - "internal.debug"
+      defaultValues:                    # Defaults for absent body fields
+        page: 1
+        limit: 20
+      validateBeforeTransform: true     # Validate request before transforming
+
     # Response transformation
     response:
       allowFields:                      # Allow only these fields
         - "id"
         - "name"
         - "email"
-      denyFields:                       # Deny these fields
-        - "password"
-        - "internal_id"
+      # denyFields:                     # Mutually exclusive with allowFields
+      #   - "password"
+      #   - "internal_id"
       fieldMappings:                    # Rename fields
         user_id: "id"
         full_name: "name"
-      fieldGrouping:                    # Group fields
-        profile:
-          - "name"
-          - "email"
-          - "avatar"
-      arrayOperations:
-        sort:
-          field: "created_at"
-          order: "desc"
-        limit: 10
-        filter:
-          field: "status"
-          value: "active"
+      groupFields:                      # Group fields into nested objects
+        - name: profile
+          fields:
+            - "name"
+            - "email"
+            - "avatar"
+      flattenFields:                    # Flatten nested objects to the parent
+        - "metadata"
+      arrayOperations:                  # Operations on array fields
+        - field: items
+          operation: sort               # append|prepend|filter|sort|limit|deduplicate
+          value: "created_at"
+        - field: items
+          operation: limit
+          value: 10
+        - field: items
+          operation: filter
+          condition: 'item.status == "active"'   # CEL, required for filter
+      template: |                       # Custom formatting (overrides other rules)
+        {"data": {{.Body}}}
+      mergeStrategy: deep               # deep|shallow|replace|ndjson (multi-backend)
 ```
+
+Validation (admission webhook, mirroring the gateway's transformer rules):
+`allowFields` and `denyFields` cannot both be set; every `injectFields`
+entry needs `value` or `source`; `arrayOperations` with
+`operation: filter` require `condition`.
+
+> **Limitation:** the gateway's `filter` array operation currently logs the
+> CEL condition and passes the array through unchanged (full CEL evaluation
+> is a follow-up); `sort` uses `value` as the field key, `limit` uses
+> `value` as the element count.
 
 #### Caching
 
@@ -219,15 +257,25 @@ spec:
   cache:
     enabled: true
     ttl: "300s"                         # Cache TTL
-    keyComponents:                      # Cache key components
-      - "uri"
-      - "method"
-      - "headers.Authorization"
-    staleWhileRevalidate: "60s"        # Serve stale while revalidating
-    negativeCaching:
-      enabled: true
-      ttl: "60s"                       # Cache error responses
+    maxEntries: 10000                   # Max entries (memory cache)
+    keyConfig:                          # Cache key generation
+      includeMethod: true
+      includePath: true
+      includeQueryParams:               # Query params to include in the key
+        - "page"
+        - "limit"
+      includeHeaders:                   # Headers to include in the key
+        - "Accept"
+      includeBodyHash: false            # Hash of the request body
+      # keyTemplate: "{{.Method}}:{{.Path}}:{{.Query.page}}"  # Custom template
+    honorCacheControl: true             # Respect Cache-Control headers
+    staleWhileRevalidate: "60s"         # Serve stale while revalidating
+    negativeCacheTTL: "60s"             # TTL for cached error responses
 ```
+
+> **Deprecated:** `cache.keyComponents` has no gateway counterpart and is
+> ignored; setting it produces an admission warning. Use `cache.keyConfig`
+> instead.
 
 ##### Redis / Redis Sentinel Cache Backend
 
@@ -262,11 +310,26 @@ spec:
       keyPrefix: "route-cache:"
       ttlJitter: 0.1                    # ±10% TTL jitter (cache stampede protection)
       hashKeys: true                    # SHA256-hash cache keys
+      tls:                              # TLS to Redis (standalone and sentinel)
+        enabled: true
+        caFile: "/etc/redis/ca.crt"     # Private CA for server verification
+        certFile: "/etc/redis/tls.crt"  # Client cert for mTLS (requires keyFile)
+        keyFile: "/etc/redis/tls.key"
+        minVersion: "TLS12"             # TLS12 | TLS13
+        # maxVersion: "TLS13"
+        # insecureSkipVerify: true      # dev only
       retry:                            # Initial connection retry (exponential backoff)
         maxRetries: 3
         initialBackoff: "100ms"
         maxBackoff: "30s"
 ```
+
+The same `tls` block is available on `rateLimit.redis.tls` (distributed
+rate limiting) and `authorization.cache.redis.tls` (authorization decision
+cache). The gateway loads the referenced certificate/CA material and fails
+with a clear error when a file is unreadable — misconfigured TLS never
+silently degrades to system-trust-only. `certFile` and `keyFile` must be set
+together (admission-validated).
 
 > Note: redis-backed route caching is applied in the HTTP (APIRoute) data
 > path. GraphQL routes attach the same cache middleware through the shared
@@ -316,6 +379,28 @@ spec:
       policies:
         - name: "business-hours"
           expression: 'hour(now()) >= 9 && hour(now()) <= 17'
+    # Authorization decision cache. type: redis shares decisions across
+    # gateway replicas through Redis or Redis Sentinel; when the connection
+    # is missing or cannot be established, the gateway logs loudly and
+    # falls back to the in-memory decision cache.
+    cache:
+      enabled: true
+      ttl: "60s"
+      type: redis                       # memory (default) | redis
+      redis:                            # Same connection shape as cache.redis
+        # url: "redis://redis.authz.svc:6379/0"   # mutually exclusive with sentinel
+        sentinel:
+          masterName: "mymaster"
+          sentinelAddrs:
+            - "redis-sentinel-0.redis.svc:26379"
+            - "redis-sentinel-1.redis.svc:26379"
+          passwordVaultPath: "secret/redis-master"
+        keyPrefix: "authz:"
+        # tls: { enabled: true, caFile: "/etc/redis/ca.crt" }
+      # DEPRECATED: the legacy top-level authorization.cache.sentinel block
+      # is still accepted (the operator converts it to redis.sentinel and
+      # emits a deprecation warning), but is mutually exclusive with the
+      # redis block. Migrate to authorization.cache.redis.sentinel.
   
   # Rate limiting
   rateLimit:
@@ -344,6 +429,9 @@ spec:
   #     keyPrefix: "rl:"
   #     failOpen: true                  # true (default): allow on Redis outage;
   #                                     # false: reject with 429
+  #     tls:                            # TLS to Redis (see cache.redis.tls)
+  #       enabled: true
+  #       caFile: "/etc/redis/ca.crt"
   #     retry:
   #       maxRetries: 3
   #       initialBackoff: "100ms"
@@ -391,7 +479,31 @@ spec:
       xXSSProtection: "1; mode=block"
       customHeaders:
         X-Custom-Security: "enabled"
+    # Structured HSTS (preferred over the deprecated raw
+    # headers.strictTransportSecurity string, which the operator parses
+    # into this block when hsts is not set)
+    hsts:
+      enabled: true
+      maxAge: 31536000
+      includeSubDomains: true
+      preload: false
+    # Structured CSP (preferred over the deprecated
+    # headers.contentSecurityPolicy string, which the operator converts
+    # into this block when csp is not set)
+    csp:
+      enabled: true
+      policy: "default-src 'self'"
+      reportOnly: false
+      # reportUri: "https://csp.example.com/report"
+    referrerPolicy: "strict-origin-when-cross-origin"
 ```
+
+> **Deprecated:** `security.headers.strictTransportSecurity` and
+> `security.headers.contentSecurityPolicy` (raw header strings). The gateway
+> consumes HSTS/CSP from the structured `security.hsts`/`security.csp`
+> blocks; the operator converts the legacy fields when the structured blocks
+> are absent, so existing manifests keep working, but new manifests should
+> use the structured form.
 
 #### TLS Configuration
 
@@ -468,19 +580,32 @@ spec:
 ```yaml
 spec:
   healthCheck:
-    enabled: true
-    path: "/health"                     # Health check path
-    method: "GET"                       # Health check method
+    path: "/health"                     # Health check path (required)
     interval: "10s"                     # Check interval
     timeout: "5s"                       # Check timeout
-    healthyThreshold: 2                 # Healthy threshold
-    unhealthyThreshold: 3               # Unhealthy threshold
-    headers:                            # Health check headers
-      Authorization: "Bearer health-token"
-      User-Agent: "avapigw-health-checker"
-    expectedStatus: [200, 204]          # Expected status codes
-    expectedBody: "OK"                  # Expected response body
+    healthyThreshold: 2                 # Consecutive successes to mark healthy
+    unhealthyThreshold: 3               # Consecutive failures to mark unhealthy
+    port: 9090                          # Optional: probe-port override
 ```
+
+Native gRPC health checking (`grpc.health.v1.Health/Check`) is available for
+backends whose probes are not HTTP:
+
+```yaml
+spec:
+  healthCheck:
+    path: "/health"                     # Required by the schema; ignored with useGRPC
+    interval: "10s"
+    timeout: "5s"
+    useGRPC: true                       # Probe via grpc.health.v1.Health/Check
+    grpcService: ""                     # Service name ("" = overall server health)
+    port: 9090                          # Separate monitoring/probe port
+```
+
+`port` overrides the backend host port for health checks only — useful for
+backends that expose a dedicated monitoring port (e.g. traffic on 8080,
+probes on 9090). When `useGRPC` is true, `path` is ignored (the schema still
+requires a non-empty value).
 
 #### Load Balancing
 
@@ -1333,7 +1458,7 @@ The operator performs comprehensive cross-reference validation to ensure configu
 2. **Namespace Validation**: Cross-namespace references are validated based on RBAC permissions
 3. **Duplicate Detection**: Rejects only **true duplicates** — match conditions with identical specificity and overlapping values that the data-plane router cannot order deterministically:
    - **APIRoute**: same match type and path with overlapping methods. Exact-vs-prefix combinations and nested prefixes (e.g. `/` and `/api`) are allowed; the router resolves them by precedence (exact = 1000 > prefix = 500 + prefix length > regex = 100), so a catch-all route coexists with specific routes
-   - **GRPCRoute**: conflicts only for identical-specificity pairs — identical `service`/`method` prefixes or identical exacts (a match-less catch-all still conflicts with any gRPC route). Nested prefixes (e.g. `com.example` and `com.example.user`) are admitted and resolved by the gRPC router's longest-prefix priority
+   - **GRPCRoute**: conflicts only when two match blocks have **identical specificity** AND overlapping match values, mirroring the GraphQL checker (specificity: service exact = 1000 / prefix = 500 + length / regex = 100; method exact = 500 / prefix = 250 + length / regex = 50; authority = +100; **+10 per metadata condition**; +5 per `withoutHeaders` entry; catch-all = 0). A match-less catch-all conflicts only with another catch-all; nil-method routes coexist with method-specific ones, and metadata-discriminated routes coexist with a generic route on the same service/method — the router orders them all deterministically (higher specificity wins, name tie-break). Nested prefixes (e.g. `com.example` and `com.example.user`) are admitted and resolved by longest-prefix priority
    - **GraphQLRoute**: conflicts only when two match blocks have identical specificity AND overlapping match values (specificity: path exact = 1000 / prefix = 500 + length / regex = 100; operationName exact = 500 / prefix = 250 + length / regex = 50; operationType set = +200; +10 per header condition; catch-all = 0). Equal-specificity regex pairs are admitted (intersection is undecidable) and ordered deterministically by name
    - Overlap checks also apply across route kinds sharing the HTTP data path (APIRoute ↔ GraphQLRoute), and updating a resource never conflicts with its own previous version
 4. **Resource Dependencies**: Ensures dependent resources exist before applying configuration
@@ -1355,6 +1480,28 @@ Some configurations are accepted with a warning instead of being rejected:
   wired for the HTTP APIRoute data path (GraphQL routes attach the shared
   cache middleware but only GET requests are cached)
 - **Backend `spec.cache`** — RESERVED, currently has no effect (see below)
+- **`cache.keyComponents`** — deprecated and **not applied** (the gateway has
+  no corresponding option); use `cache.keyConfig` instead
+- **`authorization.cache.sentinel`** (top-level legacy block) — deprecated;
+  the operator converts it to `authorization.cache.redis.sentinel` (so it
+  still takes effect) but the field will be removed in a future API revision
+- **`authorization.cache.type: redis` without any Redis connection** — the
+  gateway falls back to the in-memory decision cache, so the redis type
+  selection is not applied; configure `authorization.cache.redis`
+  (url or sentinel)
+- **Over-spec fields with no gateway counterpart** — accepted with an
+  "accepted but not applied" warning instead of being silently dropped:
+  `spec.rateLimit` on GRPCBackend/GraphQLBackend; `spec.maxSessions` and
+  `spec.requestLimits` on GRPCRoute/GraphQLRoute; `spec.requestLimits`,
+  `spec.transform`, and `spec.encoding` on Backend/GRPCBackend;
+  `spec.maxSessions`/`spec.encoding` on GraphQLBackend (and similar)
+- **Plaintext Redis Sentinel secrets** — inline `password`/
+  `sentinelPassword` values in any sentinel block (including the
+  authorization cache) warn in favor of the `*VaultPath` references
+
+The general contract is **no silent drops**: every CRD field the current
+gateway version does not consume is either converted (deprecated shapes) or
+surfaced with an "accepted but not applied" admission warning.
 
 ABAC CEL expressions are compiled at admission time against the same
 environment the gateway evaluates at runtime — variables `subject`, `request`,

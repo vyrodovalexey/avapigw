@@ -277,6 +277,16 @@ func (svc *configurationServiceImpl) StreamConfiguration(
 				observability.String("session_id", req.GetSessionId()),
 			)
 			return nil
+		case <-svc.server.ShutdownSignal():
+			// Server shutdown: return promptly so GracefulStop (which only
+			// waits for active RPCs, never cancels them) completes without
+			// burning the full graceful-shutdown timeout on this
+			// design-long-lived stream.
+			svc.server.metrics.requestsTotal.WithLabelValues("StreamConfiguration", "shutdown").Inc()
+			svc.server.logger.Info("configuration stream terminated for server shutdown",
+				observability.String("session_id", req.GetSessionId()),
+			)
+			return nil
 		case <-waitCh:
 			// Configuration changed — next iteration builds and sends it.
 		}

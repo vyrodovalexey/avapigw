@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
@@ -88,6 +91,9 @@ func (r *GraphQLRouteReconciler) callbacks() *ReconcileCallbacks {
 			}
 			return r.GRPCServer.HasGraphQLRoute(resource.GetName(), resource.GetNamespace())
 		},
+		ReferencesExternalConfig: func(resource Reconcilable) bool {
+			return graphqlRouteConfigMapName(resource.(*avapigwv1alpha1.GraphQLRoute)) != ""
+		},
 	}
 }
 
@@ -103,6 +109,15 @@ func (r *GraphQLRouteReconciler) reconcileGraphQLRoute(
 		r.Recorder.Eventf(graphqlRoute, "Warning", EventReasonReconcileFailed,
 			"Failed to resolve GraphQL schema validation: %v", err)
 		return fmt.Errorf("failed to resolve GraphQL schema validation: %w", err)
+	}
+
+	// Rewrite deprecated CRD field shapes (authorization cache sentinel,
+	// legacy CSP/HSTS header strings) into the gateway-consumable shape.
+	converted := normalizeRouteSpecShared(graphqlRoute.Spec.Authorization, graphqlRoute.Spec.Security)
+	if converted > 0 {
+		GetControllerMetrics().RecordLegacyFieldConversions(KindGraphQLRoute, converted)
+		log.FromContext(ctx).Info("converted deprecated GraphQLRoute spec fields to gateway shape",
+			"name", graphqlRoute.Name, "namespace", graphqlRoute.Namespace, "converted_fields", converted)
 	}
 
 	configJSON, err := json.Marshal(graphqlRoute.Spec)
@@ -160,8 +175,25 @@ func (r *GraphQLRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.StatusUpdater = NewStatusUpdater(r.Client)
 	}
 
+	// Index GraphQLRoutes by their referenced GraphQL schema ConfigMap so
+	// ConfigMap edits re-reconcile exactly the routes that inline it.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &avapigwv1alpha1.GraphQLRoute{},
+		graphqlRouteConfigMapIndexField, func(obj client.Object) []string {
+			route, ok := obj.(*avapigwv1alpha1.GraphQLRoute)
+			if !ok {
+				return nil
+			}
+			return configMapIndexValues(graphqlRouteConfigMapName(route))
+		}); err != nil {
+		return fmt.Errorf("failed to index GraphQLRoute ConfigMap references: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&avapigwv1alpha1.GraphQLRoute{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(
+			configMapMapFunc(r.Client, KindGraphQLRoute, graphqlRouteConfigMapIndexField,
+				func() client.ObjectList { return &avapigwv1alpha1.GraphQLRouteList{} }),
+		)).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: MaxConcurrentReconciles,
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](

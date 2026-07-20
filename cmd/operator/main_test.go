@@ -692,7 +692,7 @@ func TestSetupCertManager_SelfSigned(t *testing.T) {
 		CertProvider: "selfsigned",
 	}
 
-	manager, err := setupCertManager(ctx, cfg)
+	manager, err := setupCertManager(ctx, cfg, nil)
 	if err != nil {
 		t.Errorf("setupCertManager() error = %v, want nil", err)
 	}
@@ -712,7 +712,7 @@ func TestSetupCertManager_DefaultToSelfSigned(t *testing.T) {
 		CertProvider: "unknown",
 	}
 
-	manager, err := setupCertManager(ctx, cfg)
+	manager, err := setupCertManager(ctx, cfg, nil)
 	if err != nil {
 		t.Errorf("setupCertManager() error = %v, want nil", err)
 	}
@@ -735,7 +735,7 @@ func TestSetupCertManager_VaultMissingAddress(t *testing.T) {
 		VaultPKIRole:  "operator",
 	}
 
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	if err == nil {
 		t.Error("setupCertManager() should return error for vault without address")
 	}
@@ -750,7 +750,7 @@ func TestSetupCertManager_VaultMissingRole(t *testing.T) {
 		VaultPKIRole:  "",
 	}
 
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	if err == nil {
 		t.Error("setupCertManager() should return error for vault without role")
 	}
@@ -1033,7 +1033,7 @@ func TestSetupCertManager_TableDriven(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			manager, err := setupCertManager(ctx, tt.cfg)
+			manager, err := setupCertManager(ctx, tt.cfg, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("setupCertManager() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1345,7 +1345,7 @@ func TestSetupCertManager_SelfSignedWithCustomConfig(t *testing.T) {
 		CertProvider: "selfsigned",
 	}
 
-	manager, err := setupCertManager(ctx, cfg)
+	manager, err := setupCertManager(ctx, cfg, nil)
 	if err != nil {
 		t.Errorf("setupCertManager() error = %v, want nil", err)
 	}
@@ -1807,7 +1807,7 @@ func TestSetupCertManager_EmptyProvider(t *testing.T) {
 		CertProvider: "",
 	}
 
-	manager, err := setupCertManager(ctx, cfg)
+	manager, err := setupCertManager(ctx, cfg, nil)
 	if err != nil {
 		t.Errorf("setupCertManager() error = %v, want nil", err)
 	}
@@ -1830,7 +1830,7 @@ func TestSetupCertManager_VaultWithAllConfig(t *testing.T) {
 	}
 
 	// This will fail because we can't connect to Vault, but it tests the config path
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	if err == nil {
 		t.Error("setupCertManager() should return error when Vault is not available")
 	}
@@ -1854,7 +1854,7 @@ func TestDefineFlags_FlagUsage(t *testing.T) {
 		"leader-elect":              "Enable leader election for controller manager.",
 		"webhook-port":              "The port that the webhook server serves at.",
 		"grpc-port":                 "The port that the gRPC server serves at.",
-		"cert-provider":             "The certificate provider (selfsigned, vault).",
+		"cert-provider":             "The certificate provider (selfsigned, vault, file, cert-manager).",
 		"log-level":                 "The log level (debug, info, warn, error).",
 		"log-format":                "The log format (json, console).",
 	}
@@ -2049,7 +2049,7 @@ func TestSetupCertManager_VaultWithInvalidAddress(t *testing.T) {
 	}
 
 	// This should fail because Vault is not available
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	if err == nil {
 		t.Error("setupCertManager() should return error for invalid Vault address")
 	}

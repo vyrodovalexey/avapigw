@@ -206,6 +206,19 @@ Webhook service name
 {{- end }}
 
 {{/*
+Effective operator certificate provider: webhook.tls.mode when webhooks are
+enabled, grpc.tls.mode otherwise (matches the --cert-provider flag rendering
+in operator/deployment.yaml).
+*/}}
+{{- define "avapigw.operator.certProvider" -}}
+{{- if .Values.operator.webhook.enabled }}
+{{- .Values.operator.webhook.tls.mode | default "selfsigned" }}
+{{- else }}
+{{- .Values.operator.grpc.tls.mode | default "selfsigned" }}
+{{- end }}
+{{- end }}
+
+{{/*
 Webhook service FQDN
 */}}
 {{- define "avapigw.operator.webhookServiceFQDN" -}}
@@ -231,6 +244,29 @@ Leader election role name
 */}}
 {{- define "avapigw.operator.leaderElectionRoleName" -}}
 {{- printf "%s-leader-election" (include "avapigw.operator.fullname" .) }}
+{{- end }}
+
+{{/*
+Whether the HTTP listener is effectively TLS (Vault PKI or static TLS).
+Returns "true" when TLS is active, empty string otherwise, so it can be
+used directly in `if` conditions.
+*/}}
+{{- define "avapigw.gateway.httpTLSActive" -}}
+{{- if or (and .Values.vault .Values.vault.enabled .Values.vault.pki .Values.vault.pki.enabled) (and .Values.gateway.listeners.http.tls .Values.gateway.listeners.http.tls.enabled) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Whether an additional PLAIN HTTP listener must be rendered alongside the
+TLS HTTP listener (local/testing convenience; keeps TLS listeners intact).
+Active only when the HTTP listener is enabled, TLS is active, and
+gateway.listeners.http.plainAlongsideTls is true.
+*/}}
+{{- define "avapigw.gateway.plainHTTPAlongsideTLS" -}}
+{{- if and .Values.gateway.listeners.http.enabled .Values.gateway.listeners.http.plainAlongsideTls (include "avapigw.gateway.httpTLSActive" .) -}}
+true
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -299,6 +335,14 @@ spec:
       {{- else }}
       protocol: HTTP
       {{- end }}
+      hosts:
+        {{- toYaml .Values.gateway.listeners.http.hosts | nindent 8 }}
+      bind: {{ .Values.gateway.listeners.http.bind | default "0.0.0.0" }}
+    {{- end }}
+    {{- if include "avapigw.gateway.plainHTTPAlongsideTLS" . }}
+    - name: http-plain
+      port: {{ .Values.gateway.listeners.http.port | default 8080 }}
+      protocol: HTTP
       hosts:
         {{- toYaml .Values.gateway.listeners.http.hosts | nindent 8 }}
       bind: {{ .Values.gateway.listeners.http.bind | default "0.0.0.0" }}
@@ -539,6 +583,29 @@ spec:
       samplingRate: {{ .Values.gateway.observability.tracing.samplingRate | default 1.0 }}
       otlpEndpoint: {{ .Values.gateway.observability.tracing.otlpEndpoint | default "" | quote }}
       serviceName: {{ .Values.gateway.observability.tracing.serviceName | default "avapigw" }}
+      {{- /*
+        otlpInsecure is TRI-STATE in the gateway config: only render it when
+        the value is explicitly set (true/false). When omitted, the gateway
+        derives transport security (TLS material forces TLS; plaintext is
+        retained only for unset/loopback endpoints).
+      */}}
+      {{- if and (hasKey .Values.gateway.observability.tracing "otlpInsecure") (not (kindIs "invalid" .Values.gateway.observability.tracing.otlpInsecure)) }}
+      otlpInsecure: {{ .Values.gateway.observability.tracing.otlpInsecure }}
+      {{- end }}
+      {{- with .Values.gateway.observability.tracing.otlpTLS }}
+      {{- if or .certFile .keyFile .caFile }}
+      otlpTLS:
+        {{- with .certFile }}
+        certFile: {{ . | quote }}
+        {{- end }}
+        {{- with .keyFile }}
+        keyFile: {{ . | quote }}
+        {{- end }}
+        {{- with .caFile }}
+        caFile: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
     logging:
       level: {{ .Values.gateway.observability.logging.level | default "info" }}
       format: {{ .Values.gateway.observability.logging.format | default "json" }}
@@ -551,16 +618,21 @@ spec:
   vault:
     {{- toYaml .Values.gateway.vault | nindent 4 }}
   {{- else if and .Values.vault .Values.vault.enabled }}
-  # NOTE: The vault section below is for reference/documentation only.
-  # The Go gateway reads Vault configuration exclusively from environment
-  # variables (VAULT_ADDR, VAULT_TOKEN, VAULT_AUTH_METHOD, etc.) set in
-  # the deployment spec above. Changes here will NOT affect Vault behavior.
+  # Legacy spec.vault block derived from the top-level vault.* values.
+  # The gateway merges this file config with VAULT_* environment variables
+  # injected by the deployment; ENV overrides file PER-FIELD
+  # (ENV > config file > defaults). With vault.injectEnv=true (default) the
+  # injected env therefore stays authoritative for every field set below.
+  # Prefer gateway.vault for an explicit, fully-featured spec.vault section.
   vault:
     enabled: true
     address: {{ .Values.vault.address | quote }}
     authMethod: {{ .Values.vault.authMethod | default "kubernetes" }}
     {{- if eq (.Values.vault.authMethod | default "kubernetes") "token" }}
-    token: ${VAULT_TOKEN}
+    # token: intentionally NOT rendered into the config file. The token is
+    # injected as the VAULT_TOKEN environment variable from the
+    # "<fullname>-vault" Secret (ENV > file). To source a token from the
+    # filesystem instead, set gateway.vault with auth.tokenFile.
     {{- end }}
     {{- if eq (.Values.vault.authMethod | default "kubernetes") "kubernetes" }}
     kubernetes:

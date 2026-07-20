@@ -87,7 +87,7 @@ func newWebhookInjectorMetricsWithFactory(factory promauto.Factory) *webhookInje
 				Name:      "ca_injections_total",
 				Help:      "Total number of webhook CA bundle injection attempts",
 			},
-			[]string{"result"},
+			[]string{labelResult},
 		),
 		injectionDuration: factory.NewHistogram(
 			prometheus.HistogramOpts{
@@ -114,7 +114,7 @@ func newWebhookInjectorMetricsWithFactory(factory promauto.Factory) *webhookInje
 func InitWebhookInjectorVecMetrics() {
 	m := getWebhookInjectorMetrics()
 
-	for _, r := range []string{"success", "error"} {
+	for _, r := range []string{resultSuccess, resultError} {
 		m.injectionsTotal.WithLabelValues(r)
 	}
 }
@@ -166,43 +166,25 @@ func NewWebhookCAInjector(config *WebhookInjectorConfig) (*WebhookCAInjector, er
 
 // InjectCABundle injects the CA bundle into the webhook configuration.
 // This should be called at operator startup to ensure webhooks work immediately.
+//
+// The CA bundle is read directly from the certificate manager's CA PEM
+// (GetCAPEM). No leaf certificate is issued for the injection, so
+// restrictive Vault PKI roles that would reject a probe common name
+// (previously CN=webhook-ca-injector) cannot break CA injection.
 func (w *WebhookCAInjector) InjectCABundle(ctx context.Context) error {
 	start := time.Now()
 	defer func() {
 		w.metrics.injectionDuration.Observe(time.Since(start).Seconds())
 	}()
 
-	// Get CA pool from certificate manager
-	caPool, err := w.config.CertManager.GetCA(ctx)
+	caBundlePEM, err := w.config.CertManager.GetCAPEM(ctx)
 	if err != nil {
-		w.metrics.injectionsTotal.WithLabelValues("error").Inc()
-		return fmt.Errorf("failed to get CA from certificate manager: %w", err)
-	}
-
-	// Get the CA certificate PEM
-	// For self-signed provider, we need to get a certificate to access the CA chain
-	cert, err := w.config.CertManager.GetCertificate(ctx, &CertificateRequest{
-		CommonName: "webhook-ca-injector",
-		DNSNames:   []string{"localhost"},
-	})
-	if err != nil {
-		w.metrics.injectionsTotal.WithLabelValues("error").Inc()
-		return fmt.Errorf("failed to get certificate for CA chain: %w", err)
-	}
-
-	var caBundlePEM []byte
-	if len(cert.CAChainPEM) > 0 {
-		caBundlePEM = cert.CAChainPEM
-	} else if caPool != nil {
-		// CAChainPEM is not populated; this should not happen for properly
-		// configured providers (self-signed populates it from the CA cert,
-		// Vault populates it from the CA chain). Log a warning and reject
-		// the leaf certificate to avoid injecting the wrong bundle.
-		w.logger.Warn("certificate has no CA chain PEM; cannot inject leaf certificate as CA bundle")
+		w.metrics.injectionsTotal.WithLabelValues(resultError).Inc()
+		return fmt.Errorf("failed to get CA PEM from certificate manager: %w", err)
 	}
 
 	if len(caBundlePEM) == 0 {
-		w.metrics.injectionsTotal.WithLabelValues("error").Inc()
+		w.metrics.injectionsTotal.WithLabelValues(resultError).Inc()
 		return fmt.Errorf("no CA bundle available from certificate manager")
 	}
 
@@ -213,11 +195,11 @@ func (w *WebhookCAInjector) InjectCABundle(ctx context.Context) error {
 
 	// Update the webhook configuration
 	if err := w.updateWebhookConfiguration(ctx, caBundlePEM); err != nil {
-		w.metrics.injectionsTotal.WithLabelValues("error").Inc()
+		w.metrics.injectionsTotal.WithLabelValues(resultError).Inc()
 		return fmt.Errorf("failed to update webhook configuration: %w", err)
 	}
 
-	w.metrics.injectionsTotal.WithLabelValues("success").Inc()
+	w.metrics.injectionsTotal.WithLabelValues(resultSuccess).Inc()
 	w.metrics.lastInjectionTime.SetToCurrentTime()
 
 	w.logger.Info("CA bundle injected into webhook configuration",
@@ -265,8 +247,20 @@ func (w *WebhookCAInjector) updateWebhookConfiguration(ctx context.Context, caBu
 	return nil
 }
 
-// Start starts the background CA bundle refresh loop.
-// This ensures the CA bundle is kept up to date if certificates are rotated.
+// Initial CA injection retry backoff bounds. The injector typically starts
+// BEFORE the controller manager's informer caches (the manager client
+// rejects reads with "the cache is not started" until mgr.Start runs), so
+// the initial injection is retried with exponential backoff until it
+// succeeds instead of waiting a full RefreshInterval with webhooks broken.
+const (
+	initialInjectionRetryBase = 500 * time.Millisecond
+	initialInjectionRetryMax  = 15 * time.Second
+)
+
+// Start starts the background CA bundle injection: the initial injection is
+// retried with exponential backoff until it succeeds (or the context/stop
+// signal fires), then the periodic refresh loop keeps the bundle up to date
+// if certificates are rotated.
 func (w *WebhookCAInjector) Start(ctx context.Context) error {
 	w.mu.Lock()
 	if w.stopped {
@@ -275,18 +269,54 @@ func (w *WebhookCAInjector) Start(ctx context.Context) error {
 	}
 	w.mu.Unlock()
 
-	// Initial injection
-	if err := w.InjectCABundle(ctx); err != nil {
-		w.logger.Error("initial CA bundle injection failed",
-			observability.Error(err),
-		)
-		// Don't return error - continue with refresh loop
-	}
-
-	// Start refresh loop
-	go w.refreshLoop(ctx)
+	go w.run(ctx)
 
 	return nil
+}
+
+// run performs the retried initial injection followed by the refresh loop.
+func (w *WebhookCAInjector) run(ctx context.Context) {
+	if !w.injectWithRetry(ctx) {
+		return
+	}
+	w.refreshLoop(ctx)
+}
+
+// injectWithRetry attempts the CA bundle injection with exponential backoff
+// until it succeeds. Returns false when the context or stop signal ended
+// the attempts.
+func (w *WebhookCAInjector) injectWithRetry(ctx context.Context) bool {
+	backoff := initialInjectionRetryBase
+
+	for {
+		err := w.InjectCABundle(ctx)
+		if err == nil {
+			return true
+		}
+
+		w.logger.Warn("CA bundle injection failed; retrying",
+			observability.Duration("backoff", backoff),
+			observability.Error(err),
+		)
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			w.logger.Info("webhook CA injector context canceled during initial injection")
+			return false
+		case <-w.stopCh:
+			timer.Stop()
+			w.logger.Info("webhook CA injector stopped during initial injection")
+			return false
+		case <-timer.C:
+		}
+
+		backoff *= 2
+		if backoff > initialInjectionRetryMax {
+			backoff = initialInjectionRetryMax
+		}
+	}
 }
 
 // refreshLoop periodically refreshes the CA bundle.

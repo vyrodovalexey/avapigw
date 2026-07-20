@@ -20,6 +20,7 @@ import (
 	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
 	grpcrouter "github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 	"github.com/vyrodovalexey/avapigw/test/helpers"
 )
 
@@ -676,12 +677,13 @@ func TestIntegration_GRPCBackendReload_ProxyDirectorAfterReload(t *testing.T) {
 		proxy := grpcproxy.New(router, grpcproxy.WithProxyLogger(observability.NopLogger()))
 		defer proxy.Close()
 
-		// Verify initial routing goes to backend1
+		// Verify initial routing goes to backend1. conn.Target() reports
+		// the normalized gRPC dial target (util.GRPCDialTarget).
 		director := proxy.Director()
 		_, conn, err := director.Direct(ctx, "/api.v1.TestService/Unary")
 		require.NoError(t, err)
 		require.NotNil(t, conn)
-		assert.Equal(t, testCfg.Backend1URL, conn.Target())
+		assert.Equal(t, util.GRPCDialTarget(testCfg.Backend1URL), conn.Target())
 
 		// Update route to point to backend2
 		err = router.LoadRoutes([]config.GRPCRoute{
@@ -705,7 +707,9 @@ func TestIntegration_GRPCBackendReload_ProxyDirectorAfterReload(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		// Clean up stale connections
+		// Clean up stale connections. The connection pool keys entries by
+		// the raw backend address (normalization to a dial target happens
+		// only at dial time), so validTargets must use the raw address.
 		validTargets := map[string]bool{
 			testCfg.Backend2URL: true,
 		}
@@ -715,7 +719,7 @@ func TestIntegration_GRPCBackendReload_ProxyDirectorAfterReload(t *testing.T) {
 		_, conn, err = director.Direct(ctx, "/api.v1.TestService/Unary")
 		require.NoError(t, err)
 		require.NotNil(t, conn)
-		assert.Equal(t, testCfg.Backend2URL, conn.Target())
+		assert.Equal(t, util.GRPCDialTarget(testCfg.Backend2URL), conn.Target())
 	})
 }
 

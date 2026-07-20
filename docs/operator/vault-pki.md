@@ -354,24 +354,38 @@ graph TD
 
 ### 2. Certificate Renewal
 
-Certificates are automatically renewed before expiry:
+Certificates are renewed automatically by the operator's serving-certificate
+rotation loop: the certificate is checked every minute (with up to 20%
+jitter to desynchronize HA replicas) and re-issued from Vault PKI when it
+enters the rotate-before window (1 hour before expiry for the vault
+provider, matching the default 24h TTL). The rotated certificate is
+hot-swapped into the gRPC server and rewritten into the webhook certificate
+directory (controller-runtime's certwatcher reloads it natively) — no
+restart or connection disruption. Failures are logged and retried on the
+next tick.
 
 ```yaml
-# Configure renewal timing
-grpc:
-  tls:
-    vault:
-      ttl: 24h                     # Certificate TTL
-      renewBefore: 1h              # Renew 1 hour before expiry
-      renewJitter: 10m             # Random jitter for renewal
+# Configure issuance TTL (Helm)
+operator:
+  grpc:
+    tls:
+      mode: vault
+      vault:
+        pkiMount: pki
+        role: operator
+        # ttl: 24h                 # Certificate TTL (default 24h)
 ```
 
 ### 3. Certificate Storage
 
 Certificates are stored securely:
 
-- **In-Memory** - Primary storage for active certificates
-- **Kubernetes Secrets** - Optional backup storage
+- **In-Memory** - Primary storage for active certificates (vault provider)
+- **Kubernetes Secrets** - The **selfsigned** provider persists its CA and
+  serving certificate to the `CERT_SECRET_NAME` Secret so the CA is stable
+  across restarts (see
+  [Certificate Providers](configuration.md#certificate-providers)); the
+  vault provider's trust anchor is the PKI CA itself
 - **Vault Lease Management** - Automatic lease renewal
 
 ### 4. Certificate Rotation
@@ -380,12 +394,24 @@ Hot certificate rotation without service interruption:
 
 ```bash
 # Monitor certificate rotation
-kubectl logs -l app.kubernetes.io/name=avapigw-operator -n avapigw-system | grep certificate
+kubectl logs -l app.kubernetes.io/name=avapigw-operator -n avapigw-system | grep -i certificate
 
 # Example log output:
-# {"level":"info","msg":"Certificate renewed successfully","component":"grpc-server","expires":"2026-02-03T19:00:00Z"}
-# {"level":"info","msg":"Certificate rotated","component":"webhook-server","expires":"2026-02-03T19:00:00Z"}
+# {"level":"info","msg":"serving certificate rotation loop started","rotate_before":"1h0m0s",...}
+# {"level":"info","msg":"serving certificate rotated","common_name":"avapigw-operator-webhook.avapigw-test.svc",...}
 ```
+
+### 5. Webhook CA Injection Uses the CA PEM Directly
+
+The webhook CA injector publishes the certificate authority into the
+`ValidatingWebhookConfiguration.clientConfig.caBundle` by reading the
+provider's **CA chain PEM** (`GetCAPEM`; for the vault provider this is the
+`pki/cert/ca` PEM). No throwaway probe certificate is issued for the
+injection, so **restrictive Vault PKI roles** — roles whose allowed domains
+would reject a synthetic probe common name — work out of the box. (Earlier
+releases issued a `webhook-ca-injector`/`localhost` probe certificate just
+to obtain the CA PEM; with a restrictive role that issuance was rejected and
+the CA bundle was never injected, breaking all admission webhooks.)
 
 ## Monitoring and Troubleshooting
 
@@ -395,12 +421,15 @@ Monitor certificate status via Prometheus metrics:
 
 ```bash
 # Check certificate metrics
-curl http://operator:8080/metrics | grep certificate
+curl http://operator:8080/metrics | grep avapigw_operator_cert_
 
 # Example metrics:
-# avapigw_operator_certificate_expiry_seconds{component="grpc"} 86400
-# avapigw_operator_certificate_renewal_total{component="grpc"} 5
-# avapigw_operator_certificate_renewal_errors_total{component="grpc"} 0
+# avapigw_operator_cert_expiry_seconds{common_name="avapigw-operator-webhook.avapigw-test.svc"} 86400
+# avapigw_operator_cert_issued_total{provider="vault"} 5
+# avapigw_operator_cert_rotations_total{provider="vault"} 4
+# avapigw_operator_cert_errors_total{provider="vault",operation="issue"} 0
+# avapigw_operator_cert_ca_reuse_total{provider="selfsigned"} 1
+# avapigw_operator_cert_secret_sync_total{operation="update",result="success"} 2
 ```
 
 ### 2. Certificate Status

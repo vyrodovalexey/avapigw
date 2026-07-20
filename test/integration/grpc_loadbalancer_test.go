@@ -18,6 +18,7 @@ import (
 	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
 	grpcrouter "github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 	"github.com/vyrodovalexey/avapigw/test/helpers"
 )
 
@@ -62,8 +63,12 @@ func TestIntegration_GRPCLoadBalancer_RoundRobin(t *testing.T) {
 		proxy := grpcproxy.New(router, grpcproxy.WithProxyLogger(observability.NopLogger()))
 		defer proxy.Close()
 
-		// Track which backend is selected
+		// Track which backend is selected. conn.Target() reports the
+		// normalized gRPC dial target (util.GRPCDialTarget), so compare
+		// against the normalized form of each backend address.
 		director := proxy.Director()
+		backend1Target := util.GRPCDialTarget(testCfg.Backend1URL)
+		backend2Target := util.GRPCDialTarget(testCfg.Backend2URL)
 		backend1Count := 0
 		backend2Count := 0
 
@@ -75,9 +80,9 @@ func TestIntegration_GRPCLoadBalancer_RoundRobin(t *testing.T) {
 			require.NotNil(t, conn)
 
 			target := conn.Target()
-			if target == testCfg.Backend1URL {
+			if target == backend1Target {
 				backend1Count++
-			} else if target == testCfg.Backend2URL {
+			} else if target == backend2Target {
 				backend2Count++
 			}
 		}
@@ -134,7 +139,7 @@ func TestIntegration_GRPCLoadBalancer_RoundRobin(t *testing.T) {
 			_, conn, err := director.Direct(ctx, "/api.v1.TestService/Unary")
 			require.NoError(t, err)
 			require.NotNil(t, conn)
-			assert.Equal(t, testCfg.Backend1URL, conn.Target())
+			assert.Equal(t, util.GRPCDialTarget(testCfg.Backend1URL), conn.Target())
 		}
 	})
 }
@@ -180,8 +185,12 @@ func TestIntegration_GRPCLoadBalancer_Weighted(t *testing.T) {
 		proxy := grpcproxy.New(router, grpcproxy.WithProxyLogger(observability.NopLogger()))
 		defer proxy.Close()
 
-		// Track which backend is selected
+		// Track which backend is selected. conn.Target() reports the
+		// normalized gRPC dial target (util.GRPCDialTarget), so compare
+		// against the normalized form of each backend address.
 		director := proxy.Director()
+		backend1Target := util.GRPCDialTarget(testCfg.Backend1URL)
+		backend2Target := util.GRPCDialTarget(testCfg.Backend2URL)
 		backend1Count := 0
 		backend2Count := 0
 
@@ -193,9 +202,9 @@ func TestIntegration_GRPCLoadBalancer_Weighted(t *testing.T) {
 			require.NotNil(t, conn)
 
 			target := conn.Target()
-			if target == testCfg.Backend1URL {
+			if target == backend1Target {
 				backend1Count++
-			} else if target == testCfg.Backend2URL {
+			} else if target == backend2Target {
 				backend2Count++
 			}
 		}
@@ -379,7 +388,7 @@ func TestIntegration_GRPCLoadBalancer_StaticDirector(t *testing.T) {
 			_, conn, err := director.Direct(ctx, "/api.v1.TestService/Unary")
 			require.NoError(t, err)
 			require.NotNil(t, conn)
-			assert.Equal(t, testCfg.Backend1URL, conn.Target())
+			assert.Equal(t, util.GRPCDialTarget(testCfg.Backend1URL), conn.Target())
 		}
 	})
 

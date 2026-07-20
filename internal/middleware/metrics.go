@@ -51,7 +51,8 @@ type MiddlewareMetrics struct {
 
 	panicsRecovered prometheus.Counter
 
-	corsRequestsTotal *prometheus.CounterVec
+	corsRequestsTotal          *prometheus.CounterVec
+	corsUpstreamHeadersDropped prometheus.Counter
 }
 
 var (
@@ -91,6 +92,7 @@ func (m *MiddlewareMetrics) MustRegister(registry *prometheus.Registry) {
 		m.maxSessionsCurrent,
 		m.panicsRecovered,
 		m.corsRequestsTotal,
+		m.corsUpstreamHeadersDropped,
 	)
 }
 
@@ -294,6 +296,17 @@ func newMiddlewareMetrics() *MiddlewareMetrics {
 					"requests by type",
 			},
 			[]string{"type"},
+		),
+		corsUpstreamHeadersDropped: promauto.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
+				Name: "cors_upstream_headers_" +
+					"dropped_total",
+				Help: "Total number of responses whose " +
+					"upstream Access-Control-* headers were " +
+					"replaced by the gateway CORS policy",
+			},
 		),
 	}
 }

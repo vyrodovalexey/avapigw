@@ -266,6 +266,13 @@ type AuthzCacheConfig struct {
 	// Redis contains Redis-specific configuration for authorization cache.
 	// Only used when Type is "redis".
 	Redis *RedisCacheConfig `yaml:"redis,omitempty" json:"redis,omitempty"`
+
+	// Sentinel contains Redis Sentinel configuration for authorization
+	// cache. Only used when Type is "redis". This is the shape the operator
+	// CRD serializes (authorization.cache.sentinel); it is folded into
+	// Redis.Sentinel by the authz config converter. Mutually exclusive with
+	// a standalone Redis URL.
+	Sentinel *RedisSentinelConfig `yaml:"sentinel,omitempty" json:"sentinel,omitempty"`
 }
 
 // SecurityConfig represents security configuration.

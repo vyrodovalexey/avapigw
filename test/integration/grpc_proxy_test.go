@@ -21,6 +21,7 @@ import (
 	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
 	grpcrouter "github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 	"github.com/vyrodovalexey/avapigw/test/helpers"
 )
 
@@ -253,8 +254,12 @@ func TestIntegration_GRPCProxy_LoadBalancing(t *testing.T) {
 		proxy := grpcproxy.New(router, grpcproxy.WithProxyLogger(observability.NopLogger()))
 		defer proxy.Close()
 
-		// Make multiple requests and verify distribution
+		// Make multiple requests and verify distribution. conn.Target()
+		// reports the normalized gRPC dial target (util.GRPCDialTarget),
+		// so compare against the normalized form of each backend address.
 		director := proxy.Director()
+		backend1Target := util.GRPCDialTarget(testCfg.Backend1URL)
+		backend2Target := util.GRPCDialTarget(testCfg.Backend2URL)
 		backend1Count := 0
 		backend2Count := 0
 
@@ -265,9 +270,9 @@ func TestIntegration_GRPCProxy_LoadBalancing(t *testing.T) {
 
 			// Check which backend was selected based on connection target
 			target := conn.Target()
-			if target == testCfg.Backend1URL {
+			if target == backend1Target {
 				backend1Count++
-			} else if target == testCfg.Backend2URL {
+			} else if target == backend2Target {
 				backend2Count++
 			}
 		}

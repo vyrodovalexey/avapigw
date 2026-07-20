@@ -19,6 +19,12 @@ spec:
       targetPort: https
       protocol: TCP
       name: https
+    {{- if include "avapigw.gateway.plainHTTPAlongsideTLS" . }}
+    - port: {{ .Values.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    {{- end }}
     {{- else }}
     - port: {{ .Values.service.httpPort }}
       targetPort: http

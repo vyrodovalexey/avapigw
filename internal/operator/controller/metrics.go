@@ -26,6 +26,8 @@ type ControllerMetrics struct {
 	finalizerOperations       *prometheus.CounterVec
 	ingressResourcesProcessed *prometheus.CounterVec
 	ingressConversionErrors   *prometheus.CounterVec
+	configMapEnqueues         *prometheus.CounterVec
+	legacyFieldConversions    *prometheus.CounterVec
 }
 
 // Metric label constants.
@@ -147,6 +149,24 @@ func newControllerMetricsWithFactory(factory promauto.Factory) *ControllerMetric
 			},
 			[]string{labelNamespace, labelName},
 		),
+		configMapEnqueues: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "configmap_watch_enqueues_total",
+				Help: "Total number of route reconciliations enqueued because a " +
+					"referenced ConfigMap changed",
+			},
+			[]string{labelKind},
+		),
+		legacyFieldConversions: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Name:      "legacy_field_conversions_total",
+				Help: "Total number of deprecated CRD fields converted to the " +
+					"gateway-consumable shape during reconciliation",
+			},
+			[]string{labelKind},
+		),
 	}
 }
 
@@ -191,6 +211,12 @@ func InitControllerVecMetrics() {
 
 	// ingressConversionErrors: namespace × name
 	m.ingressConversionErrors.WithLabelValues("default", "default")
+
+	// configMapEnqueues + legacyFieldConversions: kind (routes only)
+	for _, k := range []string{KindAPIRoute, KindGRPCRoute, KindGraphQLRoute} {
+		m.configMapEnqueues.WithLabelValues(k)
+		m.legacyFieldConversions.WithLabelValues(k)
+	}
 }
 
 // InitStatusUpdateVecMetrics pre-populates all StatusUpdateMetrics vector metrics with
@@ -237,6 +263,18 @@ func (m *ControllerMetrics) SetResourceCount(kind, namespace string, count float
 // Status values: 1 = True, 0 = False, -1 = Unknown.
 func (m *ControllerMetrics) SetResourceCondition(kind, name, namespace, condition string, status float64) {
 	m.resourceCondition.WithLabelValues(kind, name, namespace, condition).Set(status)
+}
+
+// RecordConfigMapEnqueues records route reconciliations enqueued because a
+// referenced ConfigMap changed.
+func (m *ControllerMetrics) RecordConfigMapEnqueues(kind string, count int) {
+	m.configMapEnqueues.WithLabelValues(kind).Add(float64(count))
+}
+
+// RecordLegacyFieldConversions records deprecated CRD fields converted to
+// the gateway-consumable shape during reconciliation.
+func (m *ControllerMetrics) RecordLegacyFieldConversions(kind string, count int) {
+	m.legacyFieldConversions.WithLabelValues(kind).Add(float64(count))
 }
 
 // RecordFinalizerOperation records a finalizer operation.

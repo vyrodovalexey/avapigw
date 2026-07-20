@@ -1523,4 +1523,6 @@ func applyBackendTransform(client pb.ConfigurationServiceClient) {
 }
 ```
 
-For more examples and advanced usage patterns, see the [examples/operator/](../../examples/operator/) directory.
+For more examples and advanced usage patterns, see the CRD samples in
+[`test/crd-samples/`](../../test/crd-samples/) and the
+[gRPC Configuration Service guide](grpc-configuration-service.md).

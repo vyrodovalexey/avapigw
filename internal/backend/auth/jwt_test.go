@@ -83,6 +83,10 @@ func (m *mockPKIClientForJWT) GetCA(_ context.Context, _ string) (*x509.CertPool
 	return nil, nil
 }
 
+func (m *mockPKIClientForJWT) GetCAPEM(_ context.Context, _ string) ([]byte, error) {
+	return nil, nil
+}
+
 func (m *mockPKIClientForJWT) GetCRL(_ context.Context, _ string) ([]byte, error) {
 	return []byte{}, nil
 }

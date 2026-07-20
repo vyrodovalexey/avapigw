@@ -80,22 +80,27 @@ graph TB
 - **Backend Controller** - Manages HTTP backend configuration with base reconciler pattern
 - **GRPCBackend Controller** - Manages gRPC backend configuration with base reconciler pattern
 - **Ingress Controller** - Converts standard Kubernetes Ingress resources to gateway routes
+- **ConfigMap Watch** - Editing an OpenAPI/proto/GraphQL-schema ConfigMap referenced by a route automatically re-reconciles the referencing routes (no route change or operator restart needed)
 
 #### 2. Enhanced Admission Webhooks
 - **Validating Webhooks** - Validate CRD specifications before creation/update with improved validation constants
-- **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations across Backend vs GRPCBackend with context-based lifecycle management
+- **Cross-CRD Duplicate Detection** - Reject only true duplicates (identical-specificity overlapping matches); specificity-aware for gRPC routes including metadata/authority discriminators
 - **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
 - **Cross-Reference Validation** - Ensure referenced backends exist with enhanced port range and weight validation
+- **Parity Warnings** - CRD fields the gateway does not consume are surfaced with "accepted but not applied" admission warnings (no silent drops)
 
 #### 3. gRPC Communication
 - **Configuration Service** - Push configuration updates to gateways
 - **mTLS Security** - Secure communication using mutual TLS
 - **Certificate Management** - Automated certificate provisioning and rotation
+- **Graceful Shutdown** - Long-lived configuration streams are signaled before the drain; shutdown outcome/duration recorded in `avapigw_operator_grpc_shutdown_duration_seconds`
+- **Gateway Registry Reaper** - Stale gateway registrations (missed heartbeats) are reaped (`avapigw_operator_grpc_reaped_gateways_total`), keeping `avapigw_operator_grpc_active_gateways` accurate
 
 #### 4. Certificate Management
-- **Self-Signed Mode** - Generate and manage certificates automatically with thread-safe atomic operations
-- **Vault PKI Mode** - Integrate with HashiCorp Vault for certificate management with improved thread safety
-- **Auto-Rotation** - Automatic certificate renewal before expiry with atomic state management
+- **Self-Signed Mode** - Generate and manage certificates automatically; the CA and serving certificate are persisted to a Kubernetes Secret (`CERT_SECRET_NAME`) and reused/adopted across restarts
+- **Vault PKI Mode** - Integrate with HashiCorp Vault for certificate management (kubernetes auth); webhook CA injection publishes the PKI CA PEM directly (restrictive PKI roles supported)
+- **File Mode** - Serve pre-provisioned certificates from mounted files (`--cert-file`/`--key-file`/`--ca-file`) with on-disk rotation detection
+- **Auto-Rotation** - Serving certificates rotated in place before expiry (jittered check loop; gRPC hot-swap + webhook cert-dir rewrite)
 
 ## Key Features
 

@@ -32,10 +32,25 @@ The gateway exposes **130+ Prometheus metrics** across all components:
 - **Encoding**: Content negotiation and encoding metrics
 
 ### Operator Metrics (60+ metrics)
-- **Controller**: Reconciliation performance and errors
+- **Controller**: Reconciliation performance and errors, plus ConfigMap-watch
+  re-reconciles (`avapigw_operator_configmap_watch_enqueues_total{kind}` —
+  routes re-reconciled because a referenced OpenAPI/proto/GraphQL-schema
+  ConfigMap changed)
 - **Webhook**: Admission webhook validation
 - **Certificate**: Certificate management and rotation
-- **gRPC**: ConfigurationService communication
+  (`avapigw_operator_cert_issued_total{provider}`,
+  `..._cert_rotations_total{provider}`,
+  `..._cert_errors_total{provider,operation}`,
+  `..._cert_expiry_seconds{common_name}`,
+  `..._cert_ca_reuse_total{provider}` — persisted CA reused instead of
+  regenerating, and `..._cert_secret_sync_total{operation,result}` —
+  CA/serving-cert Secret persistence operations; providers:
+  `selfsigned`/`vault`/`file`)
+- **gRPC**: ConfigurationService communication, including
+  `avapigw_operator_grpc_shutdown_duration_seconds{outcome="graceful|forced"}`
+  and the gateway registry reaper counter
+  `avapigw_operator_grpc_reaped_gateways_total` (stale gateway registrations
+  removed; `avapigw_operator_grpc_active_gateways` decrements accordingly)
 - **CA Injection**: Webhook CA bundle management
 
 ## Dashboard Overview
@@ -71,6 +86,18 @@ with the SDK default. Using an older semconv import (e.g. `v1.40.0`) with the v1
 triggers a fatal `conflicting Schema URL` error during tracer initialization. With the
 aligned v1.41.0 import, OTLP export to the OpenTelemetry Collector / Tempo works as
 expected.
+
+## OTLP Exporter Transport Security
+
+The OTLP gRPC exporter supports TLS/mTLS via
+`spec.observability.tracing.otlpInsecure` (tri-state) and
+`spec.observability.tracing.otlpTLS` (`certFile`/`keyFile`/`caFile`). When
+`otlpInsecure` is unset, configured TLS material forces TLS, plaintext is
+retained only for unset/loopback endpoints, and **remote endpoints default
+to TLS with system roots** — exporting to a remote plaintext collector
+requires an explicit `otlpInsecure: true`. See the
+[OTLP Exporter TLS Configuration](configuration-reference.md#otlp-exporter-tls-configuration)
+reference for details and validation rules.
 
 ## Key Metrics Examples
 
@@ -117,22 +144,23 @@ sum(rate(avapigw_operator_config_push_total{status="success"}[5m])) / sum(rate(a
 
 ### Accessing Dashboards
 
-1. **Import to Grafana**:
+1. **Publish via the Grafana API** (canonical path — idempotent, creates and
+   uses the Grafana folder **`avapigw`**, override with `FOLDER_NAME`):
    ```bash
-   # Import all dashboards
-   kubectl apply -f monitoring/grafana/
+   # Publish all 4 dashboards from monitoring/grafana
+   ./test/monitoring/scripts/publish-dashboards.sh
    ```
+   `test/scripts/publish-dashboards.sh` is a thin wrapper delegating to the
+   same canonical script. In the docker-compose test environment, Grafana
+   additionally file-provisions the same JSONs read-only; the API-published
+   copies share the same UIDs, so Grafana serves a single live copy of each
+   dashboard, homed in the `avapigw` folder.
 
-2. **Port Forward to Grafana**:
-   ```bash
-   kubectl port-forward -n monitoring svc/grafana 3000:3000
-   ```
-
-3. **Access Dashboard URLs**:
-   - Gateway: `http://localhost:3000/d/avapigw-gateway/avapigw-gateway-dashboard`
-   - Operator: `http://localhost:3000/d/avapigw-operator/avapigw-operator-dashboard`
-   - Telemetry: `http://localhost:3000/d/avapigw-telemetry/avapigw-telemetry-dashboard`
-   - Spans: `http://localhost:3000/d/avapigw-spans/avapigw-spans-dashboard`
+2. **Access Dashboard URLs** (UIDs as published):
+   - Gateway: `http://localhost:3000/d/avapigw-gateway`
+   - Gateway & Operator (K8s): `http://localhost:3000/d/avapigw-gateway-operator`
+   - Telemetry: `http://localhost:3000/d/avapigw-telemetry`
+   - Spans: `http://localhost:3000/d/avapigw-spans`
 
 ### Dashboard Features
 

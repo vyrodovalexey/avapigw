@@ -53,12 +53,16 @@ refresh_tok() { # $1=host
 if [ "$GROUP" = "group3" ] || [ "$GROUP" = "group4" ]; then
   TOK_LH="$(refresh_tok localhost)"
   TOK_IP="$(refresh_tok 127.0.0.1)"
-  maybe_bg hscn basic     /api/v1/validated/items
+  # basic = gateway->backend basic-auth injection route (pt-validated-basic,
+  # rest-backend-basic 8805). Operator-mode path: /api/v1/validated/basic/items.
+  maybe_bg hscn basic     /api/v1/validated/basic/items
   maybe_bg hscn apikey    /api/v1/validated/apikey/items -H "X-API-Key: $APIKEY"
   maybe_bg hscn oidc      /api/v1/validated/oidc/items   -H "Authorization: Bearer $TOK_LH"
   maybe_bg hscn ratelimit /api/v1/validated/ratelimit/items
   maybe_bg hscn transform /api/v1/validated/transform/items
-  maybe_bg hscn encoding  /api/v1/validated/encoding/items -H 'Accept-Encoding: gzip'
+  # encoding route transcodes the response json->xml in CRD mode; ask for xml
+  # so content negotiation agrees with the configured response contentType.
+  maybe_bg hscn encoding  /api/v1/validated/encoding/items -H 'Accept-Encoding: gzip' -H 'Accept: application/xml'
   maybe_bg hscn cache     /api/v1/validated/cache/items
   maybe_bg hscn cors      /api/v1/validated/cors/items -H 'Origin: http://example.com'
   # WS scenarios (use 127.0.0.1 issuer token for ws-oidc route)

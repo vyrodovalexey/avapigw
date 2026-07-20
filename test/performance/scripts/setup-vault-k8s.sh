@@ -224,6 +224,22 @@ verify_setup() {
         log_warn "PKI certificate issuance failed (may need Root CA setup)"
     fi
 
+    # Test issuing an operator-style *.svc certificate (operator vault TLS mode)
+    if vault write -format=json pki/issue/test-role \
+        common_name="avapigw-operator.$K8S_NAMESPACE.svc" \
+        ttl="5m" &> /dev/null; then
+        log_success "PKI *.svc certificate issuance works (operator gRPC TLS)"
+    else
+        log_warn "PKI *.svc issuance failed (re-run with --setup-pki to add the 'svc' allowed domain)"
+    fi
+
+    # Check the PKI CA secret used by the gateway to verify the operator
+    if kubectl get secret avapigw-vault-pki-ca -n "$K8S_NAMESPACE" &> /dev/null; then
+        log_success "K8s Secret 'avapigw-vault-pki-ca' exists in $K8S_NAMESPACE"
+    else
+        log_warn "K8s Secret 'avapigw-vault-pki-ca' not found (run with --setup-pki)"
+    fi
+
     echo ""
     if [[ $errors -eq 0 ]]; then
         log_success "All Vault K8s auth checks passed!"
@@ -506,9 +522,25 @@ configure_pki() {
     # Create test-role for avapigw-test namespace
     # Allows certificates for localhost, *.local, *.test, avapigw.local
     # Also allows IP SANs for 127.0.0.1
+    #
+    # IMPORTANT: this role definition is kept in sync with the same-named
+    # 'test-role' written by test/docker-compose/scripts/setup-vault.sh
+    # (canonical allowed-domain set; the compose script adds compose-only
+    # bare backend CNs and a higher max_ttl). Whichever runs last wins, so
+    # the shared domains below must stay a subset of both.
+    #   - 'docker.internal' (+subdomains): k8s gateway listener altNames
+    #   - 'svc' (+subdomains): operator gRPC/webhook serving certificates
+    #     (<name>.<namespace>.svc) issued by the operator's vault cert
+    #     provider (operator.grpc.tls.mode=vault)
+    #   - 'webhook-ca-injector' (bare): WORKAROUND for the operator's
+    #     WebhookCAInjector, which issues a throwaway probe certificate with
+    #     this hardcoded CN to obtain the CA chain
+    #     (internal/operator/cert/webhook_injector.go:184-187) instead of
+    #     PEM-encoding the GetCA result. Remove once fixed in Go.
     log_info "Creating PKI role 'test-role' for $K8S_NAMESPACE namespace..."
     vault write pki/roles/test-role \
-        allowed_domains="localhost,local,test,avapigw.local,avapigw-test.local,docker.internal" \
+        allowed_domains="localhost,local,test,avapigw.local,avapigw-test.local,docker.internal,svc,webhook-ca-injector" \
+        allow_bare_domains=true \
         allow_subdomains=true \
         allow_localhost=true \
         allow_ip_sans=true \
@@ -520,8 +552,40 @@ configure_pki() {
         allow_any_name=false \
         enforce_hostnames=false
 
-    log_success "PKI role 'test-role' created with allowed domains: localhost, *.local, *.test, avapigw.local"
+    log_success "PKI role 'test-role' created with allowed domains: localhost, *.local, *.test, avapigw.local, *.docker.internal, *.svc"
     log_info "  IP SANs allowed: 127.0.0.1"
+
+    sync_pki_ca_secret
+}
+
+# ==============================================================================
+# PKI CA -> Kubernetes Secret sync
+# ==============================================================================
+
+# Stores the Vault PKI CA certificate in the K8s Secret "avapigw-vault-pki-ca"
+# (key ca.crt) in $K8S_NAMESPACE. The gateway mounts it to VERIFY the
+# operator's Vault-PKI-issued gRPC serving certificate
+# (helm values-local.yaml: gateway.operatorMode.caSecret=avapigw-vault-pki-ca).
+# Idempotent: kubectl apply refreshes the Secret if the CA was regenerated.
+sync_pki_ca_secret() {
+    log_info "Syncing Vault PKI CA into K8s Secret 'avapigw-vault-pki-ca' (ns: $K8S_NAMESPACE)..."
+
+    local ca_pem
+    ca_pem=$(vault read -field=certificate pki/cert/ca 2>/dev/null || true)
+    if [[ -z "$ca_pem" ]]; then
+        log_error "Could not read PKI CA certificate from Vault (pki/cert/ca)"
+        return 1
+    fi
+
+    kubectl get namespace "$K8S_NAMESPACE" &>/dev/null || \
+        kubectl create namespace "$K8S_NAMESPACE"
+
+    kubectl create secret generic avapigw-vault-pki-ca \
+        --namespace "$K8S_NAMESPACE" \
+        --from-literal=ca.crt="$ca_pem" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    log_success "Secret 'avapigw-vault-pki-ca' synced (ca.crt = Vault PKI CA)"
 }
 
 # ==============================================================================

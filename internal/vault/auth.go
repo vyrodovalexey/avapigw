@@ -9,16 +9,18 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
-// authenticateWithToken authenticates using a direct token.
-func (c *vaultClient) authenticateWithToken(_ context.Context) error {
+// authenticateWithToken authenticates using a direct token. The context
+// bounds the TTL lookup so the spec.vault.auth startup timeout applies to
+// token authentication exactly like the kubernetes/approle methods.
+func (c *vaultClient) authenticateWithToken(ctx context.Context) error {
 	if c.config.Token == "" {
 		return NewAuthenticationError("token", "token is empty")
 	}
 
 	c.api.SetToken(c.config.Token)
 
-	// Lookup token to get TTL
-	secret, err := c.api.Auth().Token().LookupSelf()
+	// Lookup token to get TTL (context-aware: cancels on ctx deadline)
+	secret, err := c.api.Auth().Token().LookupSelfWithContext(ctx)
 	if err != nil {
 		return NewAuthenticationErrorWithCause("token", "failed to lookup token", err)
 	}

@@ -29,8 +29,12 @@ and *requires* the client connection defined here.
 >   client that `spec.vault` (or `VAULT_ADDR`) establishes.
 
 The Vault client is initialized when `spec.vault.enabled` is `true`, when
-`VAULT_ADDR` is set, or when any listener/route enables `tls.vault` PKI
-issuance.
+`VAULT_ADDR` is set, or when any **listener, route, or backend** requests
+Vault PKI issuance — HTTP/gRPC listener `tls.vault`, route-level (SNI)
+`tls.vault`, backend/gRPC-backend/GraphQL-backend connection `tls.vault`,
+and backend mTLS authentication (`authentication.mtls.vault`) all count.
+A fully commented, ready-to-uncomment `spec.vault` example ships in
+[`configs/gateway.yaml`](../configs/gateway.yaml).
 
 > **Operator note:** `spec.vault` is a **gateway-only** section. The operator
 > configures its Vault client exclusively through `VAULT_*` environment
@@ -169,8 +173,14 @@ Validation runs on the **effective** (post-overlay) configuration:
 - Sub-blocks for a non-selected auth method (e.g. `appRole` while
   `authMethod: kubernetes`) emit a **warning** that they are ignored.
 - `enabled: false` while a `tls.vault` PKI block is configured is an **error**
-  (`spec.vault.enabled`): PKI issuance needs the client. Because `VAULT_ADDR`
-  forces `enabled: true` during the overlay, env-driven setups never hit this.
+  (`spec.vault.enabled`): PKI issuance needs the client. The conflict scan
+  covers listeners, routes, **and** HTTP/gRPC/GraphQL backends — including
+  backend mTLS authentication with Vault-issued client certificates
+  (`authentication.mtls.vault`) — so a backend-only PKI configuration
+  without a usable Vault client fails at startup validation with a clear
+  message instead of an opaque `vault client is required` runtime error
+  during backend TLS construction. Because `VAULT_ADDR` forces
+  `enabled: true` during the overlay, env-driven setups never hit this.
 
 #### No hot-reload — restart required
 
@@ -2414,7 +2424,11 @@ export OPERATOR_METRICS_GRPC_ENABLED=true
 > produces a fatal `conflicting Schema URL` error at gateway startup. With the aligned
 > v1.41.0 import, tracer initialization succeeds and OTLP export to Tempo/Jaeger works.
 
-The OpenTelemetry Protocol (OTLP) exporter supports comprehensive TLS configuration for secure trace export to collectors like Jaeger, Zipkin, or OTEL Collector.
+The OpenTelemetry Protocol (OTLP) gRPC exporter supports TLS and mutual TLS
+for secure trace export to collectors (OpenTelemetry Collector, Tempo,
+Jaeger). Transport security is configured under
+`spec.observability.tracing` with the tri-state `otlpInsecure` flag and the
+nested `otlpTLS` block.
 
 ### Basic TLS Configuration
 
@@ -2423,14 +2437,17 @@ spec:
   observability:
     tracing:
       enabled: true
-      otlpEndpoint: "https://jaeger-collector:14250"
+      otlpEndpoint: "otel-collector.observability.svc:4317"
       serviceName: avapigw
-      
-      # Enable secure connection (DEV-003)
+
+      # Optional: force TLS explicitly. Configuring otlpTLS material
+      # already implies TLS, so this line can be omitted.
       otlpInsecure: false
-      
-      # Server certificate verification
-      otlpTLSCAFile: "/etc/ssl/certs/jaeger-ca.crt"
+
+      otlpTLS:
+        # Private CA for collector certificate verification
+        # (omit caFile to use the system trust store)
+        caFile: "/etc/ssl/certs/otel-ca.crt"
 ```
 
 ### Mutual TLS (mTLS) Configuration
@@ -2440,60 +2457,58 @@ spec:
   observability:
     tracing:
       enabled: true
-      otlpEndpoint: "https://jaeger-collector:14250"
+      otlpEndpoint: "otel-collector.observability.svc:4317"
       serviceName: avapigw
-      
-      # Enable secure connection with client authentication
-      otlpInsecure: false
-      
-      # Client certificate and key for mTLS
-      otlpTLSCertFile: "/etc/ssl/certs/gateway-client.crt"
-      otlpTLSKeyFile: "/etc/ssl/private/gateway-client.key"
-      
-      # CA certificate for server verification
-      otlpTLSCAFile: "/etc/ssl/certs/jaeger-ca.crt"
-```
 
-### Environment Variable Overrides
-
-OTLP TLS configuration can be overridden using environment variables:
-
-```bash
-# Basic TLS settings
-export OTLP_INSECURE=false
-export OTLP_TLS_CA_FILE=/etc/ssl/certs/ca.crt
-
-# mTLS settings
-export OTLP_TLS_CERT_FILE=/etc/ssl/certs/client.crt
-export OTLP_TLS_KEY_FILE=/etc/ssl/private/client.key
+      otlpTLS:
+        # Client certificate and key for mTLS (must be set together)
+        certFile: "/etc/ssl/certs/gateway-client.crt"
+        keyFile: "/etc/ssl/private/gateway-client.key"
+        # CA certificate for collector verification
+        caFile: "/etc/ssl/certs/otel-ca.crt"
 ```
 
 ### OTLP Configuration Reference
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `otlpInsecure` | boolean | true | Use insecure gRPC connection (plaintext) |
-| `otlpTLSCertFile` | string | "" | Path to client certificate file for mTLS |
-| `otlpTLSKeyFile` | string | "" | Path to client private key file for mTLS |
-| `otlpTLSCAFile` | string | "" | Path to CA certificate file for server verification |
+| `otlpInsecure` | boolean (tri-state) | *unset* | Explicitly force plaintext (`true`) or TLS (`false`). When **unset**, the effective transport is derived: configured `otlpTLS` material forces TLS; otherwise plaintext is retained only for unset/loopback endpoints, and **remote endpoints default to TLS with system roots** |
+| `otlpTLS.certFile` | string | "" | Path to the client certificate (PEM) for mTLS. Requires `keyFile` |
+| `otlpTLS.keyFile` | string | "" | Path to the client private key (PEM) for mTLS. Requires `certFile` |
+| `otlpTLS.caFile` | string | "" | Path to a PEM CA bundle verifying the collector certificate. Empty uses the system trust store |
 
-**Note:** For backward compatibility, `otlpInsecure` defaults to `true`. Set to `false` for production deployments with TLS-enabled OTLP collectors.
+Validation rules:
 
-### Production Example with Vault PKI
+- `otlpTLS.certFile` and `otlpTLS.keyFile` must be supplied together (error).
+- `otlpTLS` material combined with an explicit `otlpInsecure: true` emits a
+  **warning** — the TLS material is ignored because the explicit flag wins.
+
+**Secure-by-default note:** earlier releases hardcoded plaintext OTLP export.
+The plaintext default is now preserved **only** for unset or loopback
+(`localhost`/`127.0.0.1`/`::1`) endpoints; a remote `otlpEndpoint` without an
+explicit `otlpInsecure` uses TLS with system roots. Deployments exporting to
+a remote *plaintext* collector (e.g. an in-cluster test collector) must set
+`otlpInsecure: true` explicitly. At startup the gateway logs the resolved
+transport (`OTLP trace exporter transport resolved` with `insecure`, `mtls`,
+and `custom_ca` fields). There are no `OTLP_*` environment variable
+overrides — the settings come from the configuration file (or the Helm
+values `gateway.observability.tracing.otlpInsecure`/`otlpTLS`).
+
+### Production Example with Vault Agent-Injected Certificates
 
 ```yaml
 spec:
   observability:
     tracing:
       enabled: true
-      otlpEndpoint: "https://otel-collector.monitoring.svc.cluster.local:4317"
+      otlpEndpoint: "otel-collector.monitoring.svc.cluster.local:4317"
       serviceName: avapigw
-      
-      # Secure connection with Vault-managed certificates
-      otlpInsecure: false
-      otlpTLSCertFile: "/vault/secrets/otlp-client.crt"
-      otlpTLSKeyFile: "/vault/secrets/otlp-client.key"
-      otlpTLSCAFile: "/vault/secrets/otlp-ca.crt"
+
+      # TLS is implied by the otlpTLS material below
+      otlpTLS:
+        certFile: "/vault/secrets/otlp-client.crt"
+        keyFile: "/vault/secrets/otlp-client.key"
+        caFile: "/vault/secrets/otlp-ca.crt"
 ```
 
 ## Middleware Configuration

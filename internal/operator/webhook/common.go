@@ -133,6 +133,7 @@ func validateRateLimitStore(rl *avapigwv1alpha1.RateLimitConfig) error {
 		readTimeout:    rl.Redis.ReadTimeout,
 		writeTimeout:   rl.Redis.WriteTimeout,
 		retry:          rl.Redis.Retry,
+		tls:            rl.Redis.TLS,
 	})
 }
 
@@ -146,6 +147,7 @@ type redisConnectionSpec struct {
 	readTimeout    avapigwv1alpha1.Duration
 	writeTimeout   avapigwv1alpha1.Duration
 	retry          *avapigwv1alpha1.RedisRetrySpec
+	tls            *avapigwv1alpha1.RedisTLSSpec
 }
 
 // validateRedisConnectionSpec validates the shared standalone-vs-sentinel
@@ -172,6 +174,10 @@ func validateRedisConnectionSpec(spec redisConnectionSpec) error {
 		"writeTimeout":   spec.writeTimeout,
 	}
 	if err := validateDurationFields(spec.fieldPath, durations); err != nil {
+		return err
+	}
+
+	if err := validateRedisTLSSpec(spec.tls, spec.fieldPath+".tls"); err != nil {
 		return err
 	}
 
@@ -223,6 +229,12 @@ func validateRouteCacheConfig(cache *avapigwv1alpha1.CacheConfig) error {
 		}
 	}
 
+	if cache.NegativeCacheTTL != "" {
+		if err := validateDuration(string(cache.NegativeCacheTTL)); err != nil {
+			return fmt.Errorf("cache.negativeCacheTTL is invalid: %w", err)
+		}
+	}
+
 	if err := validateCacheType(cache.Type, "cache"); err != nil {
 		return err
 	}
@@ -254,6 +266,7 @@ func validateRouteCacheRedis(cache *avapigwv1alpha1.CacheConfig) error {
 		readTimeout:    cache.Redis.ReadTimeout,
 		writeTimeout:   cache.Redis.WriteTimeout,
 		retry:          cache.Redis.Retry,
+		tls:            cache.Redis.TLS,
 	}); err != nil {
 		return err
 	}
@@ -978,7 +991,15 @@ func validateAuthzCacheConfig(cache *avapigwv1alpha1.AuthzCacheConfig) error {
 		return err
 	}
 
-	// Validate sentinel configuration for redis cache type
+	// Validate the preferred redis connection configuration (mutually
+	// exclusive with the deprecated sentinel field).
+	if err := validateAuthzCacheRedis(cache); err != nil {
+		return err
+	}
+
+	// Validate the deprecated sentinel configuration for redis cache type.
+	// The operator converts it into the gateway's redis.sentinel shape.
+	//nolint:staticcheck // SA1019: deprecated field must keep being validated until removed
 	if cache.Sentinel != nil {
 		if cache.Type != CacheTypeRedis {
 			return fmt.Errorf("authorization.cache.sentinel is only valid when type is 'redis'")

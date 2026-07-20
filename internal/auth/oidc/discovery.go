@@ -3,14 +3,19 @@ package oidc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/vyrodovalexey/avapigw/internal/httputil"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// maxDiscoveryResponseBytes bounds OIDC discovery-document reads so a
+// misbehaving or compromised IdP cannot inflate gateway memory.
+const maxDiscoveryResponseBytes = httputil.DefaultMaxResponseBytes
 
 // DiscoveryDocument represents an OIDC discovery document.
 type DiscoveryDocument struct {
@@ -204,9 +209,17 @@ func (c *discoveryClient) fetchDiscovery(ctx context.Context, providerName strin
 		return nil, fmt.Errorf("discovery endpoint returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Bounded read: over-limit discovery documents are rejected and counted
+	// through the discovery error metric.
+	body, err := httputil.ReadAllLimited(resp.Body, maxDiscoveryResponseBytes)
 	if err != nil {
 		c.metrics.RecordDiscovery("error", providerName)
+		if errors.Is(err, httputil.ErrResponseTooLarge) {
+			c.logger.Warn("OIDC discovery response exceeded size limit, rejecting",
+				observability.String("provider", providerName),
+				observability.Int64("limit_bytes", maxDiscoveryResponseBytes),
+			)
+		}
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 

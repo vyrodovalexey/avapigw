@@ -1,0 +1,1067 @@
+# =============================================================================
+# PT suite (PT-01..PT-06) fixture CRDs for the OPERATOR-MODE k8s gateway
+# =============================================================================
+# Operator-mode translation of test/performance/configs/gateway-pt-local.yaml
+# (the canonical PT scenario definition used by the 20260715/16 local runs)
+# for the avapigw-test deployment driven by scripts/run-pt-suite.sh.
+#
+# Designed to COEXIST with test/k8s/crds-full-test.yaml (43 CRs) without
+# route-table hijacks — every route here was checked against the router
+# priority rules (internal/router, internal/grpc/router, internal/graphql/router):
+#   * HTTP:    distinct path prefixes (no overlap with full-test routes)
+#   * gRPC:    api.v1.TestService + metadata conditions; pt-grpc-oidc carries
+#              TWO metadata conditions (priority 1020) so it outranks the
+#              full-test grpc-cached route (TestService+authorization = 1010)
+#   * GraphQL: exact /graphql + one header condition each (specificity 1010)
+#              outranks graphql-basic (1000); scenarios are disjoint by header
+#
+# Scenario map (run-*-group.sh):
+#   PT-01/02 ghz  -> pt-grpc-baseline (x-perf-baseline), pt-grpc-oidc
+#                    (x-test-scenario=oidc + Bearer), pt-grpc-mtls
+#                    (x-test-scenario=mtls*), pt-grpc-aggregate (x-perf-aggregate)
+#   PT-03/04 hey  -> pt-validated-{basic,apikey,oidc,ratelimit,transform,
+#                    encoding,cache,cors}; k6 -> /ws (full-test websocket-plain),
+#                    pt-ws-apikey, pt-ws-oidc; PT-04 adds pt-aggregate-rest
+#                    (/api/v1/items fan-out) + pt-ndjson-aggregate (/aggregate-ndjson)
+#   PT-05/06 hey  -> pt-graphql-{basic,oidc,apikey,ratelimit,transform,cors};
+#                    PT-06 adds pt-graphql-aggregate (X-Perf-Scenario: aggregate)
+#
+# External dependencies (docker-compose test env on the host):
+#   REST backends 8801/8802/8805, gRPC backends 8811/8812/8813(mTLS)
+#   Redis Sentinel host.docker.internal:26379-81 (master mymaster, password in
+#     Vault KV secret/backend-auth/redis)
+#   Keycloak host.docker.internal:8090 (realm gateway-test)
+#   Vault KV secret/data/apikeys/<sha256> (perf API key pk_perftest_1234567890abcdef)
+#   NDJSON/GraphQL go mock on host ports 8901/8902
+#     (go run test/performance/scripts/graphql-mock-server.go)
+#   OpenAPI spec ConfigMap items-openapi-spec (key items-api.yaml)
+#
+# Apply : kubectl apply -f test/performance/operator/crds-pt-k8s.yaml
+# Remove: kubectl delete -f test/performance/operator/crds-pt-k8s.yaml
+#
+# =============================================================================
+# PT-03/04 - HTTP feature routes (every route carries OpenAPI validation)
+# =============================================================================
+
+---
+# basic: gateway->backend BASIC AUTH injection (rest-backend-basic Backend CR
+# resolves Vault KV secret/backend-auth/basic) + OpenAPI validation
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-basic
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: backend-basic-auth
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/basic/items
+      methods: [GET, POST]
+  route:
+    - destination:
+        host: rest-backend-basic
+        port: 8805
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+
+---
+# apikey: client API-key auth against Vault KV sha256 hash store
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-apikey
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: auth-apikey
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/apikey/items
+      methods: [GET, POST]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      hashAlgorithm: sha256
+      vaultPath: secret/data/apikeys
+
+---
+# oidc: client JWT auth (Keycloak gateway-test realm, token issued via localhost)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-oidc
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: auth-oidc
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/oidc/items
+      methods: [GET, POST]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+---
+# ratelimit: REDIS-SENTINEL-backed rate limit, 5 rps / burst 5 (like the
+# verified items-api-redis-rl route) so redis denials are guaranteed under the
+# global limiter's ~100 rps pass-through share -> both
+# gateway_middleware_redis_rate_limit_allowed_total AND _denied_total move.
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-ratelimit
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: ratelimit-sentinel
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/ratelimit/items
+      methods: [GET, POST]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5
+    burst: 5
+    perClient: false
+    store: redis
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        passwordVaultPath: secret/backend-auth/redis
+      keyPrefix: "pt:rl:http:"
+      failOpen: true
+
+---
+# transform: request static header + response field filtering
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-transform
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: transform
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/transform/items
+      methods: [GET, POST]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  # NOTE: the admission webhook forbids allowFields+denyFields together on
+  # APIRoute (file-mode gateway config allows both - see report finding); the
+  # allow-list alone still exercises the response transform path.
+  transform:
+    request:
+      staticHeaders:
+        X-Perf-Transform: pt-k8s
+    response:
+      allowFields:
+        - data
+
+---
+# encoding: response transcode json->xml (CRD encoding supports contentType
+# transcode only; compression/negotiation are file-config-only features).
+# The xml transcode guarantees gateway_encoding_encode_total increments.
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-encoding
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: encoding
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/encoding/items
+      methods: [GET, POST]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  encoding:
+    request:
+      contentType: application/json
+    response:
+      contentType: application/xml
+
+---
+# cache: REDIS-SENTINEL-backed response cache (mirrors verified items-api-cached)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-cache
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: cache-sentinel
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/cache/items
+      methods: [GET]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  cache:
+    enabled: true
+    ttl: 60s
+    keyConfig:
+      includeMethod: true
+      includePath: true
+    type: redis
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        passwordVaultPath: secret/backend-auth/redis
+      keyPrefix: "pt:cache:"
+      ttlJitter: 0.2
+      hashKeys: false
+
+---
+# cors: route-level CORS (NOTE: global CORS "*" from values-local shadows the
+# route-level preflight answer - known finding #4 of the devops phase; the
+# scenario still exercises the CORS middleware + metrics)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-validated-cors
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: cors
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/validated/cors/items
+      methods: [GET, POST, OPTIONS]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8802
+      weight: 50
+  rewrite:
+    uri: /api/v1/items
+  timeout: 30s
+  openAPIValidation:
+    enabled: true
+    specConfigMapRef:
+      name: items-openapi-spec
+      key: items-api.yaml
+    failOnError: true
+    validateRequestBody: true
+    validateRequestParams: true
+  cors:
+    allowOrigins: ["*"]
+    allowMethods: [GET, POST, OPTIONS]
+    allowHeaders: [Content-Type, Authorization, X-API-Key, Origin]
+    exposeHeaders: [X-Request-ID]
+    maxAge: 86400
+    allowCredentials: false
+
+# =============================================================================
+# PT-03/04 - WebSocket routes (plain /ws comes from full-test websocket-plain)
+# =============================================================================
+
+---
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-ws-apikey
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: ws-apikey
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-apikey
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      hashAlgorithm: sha256
+      vaultPath: secret/data/apikeys
+
+---
+# ws-oidc: k6 sends the 127.0.0.1-issued Keycloak token (TOK_IP in the runner)
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-ws-oidc
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: ws-oidc
+spec:
+  match:
+    - uri:
+        exact: /ws-perf-oidc
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+  rewrite:
+    uri: /ws
+  timeout: 0s
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://127.0.0.1:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+# =============================================================================
+# PT-04 - REST aggregate (mirroring) routes
+# =============================================================================
+
+---
+# REST fan-out on /api/v1/items: the aggregate handler forwards the inbound
+# path VERBATIM to each target (no rewrite), and the REST backends serve
+# /api/v1/items. Prefix length 17 outranks the full-test catch-all (prefix /).
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-aggregate-rest
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: aggregate-rest
+spec:
+  match:
+    - uri:
+        prefix: /api/v1/items
+      methods: [GET, POST]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8801
+      weight: 100
+  timeout: 30s
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    merge:
+      enabled: true
+      strategy: deep
+    targets:
+      - name: rest-backend-1
+        destination:
+          host: host.docker.internal
+          port: 8801
+        timeout: 10s
+        retries: 1
+      - name: rest-backend-2
+        destination:
+          host: host.docker.internal
+          port: 8802
+        timeout: 10s
+        retries: 1
+
+---
+# NDJSON-strategy fan-out: merges the two host mock NDJSON record streams
+# (stable-sorted by _time, de-duplicated first-wins by id, capped at limit).
+apiVersion: avapigw.io/v1alpha1
+kind: APIRoute
+metadata:
+  name: pt-ndjson-aggregate
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: aggregate-ndjson
+spec:
+  match:
+    - uri:
+        prefix: /aggregate-ndjson
+      methods: [GET]
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8901
+      weight: 100
+  timeout: 30s
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    merge:
+      enabled: true
+      strategy: ndjson
+      timeField: _time
+      keyField: id
+      limit: 100
+    targets:
+      - name: ndjson-backend-1
+        destination:
+          host: host.docker.internal
+          port: 8901
+        timeout: 10s
+        retries: 1
+      - name: ndjson-backend-2
+        destination:
+          host: host.docker.internal
+          port: 8902
+        timeout: 10s
+        retries: 1
+
+# =============================================================================
+# PT-01/02 - gRPC routes (TLS listener 9443; deployment has no plaintext gRPC)
+# =============================================================================
+# WEBHOOK WORKAROUND: the admission duplicate checker for GRPCRoute compares
+# ONLY service+method and IGNORES metadata match conditions
+# (internal/operator/webhook/duplicate.go grpcMatchConditionsOverlap /
+# grpcMethodsOverlap), while the data-plane router orders metadata-
+# differentiated routes deterministically (internal/grpc/router calculatePriority
+# counts +10 per metadata condition) and the GraphQL checker IS specificity-
+# aware for headers. Metadata-only scenario routes on the same service are
+# therefore rejected as duplicates (product finding, see PT report).
+#
+# To stay admissible these routes ALSO differ in method matchers using the
+# checker's coexistence rules (exact-vs-prefix never conflicts; distinct
+# prefixes never conflict), while metadata still gates the actual match:
+#   pt-grpc-oidc      method exact  Unary          + x-test-scenario=oidc
+#   pt-grpc-aggregate method prefix "Unary"        + x-perf-aggregate
+#   pt-grpc-mtls      method prefix "Una"/"Server" + x-test-scenario prefix mtls
+#   pt-grpc-baseline  method prefix "U"/"ServerS"/"Bidirectional" + x-perf-baseline
+#
+# PREREQUISITE: the full-test route grpc-cached (service exact TestService with
+# NO method matcher = matches-all-methods) must be temporarily removed while
+# these fixtures are installed, or the webhook rejects every TestService route:
+#   kubectl -n avapigw-test delete grpcroute grpc-cached
+# Restore after the suite: kubectl apply -f test/k8s/crds-full-test.yaml
+# (delete the pt fixtures FIRST - see run-pt-suite.sh restore step).
+
+---
+# baseline unary/serverstream/bidistream throughput
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: pt-grpc-baseline
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: grpc-baseline
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+      method:
+        prefix: U
+      metadata:
+        - name: x-perf-baseline
+          present: true
+    - service:
+        exact: api.v1.TestService
+      method:
+        prefix: ServerS
+      metadata:
+        - name: x-perf-baseline
+          present: true
+    - service:
+        exact: api.v1.TestService
+      method:
+        prefix: Bidirectional
+      metadata:
+        - name: x-perf-baseline
+          present: true
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8812
+      weight: 50
+  timeout: 30s
+
+---
+# oidc: client Bearer token validated at the gateway (Keycloak JWT)
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: pt-grpc-oidc
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: grpc-oidc
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+      method:
+        exact: Unary
+      metadata:
+        - name: x-test-scenario
+          exact: oidc
+        - name: authorization
+          present: true
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 50
+    - destination:
+        host: host.docker.internal
+        port: 8812
+      weight: 50
+  timeout: 30s
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+---
+# PT-owned mTLS GRPCBackend on the docker-desktop host-gateway IPv4 LITERAL.
+# WHY: host.docker.internal resolves to A 192.168.65.254 + AAAA fdc4:...::254
+# inside this cluster; the mTLS/TLS backend dial path picks the AAAA record and
+# fails with "network is unreachable" (plain gRPC backends on the same hostname
+# dial fine - IPv6-preference bug in the TLS backend dialer, see PT report).
+# Same Vault PKI MUTUAL TLS config as the verified full-test grpc-backend-mtls.
+# NOTE: 192.168.65.254 is docker-desktop-specific (matches this test env).
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCBackend
+metadata:
+  name: pt-grpc-backend-mtls
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: grpc-backend-mtls
+spec:
+  hosts:
+    - address: 192.168.65.254
+      port: 8813
+      weight: 1
+  healthCheck:
+    enabled: true
+    service: ""
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+  connectionPool:
+    maxConnsPerHost: 100
+    maxIdleConns: 50
+    idleConnTimeout: 90s
+  tls:
+    enabled: true
+    mode: MUTUAL
+    insecureSkipVerify: true
+    vault:
+      enabled: true
+      pkiMount: pki
+      role: client-role
+      commonName: avapigw-client
+      altNames:
+        - localhost
+        - host.docker.internal
+      ttl: "720h"
+
+---
+# mtls: gateway->backend MUTUAL TLS to grpc_3 :8813 (via pt-grpc-backend-mtls
+# above, Vault PKI client cert). Matches x-test-scenario=mtls AND =mtls-stream
+# (prefix) for Unary ("Una") and ServerStream ("Server") methods.
+# IMPORTANT: the destination host MUST be the GRPCBackend NAME - the gRPC
+# director resolves backend features (mTLS/auth/LB) only when
+# destination.host == backend name (internal/grpc/proxy/director.go
+# resolveTarget/getServiceBackend); literal host destinations dial PLAINTEXT
+# and silently drop the backend's TLS config (see PT report finding).
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: pt-grpc-mtls
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: grpc-backend-mtls
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+      method:
+        prefix: Una
+      metadata:
+        - name: x-test-scenario
+          prefix: mtls
+    - service:
+        exact: api.v1.TestService
+      method:
+        prefix: Server
+      metadata:
+        - name: x-test-scenario
+          prefix: mtls
+  route:
+    - destination:
+        host: pt-grpc-backend-mtls
+        port: 8813
+  timeout: 30s
+
+---
+# aggregate: gRPC unary fan-out across 8811 + 8812 (the gRPC aggregate
+# data-plane adapter is wired in this build via WithGatewayGRPCAggregateHandler)
+apiVersion: avapigw.io/v1alpha1
+kind: GRPCRoute
+metadata:
+  name: pt-grpc-aggregate
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: grpc-aggregate
+spec:
+  match:
+    - service:
+        exact: api.v1.TestService
+      method:
+        prefix: Unary
+      metadata:
+        - name: x-perf-aggregate
+          present: true
+  route:
+    - destination:
+        host: host.docker.internal
+        port: 8811
+      weight: 100
+  timeout: 30s
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    targets:
+      - name: grpc-backend-1
+        destination:
+          host: host.docker.internal
+          port: 8811
+        timeout: 10s
+        retries: 1
+      - name: grpc-backend-2
+        destination:
+          host: host.docker.internal
+          port: 8812
+        timeout: 10s
+        retries: 1
+
+# =============================================================================
+# PT-05/06 - GraphQL backend + routes (host go mock on 8901/8902)
+# =============================================================================
+
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLBackend
+metadata:
+  name: pt-graphql-mock
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+spec:
+  hosts:
+    - address: host.docker.internal
+      port: 8901
+      weight: 50
+    - address: host.docker.internal
+      port: 8902
+      weight: 50
+  healthCheck:
+    path: /health
+    interval: 10s
+    timeout: 3s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+  loadBalancer:
+    algorithm: roundRobin
+
+---
+# basic (X-Perf-Scenario: basic -> specificity 1010 > graphql-basic 1000, so
+# the PT baseline uses the same host mock backend as every other PT scenario)
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: pt-graphql-basic
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: graphql-basic
+spec:
+  match:
+    - path:
+        exact: /graphql
+      headers:
+        - name: X-Perf-Scenario
+          exact: basic
+  route:
+    - destination:
+        host: pt-graphql-mock
+        port: 8901
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  introspectionEnabled: true
+
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: pt-graphql-oidc
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: graphql-oidc
+spec:
+  match:
+    - path:
+        exact: /graphql
+      headers:
+        - name: Authorization
+          prefix: "Bearer "
+  route:
+    - destination:
+        host: pt-graphql-mock
+        port: 8901
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  authentication:
+    enabled: true
+    jwt:
+      enabled: true
+      issuer: http://localhost:8090/realms/gateway-test
+      jwksUrl: http://host.docker.internal:8090/realms/gateway-test/protocol/openid-connect/certs
+      audience:
+        - account
+
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: pt-graphql-apikey
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: graphql-apikey
+spec:
+  match:
+    - path:
+        exact: /graphql
+      headers:
+        - name: X-API-Key
+          prefix: "pk_"
+  route:
+    - destination:
+        host: pt-graphql-mock
+        port: 8901
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  authentication:
+    enabled: true
+    apiKey:
+      enabled: true
+      header: X-API-Key
+      hashAlgorithm: sha256
+      vaultPath: secret/data/apikeys
+
+---
+# ratelimit: REDIS-SENTINEL-backed, 5 rps / burst 5 for guaranteed denials
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: pt-graphql-ratelimit
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: graphql-ratelimit-sentinel
+spec:
+  match:
+    - path:
+        exact: /graphql
+      headers:
+        - name: X-Perf-Scenario
+          exact: ratelimit
+  route:
+    - destination:
+        host: pt-graphql-mock
+        port: 8901
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 5
+    burst: 5
+    perClient: false
+    store: redis
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        passwordVaultPath: secret/backend-auth/redis
+      keyPrefix: "pt:rl:graphql:"
+      failOpen: true
+
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: pt-graphql-transform
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: graphql-transform
+spec:
+  match:
+    - path:
+        exact: /graphql
+      headers:
+        - name: X-Perf-Scenario
+          exact: transform
+  route:
+    - destination:
+        host: pt-graphql-mock
+        port: 8901
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  headers:
+    request:
+      set:
+        x-gateway: avapigw
+        x-perf-test: graphql-transform
+
+---
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: pt-graphql-cors
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: graphql-cors
+spec:
+  match:
+    - path:
+        exact: /graphql
+      headers:
+        - name: Origin
+          prefix: "http"
+  route:
+    - destination:
+        host: pt-graphql-mock
+        port: 8901
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  cors:
+    allowOrigins: ["*"]
+    allowMethods: [GET, POST, OPTIONS]
+    allowHeaders: [Content-Type, Authorization, X-API-Key, Origin]
+    maxAge: 86400
+
+---
+# aggregate: GraphQL fan-out across both host mock instances, deep data merge
+apiVersion: avapigw.io/v1alpha1
+kind: GraphQLRoute
+metadata:
+  name: pt-graphql-aggregate
+  namespace: avapigw-test
+  labels:
+    app: avapigw-pt
+    suite: pt-k8s
+    feature: graphql-aggregate
+spec:
+  match:
+    - path:
+        exact: /graphql
+      headers:
+        - name: X-Perf-Scenario
+          exact: aggregate
+  route:
+    - destination:
+        host: pt-graphql-mock
+        port: 8901
+  timeout: 30s
+  depthLimit: 10
+  complexityLimit: 100
+  aggregate:
+    enabled: true
+    failMode: any
+    maxParallel: 4
+    merge:
+      enabled: true
+      strategy: deep
+    targets:
+      - name: graphql-mock-1
+        destination:
+          host: host.docker.internal
+          port: 8901
+        timeout: 10s
+        retries: 1
+      - name: graphql-mock-2
+        destination:
+          host: host.docker.internal
+          port: 8902
+        timeout: 10s
+        retries: 1

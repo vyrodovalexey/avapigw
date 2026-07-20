@@ -18,6 +18,13 @@ const (
 	CertModeSelfSigned CertificateMode = "selfsigned"
 	// CertModeVault uses Vault PKI for certificates.
 	CertModeVault CertificateMode = "vault"
+	// CertModeFile serves pre-provisioned certificates from files
+	// (for example a mounted Kubernetes Secret).
+	CertModeFile CertificateMode = "file"
+	// CertModeCertManager indicates certificates are provisioned externally
+	// by cert-manager into a mounted directory. It is served through the
+	// file provider; internal webhook certificate provisioning is skipped.
+	CertModeCertManager CertificateMode = "cert-manager"
 )
 
 // Manager is the interface for certificate management.
@@ -27,6 +34,11 @@ type Manager interface {
 
 	// GetCA returns the CA certificate pool.
 	GetCA(ctx context.Context) (*x509.CertPool, error)
+
+	// GetCAPEM returns the PEM-encoded CA bundle. The PEM form is used for
+	// distribution (webhook caBundle injection, Secret persistence) without
+	// issuing a throwaway leaf certificate just to read its chain.
+	GetCAPEM(ctx context.Context) ([]byte, error)
 
 	// RotateCertificate rotates the certificate for the given request.
 	RotateCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error)
@@ -45,6 +57,10 @@ type ManagerConfig struct {
 
 	// Vault contains Vault PKI configuration.
 	Vault *VaultProviderConfig
+
+	// File contains file-based certificate configuration (used by the
+	// file and cert-manager modes).
+	File *FileProviderConfig
 }
 
 // NewManager creates a new certificate manager based on the configuration.
@@ -59,9 +75,14 @@ func NewManager(ctx context.Context, config *ManagerConfig) (Manager, error) {
 			return nil, fmt.Errorf("vault configuration required for vault mode")
 		}
 		return NewVaultProvider(ctx, config.Vault)
+	case CertModeFile, CertModeCertManager:
+		if config.File == nil {
+			return nil, fmt.Errorf("file configuration required for %s mode", config.Mode)
+		}
+		return NewFileProvider(config.File)
 	default:
 		// Default to self-signed certificates (includes CertModeSelfSigned and any unknown mode)
-		return NewSelfSignedProvider(config.SelfSigned)
+		return NewSelfSignedProviderWithContext(ctx, config.SelfSigned)
 	}
 }
 

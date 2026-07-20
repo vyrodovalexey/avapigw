@@ -27,6 +27,29 @@ var connectionCounter atomic.Int64
 // subscriptionTracerName is the OpenTelemetry tracer name for subscription operations.
 const subscriptionTracerName = "avapigw/graphql-subscription"
 
+// GraphQL WebSocket subprotocol names supported by the gateway upgrader
+// (RFC 6455 section 1.9/4.2.2 subprotocol negotiation).
+const (
+	// SubprotocolGraphQLTransportWS is the modern graphql-ws protocol
+	// (https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md).
+	SubprotocolGraphQLTransportWS = "graphql-transport-ws"
+
+	// SubprotocolGraphQLWS is the legacy subscriptions-transport-ws
+	// protocol name, still offered by older GraphQL clients.
+	SubprotocolGraphQLWS = "graphql-ws"
+)
+
+// supportedSubprotocols returns the WebSocket subprotocols the gateway
+// negotiates on the client-side upgrade. gorilla/websocket selects the
+// first client-offered protocol present in this list (client preference
+// order, per RFC 6455 section 4.2.2) and echoes it in the 101 response's
+// Sec-WebSocket-Protocol header. Strict graphql-ws clients (e.g. the
+// graphql-ws JS library) reject handshakes without this echo. Clients
+// offering no subprotocol keep the historical no-echo behavior.
+func supportedSubprotocols() []string {
+	return []string{SubprotocolGraphQLTransportWS, SubprotocolGraphQLWS}
+}
+
 // SubscriptionProxy handles WebSocket-based GraphQL subscriptions.
 type SubscriptionProxy struct {
 	proxy    *Proxy
@@ -99,6 +122,12 @@ func NewSubscriptionProxy(proxy *Proxy, opts ...SubscriptionOption) *Subscriptio
 	sp.upgrader = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		// Negotiate and echo the graphql-ws subprotocols on the 101
+		// response. Without this, strict graphql-ws clients reject the
+		// handshake because the client-requested Sec-WebSocket-Protocol
+		// is never confirmed by the gateway (it is still forwarded to
+		// the backend dial via copySubscriptionHeaders).
+		Subprotocols: supportedSubprotocols(),
 		CheckOrigin: func(r *http.Request) bool {
 			// When no origins are configured, allow all (backward compatible).
 			if len(sp.allowedOrigins) == 0 {
@@ -193,6 +222,7 @@ func (sp *SubscriptionProxy) HandleSubscription(
 	sp.logger.Info("GraphQL subscription established",
 		observability.String("backend", backendName),
 		observability.String("conn_id", connID),
+		observability.String("subprotocol", clientConn.Subprotocol()),
 	)
 
 	// Start bidirectional message relay.

@@ -1445,6 +1445,7 @@ spec:
 | `spec.rateLimit.redis.keyPrefix` | `string` | No | Key prefix |
 | `spec.rateLimit.redis.passwordVaultPath` | `string` | No | Vault path for Redis password (standalone) |
 | `spec.rateLimit.redis.failOpen` | `bool` | No | Allow (`true`, default) or 429 (`false`) on Redis outage |
+| `spec.rateLimit.redis.tls.*` | - | No | TLS to Redis (`enabled`, `certFile`+`keyFile` for mTLS, `caFile`, `minVersion`/`maxVersion` `TLS12`\|`TLS13`, `insecureSkipVerify`) |
 | `spec.rateLimit.redis.retry.maxRetries` | `int` | No | Initial connection retries (default 3) |
 | `spec.rateLimit.redis.retry.initialBackoff` | `string` | No | Initial retry backoff (default 100ms) |
 | `spec.rateLimit.redis.retry.maxBackoff` | `string` | No | Max retry backoff (default 30s) |
@@ -1454,9 +1455,34 @@ spec:
 | `spec.tls.vault.enabled` | `bool` | No | Enable Vault PKI |
 | `spec.tls.vault.pkiMount` | `string` | No | Vault PKI mount path |
 | `spec.tls.vault.role` | `string` | No | Vault PKI role |
-| `spec.transform.response.allowFields` | `[]string` | No | Fields to include in response |
+| `spec.transform.request.template` | `string` | No | Go template for the request body |
+| `spec.transform.request.passthroughBody` | `bool` | No | Pass request body unchanged to the backend |
+| `spec.transform.request.staticHeaders` | `map[string]string` | No | Headers added with static values |
+| `spec.transform.request.dynamicHeaders` | `[]{name,source}` | No | Headers sourced from request context (`jwt.claim.*`, `context.*`, `metadata.*`) |
+| `spec.transform.request.injectFields` | `[]{field,value\|source}` | No | Fields injected into the request body (each entry needs `value` or `source`) |
+| `spec.transform.request.removeFields` | `[]string` | No | Fields removed from the request body (dot notation) |
+| `spec.transform.request.defaultValues` | `map[string]JSON` | No | Defaults for absent request body fields |
+| `spec.transform.request.validateBeforeTransform` | `bool` | No | Validate the request before transformation |
+| `spec.transform.response.allowFields` | `[]string` | No | Fields to include in response (mutually exclusive with `denyFields`) |
+| `spec.transform.response.denyFields` | `[]string` | No | Fields to strip from response |
+| `spec.transform.response.fieldMappings` | `map[string]string` | No | Field renames |
+| `spec.transform.response.groupFields` | `[]{name,fields}` | No | Group fields into nested objects |
+| `spec.transform.response.flattenFields` | `[]string` | No | Flatten nested objects into the parent (dot notation) |
+| `spec.transform.response.arrayOperations` | `[]{field,operation,value,condition}` | No | Array operations (`append`\|`prepend`\|`filter`\|`sort`\|`limit`\|`deduplicate`; `condition` required for `filter`) |
+| `spec.transform.response.template` | `string` | No | Go template for response formatting (overrides other rules) |
+| `spec.transform.response.mergeStrategy` | `string` | No | Multi-backend merge strategy: `deep`\|`shallow`\|`replace`\|`ndjson` |
 | `spec.cache.enabled` | `bool` | No | Enable caching |
 | `spec.cache.ttl` | `string` | No | Cache TTL |
+| `spec.cache.maxEntries` | `int` | No | Max entries (memory cache) |
+| `spec.cache.keyConfig.includeMethod` | `bool` | No | Include HTTP method in the cache key |
+| `spec.cache.keyConfig.includePath` | `bool` | No | Include request path in the cache key |
+| `spec.cache.keyConfig.includeQueryParams` | `[]string` | No | Query parameters included in the cache key |
+| `spec.cache.keyConfig.includeHeaders` | `[]string` | No | Headers included in the cache key |
+| `spec.cache.keyConfig.includeBodyHash` | `bool` | No | Include request-body hash in the cache key |
+| `spec.cache.keyConfig.keyTemplate` | `string` | No | Custom key template (`{{.Method}}`, `{{.Path}}`, `{{.Query.p}}`, `{{.Header.h}}`) |
+| `spec.cache.honorCacheControl` | `bool` | No | Respect `Cache-Control` headers |
+| `spec.cache.negativeCacheTTL` | `string` | No | TTL for cached error responses |
+| `spec.cache.keyComponents` | `[]string` | No | **Deprecated** — not applied (admission warning); use `keyConfig` |
 | `spec.cache.type` | `string` | No | Cache backend: `memory` (default) or `redis` |
 | `spec.cache.redis.url` | `string` | No | Redis URL (standalone; mutually exclusive with sentinel) |
 | `spec.cache.redis.sentinel.*` | - | No | Redis Sentinel connection (same schema as rate limit sentinel) |
@@ -1466,7 +1492,12 @@ spec:
 | `spec.cache.redis.ttlJitter` | `float64` | No | TTL jitter percentage (0.0-1.0) |
 | `spec.cache.redis.hashKeys` | `bool` | No | SHA256-hash cache keys (hashed keys also used in spans/logs) |
 | `spec.cache.redis.passwordVaultPath` | `string` | No | Vault path for Redis password (standalone) |
+| `spec.cache.redis.tls.*` | - | No | TLS to Redis (same schema as `rateLimit.redis.tls`) |
 | `spec.cache.redis.retry.*` | - | No | Initial connection retry (maxRetries, initialBackoff, maxBackoff) |
+| `spec.security.headers.*` | - | No | Security headers (`xFrameOptions`, `xContentTypeOptions`, `xXSSProtection`, `customHeaders`) |
+| `spec.security.hsts.*` | - | No | Structured HSTS (`enabled`, `maxAge`, `includeSubDomains`, `preload`); preferred over the deprecated `headers.strictTransportSecurity` string |
+| `spec.security.csp.*` | - | No | Structured CSP (`enabled`, `policy`, `reportOnly`, `reportUri`); preferred over the deprecated `headers.contentSecurityPolicy` string |
+| `spec.security.referrerPolicy` | `string` | No | `Referrer-Policy` header value |
 | `spec.authentication.enabled` | `bool` | No | Enable route authentication |
 | `spec.authentication.jwt.enabled` | `bool` | No | Enable JWT authentication |
 | `spec.authentication.apiKey.enabled` | `bool` | No | Enable API key authentication |
@@ -1476,6 +1507,9 @@ spec:
 | `spec.authorization.rbac.enabled` | `bool` | No | Enable RBAC authorization |
 | `spec.authorization.abac.enabled` | `bool` | No | Enable ABAC authorization |
 | `spec.authorization.external.enabled` | `bool` | No | Enable external authorization |
+| `spec.authorization.cache.type` | `string` | No | Decision cache: `memory` (default) or `redis` (shared across replicas) |
+| `spec.authorization.cache.redis.*` | - | No | Redis connection for the decision cache (same `RedisCacheSpec` schema as `cache.redis`, incl. `tls`); falls back to in-memory on connection failure |
+| `spec.authorization.cache.sentinel.*` | - | No | **Deprecated** legacy top-level sentinel block — converted to `redis.sentinel` with a warning; mutually exclusive with `redis` |
 
 > **Enforcement notes:**
 > - Route-level rate limiting on HTTP and GraphQL routes is enforced by the
@@ -1881,11 +1915,14 @@ spec:
 | `spec.hosts[].address` | `string` | Yes | Host address (IP or hostname) |
 | `spec.hosts[].port` | `int` | Yes | Host port |
 | `spec.hosts[].weight` | `int` | No | Load balancing weight |
-| `spec.healthCheck.path` | `string` | No | Health check path |
+| `spec.healthCheck.path` | `string` | Yes* | Health check path (*required by the schema; ignored when `useGRPC` is true) |
 | `spec.healthCheck.interval` | `string` | No | Health check interval |
 | `spec.healthCheck.timeout` | `string` | No | Health check timeout |
 | `spec.healthCheck.healthyThreshold` | `int` | No | Healthy threshold |
 | `spec.healthCheck.unhealthyThreshold` | `int` | No | Unhealthy threshold |
+| `spec.healthCheck.useGRPC` | `bool` | No | Probe via `grpc.health.v1.Health/Check` instead of HTTP GET |
+| `spec.healthCheck.grpcService` | `string` | No | Service name for gRPC health checks (`""` = overall server health) |
+| `spec.healthCheck.port` | `int` | No | Probe-port override (for backends with a separate monitoring port, e.g. 9090) |
 | `spec.loadBalancer.algorithm` | `string` | No | Load balancing algorithm |
 | `spec.tls.enabled` | `bool` | No | Enable TLS |
 | `spec.tls.mode` | `string` | No | TLS mode (SIMPLE, MUTUAL) |
@@ -1895,11 +1932,11 @@ spec:
 | `spec.authentication.type` | `string` | No | Authentication type |
 | `spec.authentication.jwt.enabled` | `bool` | No | Enable JWT auth |
 | `spec.authentication.jwt.tokenSource` | `string` | No | Token source (static, vault, oidc) |
-| `spec.requestLimits.maxBodySize` | `int64` | No | Max request body size |
-| `spec.requestLimits.maxHeaderSize` | `int64` | No | Max header size |
-| `spec.transform.enabled` | `bool` | No | Enable transformation |
-| `spec.transform.request.template` | `string` | No | Request transformation template |
-| `spec.transform.response.allowFields` | `[]string` | No | Response fields to allow |
+| `spec.requestLimits.maxBodySize` | `int64` | No | Accepted with warning — no backend-level counterpart in the gateway (use route-level `requestLimits`) |
+| `spec.requestLimits.maxHeaderSize` | `int64` | No | Accepted with warning — no backend-level counterpart in the gateway |
+| `spec.transform.enabled` | `bool` | No | Accepted with warning — backend-level transform is not applied (use route-level `transform`) |
+| `spec.transform.request.template` | `string` | No | Accepted with warning — not applied at backend level |
+| `spec.transform.response.allowFields` | `[]string` | No | Accepted with warning — not applied at backend level |
 | `spec.cache.enabled` | `bool` | No | RESERVED — enable caching (admission warning, not wired to the data path) |
 | `spec.cache.ttl` | `string` | No | RESERVED — cache TTL |
 | `spec.cache.type` | `string` | No | RESERVED — cache type (memory, redis) |
@@ -1912,9 +1949,9 @@ spec:
 | `spec.cache.hashKeys` | `bool` | No | RESERVED — enable SHA256 key hashing |
 | `spec.cache.passwordVaultPath` | `string` | No | RESERVED — Vault path for Redis password (standalone) |
 | `spec.rateLimit.store` | `string` | No | Accepted with warning — the distributed limiter is not applied at backend level |
-| `spec.encoding.request.contentType` | `string` | No | Request content type |
-| `spec.encoding.response.contentType` | `string` | No | Response content type |
-| `spec.encoding.response.compression` | `string` | No | Response compression (gzip, deflate, br) |
+| `spec.encoding.request.contentType` | `string` | No | Accepted with warning — backend-level encoding is not applied (use route-level `encoding`) |
+| `spec.encoding.response.contentType` | `string` | No | Accepted with warning — not applied at backend level |
+| `spec.encoding.response.compression` | `string` | No | Accepted with warning — not applied at backend level |
 
 ## GRPCBackend CRD
 
@@ -2129,13 +2166,19 @@ status:
 ## Redis Sentinel Configuration
 
 The AVAPIGW Operator supports Redis Sentinel for high availability in
-route-level caching (`spec.cache.redis.sentinel`) and distributed rate
-limiting (`spec.rateLimit.redis.sentinel`). Redis Sentinel provides automatic
-failover and service discovery for Redis master-replica setups.
+route-level caching (`spec.cache.redis.sentinel`), distributed rate
+limiting (`spec.rateLimit.redis.sentinel`), and the authorization decision
+cache (`spec.authorization.cache.redis.sentinel`). Redis Sentinel provides
+automatic failover and service discovery for Redis master-replica setups.
 
 > Backend-level caching (`Backend`/`GRPCBackend` `spec.cache`) is RESERVED:
 > the Sentinel fields are accepted with an admission warning but are not
 > wired to the gateway data path. Use route-level caching instead.
+
+> The **legacy** `spec.authorization.cache.sentinel` top-level block is
+> deprecated: the operator converts it to
+> `authorization.cache.redis.sentinel` (deprecation warning) and rejects
+> configurations declaring both shapes.
 
 ### RedisSentinelSpec Fields
 
@@ -2149,12 +2192,31 @@ failover and service discovery for Redis master-replica setups.
 | `passwordVaultPath` | `string` | No | Vault path for the Redis master password (secret with `password` key) |
 | `db` | `int` | No | Redis database number (default: 0) |
 
+### RedisTLSSpec Fields (`redis.tls`)
+
+TLS for the Redis client connection is configurable on all three Redis
+consumers (`cache.redis.tls`, `rateLimit.redis.tls`,
+`authorization.cache.redis.tls`) and applies to both standalone and
+Sentinel modes. The gateway honors the material end-to-end — unreadable or
+unparsable files produce a clear startup error instead of silently falling
+back to system trust:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `enabled` | `bool` | Yes | Enable TLS for the Redis connection |
+| `certFile` | `string` | No | Client certificate path (mTLS; requires `keyFile`) |
+| `keyFile` | `string` | No | Client private key path (mTLS; requires `certFile`) |
+| `caFile` | `string` | No | CA certificate path for server verification |
+| `minVersion` | `string` | No | Minimum TLS version (`TLS12`, `TLS13`) |
+| `maxVersion` | `string` | No | Maximum TLS version (`TLS12`, `TLS13`) |
+| `insecureSkipVerify` | `bool` | No | Skip server certificate verification (dev only) |
+
 ### Mutual Exclusivity
 
 `redis.url` (standalone) and `redis.sentinel` are mutually exclusive; the
 admission webhook rejects configurations declaring both. When Sentinel is
 configured, `masterName` and at least one entry in `sentinelAddrs` are
-required.
+required. `tls.certFile` and `tls.keyFile` must be specified together.
 
 ### Example APIRoute with Redis Sentinel Cache and Rate Limit
 

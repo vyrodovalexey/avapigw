@@ -77,6 +77,16 @@ helm uninstall my-gateway
 
 The following table lists the configurable parameters of the avapigw chart and their default values.
 
+> **Values schema:** the chart ships a regenerated `values.schema.json`
+> covering every values key (gateway `operatorMode`/`observability`/`cors`/
+> `security`/`requestLimits`/`customConfig`/gRPC/GraphQL blocks, `tls`,
+> `redisEnv`, and all operator-side keys) with top-level
+> `additionalProperties: false` — misspelled keys are rejected at
+> `helm install`/`upgrade`/`lint` time instead of being silently ignored.
+> The gateway's own config-file schema lives at
+> `pkg/schema/gateway.schema.json` (full `spec` coverage, listener protocols
+> `HTTP`/`HTTPS`/`HTTP2`/`GRPC`/`GRAPHQL`).
+
 ### General
 
 | Parameter | Description | Default |
@@ -85,9 +95,17 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `image.repository` | Image repository | `ghcr.io/vyrodovalexey/avapigw` |
 | `image.tag` | Image tag | `""` (uses appVersion) |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
-| `imagePullSecrets` | Image pull secrets | `[]` |
+| `imagePullSecrets` | Image pull secrets (merged and de-duplicated with `operator.imagePullSecrets` into a single `imagePullSecrets` key on the operator pod) | `[]` |
 | `nameOverride` | Override chart name | `""` |
 | `fullnameOverride` | Override full name | `""` |
+
+> **Distroless runtime images:** both the gateway and operator images are
+> built on `gcr.io/distroless/static-debian12:nonroot` and run as the
+> distroless `nonroot` user (UID/GID 65532). There is **no shell** in the
+> containers — use `kubectl debug` with an ephemeral container instead of
+> `kubectl exec`. Health is covered by the chart's HTTP probes (the
+> container-level Docker `HEALTHCHECK` was removed); the chart's helm test
+> probes from a separate busybox pod.
 
 ### Service Account
 
@@ -178,8 +196,13 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.logLevel` | Log level | `info` |
 | `gateway.logFormat` | Log format | `json` |
 | `gateway.environment` | Environment name | `production` |
+| `gateway.operatorMode.enabled` | Connect to the operator's gRPC ConfigurationService for CRD-based configuration | `false` |
+| `gateway.operatorMode.tls` | Use TLS for the operator connection | `true` |
+| `gateway.operatorMode.tlsInsecure` | Skip TLS certificate verification (dev/test only) | `false` |
+| `gateway.operatorMode.caSecret` | Secret with the operator CA (`ca.crt`). Empty mounts the chart-managed `<operator-fullname>-grpc-cert` Secret (see [Operator gRPC TLS](#operator-grpc-tls-and-ca-management)) | `""` |
 | `gateway.listeners.http.enabled` | Enable HTTP listener | `true` |
 | `gateway.listeners.http.port` | HTTP listener port | `8080` |
+| `gateway.listeners.http.plainAlongsideTls` | Render an ADDITIONAL plain HTTP listener (`http-plain`, same port) alongside the TLS HTTP listener when TLS is active — local/perf convenience; ignored when the HTTP listener is already plaintext | `false` |
 | `gateway.listeners.grpc.enabled` | Enable gRPC listener | `false` |
 | `gateway.listeners.grpc.port` | gRPC listener port | `9000` |
 | `gateway.listeners.grpc.tls.enabled` | Enable TLS for gRPC listener | `false` |
@@ -197,6 +220,11 @@ The following table lists the configurable parameters of the avapigw chart and t
 | `gateway.maxSessions.queueTimeout` | Timeout for queued requests | `30s` |
 | `gateway.observability.metrics.enabled` | Enable metrics | `true` |
 | `gateway.observability.tracing.enabled` | Enable tracing | `false` |
+| `gateway.observability.tracing.otlpEndpoint` | OTLP gRPC endpoint for trace export | `""` |
+| `gateway.observability.tracing.otlpInsecure` | OTLP transport (tri-state): `null` (unset) derives the transport — TLS material forces TLS, plaintext only for unset/loopback endpoints, remote endpoints default to TLS with system roots; `true` forces plaintext; `false` forces TLS. The key is rendered into the config only when explicitly set | `null` |
+| `gateway.observability.tracing.otlpTLS.certFile` | Client certificate (PEM) for mTLS to the collector (requires `keyFile`; paths must be mounted) | `""` |
+| `gateway.observability.tracing.otlpTLS.keyFile` | Client private key (PEM) for mTLS (requires `certFile`) | `""` |
+| `gateway.observability.tracing.otlpTLS.caFile` | PEM CA bundle verifying the collector certificate (empty = system trust store) | `""` |
 | `gateway.vault` | Gateway-wide Vault client connection rendered verbatim as `spec.vault` in the generated config (see [Vault Integration](#vault-integration)) | `{}` |
 
 ### Audit Configuration
@@ -308,6 +336,21 @@ chart ships `values-vault-file.yaml` as a complete example of this pattern.
 `vault.injectEnv: false` suppresses only the `VAULT_*` env; Vault PKI listener
 TLS (`vault.pki`) is unaffected.
 
+##### Legacy `spec.vault` block and tokens
+
+When `gateway.vault` is **not** set and the top-level `vault.*` values are
+enabled, the chart renders a legacy `spec.vault` block derived from those
+values. The gateway merges this file config with the injected `VAULT_*`
+environment variables **per-field** (ENV > config file > defaults), so with
+`vault.injectEnv: true` (default) the injected env stays authoritative.
+
+With `vault.authMethod: token`, the token is **no longer rendered into the
+ConfigMap** (older chart versions emitted a literal `token: ${VAULT_TOKEN}`
+line, which triggered inline-token warnings at boot): the token reaches the
+gateway solely as the `VAULT_TOKEN` env variable from the
+`<fullname>-vault` Secret. To source a token from the filesystem instead,
+use `gateway.vault` with `tokenFile`.
+
 ### Keycloak Integration
 
 | Parameter | Description | Default |
@@ -347,10 +390,9 @@ The operator enables Kubernetes-native configuration management through CRDs wit
 | `operator.leaderElection.enabled` | Enable leader election | `true` |
 | `operator.leaderElection.resourceName` | Leader election resource name | `avapigw-operator-leader` |
 | `operator.grpc.port` | gRPC ConfigurationService server port | `9444` |
-| `operator.grpc.tls.mode` | gRPC TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |
-| `operator.grpc.gracefulShutdownTimeout` | gRPC server graceful shutdown timeout | `30s` |
-| `operator.grpc.keepalive.time` | gRPC keepalive time | `30s` |
-| `operator.grpc.keepalive.timeout` | gRPC keepalive timeout | `10s` |
+| `operator.grpc.requireClientCert` | Require client certificates for gRPC connections (mTLS) | `false` |
+| `operator.grpc.tls.mode` | gRPC TLS mode (selfsigned, vault) | `selfsigned` |
+| `operator.grpc.tls.caBundle` | PEM CA bundle verifying the operator's gRPC serving certificate; stored as `ca.crt` in the `<operator-fullname>-grpc-cert` Secret. Required for a verified chain with `mode=vault` (set to the Vault PKI CA); `mode=selfsigned` needs no caBundle (see [Operator gRPC TLS](#operator-grpc-tls-and-ca-management)) | `""` |
 | `operator.webhook.enabled` | Enable admission webhooks | `true` |
 | `operator.webhook.port` | Webhook server port | `9443` |
 | `operator.webhook.tls.mode` | Webhook TLS mode (selfsigned, vault, cert-manager) | `selfsigned` |
@@ -373,7 +415,14 @@ The operator enables Kubernetes-native configuration management through CRDs wit
 
 ### Certificate Management Configuration
 
-The operator supports three certificate management modes for webhook validation and gRPC communication.
+The operator supports multiple certificate management modes for webhook
+validation and gRPC communication. One certificate manager serves **both**
+servers: the chart renders the operator's `--cert-provider` flag from
+`operator.webhook.tls.mode` (when webhooks are enabled) or
+`operator.grpc.tls.mode`, and passes the certificate identity
+(`CERT_SERVICE_NAME`/`CERT_DNS_NAMES`) with SANs covering **both** the
+webhook and operator gRPC services (FQDN forms in vault mode, so PKI roles
+restricted to `svc` domains work).
 
 #### Self-Signed Mode (Default)
 | Parameter | Description | Default |
@@ -400,12 +449,58 @@ The operator supports three certificate management modes for webhook validation 
 | `vault.pki.ttl` | Certificate TTL | `24h` |
 | `vault.pki.renewBefore` | Renew before expiry | `1h` |
 
+In vault mode the operator authenticates with Kubernetes auth, issues its
+serving certificate from the PKI mount, rotates it in place before expiry,
+and injects the **PKI CA PEM** into the ValidatingWebhookConfiguration (no
+probe-certificate issuance, so restrictive PKI roles work). The webhook
+certificate volume is an `emptyDir` in vault mode (like selfsigned) — the
+operator writes its own certificates.
+
 #### Cert-Manager Mode
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `operator.webhook.tls.mode` | Certificate mode | `cert-manager` |
 | `operator.webhook.tls.certificateName` | Certificate resource name | `""` (auto-detected) |
 | `operator.webhook.tls.secretName` | Secret name for certificates | `avapigw-operator-webhook-certs` |
+
+With `cert-manager` (and the operator's `file` cert provider), certificates
+are provisioned externally: the operator serves whatever is mounted at the
+webhook cert dir and controller-runtime watches the files for rotation.
+
+### Operator gRPC TLS and CA Management
+
+With `operator.enabled` + `gateway.operatorMode.enabled`, the gateway
+verifies the operator's gRPC serving certificate against a CA Secret — and
+the chart now guarantees that Secret exists, so the **secure default
+(`tls: true`, `tlsInsecure: false`) works out of the box**:
+
+1. **CA Secret provisioning** (`templates/operator/grpc-cert-secret.yaml`,
+   rendered when TLS is on, not insecure, and no
+   `gateway.operatorMode.caSecret` override):
+   - `operator.grpc.tls.caBundle` set → stored verbatim as `ca.crt`
+     (e.g. the Vault PKI CA);
+   - otherwise an **existing** `<operator-fullname>-grpc-cert` Secret is
+     reused via `lookup` — **upgrades do not rotate the CA**;
+   - otherwise Helm generates a CA + signed serving cert (`genCA`/
+     `genSignedCert`; `ca.crt`/`ca.key`/`tls.crt`/`tls.key`, SANs covering
+     the operator and webhook services).
+2. **Operator-side persistence/adoption** (selfsigned provider): the chart
+   sets `CERT_SECRET_NAME=<operator-fullname>-grpc-cert` so the operator
+   **adopts** the Helm-seeded CA (or its own previously persisted one) and
+   persists rotated serving certificates back to the Secret. The CA is
+   therefore **stable across operator restarts** and the gateway keeps
+   verifying successfully. RBAC for the Secret writes comes from the
+   namespaced `templates/operator/cert-secret-role.yaml` (rendered only for
+   the selfsigned provider).
+3. **Gateway mount**: the gateway deployment mounts `ca.crt` from
+   `gateway.operatorMode.caSecret`, defaulting to the chart-managed
+   `<operator-fullname>-grpc-cert` Secret.
+
+For `operator.grpc.tls.mode=vault`, set `operator.grpc.tls.caBundle` to the
+Vault PKI CA PEM (or point `gateway.operatorMode.caSecret` at a Secret
+containing it — `values-local.yaml` uses the `avapigw-vault-pki-ca` Secret
+created by `test/performance/scripts/setup-vault-k8s.sh --setup-pki`). The
+PKI CA is stable across operator restarts by construction.
 
 ### Ingress Controller Configuration
 
@@ -672,16 +767,27 @@ vault:
 
 Deploy with:
 ```bash
-# Build local image
-make docker-build
+# Build BOTH local images matching values-local.yaml
+# (avapigw:test + avapigw-operator:latest)
+make docker-build-local
 
-# Setup Vault for K8s
-./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test
+# Load the images into the cluster's container runtime. Detects
+# kind / minikube / classic docker-desktop / containerd-backed nodes
+# (kind-based Docker Desktop clusters do NOT share the docker daemon's
+# image store — this target streams `docker save` into the node's
+# containerd via a helper pod).
+make k8s-load-images
 
-# Deploy to K8s
-helm upgrade --install avapigw helm/avapigw/ \
-  -f helm/avapigw/values-local.yaml \
-  -n avapigw-test --create-namespace
+# Setup Vault for K8s (kubernetes auth roles avapigw/avapigw-operator,
+# PKI test-role incl. the `svc` domain, and the avapigw-vault-pki-ca Secret)
+./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test --setup-pki
+
+# Deploy to K8s (operator + gateway in operator mode)
+make helm-install-with-operator
+# equivalent to:
+# helm upgrade --install avapigw helm/avapigw/ \
+#   -f helm/avapigw/values-local.yaml \
+#   -n avapigw-test --create-namespace
 
 # Run performance tests
 make perf-test-k8s
@@ -690,17 +796,43 @@ make perf-test-k8s
 Notes on `values-local.yaml`:
 
 - The **operator and its validating webhook are enabled by default**
-  (`operator.webhook.enabled: true`, self-signed TLS), matching the
-  production posture — CR creates/updates are validated locally exactly as
-  they would be in production. Since the admission-lifecycle fix, the webhook
-  never blocks finalizer removal, so it is safe to keep enabled during local
-  CR churn.
+  (`operator.webhook.enabled: true`), matching the production posture — CR
+  creates/updates are validated locally exactly as they would be in
+  production. Since the admission-lifecycle fix, the webhook never blocks
+  finalizer removal, so it is safe to keep enabled during local CR churn.
+- The **operator connection uses verified TLS** (no `tlsInsecure`):
+  `operator.grpc.tls.mode: vault` + `operator.webhook.tls.mode: vault`
+  issue the operator's serving certificate from Vault PKI (kubernetes
+  auth), and the gateway verifies against the `avapigw-vault-pki-ca` Secret
+  (`gateway.operatorMode.caSecret`) created by
+  `setup-vault-k8s.sh --setup-pki`. The chart **default**
+  (`mode: selfsigned`, no `caSecret`) also yields verified TLS without
+  Vault thanks to the CA Secret persistence described in
+  [Operator gRPC TLS](#operator-grpc-tls-and-ca-management).
+- The Vault client uses **Kubernetes auth** (gateway ServiceAccount
+  `avapigw` → role `avapigw`, operator ServiceAccount `avapigw-operator` →
+  role `avapigw-operator`) — no static `vault-token` Secret.
+- A **plain HTTP listener is rendered alongside the HTTPS one**
+  (`gateway.listeners.http.plainAlongsideTls: true`) so local/perf runs can
+  exercise plaintext 8080 without dropping the TLS listeners.
+- The **global rate limit is perf-friendly** (`requestsPerSecond: 5000`,
+  `burst: 10000`): the previous 100 rps default capped every PT suite run at
+  ~97% 429 through a single port-forward client; route-level limits still
+  apply where configured.
+- `gateway.observability.tracing` points at the in-cluster collector
+  (`otel-collector.avapigw-test.svc:4317`) with an explicit
+  `otlpInsecure: true` — the test collector is plaintext and remote OTLP
+  endpoints now default to TLS.
+- There is intentionally **no `gateway.cache` block**: `gateway.cache` is
+  not rendered by the chart templates (dead value; the schema marks it
+  deprecated). Route-level caching — including Redis Sentinel — is
+  configured through APIRoute/GRPCRoute CRDs in operator mode.
 - The Vault PKI listener certificates request a `host.docker.internal`
   altName. The PKI `test-role` created by
   `test/performance/scripts/setup-vault-k8s.sh --setup-pki` (and kept in sync
   by `test/docker-compose/scripts/setup-vault.sh`) must therefore keep
-  `docker.internal` in its allowed domains — see the sync-contract comments
-  in both scripts.
+  `docker.internal` (and `svc`) in its allowed domains — see the
+  sync-contract comments in both scripts.
 
 ### Enable Operator with CRD-based Configuration
 
@@ -774,7 +906,21 @@ distributed rate limiting (`spec.rateLimit.store: redis` with a
 is enforced for APIRoutes and GraphQLRoutes (gRPC routes keep the in-memory
 limiter); redis route caching is wired for the HTTP APIRoute data path. The
 admission webhook emits a conservative forward-compatibility warning for
-these redis options on kinds other than APIRoute. See the
+these redis options on kinds other than APIRoute.
+
+Recent CRD additions round-tripped to the gateway config: advanced
+request/response transforms (`staticHeaders`, `dynamicHeaders`,
+`injectFields`, `removeFields`, `defaultValues`, `validateBeforeTransform`;
+response `groupFields`/`flattenFields`/`arrayOperations`/`template`/
+`mergeStrategy`), cache tuning (`maxEntries`, `keyConfig`,
+`honorCacheControl`, `negativeCacheTTL` — `keyComponents` is deprecated),
+Redis TLS (`cache.redis.tls`, `rateLimit.redis.tls`,
+`authorization.cache.redis.tls`), a Redis-backed authorization decision
+cache (`authorization.cache.redis`, replacing the deprecated top-level
+`sentinel` shape), structured security headers (`security.hsts`,
+`security.csp`, `referrerPolicy`), and gRPC backend health checks
+(`healthCheck.useGRPC`/`grpcService`/`port`). Fields the gateway does not
+consume yet are admitted with "accepted but not applied" warnings. See the
 [CRD reference](../../docs/crd-reference.md) for the full schema.
 
 ```yaml

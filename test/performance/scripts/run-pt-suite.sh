@@ -75,8 +75,11 @@ queries = {
   "grpc_stream_active": "sum(gateway_grpc_stream_active)",
   "grpc_stream_msgs_sent": "sum(gateway_grpc_stream_messages_sent_total)",
   "grpc_ratelimit_rejected": "sum(gateway_grpc_proxy_rate_limit_rejected_total)",
-  # rate limiting: route-level ratelimit hits (redis sentinel backed)
+  # rate limiting: route-level ratelimit hits (redis sentinel backed) + the
+  # redis middleware allowed/denied counters that prove SENTINEL liveness
   "route_ratelimit_hits": "sum(gateway_route_ratelimit_hits_total)",
+  "redis_rl_allowed": "sum(gateway_middleware_redis_rate_limit_allowed_total)",
+  "redis_rl_denied": "sum(gateway_middleware_redis_rate_limit_denied_total)",
   # websocket: real ws connection counter (no gateway_websocket_proxy_connections_total)
   "ws_connections": "sum(gateway_ws_connections_total)",
   "ws_connections_active": "sum(gateway_ws_connections_active)",
@@ -84,9 +87,14 @@ queries = {
   "transform_count": "sum(gateway_transform_operations_total)",
   "encoding_count": "sum(gateway_encoding_encode_total)",
   "cors_count": "sum(gateway_middleware_cors_requests_total)",
-  # openapi: gateway emits no dedicated openapi validation counter on this build;
-  # verify openapi-validated route liveness via its per-route request counter.
+  # openapi: this build HAS dedicated validation counters (internal/openapi/metrics.go)
+  "openapi_validation_requests": "sum(gateway_openapi_validation_requests_total)",
+  "openapi_validation_errors": "sum(gateway_openapi_validation_errors_total)",
   "openapi_route_requests": 'sum(gateway_route_requests_total{route=~".*(validated|openapi).*"})',
+  # TLS handshakes (new histogram in this build) + auth + graphql counters
+  "tls_handshake_count": "sum(gateway_tls_handshake_duration_seconds_count)",
+  "graphql_requests": "sum(avapigw_graphql_requests_total)",
+  "operator_active_gateways": "avapigw_operator_grpc_active_gateways",
 }
 res = {}
 for k, q in queries.items():

@@ -64,7 +64,8 @@ func TestBuildOTLPExporterOptions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			opts := buildOTLPExporterOptions(tt.cfg)
+			opts, err := buildOTLPExporterOptions(tt.cfg)
+			assert.NoError(t, err)
 			assert.NotNil(t, opts)
 			assert.Greater(t, len(opts), 0)
 		})
@@ -472,8 +473,9 @@ func TestBuildOTLPExporterOptions_WithTLS(t *testing.T) {
 	certFile, keyFile, caFile := generateTestCert(t, dir)
 
 	tests := []struct {
-		name string
-		cfg  TracerConfig
+		name    string
+		cfg     TracerConfig
+		wantErr bool
 	}{
 		{
 			name: "insecure mode",
@@ -506,7 +508,7 @@ func TestBuildOTLPExporterOptions_WithTLS(t *testing.T) {
 			},
 		},
 		{
-			name: "TLS with invalid cert files (falls through to system default)",
+			name: "TLS with invalid cert files (hard error, no silent fallback)",
 			cfg: TracerConfig{
 				ServiceName:     "test-service",
 				OTLPEndpoint:    "localhost:4317",
@@ -515,6 +517,7 @@ func TestBuildOTLPExporterOptions_WithTLS(t *testing.T) {
 				OTLPTLSKeyFile:  "/nonexistent/key.pem",
 				Enabled:         true,
 			},
+			wantErr: true,
 		},
 	}
 
@@ -522,7 +525,12 @@ func TestBuildOTLPExporterOptions_WithTLS(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			opts := buildOTLPExporterOptions(tt.cfg)
+			opts, err := buildOTLPExporterOptions(tt.cfg)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
 			assert.NotNil(t, opts)
 			assert.Greater(t, len(opts), 0)
 		})

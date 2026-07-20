@@ -2,6 +2,7 @@
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -267,13 +268,114 @@ type TransformConfig struct {
 }
 
 // RequestTransform represents request transformation configuration.
+// The JSON shape matches the gateway's request transform configuration so it
+// round-trips to the data plane unchanged.
 type RequestTransform struct {
 	// Template is a Go template for transforming the request body.
 	// +optional
 	Template string `json:"template,omitempty"`
+
+	// PassthroughBody passes the request body unchanged to the backend.
+	// +optional
+	PassthroughBody bool `json:"passthroughBody,omitempty"`
+
+	// StaticHeaders defines headers to add with static values.
+	// +optional
+	StaticHeaders map[string]string `json:"staticHeaders,omitempty"`
+
+	// DynamicHeaders defines headers to add with values sourced from request
+	// context (e.g. JWT claims or request metadata).
+	// +optional
+	DynamicHeaders []TransformDynamicHeader `json:"dynamicHeaders,omitempty"`
+
+	// InjectFields defines fields to inject into the request body.
+	// +optional
+	InjectFields []TransformFieldInjection `json:"injectFields,omitempty"`
+
+	// RemoveFields specifies fields to remove from the request body.
+	// Uses dot notation for nested fields.
+	// +optional
+	RemoveFields []string `json:"removeFields,omitempty"`
+
+	// DefaultValues defines default values for request body fields when the
+	// field is not present. Values may be any valid JSON value.
+	// +optional
+	DefaultValues map[string]apiextensionsv1.JSON `json:"defaultValues,omitempty"`
+
+	// ValidateBeforeTransform validates the request before transformation.
+	// +optional
+	ValidateBeforeTransform bool `json:"validateBeforeTransform,omitempty"`
+}
+
+// TransformDynamicHeader defines a header whose value is sourced from
+// request context.
+type TransformDynamicHeader struct {
+	// Name is the header name.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Source is the context path of the value.
+	// Examples: "jwt.claim.sub", "context.request_id", "metadata.key".
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Source string `json:"source"`
+}
+
+// TransformFieldInjection defines a field to inject into the request body.
+type TransformFieldInjection struct {
+	// Field is the dot-notation path where the value is injected.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Field string `json:"field"`
+
+	// Value is a static JSON value to inject.
+	// +optional
+	Value *apiextensionsv1.JSON `json:"value,omitempty"`
+
+	// Source is the context path of a dynamic value.
+	// Examples: "jwt.claim.sub", "context.request_id".
+	// +optional
+	Source string `json:"source,omitempty"`
+}
+
+// TransformFieldGroup groups multiple fields into a nested object.
+type TransformFieldGroup struct {
+	// Name is the name of the new nested object.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Fields is the list of field paths to include in the group.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	Fields []string `json:"fields"`
+}
+
+// TransformArrayOperation defines an operation to perform on an array field.
+type TransformArrayOperation struct {
+	// Field is the dot-notation path to the array field.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Field string `json:"field"`
+
+	// Operation is the type of operation to perform.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=append;prepend;filter;sort;limit;deduplicate
+	Operation string `json:"operation"`
+
+	// Value is the JSON value used by append/prepend/sort/limit operations.
+	// +optional
+	Value *apiextensionsv1.JSON `json:"value,omitempty"`
+
+	// Condition is a CEL expression for filter operations.
+	// +optional
+	Condition string `json:"condition,omitempty"`
 }
 
 // ResponseTransform represents response transformation configuration.
+// The JSON shape matches the gateway's response transform configuration so it
+// round-trips to the data plane unchanged.
 type ResponseTransform struct {
 	// AllowFields is the list of fields to allow in the response.
 	// +optional
@@ -286,6 +388,29 @@ type ResponseTransform struct {
 	// FieldMappings maps field names.
 	// +optional
 	FieldMappings map[string]string `json:"fieldMappings,omitempty"`
+
+	// GroupFields defines how to group multiple fields into nested objects.
+	// +optional
+	GroupFields []TransformFieldGroup `json:"groupFields,omitempty"`
+
+	// FlattenFields specifies nested objects to flatten into the parent.
+	// Uses dot notation (e.g. "metadata" flattens metadata.* to root level).
+	// +optional
+	FlattenFields []string `json:"flattenFields,omitempty"`
+
+	// ArrayOperations defines operations to perform on array fields.
+	// +optional
+	ArrayOperations []TransformArrayOperation `json:"arrayOperations,omitempty"`
+
+	// Template is a Go template string for custom response formatting.
+	// When set, it overrides other transformation rules.
+	// +optional
+	Template string `json:"template,omitempty"`
+
+	// MergeStrategy defines how to merge responses from multiple backends.
+	// +kubebuilder:validation:Enum=deep;shallow;replace;ndjson
+	// +optional
+	MergeStrategy string `json:"mergeStrategy,omitempty"`
 }
 
 // CacheConfig represents caching configuration.
@@ -299,12 +424,33 @@ type CacheConfig struct {
 	TTL Duration `json:"ttl,omitempty"`
 
 	// KeyComponents are the components used to generate the cache key.
+	//
+	// Deprecated: the gateway has no corresponding option and ignores this
+	// field. Use KeyConfig instead; setting KeyComponents produces an
+	// admission warning.
 	// +optional
 	KeyComponents []string `json:"keyComponents,omitempty"`
+
+	// MaxEntries is the maximum number of entries for the memory cache.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxEntries int `json:"maxEntries,omitempty"`
+
+	// KeyConfig configures cache key generation.
+	// +optional
+	KeyConfig *CacheKeyConfig `json:"keyConfig,omitempty"`
+
+	// HonorCacheControl respects Cache-Control headers when caching.
+	// +optional
+	HonorCacheControl bool `json:"honorCacheControl,omitempty"`
 
 	// StaleWhileRevalidate allows serving stale content while revalidating.
 	// +optional
 	StaleWhileRevalidate Duration `json:"staleWhileRevalidate,omitempty"`
+
+	// NegativeCacheTTL is the time-to-live for caching error responses.
+	// +optional
+	NegativeCacheTTL Duration `json:"negativeCacheTTL,omitempty"`
 
 	// Type is the cache backend type (memory, redis).
 	// +kubebuilder:validation:Enum=memory;redis
@@ -316,6 +462,36 @@ type CacheConfig struct {
 	// Required when Type is "redis"; must be omitted otherwise.
 	// +optional
 	Redis *RedisCacheSpec `json:"redis,omitempty"`
+}
+
+// CacheKeyConfig configures cache key generation. The JSON shape matches the
+// gateway's cache key configuration so it round-trips to the data plane
+// unchanged.
+type CacheKeyConfig struct {
+	// IncludeMethod includes the HTTP method in the cache key.
+	// +optional
+	IncludeMethod bool `json:"includeMethod,omitempty"`
+
+	// IncludePath includes the request path in the cache key.
+	// +optional
+	IncludePath bool `json:"includePath,omitempty"`
+
+	// IncludeQueryParams specifies query parameters to include in the cache key.
+	// +optional
+	IncludeQueryParams []string `json:"includeQueryParams,omitempty"`
+
+	// IncludeHeaders specifies headers to include in the cache key.
+	// +optional
+	IncludeHeaders []string `json:"includeHeaders,omitempty"`
+
+	// IncludeBodyHash includes a hash of the request body in the cache key.
+	// +optional
+	IncludeBodyHash bool `json:"includeBodyHash,omitempty"`
+
+	// KeyTemplate is a custom template for generating cache keys.
+	// Supports placeholders: {{.Method}}, {{.Path}}, {{.Query.param}}, {{.Header.name}}
+	// +optional
+	KeyTemplate string `json:"keyTemplate,omitempty"`
 }
 
 // EncodingConfig represents encoding configuration.

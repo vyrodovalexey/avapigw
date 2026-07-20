@@ -78,7 +78,12 @@ CORS → MaxSessions → CircuitBreaker → RateLimit → Auth → [proxy]
 4. **Tracing** - OpenTelemetry distributed tracing
 5. **Audit** - Security audit logging
 6. **Metrics** - Prometheus metrics collection
-7. **CORS** - Cross-Origin Resource Sharing headers
+7. **CORS** - Cross-Origin Resource Sharing headers. The global CORS
+   middleware **skips requests that match a route with its own `cors` block**
+   (via a route-matching skipper predicate shared with the reverse proxy), so
+   route-level CORS takes precedence end-to-end — including preflight
+   `OPTIONS`, which would otherwise be answered by the global layer before
+   the route chain runs
 8. **MaxSessions** - Concurrent connection limiting
 9. **CircuitBreaker** - Circuit breaker pattern for fault tolerance
 10. **RateLimit** - Token bucket rate limiting
@@ -101,7 +106,8 @@ OpenAPI Validation → Headers → Cache → Transform → Encoding → [proxy t
 2. **Authz** - Route-level authorization (RBAC, ABAC, external); same fail-closed behavior
 3. **RateLimit** - Route-level rate limiting (memory or distributed redis store); runs after auth so unauthenticated requests get 401 before 429
 4. **Security Headers** - Security header injection (X-Frame-Options, CSP, etc.)
-5. **CORS** - Route-specific CORS configuration (overrides global)
+5. **CORS** - Route-specific CORS configuration (fully overrides global,
+   including preflight — see [CORS Authority Semantics](#cors-authority-semantics))
 6. **Body Limit** - Request body size limits (route-specific)
 7. **OpenAPI Validation** - Request validation against the route's OpenAPI spec
 8. **Headers** - Request/response header manipulation
@@ -260,6 +266,39 @@ spec:
         allowOrigins: ["https://trusted.example.com"]
         allowMethods: ["GET"]  # More restrictive than global
 ```
+
+### CORS Authority Semantics
+
+The configured CORS policy is **authoritative** for the `Access-Control-*`
+response headers:
+
+- **Preflight**: `OPTIONS` preflight requests are answered entirely by the
+  gateway's CORS middleware; the inner handler (and backend) never runs.
+- **Actual requests**: just before response headers are written, CORS
+  headers produced by inner handlers — proxied **backend responses** in
+  particular — are stripped and replaced by the gateway's own grant
+  decision. A denied origin can therefore never receive a backend-issued
+  grant through the gateway. Routes with **no** CORS policy at all have no
+  CORS middleware in their chain, and backend CORS headers pass through
+  untouched.
+- **Vary merging**: the gateway appends `Origin` to the `Vary` header
+  without discarding backend `Vary` members (e.g. `Accept-Encoding`) —
+  `Vary` has broader caching semantics than CORS, so it is merged, never
+  replaced.
+- **Route over global, including preflight**: the global CORS middleware
+  steps aside (skipper predicate matched against the live HTTP and GraphQL
+  routers, hot-reload safe) for any request matching a route with its own
+  `cors` block. The route chain's CORS middleware then owns preflight and
+  header authority for that route. Routes without a route-level policy fall
+  back to the global config through the same single-grant-authority
+  mechanism. The extra route match per request runs only when a global CORS
+  policy is configured.
+- **`directResponse` routes**: direct responses are served **through the
+  route middleware chain** (previously they bypassed it entirely), so CORS,
+  security headers, authentication, and rate limits apply to
+  direct-response routes exactly as to proxied ones. The configured
+  status/body/header semantics are unchanged. Aggregate (fan-out) routes
+  share the same wrapping.
 
 ### Configuration Inheritance Hierarchy
 

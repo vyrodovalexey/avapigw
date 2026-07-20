@@ -60,6 +60,11 @@ spec:
             - name: https
               containerPort: {{ .Values.service.httpsPort | default 8443 }}
               protocol: TCP
+            {{- if include "avapigw.gateway.plainHTTPAlongsideTLS" . }}
+            - name: http
+              containerPort: {{ .Values.gateway.listeners.http.port | default 8080 }}
+              protocol: TCP
+            {{- end }}
             {{- else }}
             - name: http
               containerPort: {{ .Values.service.httpPort }}
