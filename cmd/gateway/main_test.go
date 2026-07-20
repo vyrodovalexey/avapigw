@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -851,22 +852,18 @@ func TestRunMetricsServer_ServerClosed(t *testing.T) {
 }
 
 func TestParseFlags_Defaults(t *testing.T) {
-	// Save original args and restore after test
-	origArgs := os.Args
-	defer func() { os.Args = origArgs }()
-
 	// Clear environment variables that might affect defaults
 	os.Unsetenv("GATEWAY_CONFIG_PATH")
 	os.Unsetenv("GATEWAY_LOG_LEVEL")
 	os.Unsetenv("GATEWAY_LOG_FORMAT")
 
-	// Set minimal args
-	os.Args = []string{"gateway"}
+	// Parse against a local FlagSet with explicit (empty) arguments: tests
+	// must never mutate flag.CommandLine or os.Args, which carry the
+	// -test.* flags registered by the testing framework under go test.
+	fs := flag.NewFlagSet("gateway-test", flag.ContinueOnError)
 
-	// Reset flag.CommandLine to allow re-parsing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-
-	flags := parseFlags()
+	flags, err := parseFlagsFrom(fs, []string{})
+	require.NoError(t, err)
 
 	assert.Equal(t, "configs/gateway.yaml", flags.configPath)
 	assert.Equal(t, "info", flags.logLevel)
@@ -875,10 +872,6 @@ func TestParseFlags_Defaults(t *testing.T) {
 }
 
 func TestParseFlags_WithEnvVars(t *testing.T) {
-	// Save original args and restore after test
-	origArgs := os.Args
-	defer func() { os.Args = origArgs }()
-
 	// Set environment variables
 	os.Setenv("GATEWAY_CONFIG_PATH", "/custom/config.yaml")
 	os.Setenv("GATEWAY_LOG_LEVEL", "debug")
@@ -889,13 +882,11 @@ func TestParseFlags_WithEnvVars(t *testing.T) {
 		os.Unsetenv("GATEWAY_LOG_FORMAT")
 	}()
 
-	// Set minimal args
-	os.Args = []string{"gateway"}
+	// Parse against a local FlagSet with explicit (empty) arguments.
+	fs := flag.NewFlagSet("gateway-test", flag.ContinueOnError)
 
-	// Reset flag.CommandLine to allow re-parsing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-
-	flags := parseFlags()
+	flags, err := parseFlagsFrom(fs, []string{})
+	require.NoError(t, err)
 
 	assert.Equal(t, "/custom/config.yaml", flags.configPath)
 	assert.Equal(t, "debug", flags.logLevel)
@@ -903,33 +894,38 @@ func TestParseFlags_WithEnvVars(t *testing.T) {
 }
 
 func TestParseFlags_WithCommandLineArgs(t *testing.T) {
-	// Save original args and restore after test
-	origArgs := os.Args
-	defer func() { os.Args = origArgs }()
-
 	// Clear environment variables
 	os.Unsetenv("GATEWAY_CONFIG_PATH")
 	os.Unsetenv("GATEWAY_LOG_LEVEL")
 	os.Unsetenv("GATEWAY_LOG_FORMAT")
 
-	// Set command line args
-	os.Args = []string{
-		"gateway",
+	// Parse explicit arguments against a local FlagSet.
+	fs := flag.NewFlagSet("gateway-test", flag.ContinueOnError)
+
+	flags, err := parseFlagsFrom(fs, []string{
 		"-config", "/path/to/config.yaml",
 		"-log-level", "warn",
 		"-log-format", "console",
 		"-version",
-	}
-
-	// Reset flag.CommandLine to allow re-parsing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-
-	flags := parseFlags()
+	})
+	require.NoError(t, err)
 
 	assert.Equal(t, "/path/to/config.yaml", flags.configPath)
 	assert.Equal(t, "warn", flags.logLevel)
 	assert.Equal(t, "console", flags.logFormat)
 	assert.True(t, flags.showVersion)
+}
+
+func TestParseFlagsFrom_ParseError(t *testing.T) {
+	// An unknown flag must surface as an error (ContinueOnError FlagSet)
+	// instead of terminating the process.
+	fs := flag.NewFlagSet("gateway-test", flag.ContinueOnError)
+	fs.SetOutput(&strings.Builder{}) // silence usage output
+
+	flags, err := parseFlagsFrom(fs, []string{"-definitely-not-a-flag=1"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parsing flags")
+	assert.Equal(t, cliFlags{}, flags)
 }
 
 func TestLoadAndValidateConfig_ValidConfig(t *testing.T) {

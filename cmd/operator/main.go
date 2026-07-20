@@ -303,7 +303,8 @@ func run() error {
 }
 
 // runWithConfig is the main orchestration function that accepts a REST config.
-// When restConfig is nil, it uses ctrl.GetConfigOrDie() (production mode).
+// When restConfig is nil, it is resolved via the getRESTConfig seam
+// (ctrl.GetConfigOrDie in production, a fake config in tests).
 // This separation enables unit testing without a real Kubernetes cluster.
 func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	// Setup logging
@@ -376,6 +377,13 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	return nil
 }
 
+// getRESTConfig resolves the Kubernetes REST configuration when none was
+// supplied by the caller. It defaults to ctrl.GetConfigOrDie, which
+// terminates the process when neither a kubeconfig nor an in-cluster
+// environment is available. It is a package-level variable so tests can
+// substitute a fake config and keep the nil-restConfig fallback hermetic.
+var getRESTConfig = ctrl.GetConfigOrDie
+
 // setupCertManagerAndControllerManager initializes the certificate manager,
 // writes webhook TLS certificates if needed, and creates the controller-runtime manager.
 func setupCertManagerAndControllerManager(
@@ -386,7 +394,7 @@ func setupCertManagerAndControllerManager(
 	// Resolve the REST config once: it is shared by the certificate
 	// manager (Secret persistence client) and the controller manager.
 	if restConfig == nil {
-		restConfig = ctrl.GetConfigOrDie()
+		restConfig = getRESTConfig()
 	}
 
 	certManager, err := setupCertManager(ctx, cfg, restConfig)
@@ -721,8 +729,9 @@ func setupTracingIfEnabled(cfg *Config) (func(), error) {
 }
 
 // createManagerWithConfig creates the controller-runtime manager using the provided REST config.
-// The REST config is resolved by setupCertManagerAndControllerManager (production:
-// ctrl.GetConfigOrDie; tests: a fake API server config).
+// The REST config is resolved by setupCertManagerAndControllerManager via the
+// getRESTConfig seam (production: ctrl.GetConfigOrDie; tests: a fake API
+// server config).
 func createManagerWithConfig(restConfig *rest.Config, cfg *Config) (ctrl.Manager, error) {
 	webhookOpts := webhook.Options{
 		Port: cfg.WebhookPort,
@@ -864,92 +873,112 @@ func startGRPCServerBackground(ctx context.Context, grpcServer *operatorgrpc.Ser
 	}()
 }
 
+// parseFlags parses the operator configuration from the process command
+// line (flag.CommandLine and os.Args[1:]) and applies environment variable
+// overrides. flag.CommandLine uses ExitOnError handling, so an invalid
+// command line terminates the process exactly as the previous flag.Parse
+// call did and the parse error can never propagate here. Tests must use
+// parseFlagsFrom with a local FlagSet and explicit arguments instead of
+// mutating the global flag state.
 func parseFlags() *Config {
-	cfg := &Config{}
-
-	defineFlags(cfg)
-	flag.Parse()
-	applyEnvOverrides(cfg)
-
+	cfg, _ := parseFlagsFrom(flag.CommandLine, os.Args[1:])
 	return cfg
 }
 
-func defineFlags(cfg *Config) {
-	flag.StringVar(&cfg.MetricsAddr, "metrics-bind-address", ":8080",
+// parseFlagsFrom registers the operator flags on fs, parses args against
+// it, and applies environment variable overrides (environment values take
+// precedence over parsed flag values). Injecting the FlagSet and argument
+// list keeps flag handling unit-testable without touching flag.CommandLine,
+// which carries the testing framework's -test.* flag definitions during
+// `go test` runs and must never be replaced or re-parsed by tests.
+func parseFlagsFrom(fs *flag.FlagSet, args []string) (*Config, error) {
+	cfg := &Config{}
+	registerFlags(fs, cfg)
+	if err := fs.Parse(args); err != nil {
+		return nil, fmt.Errorf("parsing flags: %w", err)
+	}
+	applyEnvOverrides(cfg)
+	return cfg, nil
+}
+
+// registerFlags defines all operator flags on the given FlagSet, binding
+// them to the corresponding Config fields.
+func registerFlags(fs *flag.FlagSet, cfg *Config) {
+	fs.StringVar(&cfg.MetricsAddr, "metrics-bind-address", ":8080",
 		"The address the metric endpoint binds to.")
-	flag.StringVar(&cfg.ProbeAddr, "health-probe-bind-address", ":8081",
+	fs.StringVar(&cfg.ProbeAddr, "health-probe-bind-address", ":8081",
 		"The address the probe endpoint binds to.")
-	flag.BoolVar(&cfg.EnableLeaderElection, "leader-elect", false,
+	fs.BoolVar(&cfg.EnableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager.")
-	flag.StringVar(&cfg.LeaderElectionID, "leader-election-id",
+	fs.StringVar(&cfg.LeaderElectionID, "leader-election-id",
 		"avapigw-operator-leader.avapigw.io",
 		"The name of the resource that leader election will use for holding the leader lock.")
-	flag.IntVar(&cfg.WebhookPort, "webhook-port", 9443,
+	fs.IntVar(&cfg.WebhookPort, "webhook-port", 9443,
 		"The port that the webhook server serves at.")
-	flag.StringVar(&cfg.WebhookCertDir, "webhook-cert-dir", "",
+	fs.StringVar(&cfg.WebhookCertDir, "webhook-cert-dir", "",
 		"The directory containing TLS certificates for the webhook server. "+
 			"If empty, certificates are generated from the cert manager.")
-	flag.StringVar(&cfg.WebhookConfigName, "webhook-config-name", defaultWebhookConfigName,
+	fs.StringVar(&cfg.WebhookConfigName, "webhook-config-name", defaultWebhookConfigName,
 		"The name of the ValidatingWebhookConfiguration resource.")
-	flag.IntVar(&cfg.GRPCPort, "grpc-port", 9444,
+	fs.IntVar(&cfg.GRPCPort, "grpc-port", 9444,
 		"The port that the gRPC server serves at.")
-	flag.StringVar(&cfg.CertProvider, "cert-provider", "selfsigned",
+	fs.StringVar(&cfg.CertProvider, "cert-provider", "selfsigned",
 		"The certificate provider (selfsigned, vault, file, cert-manager).")
-	flag.StringVar(&cfg.CertFile, "cert-file", "",
+	fs.StringVar(&cfg.CertFile, "cert-file", "",
 		"Path to the PEM serving certificate (file provider).")
-	flag.StringVar(&cfg.KeyFile, "key-file", "",
+	fs.StringVar(&cfg.KeyFile, "key-file", "",
 		"Path to the PEM private key (file provider).")
-	flag.StringVar(&cfg.CACertFile, "ca-file", "",
+	fs.StringVar(&cfg.CACertFile, "ca-file", "",
 		"Path to the PEM CA bundle (file provider, optional).")
-	flag.StringVar(&cfg.CertSecretName, "cert-secret-name", "",
+	fs.StringVar(&cfg.CertSecretName, "cert-secret-name", "",
 		"Kubernetes Secret used by the selfsigned provider to persist its CA and "+
 			"serving certificate (empty disables persistence).")
-	flag.StringVar(&cfg.CertSecretNamespace, "cert-secret-namespace", "",
+	fs.StringVar(&cfg.CertSecretNamespace, "cert-secret-namespace", "",
 		"Namespace of the certificate persistence Secret "+
 			"(defaults to POD_NAMESPACE, then the cert namespace).")
-	flag.StringVar(&cfg.VaultAddr, "vault-addr", "",
+	fs.StringVar(&cfg.VaultAddr, "vault-addr", "",
 		"The Vault server address.")
-	flag.StringVar(&cfg.VaultPKIMount, "vault-pki-mount", "pki",
+	fs.StringVar(&cfg.VaultPKIMount, "vault-pki-mount", "pki",
 		"The Vault PKI mount path.")
-	flag.StringVar(&cfg.VaultPKIRole, "vault-pki-role", "operator",
+	fs.StringVar(&cfg.VaultPKIRole, "vault-pki-role", "operator",
 		"The Vault PKI role name.")
-	flag.StringVar(&cfg.VaultK8sRole, "vault-k8s-role", "",
+	fs.StringVar(&cfg.VaultK8sRole, "vault-k8s-role", "",
 		"The Vault role for Kubernetes authentication.")
-	flag.StringVar(&cfg.VaultK8sMountPath, "vault-k8s-mount-path", "kubernetes",
+	fs.StringVar(&cfg.VaultK8sMountPath, "vault-k8s-mount-path", "kubernetes",
 		"The mount path for the Kubernetes auth method.")
-	flag.StringVar(&cfg.LogLevel, "log-level", "info",
+	fs.StringVar(&cfg.LogLevel, "log-level", "info",
 		"The log level (debug, info, warn, error).")
-	flag.StringVar(&cfg.LogFormat, "log-format", "json",
+	fs.StringVar(&cfg.LogFormat, "log-format", "json",
 		"The log format (json, console).")
-	flag.BoolVar(&cfg.EnableWebhooks, "enable-webhooks", true,
+	fs.BoolVar(&cfg.EnableWebhooks, "enable-webhooks", true,
 		"Enable admission webhooks.")
-	flag.BoolVar(&cfg.EnableGRPCServer, "enable-grpc-server", true,
+	fs.BoolVar(&cfg.EnableGRPCServer, "enable-grpc-server", true,
 		"Enable the gRPC configuration server.")
-	flag.BoolVar(&cfg.GRPCRequireClientCert, "grpc-require-client-cert", false,
+	fs.BoolVar(&cfg.GRPCRequireClientCert, "grpc-require-client-cert", false,
 		"Require client certificates for gRPC connections (mTLS). When false, uses server-side TLS only.")
-	flag.BoolVar(&cfg.EnableTracing, "enable-tracing", false,
+	fs.BoolVar(&cfg.EnableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing.")
-	flag.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "",
+	fs.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "",
 		"The OTLP exporter endpoint (e.g., localhost:4317).")
-	flag.Float64Var(&cfg.TracingSamplingRate, "tracing-sampling-rate", 1.0,
+	fs.Float64Var(&cfg.TracingSamplingRate, "tracing-sampling-rate", 1.0,
 		"The sampling rate for tracing (0.0 to 1.0).")
-	flag.DurationVar(&cfg.VaultInitTimeout, "vault-init-timeout", 30*time.Second,
+	fs.DurationVar(&cfg.VaultInitTimeout, "vault-init-timeout", 30*time.Second,
 		"The timeout for Vault certificate manager initialization.")
-	flag.StringVar(&cfg.CertServiceName, "cert-service-name", "avapigw-operator",
+	fs.StringVar(&cfg.CertServiceName, "cert-service-name", "avapigw-operator",
 		"The service name for generating default certificate DNS names.")
-	flag.StringVar(&cfg.CertNamespace, "cert-namespace", "avapigw-system",
+	fs.StringVar(&cfg.CertNamespace, "cert-namespace", "avapigw-system",
 		"The namespace for generating default certificate DNS names.")
-	flag.BoolVar(&cfg.EnableIngressController, "enable-ingress-controller", false,
+	fs.BoolVar(&cfg.EnableIngressController, "enable-ingress-controller", false,
 		"Enable the Kubernetes Ingress controller.")
-	flag.StringVar(&cfg.IngressClassName, "ingress-class-name", controller.DefaultIngressClassName,
+	fs.StringVar(&cfg.IngressClassName, "ingress-class-name", controller.DefaultIngressClassName,
 		"The IngressClass name this controller handles.")
-	flag.StringVar(&cfg.IngressLBAddress, "ingress-lb-address", "",
+	fs.StringVar(&cfg.IngressLBAddress, "ingress-lb-address", "",
 		"The load balancer address (IP or hostname) to set on Ingress status.")
-	flag.BoolVar(&cfg.EnableClusterWideDuplicateCheck, "enable-cluster-wide-duplicate-check", false,
+	fs.BoolVar(&cfg.EnableClusterWideDuplicateCheck, "enable-cluster-wide-duplicate-check", false,
 		"Enable cluster-wide duplicate detection for webhooks (default: namespace-scoped).")
-	flag.BoolVar(&cfg.DuplicateCacheEnabled, "duplicate-cache-enabled", true,
+	fs.BoolVar(&cfg.DuplicateCacheEnabled, "duplicate-cache-enabled", true,
 		"Enable caching for duplicate detection.")
-	flag.DurationVar(&cfg.DuplicateCacheTTL, "duplicate-cache-ttl", 30*time.Second,
+	fs.DurationVar(&cfg.DuplicateCacheTTL, "duplicate-cache-ttl", 30*time.Second,
 		"TTL for duplicate detection cache entries.")
 }
 

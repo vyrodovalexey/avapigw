@@ -236,10 +236,57 @@ func TestSetupCertManagerAndControllerManager_CertManagerError(t *testing.T) {
 		VaultInitTimeout: 1,
 	}
 
+	// Pass a fake REST config (like the sibling tests below) so the test is
+	// hermetic: a nil restConfig would fall back to getRESTConfig /
+	// ctrl.GetConfigOrDie, which os.Exit(1)s in environments without a
+	// kubeconfig or in-cluster config (e.g. CI).
+	restConfig := &rest.Config{Host: "https://127.0.0.1:1"}
+
 	ctx := context.Background()
-	_, _, err := setupCertManagerAndControllerManager(ctx, cfg, nil)
+	_, _, err := setupCertManagerAndControllerManager(ctx, cfg, restConfig)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unable to setup certificate manager")
+}
+
+func TestSetupCertManagerAndControllerManager_NilRESTConfigFallback(t *testing.T) {
+	// Cover the nil-restConfig branch hermetically by swapping the
+	// getRESTConfig seam for a stub returning a fake API server config,
+	// instead of depending on a developer kubeconfig (ctrl.GetConfigOrDie
+	// would terminate the process when none is available).
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"kind":"APIVersions","versions":["v1"]}`))
+	}))
+	defer ts.Close()
+
+	origGetRESTConfig := getRESTConfig
+	t.Cleanup(func() { getRESTConfig = origGetRESTConfig })
+
+	seamCalls := 0
+	getRESTConfig = func() *rest.Config {
+		seamCalls++
+		return &rest.Config{Host: ts.URL}
+	}
+
+	cfg := &Config{
+		CertProvider:         "selfsigned",
+		EnableWebhooks:       false,
+		MetricsAddr:          "0",
+		ProbeAddr:            "0",
+		EnableLeaderElection: false,
+		WebhookPort:          0,
+	}
+
+	ctx := context.Background()
+	certMgr, mgr, err := setupCertManagerAndControllerManager(ctx, cfg, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, certMgr)
+	assert.NotNil(t, mgr)
+	assert.Equal(t, 1, seamCalls, "nil restConfig must be resolved exactly once via getRESTConfig")
+
+	if certMgr != nil {
+		certMgr.Close()
+	}
 }
 
 func TestSetupCertManagerAndControllerManager_WithWebhooksEnabled(t *testing.T) {

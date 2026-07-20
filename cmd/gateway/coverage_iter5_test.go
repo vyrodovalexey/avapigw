@@ -713,10 +713,6 @@ func TestGatewayConfigApplier_ApplyFullConfig_RouteError(t *testing.T) {
 // ============================================================
 
 func TestParseFlags_OperatorModeFlags(t *testing.T) {
-	// Save original args and restore after test
-	origArgs := os.Args
-	defer func() { os.Args = origArgs }()
-
 	// Clear environment variables
 	envVars := []string{
 		"GATEWAY_CONFIG_PATH", "GATEWAY_LOG_LEVEL", "GATEWAY_LOG_FORMAT",
@@ -728,9 +724,12 @@ func TestParseFlags_OperatorModeFlags(t *testing.T) {
 		os.Unsetenv(key)
 	}
 
-	// Set command line args with operator mode flags
-	os.Args = []string{
-		"gateway",
+	// Parse explicit operator-mode arguments against a local FlagSet:
+	// tests must never mutate flag.CommandLine or os.Args, which carry
+	// the -test.* flags registered by the testing framework.
+	fs := flag.NewFlagSet("gateway-test", flag.ContinueOnError)
+
+	flags, err := parseFlagsFrom(fs, []string{
 		"-operator-mode",
 		"-operator-address", "localhost:9444",
 		"-gateway-name", "my-gateway",
@@ -740,12 +739,8 @@ func TestParseFlags_OperatorModeFlags(t *testing.T) {
 		"-operator-cert-file", "/path/to/cert.crt",
 		"-operator-key-file", "/path/to/key.key",
 		"-operator-namespaces", "ns1,ns2",
-	}
-
-	// Reset flag.CommandLine to allow re-parsing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-
-	flags := parseFlags()
+	})
+	require.NoError(t, err)
 
 	assert.True(t, flags.operatorMode)
 	assert.Equal(t, "localhost:9444", flags.operatorAddress)
@@ -759,10 +754,6 @@ func TestParseFlags_OperatorModeFlags(t *testing.T) {
 }
 
 func TestParseFlags_OperatorModeEnvVars(t *testing.T) {
-	// Save original args and restore after test
-	origArgs := os.Args
-	defer func() { os.Args = origArgs }()
-
 	// Set environment variables
 	os.Setenv("GATEWAY_OPERATOR_MODE", "true")
 	os.Setenv("GATEWAY_OPERATOR_ADDRESS", "env-operator:9444")
@@ -785,13 +776,12 @@ func TestParseFlags_OperatorModeEnvVars(t *testing.T) {
 		os.Unsetenv("GATEWAY_OPERATOR_NAMESPACES")
 	}()
 
-	// Set minimal args
-	os.Args = []string{"gateway"}
+	// Parse against a local FlagSet with explicit (empty) arguments; the
+	// environment variables feed the flag defaults.
+	fs := flag.NewFlagSet("gateway-test", flag.ContinueOnError)
 
-	// Reset flag.CommandLine to allow re-parsing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-
-	flags := parseFlags()
+	flags, err := parseFlagsFrom(fs, []string{})
+	require.NoError(t, err)
 
 	assert.True(t, flags.operatorMode)
 	assert.Equal(t, "env-operator:9444", flags.operatorAddress)

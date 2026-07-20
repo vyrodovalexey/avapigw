@@ -68,46 +68,64 @@ func main() {
 	runGateway(app, flags.configPath, logger)
 }
 
-// parseFlags parses command line flags.
+// parseFlags parses the gateway configuration from the process command
+// line (flag.CommandLine and os.Args[1:]). flag.CommandLine uses
+// ExitOnError handling, so an invalid command line terminates the process
+// exactly as the previous flag.Parse call did and the parse error can
+// never propagate here. Tests must use parseFlagsFrom with a local FlagSet
+// and explicit arguments instead of mutating the global flag state.
+func parseFlags() cliFlags {
+	flags, _ := parseFlagsFrom(flag.CommandLine, os.Args[1:])
+	return flags
+}
+
+// parseFlagsFrom registers the gateway flags on fs and parses args against
+// it. Environment variables feed the flag defaults, so explicit flags win
+// over the environment. Injecting the FlagSet and argument list keeps flag
+// handling unit-testable without touching flag.CommandLine, which carries
+// the testing framework's -test.* flag definitions during `go test` runs
+// and must never be replaced or re-parsed by tests.
 //
 // Boolean env defaults are parsed before the configured logger exists, so
 // invalid values are reported through the process-wide fallback logger
 // (observability.L()) instead of being silently ignored.
-func parseFlags() cliFlags {
+func parseFlagsFrom(fs *flag.FlagSet, args []string) (cliFlags, error) {
 	envLogger := observability.L()
 
-	configPath := flag.String("config", getEnvOrDefault("GATEWAY_CONFIG_PATH", "configs/gateway.yaml"),
+	configPath := fs.String("config", getEnvOrDefault("GATEWAY_CONFIG_PATH", "configs/gateway.yaml"),
 		"Path to configuration file")
-	logLevel := flag.String("log-level", getEnvOrDefault("GATEWAY_LOG_LEVEL", "info"),
+	logLevel := fs.String("log-level", getEnvOrDefault("GATEWAY_LOG_LEVEL", "info"),
 		"Log level (debug, info, warn, error)")
-	logFormat := flag.String("log-format", getEnvOrDefault("GATEWAY_LOG_FORMAT", "json"),
+	logFormat := fs.String("log-format", getEnvOrDefault("GATEWAY_LOG_FORMAT", "json"),
 		"Log format (json, console)")
-	showVersion := flag.Bool("version", false, "Show version information")
+	showVersion := fs.Bool("version", false, "Show version information")
 
 	// Operator mode flags
-	operatorMode := flag.Bool("operator-mode", getEnvBool("GATEWAY_OPERATOR_MODE", false, envLogger),
+	operatorMode := fs.Bool("operator-mode", getEnvBool("GATEWAY_OPERATOR_MODE", false, envLogger),
 		"Enable operator mode (receive configuration from operator)")
-	operatorAddress := flag.String("operator-address", getEnvOrDefault("GATEWAY_OPERATOR_ADDRESS", ""),
+	operatorAddress := fs.String("operator-address", getEnvOrDefault("GATEWAY_OPERATOR_ADDRESS", ""),
 		"Operator gRPC server address (host:port)")
-	gatewayName := flag.String("gateway-name", getEnvOrDefault("GATEWAY_NAME", ""),
+	gatewayName := fs.String("gateway-name", getEnvOrDefault("GATEWAY_NAME", ""),
 		"Gateway name for operator registration")
-	gatewayNamespace := flag.String("gateway-namespace", getEnvOrDefault("GATEWAY_NAMESPACE", "default"),
+	gatewayNamespace := fs.String("gateway-namespace", getEnvOrDefault("GATEWAY_NAMESPACE", "default"),
 		"Gateway namespace for operator registration")
-	operatorTLS := flag.Bool("operator-tls", getEnvBool("GATEWAY_OPERATOR_TLS", false, envLogger),
+	operatorTLS := fs.Bool("operator-tls", getEnvBool("GATEWAY_OPERATOR_TLS", false, envLogger),
 		"Enable TLS for operator connection")
-	operatorCAFile := flag.String("operator-ca-file", getEnvOrDefault("GATEWAY_OPERATOR_CA_FILE", ""),
+	operatorCAFile := fs.String("operator-ca-file", getEnvOrDefault("GATEWAY_OPERATOR_CA_FILE", ""),
 		"CA certificate file for operator TLS")
-	operatorCertFile := flag.String("operator-cert-file", getEnvOrDefault("GATEWAY_OPERATOR_CERT_FILE", ""),
+	operatorCertFile := fs.String("operator-cert-file", getEnvOrDefault("GATEWAY_OPERATOR_CERT_FILE", ""),
 		"Client certificate file for operator mTLS")
-	operatorKeyFile := flag.String("operator-key-file", getEnvOrDefault("GATEWAY_OPERATOR_KEY_FILE", ""),
+	operatorKeyFile := fs.String("operator-key-file", getEnvOrDefault("GATEWAY_OPERATOR_KEY_FILE", ""),
 		"Client key file for operator mTLS")
-	operatorNamespaces := flag.String("operator-namespaces", getEnvOrDefault("GATEWAY_OPERATOR_NAMESPACES", ""),
+	operatorNamespaces := fs.String("operator-namespaces", getEnvOrDefault("GATEWAY_OPERATOR_NAMESPACES", ""),
 		"Comma-separated list of namespaces to watch (empty = all)")
-	operatorTLSInsecureSkipVerify := flag.Bool("operator-tls-insecure",
+	operatorTLSInsecureSkipVerify := fs.Bool("operator-tls-insecure",
 		getEnvBool("GATEWAY_OPERATOR_TLS_INSECURE", false, envLogger),
 		"Skip TLS certificate verification for operator connection (dev/test only)")
 
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return cliFlags{}, fmt.Errorf("parsing flags: %w", err)
+	}
 
 	return cliFlags{
 		configPath:                    *configPath,
@@ -124,7 +142,7 @@ func parseFlags() cliFlags {
 		operatorKeyFile:               *operatorKeyFile,
 		operatorNamespaces:            *operatorNamespaces,
 		operatorTLSInsecureSkipVerify: *operatorTLSInsecureSkipVerify,
-	}
+	}, nil
 }
 
 // buildOperatorConfig builds the operator client configuration from CLI flags.

@@ -214,14 +214,15 @@ func TestApplyFloat64Env_EmptyValue(t *testing.T) {
 // ============================================================================
 
 func TestDefineFlags_DefaultValues(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Use a local FlagSet: tests must never mutate flag.CommandLine, which
+	// carries the -test.* flags registered by the testing framework.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	// Parse with no arguments to get defaults
-	err := flag.CommandLine.Parse([]string{})
+	err := fs.Parse([]string{})
 	if err != nil {
 		t.Fatalf("Failed to parse flags: %v", err)
 	}
@@ -264,11 +265,11 @@ func TestDefineFlags_DefaultValues(t *testing.T) {
 }
 
 func TestDefineFlags_CustomValues(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Use a local FlagSet instead of mutating flag.CommandLine.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	// Parse with custom arguments
 	args := []string{
@@ -291,7 +292,7 @@ func TestDefineFlags_CustomValues(t *testing.T) {
 		"-ingress-lb-address=10.0.0.100",
 	}
 
-	err := flag.CommandLine.Parse(args)
+	err := fs.Parse(args)
 	if err != nil {
 		t.Fatalf("Failed to parse flags: %v", err)
 	}
@@ -1059,8 +1060,9 @@ func containsString(s, substr string) bool {
 // ============================================================================
 
 func TestParseFlags_ReturnsConfig(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Parse against a local FlagSet with explicit (empty) arguments so the
+	// test never reads os.Args, which carries -test.* flags under go test.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	// Clear environment variables that might affect the test
 	envVars := []string{
@@ -1075,10 +1077,13 @@ func TestParseFlags_ReturnsConfig(t *testing.T) {
 		os.Unsetenv(env)
 	}
 
-	cfg := parseFlags()
+	cfg, err := parseFlagsFrom(fs, []string{})
+	if err != nil {
+		t.Fatalf("parseFlagsFrom() error = %v, want nil", err)
+	}
 
 	if cfg == nil {
-		t.Fatal("parseFlags() returned nil")
+		t.Fatal("parseFlagsFrom() returned nil")
 	}
 
 	// Verify default values are set
@@ -1097,8 +1102,8 @@ func TestParseFlags_ReturnsConfig(t *testing.T) {
 }
 
 func TestParseFlags_WithEnvOverrides(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Parse against a local FlagSet with explicit arguments.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	// Set environment variables
 	os.Setenv("METRICS_BIND_ADDRESS", ":9090")
@@ -1106,10 +1111,13 @@ func TestParseFlags_WithEnvOverrides(t *testing.T) {
 	defer os.Unsetenv("METRICS_BIND_ADDRESS")
 	defer os.Unsetenv("LOG_LEVEL")
 
-	cfg := parseFlags()
+	cfg, err := parseFlagsFrom(fs, []string{})
+	if err != nil {
+		t.Fatalf("parseFlagsFrom() error = %v, want nil", err)
+	}
 
 	if cfg == nil {
-		t.Fatal("parseFlags() returned nil")
+		t.Fatal("parseFlagsFrom() returned nil")
 	}
 
 	// Verify env overrides are applied
@@ -1118,6 +1126,50 @@ func TestParseFlags_WithEnvOverrides(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, "debug")
+	}
+}
+
+func TestParseFlagsFrom_EnvOverridesFlagValue(t *testing.T) {
+	// Environment variables take precedence over explicitly passed flags:
+	// applyEnvOverrides runs after fs.Parse, so the env value wins.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
+
+	os.Setenv("METRICS_BIND_ADDRESS", ":7070")
+	os.Setenv("WEBHOOK_PORT", "7443")
+	defer os.Unsetenv("METRICS_BIND_ADDRESS")
+	defer os.Unsetenv("WEBHOOK_PORT")
+
+	cfg, err := parseFlagsFrom(fs, []string{
+		"-metrics-bind-address=:9090",
+		"-webhook-port=8443",
+	})
+	if err != nil {
+		t.Fatalf("parseFlagsFrom() error = %v, want nil", err)
+	}
+
+	if cfg.MetricsAddr != ":7070" {
+		t.Errorf("MetricsAddr = %q, want env override %q over flag value", cfg.MetricsAddr, ":7070")
+	}
+	if cfg.WebhookPort != 7443 {
+		t.Errorf("WebhookPort = %d, want env override %d over flag value", cfg.WebhookPort, 7443)
+	}
+}
+
+func TestParseFlagsFrom_ParseError(t *testing.T) {
+	// An unknown flag must surface as an error (ContinueOnError FlagSet)
+	// instead of terminating the process.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
+	fs.SetOutput(&strings.Builder{}) // silence usage output
+
+	cfg, err := parseFlagsFrom(fs, []string{"-definitely-not-a-flag=1"})
+	if err == nil {
+		t.Fatal("parseFlagsFrom() error = nil, want parse error")
+	}
+	if !strings.Contains(err.Error(), "parsing flags") {
+		t.Errorf("parseFlagsFrom() error = %v, want wrapped parsing error", err)
+	}
+	if cfg != nil {
+		t.Errorf("parseFlagsFrom() cfg = %v, want nil on parse error", cfg)
 	}
 }
 
@@ -1319,8 +1371,8 @@ func TestConfig_ZeroValues(t *testing.T) {
 // ============================================================================
 
 func TestParseFlags_FullFlow(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Parse against a local FlagSet with explicit arguments.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	// Set some env vars
 	os.Setenv("LOG_LEVEL", "warn")
@@ -1328,7 +1380,10 @@ func TestParseFlags_FullFlow(t *testing.T) {
 	defer os.Unsetenv("LOG_LEVEL")
 	defer os.Unsetenv("ENABLE_TRACING")
 
-	cfg := parseFlags()
+	cfg, err := parseFlagsFrom(fs, []string{})
+	if err != nil {
+		t.Fatalf("parseFlagsFrom() error = %v, want nil", err)
+	}
 
 	// Verify env overrides are applied
 	if cfg.LogLevel != "warn" {
@@ -1479,11 +1534,11 @@ func TestApplyEnvOverrides_AllTypes(t *testing.T) {
 }
 
 func TestDefineFlags_AllFlags(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Register on a local FlagSet instead of mutating flag.CommandLine.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	// Verify all flags are defined
 	expectedFlags := []string{
@@ -1510,7 +1565,7 @@ func TestDefineFlags_AllFlags(t *testing.T) {
 	}
 
 	for _, flagName := range expectedFlags {
-		f := flag.CommandLine.Lookup(flagName)
+		f := fs.Lookup(flagName)
 		if f == nil {
 			t.Errorf("Flag %q not defined", flagName)
 		}
@@ -1841,11 +1896,11 @@ func TestSetupCertManager_VaultWithAllConfig(t *testing.T) {
 // ============================================================================
 
 func TestDefineFlags_FlagUsage(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Register on a local FlagSet instead of mutating flag.CommandLine.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	// Verify flag usage strings are set
 	flagsWithUsage := map[string]string{
@@ -1860,7 +1915,7 @@ func TestDefineFlags_FlagUsage(t *testing.T) {
 	}
 
 	for flagName, expectedUsage := range flagsWithUsage {
-		f := flag.CommandLine.Lookup(flagName)
+		f := fs.Lookup(flagName)
 		if f == nil {
 			t.Errorf("Flag %q not defined", flagName)
 			continue
@@ -1872,11 +1927,11 @@ func TestDefineFlags_FlagUsage(t *testing.T) {
 }
 
 func TestDefineFlags_FlagDefaults(t *testing.T) {
-	// Reset flag.CommandLine for testing
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Register on a local FlagSet instead of mutating flag.CommandLine.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	// Verify flag default values
 	flagDefaults := map[string]string{
@@ -1893,7 +1948,7 @@ func TestDefineFlags_FlagDefaults(t *testing.T) {
 	}
 
 	for flagName, expectedDefault := range flagDefaults {
-		f := flag.CommandLine.Lookup(flagName)
+		f := fs.Lookup(flagName)
 		if f == nil {
 			t.Errorf("Flag %q not defined", flagName)
 			continue
