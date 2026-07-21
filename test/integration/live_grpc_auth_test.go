@@ -12,7 +12,11 @@
 //
 // Unary, SERVER STREAMING, and BIDI STREAMING all flow through the gateway
 // (client -> gateway plaintext, gateway -> backend mTLS/OIDC). Tests skip
-// cleanly when the environment is absent.
+// cleanly when the environment is absent AND pre-flight the backend auth
+// contract DIRECTLY (bypassing the gateway) with the exact material the
+// gateway will use: pre-flight failure means environment drift (CA
+// generation mismatch, image/auth-mode drift) and skips with a precise
+// diagnostic; pre-flight success makes every gateway-path assertion STRICT.
 package integration
 
 import (
@@ -23,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -209,19 +212,42 @@ func bidiStreamThroughGateway(
 	return responses, nil
 }
 
+// warmUpGatewayJourney absorbs transient UNAVAILABLE errors on the FIRST
+// gateway-path call (backend churn right after start) with a bounded retry
+// (up to 5 attempts, ~2.5s backoff total). It never weakens assertions: the
+// strict suite still asserts the final state afterwards.
+func warmUpGatewayJourney(t *testing.T, ctx context.Context, conn *grpc.ClientConn) {
+	t.Helper()
+
+	const attempts = 5
+	for attempt := 1; attempt <= attempts; attempt++ {
+		_, err := invokeUnaryThroughGateway(ctx, conn, "warm-up")
+		if err == nil {
+			return
+		}
+		t.Logf("gateway journey warm-up attempt %d/%d failed: %v", attempt, attempts, err)
+		if attempt < attempts {
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+		}
+	}
+}
+
 // runGRPCStreamingSuite asserts Unary + ServerStream + Bidi through the
-// gateway at the given address.
+// gateway at the given address. Journey-critical checks use require so a
+// success log can never follow a failed assertion.
 func runGRPCStreamingSuite(t *testing.T, ctx context.Context, gatewayAddr string) {
 	t.Helper()
 
 	conn := dialGateway(t, ctx, gatewayAddr)
+	warmUpGatewayJourney(t, ctx, conn)
 
 	t.Run("unary through gateway", func(t *testing.T) {
 		decoded, err := invokeUnaryThroughGateway(ctx, conn, "live-auth-unary")
 		require.NoError(t, err, "unary call through gateway failed")
-		assert.Equal(t, "live-auth-unary", decoded.Strings[1],
+		require.Equal(t, "live-auth-unary", decoded.Strings[1],
 			"backend must echo the unary message")
-		assert.NotZero(t, decoded.Varints[2], "timestamp must be set")
+		require.NotZero(t, decoded.Varints[2], "timestamp must be set")
+		t.Log("unary OK: message echoed through gateway")
 	})
 
 	t.Run("server streaming through gateway", func(t *testing.T) {
@@ -231,7 +257,7 @@ func runGRPCStreamingSuite(t *testing.T, ctx context.Context, gatewayAddr string
 		require.Len(t, messages, wantMessages,
 			"backend must stream exactly the requested message count")
 		for i, msg := range messages {
-			assert.EqualValues(t, i+1, msg.Varints[2],
+			require.EqualValues(t, i+1, msg.Varints[2],
 				"stream sequence must be contiguous")
 		}
 		t.Logf("server streaming OK: %d messages relayed through gateway", len(messages))
@@ -243,11 +269,11 @@ func runGRPCStreamingSuite(t *testing.T, ctx context.Context, gatewayAddr string
 		require.NoError(t, err, "bidi stream through gateway failed")
 		require.Len(t, responses, len(values))
 		for i, resp := range responses {
-			assert.EqualValues(t, values[i], resp.Varints[1],
+			require.EqualValues(t, values[i], resp.Varints[1],
 				"original_value must echo the sent value")
-			assert.EqualValues(t, values[i]*2, resp.Varints[2],
+			require.EqualValues(t, values[i]*2, resp.Varints[2],
 				"transformed_value must be doubled")
-			assert.Equal(t, "double", resp.Strings[3])
+			require.Equal(t, "double", resp.Strings[3])
 		}
 		t.Logf("bidi streaming OK: %d exchanges relayed through gateway", len(responses))
 	})
@@ -267,6 +293,17 @@ func TestIntegration_LiveGRPCBackend_MTLS_VaultPKI(t *testing.T) {
 	clientCert := helpers.IssueVaultClientCert(
 		t, vaultSetup, live.VaultClientCertRole, "avapigw-live-grpc-client")
 
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Pre-flight: prove grpc_3 accepts EXACTLY this material directly, so
+	// a gateway-path failure below is a gateway bug, not environment drift.
+	if pfErr := helpers.PreflightDirectGRPCMTLS(ctx, live.MTLSGRPCAddr, clientCert); pfErr != nil {
+		t.Skipf("backend mTLS contract not satisfied: direct gRPC handshake failed (%v) — "+
+			"CA generation mismatch, stale backend certs, or a non-mTLS service on the port "+
+			"(run setup-vault.sh + make test-env-restart-auth-backends); environment drift; skipping", pfErr)
+	}
+
 	host, port := splitHostPortOrFatal(t, live.MTLSGRPCAddr)
 
 	backendCfg := config.GRPCBackend{
@@ -283,9 +320,6 @@ func TestIntegration_LiveGRPCBackend_MTLS_VaultPKI(t *testing.T) {
 			CAFile: clientCert.CAFile,
 		},
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
 
 	gatewayPort, err := helpers.GetFreeGRPCPort()
 	require.NoError(t, err)
@@ -323,7 +357,7 @@ func TestIntegration_LiveGRPCBackend_MTLS_VaultPKI(t *testing.T) {
 			"backend must reject the gateway connection without a client cert")
 		st, ok := status.FromError(callErr)
 		require.True(t, ok)
-		assert.Equal(t, codes.Unavailable, st.Code(),
+		require.Equal(t, codes.Unavailable, st.Code(),
 			"TLS rejection surfaces as UNAVAILABLE from the gateway")
 		t.Logf("no-client-cert rejection (expected): %v", callErr)
 	})
@@ -339,10 +373,32 @@ func TestIntegration_LiveGRPCBackend_MTLS_VaultPKI(t *testing.T) {
 func TestIntegration_LiveGRPCBackend_OIDC_S2S(t *testing.T) {
 	live := helpers.GetLiveAuthBackendConfig()
 	helpers.SkipIfKeycloakUnavailable(t)
+	helpers.SkipIfKeycloakRealmMissing(t, live.KeycloakURL, live.BackendRealm)
 	helpers.SkipIfTCPUnreachable(t, live.OIDCGRPCAddr, "grpc_4 (OIDC)")
 
 	issuerProxy := helpers.StartIssuerRewriteProxy(t, live.KeycloakURL, live.BackendIssuerHost)
 	issuerURL := fmt.Sprintf("%s/realms/%s", issuerProxy, live.BackendRealm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// Pre-flight the backend OIDC contract directly (bypassing the
+	// gateway): no-token calls must be UNAUTHENTICATED and a live-minted
+	// client_credentials token must be accepted.
+	if pfErr := helpers.PreflightDirectGRPCUnauthenticated(ctx, live.OIDCGRPCAddr); pfErr != nil {
+		t.Skipf("backend OIDC contract not satisfied: %v — "+
+			"auth mode/image drift on grpc_4; environment drift; skipping", pfErr)
+	}
+	token, tokenErr := helpers.MintClientCredentialsToken(
+		ctx, issuerURL, live.BackendClientID, live.BackendClientSecret)
+	if tokenErr != nil {
+		t.Skipf("backend OIDC contract not satisfied: cannot mint client_credentials token (%v) — "+
+			"run test/docker-compose/scripts/setup-keycloak.sh; environment drift; skipping", tokenErr)
+	}
+	if pfErr := helpers.PreflightDirectGRPCAuthorized(ctx, live.OIDCGRPCAddr, token); pfErr != nil {
+		t.Skipf("backend OIDC contract not satisfied: %v — "+
+			"issuer/audience drift between Keycloak and grpc_4; environment drift; skipping", pfErr)
+	}
 
 	host, port := splitHostPortOrFatal(t, live.OIDCGRPCAddr)
 
@@ -362,9 +418,6 @@ func TestIntegration_LiveGRPCBackend_OIDC_S2S(t *testing.T) {
 			},
 		},
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
 
 	gatewayPort, err := helpers.GetFreeGRPCPort()
 	require.NoError(t, err)
@@ -398,7 +451,7 @@ func TestIntegration_LiveGRPCBackend_OIDC_S2S(t *testing.T) {
 			"backend must reject calls without an OIDC token")
 		st, ok := status.FromError(callErr)
 		require.True(t, ok)
-		assert.Equal(t, codes.Unauthenticated, st.Code(),
+		require.Equal(t, codes.Unauthenticated, st.Code(),
 			"missing token must surface as UNAUTHENTICATED")
 		t.Logf("no-token rejection (expected): %v", callErr)
 	})

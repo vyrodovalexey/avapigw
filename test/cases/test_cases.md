@@ -5093,55 +5093,78 @@ REAL gateway journeys against the LIVE compose auth backends. All endpoints
 are env-overridable (see `helpers.GetLiveAuthBackendConfig`:
 TEST_MTLS_REST_BACKEND_ADDR, TEST_OIDC_REST_BACKEND_URL,
 TEST_BASIC_REST_BACKEND_URL, TEST_MTLS_GRPC_BACKEND_ADDR,
-TEST_OIDC_GRPC_BACKEND_ADDR, TEST_KEYCLOAK_ADDR,
-TEST_KEYCLOAK_BACKEND_REALM, TEST_BACKEND_OIDC_CLIENT_ID/SECRET,
-TEST_BACKEND_ISSUER_HOST, TEST_VAULT_PKI_CLIENT_ROLE,
-TEST_VAULT_BASIC_AUTH_PATH); every test skips cleanly when
-Vault/Keycloak/the backend is unreachable. The issuer-rewrite proxy
-(`helpers.StartIssuerRewriteProxy`) bridges the host.docker.internal DNS gap
-so Keycloak mints tokens with the backend-expected iss while OIDC discovery
-keeps pointing the gateway at the proxy.
+TEST_OIDC_GRPC_BACKEND_ADDR, TEST_MTLS_CLIENT_CERT_DIR,
+TEST_KEYCLOAK_ADDR, TEST_KEYCLOAK_BACKEND_REALM,
+TEST_BACKEND_OIDC_CLIENT_ID/SECRET, TEST_BACKEND_ISSUER_HOST,
+TEST_VAULT_PKI_CLIENT_ROLE, TEST_VAULT_BASIC_AUTH_PATH).
+
+Guard model (two layers, keeping tests STRICT on a correct env):
+1. Reachability guards — skip when Vault/Keycloak/the backend is not
+   reachable, or when the Keycloak realm / Vault KV secret / provisioned
+   cert files are not provisioned.
+2. Contract pre-flights — each test verifies the backend auth contract
+   DIRECTLY (bypassing the gateway) with the exact material the gateway
+   will use: direct https/grpc mTLS handshake with the client cert+CA;
+   direct 401-without-token / 200-with-live-minted-token (REST OIDC and
+   basic); direct UNAUTHENTICATED-without-token / OK-with-token (gRPC
+   OIDC). Pre-flight failure = environment drift (CA generation mismatch,
+   stale backend certs after a Vault re-provision without
+   `make test-env-restart-auth-backends`, image/auth-mode drift, or a
+   different service on the port — the GitHub Actions topology) → skip
+   with a precise diagnostic. Pre-flight success → gateway-path
+   assertions are strict `require`s, with a bounded retry (5 attempts,
+   ~5s linear backoff) on the first gateway-path request to absorb
+   transient 502/UNAVAILABLE during backend churn.
+
+The mTLS no-cert rejection subtest is file-independent
+(insecureSkipVerify; only the backend's client-cert requirement is under
+test) so it still runs and passes under every drift mode. The
+issuer-rewrite proxy (`helpers.StartIssuerRewriteProxy`) bridges the
+host.docker.internal DNS gap so Keycloak mints tokens with the
+backend-expected iss while OIDC discovery keeps pointing the gateway at
+the proxy.
 
 Files: `test/integration/live_backend_auth_test.go`,
 `test/integration/live_grpc_auth_test.go` (build tag `integration`);
 helpers `test/helpers/live_env_helpers.go`.
 
 ### TestIntegration_LiveBackend_MTLS_VaultPKIFileCerts
-- **Description**: Gateway route → rest_api_4 (mTLS) with a client certificate issued at test runtime by the LIVE Vault PKI client-role, configured file-based on the backend TLS block
-- **Preconditions**: Vault (:8200) and rest_api_4 (:8804) reachable
+- **Description**: Gateway route → rest_api_4 (mTLS) with the client certificate files provisioned from the LIVE Vault PKI by setup-vault.sh (test/docker-compose/certs), configured file-based on the backend TLS block — the same CA generation the backend loaded at container start
+- **Preconditions**: rest_api_4 (:8804) reachable; client.crt/client.key/ca.crt provisioned (missing files skip only the with-cert subtest with a file-missing diagnostic); direct mTLS pre-flight handshake succeeds (otherwise skip with a CA-mismatch/non-mTLS-service diagnostic)
 - **Steps**:
-  1. Issue client cert from pki/issue/client-role; write cert/key/CA to temp files
+  1. Resolve provisioned client cert files; pre-flight a DIRECT https request to :8804 with them
   2. Start gateway with backend TLS MUTUAL (certFile/keyFile/caFile, serverName localhost)
-  3. GET /api/v1/items through the gateway; repeat with a SIMPLE (no client cert) backend
-- **Expected Results**: 200 with the client cert; 502 without it (backend rejects the handshake)
+  3. GET /api/v1/items through the gateway (bounded retry, then strict); repeat with a SIMPLE/insecureSkipVerify (no client cert) backend
+- **Expected Results**: 200 with the client cert; 502 without it (backend rejects the handshake) — the no-cert subtest runs under every drift mode
 
 ### TestIntegration_LiveBackend_MTLS_VaultRuntimeCerts
 - **Description**: Same journey with backend tls.vault — the GATEWAY issues its own client certificate from the live Vault PKI at startup (no cert files)
-- **Preconditions**: Vault and rest_api_4 reachable
-- **Expected Results**: 200 through the gateway with the runtime-issued cert
+- **Preconditions**: Vault and rest_api_4 reachable; a freshly Vault-issued probe cert passes the direct mTLS pre-flight (a fresh/rotated Vault CA without a backend restart skips with a CA-generation-mismatch diagnostic)
+- **Expected Results**: 200 through the gateway with the runtime-issued cert (strict require; the success log can never follow a failed assertion)
 
 ### TestIntegration_LiveBackend_OIDC_S2S
 - **Description**: Gateway route → rest_api_3 (OIDC) — the gateway acquires a client_credentials token from the LIVE Keycloak backend-test realm (gateway-backend client) and attaches it to backend requests
-- **Preconditions**: Keycloak (:8090) and rest_api_3 (:8803) reachable
+- **Preconditions**: Keycloak (:8090) reachable with the backend-test realm provisioned; rest_api_3 (:8803) reachable; direct pre-flights hold (401 without token, live-minted token accepted directly)
 - **Expected Results**: 200 with the gateway-acquired token; 401 pass-through without backend auth
 
 ### TestIntegration_LiveBackend_BasicAuth_VaultKV
 - **Description**: Gateway route → rest_api_5 (basic) with credentials read from the LIVE Vault KV secret/backend-auth/basic
-- **Preconditions**: Vault and rest_api_5 (:8805) reachable
+- **Preconditions**: Vault and rest_api_5 (:8805) reachable; the KV secret is provisioned; direct pre-flights hold (401 without credentials, 200 with the KV credentials)
 - **Expected Results**: 200 with KV credentials; 401 pass-through without backend auth
 
 ### TestIntegration_LiveGRPCBackend_MTLS_VaultPKI
 - **Description**: Gateway grpcRoute → grpc_3 (mTLS) with a Vault-PKI-issued client cert — UNARY + SERVER STREAMING + BIDI STREAMING all through the gateway (client→gateway plaintext, gateway→backend mTLS)
-- **Preconditions**: Vault and grpc_3 (:8813) reachable
+- **Preconditions**: Vault and grpc_3 (:8813) reachable; the issued cert passes the direct gRPC mTLS pre-flight (issuance failure or CA mismatch skips with a diagnostic)
 - **Steps**:
-  1. Issue client cert (client-role); start gRPC gateway with GRPCBackend TLS MUTUAL and backend-registry resolution
-  2. Unary echo; ServerStream count=4 (sequence-contiguous); Bidi ×3 with operation=double
-  3. Negative: SIMPLE TLS without client cert
+  1. Issue client cert (client-role, skips on provisioning drift); pre-flight a DIRECT gRPC unary to :8813 with it
+  2. Start gRPC gateway with GRPCBackend TLS MUTUAL and backend-registry resolution; warm-up unary with bounded retry
+  3. Unary echo; ServerStream count=4 (sequence-contiguous); Bidi ×3 with operation=double
+  4. Negative: SIMPLE TLS without client cert
 - **Expected Results**: Unary echoes; 4 stream messages with sequences 1..4; bidi doubles each value; no-cert dial surfaces UNAVAILABLE
 
 ### TestIntegration_LiveGRPCBackend_OIDC_S2S
 - **Description**: Gateway grpcRoute → grpc_4 (OIDC) — the gateway injects live-Keycloak client_credentials tokens into backend metadata; UNARY + SERVER STREAMING + BIDI STREAMING through the gateway
-- **Preconditions**: Keycloak and grpc_4 (:8814) reachable
+- **Preconditions**: Keycloak reachable with the backend-test realm provisioned; grpc_4 (:8814) reachable; direct pre-flights hold (UNAUTHENTICATED without token, live-minted token accepted directly)
 - **Expected Results**: All three call shapes succeed with injected tokens; without backend auth the backend answers UNAUTHENTICATED
 
 ## Phase-3 CRD Field Contract Tests (operator functional)

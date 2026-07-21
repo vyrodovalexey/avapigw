@@ -11,15 +11,26 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
@@ -183,6 +194,11 @@ type VaultIssuedClientCert struct {
 // IssueVaultClientCert issues a client certificate from the live Vault PKI
 // using the given role (EKU clientAuth for the compose client-role) and
 // writes cert/key/CA PEM files into a test temp dir.
+//
+// Issuance failures are ENVIRONMENT drift (the role is provisioned by
+// test/docker-compose/scripts/setup-vault.sh), so they skip the test with a
+// precise diagnostic rather than failing it; only host-side file writes
+// remain fatal.
 func IssueVaultClientCert(
 	t *testing.T, setup *VaultTestSetup, role, commonName string,
 ) *VaultIssuedClientCert {
@@ -197,17 +213,23 @@ func IssueVaultClientCert(
 		"ttl":         "1h",
 	})
 	if err != nil {
-		t.Fatalf("failed to issue client certificate from Vault role %s: %v", role, err)
+		t.Skipf("vault PKI role %s/%s cannot issue a client certificate (%v) — "+
+			"run test/docker-compose/scripts/setup-vault.sh; environment drift; skipping",
+			setup.PKIMount, role, err)
 	}
 	if secret == nil || secret.Data == nil {
-		t.Fatalf("no certificate data returned from Vault role %s", role)
+		t.Skipf("vault PKI role %s/%s returned no certificate data — "+
+			"run test/docker-compose/scripts/setup-vault.sh; environment drift; skipping",
+			setup.PKIMount, role)
 	}
 
 	certPEM, _ := secret.Data["certificate"].(string)
 	keyPEM, _ := secret.Data["private_key"].(string)
 	caPEM, _ := secret.Data["issuing_ca"].(string)
 	if certPEM == "" || keyPEM == "" || caPEM == "" {
-		t.Fatalf("incomplete certificate data from Vault role %s", role)
+		t.Skipf("vault PKI role %s/%s returned incomplete certificate data — "+
+			"run test/docker-compose/scripts/setup-vault.sh; environment drift; skipping",
+			setup.PKIMount, role)
 	}
 
 	dir := t.TempDir()
@@ -410,6 +432,300 @@ func TLSClientForFiles(certFile, keyFile, caFile string) (*tls.Config, error) {
 		RootCAs:      pool,
 		MinVersion:   tls.VersionTLS12,
 	}, nil
+}
+
+// --- Live-environment pre-flight guards ---
+//
+// The compose auth backends load TLS material and auth configuration at
+// CONTAINER START from state provisioned by setup-vault.sh /
+// setup-keycloak.sh. When the workspace, Vault, Keycloak, and the backends
+// drift apart (fresh Vault without a backend restart, a different image on
+// the same port, missing provisioned files), gateway-path assertions would
+// fail for reasons external to the gateway. These guards verify the
+// environment contract DIRECTLY against the backend with the exact material
+// the gateway will use, so tests stay strict on a correct environment and
+// skip with a precise diagnostic on a drifted one.
+
+// preflightTimeout bounds every direct-to-backend pre-flight operation.
+const preflightTimeout = 10 * time.Second
+
+// liveTestServiceUnaryMethod is the unary method of the api.v1.TestService
+// implemented by the live grpc-example backends.
+const liveTestServiceUnaryMethod = "/api.v1.TestService/Unary"
+
+// ComposeCertsDir returns the directory holding the certificates
+// provisioned by setup-vault.sh. TEST_MTLS_CLIENT_CERT_DIR overrides the
+// default <repo>/test/docker-compose/certs (resolved from this source
+// file's location, independent of the test working directory).
+func ComposeCertsDir() string {
+	if dir := os.Getenv("TEST_MTLS_CLIENT_CERT_DIR"); dir != "" {
+		return dir
+	}
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(thisFile), "..", "docker-compose", "certs")
+}
+
+// ProvisionedClientCert returns the setup-vault.sh-provisioned gateway
+// client certificate material (client.crt/client.key/ca.crt) from the
+// compose certs dir, verifying every file exists and parses as usable TLS
+// material. A non-nil error names the missing/unusable piece so callers can
+// skip with a precise file-missing diagnostic.
+func ProvisionedClientCert() (*VaultIssuedClientCert, error) {
+	dir := ComposeCertsDir()
+	cert := &VaultIssuedClientCert{
+		CertFile: filepath.Join(dir, "client.crt"),
+		KeyFile:  filepath.Join(dir, "client.key"),
+		CAFile:   filepath.Join(dir, "ca.crt"),
+	}
+	for _, f := range []string{cert.CertFile, cert.KeyFile, cert.CAFile} {
+		if _, err := os.Stat(f); err != nil {
+			return nil, fmt.Errorf("client cert material missing: %w", err)
+		}
+	}
+	if _, err := TLSClientForFiles(cert.CertFile, cert.KeyFile, cert.CAFile); err != nil {
+		return nil, fmt.Errorf("client cert material unusable: %w", err)
+	}
+	return cert, nil
+}
+
+// PreflightDirectMTLS performs a DIRECT https request to the mTLS backend
+// using exactly the given client cert/key/CA material. A nil return proves
+// the backend TLS trust contract (full handshake + HTTP exchange) holds;
+// any error means environment drift (CA generation mismatch, stale backend
+// certs, or a non-TLS service on the port).
+func PreflightDirectMTLS(addr, serverName string, cert *VaultIssuedClientCert) error {
+	tlsCfg, err := TLSClientForFiles(cert.CertFile, cert.KeyFile, cert.CAFile)
+	if err != nil {
+		return fmt.Errorf("load client TLS material: %w", err)
+	}
+	tlsCfg.ServerName = serverName
+
+	client := &http.Client{
+		Timeout: preflightTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig:   tlsCfg,
+			DisableKeepAlives: true,
+		},
+	}
+	resp, err := client.Get("https://" + addr + "/health")
+	if err != nil {
+		return fmt.Errorf("direct mTLS handshake with %s failed: %w", addr, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// preflightDialGRPC dials addr with the given transport credentials,
+// surfacing TLS/transport errors instead of hanging.
+func preflightDialGRPC(
+	ctx context.Context, addr string, creds credentials.TransportCredentials,
+) (*grpc.ClientConn, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	//nolint:staticcheck // DialContext+WithBlock matches the suite's dial style.
+	return grpc.DialContext(dialCtx, addr,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithBlock(),
+		grpc.WithReturnConnectionError(),
+	)
+}
+
+// preflightUnaryGRPC performs one raw-codec unary call to the live
+// api.v1.TestService on conn, optionally with an authorization token.
+func preflightUnaryGRPC(ctx context.Context, conn *grpc.ClientConn, bearerToken string) error {
+	callCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	if bearerToken != "" {
+		callCtx = metadata.AppendToOutgoingContext(callCtx, "authorization", "Bearer "+bearerToken)
+	}
+	req := &RawFrame{Payload: EncodeUnaryRequest("preflight")}
+	resp := &RawFrame{}
+	return conn.Invoke(callCtx, liveTestServiceUnaryMethod, req, resp,
+		grpc.ForceCodec(RawProtoCodec{}))
+}
+
+// PreflightDirectGRPCMTLS performs a DIRECT gRPC unary call to the mTLS
+// backend using exactly the given client cert material. A nil return proves
+// the backend TLS trust contract holds; any error means environment drift
+// (CA generation mismatch, stale backend certs, or a non-mTLS service on
+// the port).
+func PreflightDirectGRPCMTLS(ctx context.Context, addr string, cert *VaultIssuedClientCert) error {
+	tlsCfg, err := TLSClientForFiles(cert.CertFile, cert.KeyFile, cert.CAFile)
+	if err != nil {
+		return fmt.Errorf("load client TLS material: %w", err)
+	}
+	conn, err := preflightDialGRPC(ctx, addr, credentials.NewTLS(tlsCfg))
+	if err != nil {
+		return fmt.Errorf("direct gRPC mTLS dial to %s failed: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := preflightUnaryGRPC(ctx, conn, ""); err != nil {
+		return fmt.Errorf("direct gRPC mTLS call to %s failed: %w", addr, err)
+	}
+	return nil
+}
+
+// PreflightDirectGRPCUnauthenticated verifies that a DIRECT plaintext
+// no-token unary call to the OIDC-gated gRPC backend is rejected with
+// codes.Unauthenticated, proving the port hosts the expected gRPC service
+// with backend OIDC enforcement enabled. Any other outcome (transport
+// failure, different code, or unexpected success) is environment drift.
+func PreflightDirectGRPCUnauthenticated(ctx context.Context, addr string) error {
+	conn, err := preflightDialGRPC(ctx, addr, insecure.NewCredentials())
+	if err != nil {
+		return fmt.Errorf("direct plaintext gRPC dial to %s failed: %w", addr, err)
+	}
+	defer conn.Close()
+
+	callErr := preflightUnaryGRPC(ctx, conn, "")
+	if callErr == nil {
+		return fmt.Errorf("direct no-token call to %s unexpectedly succeeded: "+
+			"backend does not enforce OIDC", addr)
+	}
+	st, ok := status.FromError(callErr)
+	if !ok || st.Code() != codes.Unauthenticated {
+		return fmt.Errorf("direct no-token call to %s: got %v, want code %s",
+			addr, callErr, codes.Unauthenticated)
+	}
+	return nil
+}
+
+// PreflightDirectGRPCAuthorized verifies that a DIRECT plaintext unary call
+// carrying the given bearer token is ACCEPTED by the OIDC-gated gRPC
+// backend, proving the issuer/audience contract between Keycloak and the
+// backend holds for exactly the token material the gateway will inject.
+func PreflightDirectGRPCAuthorized(ctx context.Context, addr, token string) error {
+	conn, err := preflightDialGRPC(ctx, addr, insecure.NewCredentials())
+	if err != nil {
+		return fmt.Errorf("direct plaintext gRPC dial to %s failed: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := preflightUnaryGRPC(ctx, conn, token); err != nil {
+		return fmt.Errorf("direct call with live-minted token to %s failed: %w", addr, err)
+	}
+	return nil
+}
+
+// PreflightHTTPStatus performs a DIRECT request to url with the given
+// header and verifies the exact response status, proving a backend auth
+// contract (e.g. 401 without credentials, 200 with them) holds before any
+// gateway-path assertion runs.
+func PreflightHTTPStatus(ctx context.Context, url string, header http.Header, want int) error {
+	reqCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build pre-flight request for %s: %w", url, err)
+	}
+	for k, vv := range header {
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := (&http.Client{Timeout: preflightTimeout}).Do(req)
+	if err != nil {
+		return fmt.Errorf("direct request to %s failed: %w", url, err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != want {
+		return fmt.Errorf("direct request to %s: got status %d, want %d", url, resp.StatusCode, want)
+	}
+	return nil
+}
+
+// MintClientCredentialsToken acquires a client_credentials access token
+// from issuerURL (an OIDC issuer base such as the issuer-rewrite proxy +
+// /realms/<realm>), returning the raw bearer token the gateway would also
+// obtain.
+func MintClientCredentialsToken(ctx context.Context, issuerURL, clientID, clientSecret string) (string, error) {
+	form := neturl.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost,
+		strings.TrimSuffix(issuerURL, "/")+"/protocol/openid-connect/token",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := (&http.Client{Timeout: preflightTimeout}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("token request to %s failed: %w", issuerURL, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read token response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+	var payload struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode token response: %w", err)
+	}
+	if payload.AccessToken == "" {
+		return "", fmt.Errorf("token endpoint returned an empty access_token")
+	}
+	return payload.AccessToken, nil
+}
+
+// SkipIfKeycloakRealmMissing skips the test when the given realm's OIDC
+// discovery document is not served by the live Keycloak (realm not
+// provisioned by setup-keycloak.sh).
+func SkipIfKeycloakRealmMissing(t *testing.T, keycloakURL, realm string) {
+	t.Helper()
+	url := strings.TrimSuffix(keycloakURL, "/") +
+		"/realms/" + realm + "/.well-known/openid-configuration"
+	ctx, cancel := context.WithTimeout(context.Background(), preflightTimeout)
+	defer cancel()
+	if err := PreflightHTTPStatus(ctx, url, nil, http.StatusOK); err != nil {
+		t.Skipf("keycloak realm %q not provisioned (%v) — "+
+			"run test/docker-compose/scripts/setup-keycloak.sh; environment drift; skipping",
+			realm, err)
+	}
+}
+
+// ReadVaultKVCredentials reads username/password from the live Vault KV v2
+// path given in mount/path form (e.g. secret/backend-auth/basic), as
+// provisioned by setup-vault.sh.
+func ReadVaultKVCredentials(ctx context.Context, vaultPath string) (string, string, error) {
+	client, err := CreateVaultClient()
+	if err != nil {
+		return "", "", fmt.Errorf("create vault client: %w", err)
+	}
+	mount, rest, ok := strings.Cut(vaultPath, "/")
+	if !ok {
+		return "", "", fmt.Errorf("vault path %q is not in mount/path form", vaultPath)
+	}
+	readCtx, cancel := context.WithTimeout(ctx, preflightTimeout)
+	defer cancel()
+	secret, err := client.Logical().ReadWithContext(readCtx, mount+"/data/"+rest)
+	if err != nil {
+		return "", "", fmt.Errorf("read %s: %w", vaultPath, err)
+	}
+	if secret == nil || secret.Data == nil {
+		return "", "", fmt.Errorf("secret %s not found", vaultPath)
+	}
+	data, ok := secret.Data["data"].(map[string]interface{})
+	if !ok {
+		return "", "", fmt.Errorf("secret %s has no KV v2 data", vaultPath)
+	}
+	username, _ := data["username"].(string)
+	password, _ := data["password"].(string)
+	if username == "" || password == "" {
+		return "", "", fmt.Errorf("secret %s is missing username/password", vaultPath)
+	}
+	return username, password, nil
 }
 
 // --- Minimal protobuf wire helpers for api.v1.TestService ---

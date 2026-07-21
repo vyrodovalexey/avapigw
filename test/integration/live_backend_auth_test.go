@@ -6,24 +6,28 @@
 // Live backend-auth tests drive a REAL gateway against the LIVE
 // docker-compose auth backends:
 //
-//	rest_api_4 (:8804)  mTLS     — client certs issued by the live Vault PKI
+//	rest_api_4 (:8804)  mTLS     — client certs from the live Vault PKI
 //	rest_api_3 (:8803)  OIDC     — service-to-service client_credentials
 //	                                against the live Keycloak backend-test realm
 //	rest_api_5 (:8805)  basic    — credentials read from the live Vault KV
 //
-// Every test is guarded: it skips cleanly when Vault/Keycloak/the backend is
-// not reachable (env vars in helpers.GetLiveAuthBackendConfig control all
-// endpoints).
+// Every test is guarded twice: it skips cleanly when Vault/Keycloak/the
+// backend is not reachable AND it pre-flights the backend auth contract
+// DIRECTLY (bypassing the gateway) with the exact material the gateway will
+// use. Pre-flight failure means environment drift (CA generation mismatch,
+// stale backend certs, image/auth-mode drift) and skips with a precise
+// diagnostic; pre-flight success makes every gateway-path assertion STRICT.
+// Env vars in helpers.GetLiveAuthBackendConfig control all endpoints.
 package integration
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
@@ -106,63 +110,110 @@ func requestThroughGateway(t *testing.T, baseURL, path string) int {
 	return resp.StatusCode
 }
 
+// Bounded retry for the first gateway-path request of a journey: absorbs
+// transient 502s while backends churn without ever weakening the final
+// assertion (the caller still require.Equal's the returned status).
+const (
+	gatewayJourneyAttempts = 5
+	gatewayJourneyBackoff  = 250 * time.Millisecond
+)
+
+// requestThroughGatewayEventually GETs the path through the gateway,
+// retrying up to gatewayJourneyAttempts with linear backoff (~5s total)
+// while the status differs from want. The FINAL status is returned for a
+// strict assertion by the caller.
+func requestThroughGatewayEventually(t *testing.T, baseURL, path string, want int) int {
+	t.Helper()
+
+	status := 0
+	for attempt := 1; attempt <= gatewayJourneyAttempts; attempt++ {
+		status = requestThroughGateway(t, baseURL, path)
+		if status == want {
+			return status
+		}
+		t.Logf("gateway journey attempt %d/%d: got %d, want %d — retrying",
+			attempt, gatewayJourneyAttempts, status, want)
+		if attempt < gatewayJourneyAttempts {
+			time.Sleep(time.Duration(attempt) * gatewayJourneyBackoff)
+		}
+	}
+	return status
+}
+
 // TestIntegration_LiveBackend_MTLS_VaultPKIFileCerts verifies the gateway
-// route -> rest_api_4 journey with backend mTLS using client certificates
-// issued at test runtime by the LIVE Vault PKI (client-role), configured
-// file-based on the backend TLS block.
+// route -> rest_api_4 journey with backend mTLS using the client
+// certificate files provisioned from the LIVE Vault PKI by setup-vault.sh
+// (test/docker-compose/certs), configured file-based on the backend TLS
+// block — the same CA generation the backend loaded at container start.
 func TestIntegration_LiveBackend_MTLS_VaultPKIFileCerts(t *testing.T) {
 	live := helpers.GetLiveAuthBackendConfig()
-	helpers.SkipIfVaultUnavailable(t)
 	helpers.SkipIfTCPUnreachable(t, live.MTLSRestAddr, "rest_api_4 (mTLS)")
 
-	vaultSetup := helpers.SetupVaultForTesting(t)
-	defer vaultSetup.Cleanup()
-
-	// Issue a fresh client certificate from the live Vault PKI client role.
-	clientCert := helpers.IssueVaultClientCert(
-		t, vaultSetup, live.VaultClientCertRole, "avapigw-live-test-client")
+	// The exact TLS material the with-cert journey will use (gitignored;
+	// provisioned by setup-vault.sh). Resolution failure only skips the
+	// with-cert subtest: the no-cert rejection subtest below is
+	// deliberately file-independent so it runs under every drift mode.
+	clientCert, certErr := helpers.ProvisionedClientCert()
 
 	host, port := splitHostPortOrFatal(t, live.MTLSRestAddr)
-
-	backendCfg := config.Backend{
-		Name:  "rest-mtls-backend",
-		Hosts: []config.BackendHost{{Address: host, Port: port, Weight: 1}},
-		TLS: &config.BackendTLSConfig{
-			Enabled:  true,
-			Mode:     config.BackendTLSModeMutual,
-			CertFile: clientCert.CertFile,
-			KeyFile:  clientCert.KeyFile,
-			CAFile:   clientCert.CAFile,
-			// The compose server cert carries SANs localhost/127.0.0.1.
-			ServerName: "localhost",
-		},
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	gi, err := helpers.StartGatewayWithConfigAndVault(
-		ctx, buildLiveBackendGatewayConfig(liveAuthGatewayPort, backendCfg), nil)
-	require.NoError(t, err, "failed to start gateway with mTLS backend")
-	t.Cleanup(func() { _ = gi.Stop(ctx) })
-
-	require.NoError(t, helpers.WaitForReady(gi.BaseURL+"/gw-health", 10*time.Second))
-
 	t.Run("request reaches mTLS backend through gateway", func(t *testing.T) {
-		status := requestThroughGateway(t, gi.BaseURL, "/api/v1/items")
-		assert.Equal(t, http.StatusOK, status,
-			"gateway with Vault-issued client cert must reach the mTLS backend")
+		if certErr != nil {
+			t.Skipf("backend mTLS contract not satisfied: %v — "+
+				"run test/docker-compose/scripts/setup-vault.sh "+
+				"(environment not provisioned); skipping", certErr)
+		}
+		// Pre-flight: prove the backend accepts EXACTLY this material
+		// directly, so a gateway-path failure below is a gateway bug.
+		if pfErr := helpers.PreflightDirectMTLS(live.MTLSRestAddr, "localhost", clientCert); pfErr != nil {
+			t.Skipf("backend mTLS contract not satisfied: direct handshake failed (%v) — "+
+				"CA generation mismatch, stale backend certs, or a non-mTLS service on the port "+
+				"(run setup-vault.sh + make test-env-restart-auth-backends); environment drift; skipping", pfErr)
+		}
+
+		backendCfg := config.Backend{
+			Name:  "rest-mtls-backend",
+			Hosts: []config.BackendHost{{Address: host, Port: port, Weight: 1}},
+			TLS: &config.BackendTLSConfig{
+				Enabled:  true,
+				Mode:     config.BackendTLSModeMutual,
+				CertFile: clientCert.CertFile,
+				KeyFile:  clientCert.KeyFile,
+				CAFile:   clientCert.CAFile,
+				// The compose server cert carries SANs localhost/127.0.0.1.
+				ServerName: "localhost",
+			},
+		}
+
+		gi, err := helpers.StartGatewayWithConfigAndVault(
+			ctx, buildLiveBackendGatewayConfig(liveAuthGatewayPort, backendCfg), nil)
+		require.NoError(t, err, "failed to start gateway with mTLS backend")
+		t.Cleanup(func() { _ = gi.Stop(ctx) })
+		require.NoError(t, helpers.WaitForReady(gi.BaseURL+"/gw-health", 10*time.Second))
+
+		status := requestThroughGatewayEventually(t, gi.BaseURL, "/api/v1/items", http.StatusOK)
+		require.Equal(t, http.StatusOK, status,
+			"gateway with the provisioned Vault PKI client cert must reach the mTLS backend")
 		t.Logf("mTLS journey OK: client -> gateway -> rest_api_4 (%s)", live.MTLSRestAddr)
 	})
 
+	// Runs under EVERY drift mode (missing cert files, CA generation
+	// mismatch): rejecting a certificate-less connection depends only on
+	// the backend requiring client certs, so server verification is
+	// intentionally skipped to avoid any dependency on provisioned files.
 	t.Run("gateway without client cert is rejected by backend", func(t *testing.T) {
-		noCert := backendCfg
-		noCert.Name = "rest-mtls-nocert"
-		noCert.TLS = &config.BackendTLSConfig{
-			Enabled:    true,
-			Mode:       config.BackendTLSModeSimple,
-			CAFile:     clientCert.CAFile,
-			ServerName: "localhost",
+		noCert := config.Backend{
+			Name:  "rest-mtls-nocert",
+			Hosts: []config.BackendHost{{Address: host, Port: port, Weight: 1}},
+			TLS: &config.BackendTLSConfig{
+				Enabled:            true,
+				Mode:               config.BackendTLSModeSimple,
+				InsecureSkipVerify: true,
+				ServerName:         "localhost",
+			},
 		}
 
 		gi2, err := helpers.StartGatewayWithConfigAndVault(
@@ -171,8 +222,8 @@ func TestIntegration_LiveBackend_MTLS_VaultPKIFileCerts(t *testing.T) {
 		t.Cleanup(func() { _ = gi2.Stop(ctx) })
 		require.NoError(t, helpers.WaitForReady(gi2.BaseURL+"/gw-health", 10*time.Second))
 
-		status := requestThroughGateway(t, gi2.BaseURL, "/api/v1/items")
-		assert.Equal(t, http.StatusBadGateway, status,
+		status := requestThroughGatewayEventually(t, gi2.BaseURL, "/api/v1/items", http.StatusBadGateway)
+		require.Equal(t, http.StatusBadGateway, status,
 			"missing client certificate must surface as 502 from the gateway")
 	})
 }
@@ -188,9 +239,22 @@ func TestIntegration_LiveBackend_MTLS_VaultRuntimeCerts(t *testing.T) {
 	vaultSetup := helpers.SetupVaultForTesting(t)
 	defer vaultSetup.Cleanup()
 
-	// CA for server verification still comes from PKI (exported to a file).
+	// Probe material: a cert freshly issued from the live PKI client role.
+	// It carries the CURRENT Vault CA generation — exactly what the
+	// gateway's tls.vault flow will obtain at startup. Its issuing CA also
+	// serves as the CAFile for server verification.
 	caCert := helpers.IssueVaultClientCert(
 		t, vaultSetup, live.VaultClientCertRole, "avapigw-ca-probe")
+
+	// Pre-flight: the backend must accept the CURRENT Vault CA generation
+	// directly. A fresh Vault (or rotated PKI root) without a backend
+	// restart fails here — that is environment drift, not a gateway bug.
+	if pfErr := helpers.PreflightDirectMTLS(live.MTLSRestAddr, "localhost", caCert); pfErr != nil {
+		t.Skipf("backend mTLS contract not satisfied: direct handshake with a freshly "+
+			"Vault-issued client cert failed (%v) — CA generation mismatch between Vault and "+
+			"the backend's startup-loaded certs, or a non-mTLS service on the port "+
+			"(run setup-vault.sh + make test-env-restart-auth-backends); environment drift; skipping", pfErr)
+	}
 
 	host, port := splitHostPortOrFatal(t, live.MTLSRestAddr)
 
@@ -224,8 +288,10 @@ func TestIntegration_LiveBackend_MTLS_VaultRuntimeCerts(t *testing.T) {
 
 	require.NoError(t, helpers.WaitForReady(gi.BaseURL+"/gw-health", 10*time.Second))
 
-	status := requestThroughGateway(t, gi.BaseURL, "/api/v1/items")
-	assert.Equal(t, http.StatusOK, status,
+	status := requestThroughGatewayEventually(t, gi.BaseURL, "/api/v1/items", http.StatusOK)
+	// require (not assert): the success log below must NEVER print after a
+	// failed journey assertion.
+	require.Equal(t, http.StatusOK, status,
 		"gateway with Vault-runtime client cert must reach the mTLS backend")
 	t.Log("tls.vault journey OK: gateway issued its client cert from live Vault PKI")
 }
@@ -242,10 +308,34 @@ func TestIntegration_LiveBackend_MTLS_VaultRuntimeCerts(t *testing.T) {
 func TestIntegration_LiveBackend_OIDC_S2S(t *testing.T) {
 	live := helpers.GetLiveAuthBackendConfig()
 	helpers.SkipIfKeycloakUnavailable(t)
+	helpers.SkipIfKeycloakRealmMissing(t, live.KeycloakURL, live.BackendRealm)
 	helpers.SkipIfBackendUnavailable(t, live.OIDCRestURL)
 
 	issuerProxy := helpers.StartIssuerRewriteProxy(t, live.KeycloakURL, live.BackendIssuerHost)
 	issuerURL := fmt.Sprintf("%s/realms/%s", issuerProxy, live.BackendRealm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Pre-flight the backend OIDC contract directly (bypassing the
+	// gateway) with exactly the token material the gateway will acquire.
+	itemsURL := live.OIDCRestURL + "/api/v1/items"
+	if pfErr := helpers.PreflightHTTPStatus(ctx, itemsURL, nil, http.StatusUnauthorized); pfErr != nil {
+		t.Skipf("backend OIDC contract not satisfied: %v — "+
+			"auth mode/image drift on rest_api_3; environment drift; skipping", pfErr)
+	}
+	token, tokenErr := helpers.MintClientCredentialsToken(
+		ctx, issuerURL, live.BackendClientID, live.BackendClientSecret)
+	if tokenErr != nil {
+		t.Skipf("backend OIDC contract not satisfied: cannot mint client_credentials token (%v) — "+
+			"run test/docker-compose/scripts/setup-keycloak.sh; environment drift; skipping", tokenErr)
+	}
+	authHeader := http.Header{"Authorization": {"Bearer " + token}}
+	if pfErr := helpers.PreflightHTTPStatus(ctx, itemsURL, authHeader, http.StatusOK); pfErr != nil {
+		t.Skipf("backend OIDC contract not satisfied: direct request with a live-minted token "+
+			"failed (%v) — issuer/audience drift between Keycloak and rest_api_3; "+
+			"environment drift; skipping", pfErr)
+	}
 
 	host, port := parseURLHostPortForTest(t, live.OIDCRestURL)
 
@@ -266,9 +356,6 @@ func TestIntegration_LiveBackend_OIDC_S2S(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
 	gi, err := helpers.StartGatewayWithConfigAndVault(
 		ctx, buildLiveBackendGatewayConfig(liveAuthGatewayPort+3, backendCfg), nil)
 	require.NoError(t, err, "failed to start gateway with OIDC backend auth")
@@ -277,8 +364,8 @@ func TestIntegration_LiveBackend_OIDC_S2S(t *testing.T) {
 	require.NoError(t, helpers.WaitForReady(gi.BaseURL+"/gw-health", 10*time.Second))
 
 	t.Run("token attached and accepted by live backend", func(t *testing.T) {
-		status := requestThroughGateway(t, gi.BaseURL, "/api/v1/items")
-		assert.Equal(t, http.StatusOK, status,
+		status := requestThroughGatewayEventually(t, gi.BaseURL, "/api/v1/items", http.StatusOK)
+		require.Equal(t, http.StatusOK, status,
 			"gateway-acquired client_credentials token must be accepted by rest_api_3")
 		t.Logf("OIDC S2S journey OK: gateway -> Keycloak(%s) -> rest_api_3", live.BackendRealm)
 	})
@@ -294,8 +381,8 @@ func TestIntegration_LiveBackend_OIDC_S2S(t *testing.T) {
 		t.Cleanup(func() { _ = gi2.Stop(ctx) })
 		require.NoError(t, helpers.WaitForReady(gi2.BaseURL+"/gw-health", 10*time.Second))
 
-		status := requestThroughGateway(t, gi2.BaseURL, "/api/v1/items")
-		assert.Equal(t, http.StatusUnauthorized, status,
+		status := requestThroughGatewayEventually(t, gi2.BaseURL, "/api/v1/items", http.StatusUnauthorized)
+		require.Equal(t, http.StatusUnauthorized, status,
 			"request without a token must pass through as 401 from the backend")
 	})
 }
@@ -308,6 +395,30 @@ func TestIntegration_LiveBackend_BasicAuth_VaultKV(t *testing.T) {
 	live := helpers.GetLiveAuthBackendConfig()
 	helpers.SkipIfVaultUnavailable(t)
 	helpers.SkipIfBackendUnavailable(t, live.BasicRestURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Pre-flight the backend basic-auth contract directly with exactly the
+	// credentials the gateway will read from Vault KV.
+	username, password, credErr := helpers.ReadVaultKVCredentials(ctx, live.VaultBasicAuthPath)
+	if credErr != nil {
+		t.Skipf("backend basic-auth contract not satisfied: cannot read credentials from "+
+			"Vault KV %s (%v) — run test/docker-compose/scripts/setup-vault.sh; "+
+			"environment drift; skipping", live.VaultBasicAuthPath, credErr)
+	}
+	itemsURL := live.BasicRestURL + "/api/v1/items"
+	if pfErr := helpers.PreflightHTTPStatus(ctx, itemsURL, nil, http.StatusUnauthorized); pfErr != nil {
+		t.Skipf("backend basic-auth contract not satisfied: %v — "+
+			"auth mode/image drift on rest_api_5; environment drift; skipping", pfErr)
+	}
+	basicHeader := http.Header{"Authorization": {
+		"Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))}}
+	if pfErr := helpers.PreflightHTTPStatus(ctx, itemsURL, basicHeader, http.StatusOK); pfErr != nil {
+		t.Skipf("backend basic-auth contract not satisfied: direct request with Vault KV "+
+			"credentials failed (%v) — credential drift between Vault and rest_api_5; "+
+			"environment drift; skipping", pfErr)
+	}
 
 	vaultClient := helpers.NewInternalVaultClient(t)
 
@@ -325,9 +436,6 @@ func TestIntegration_LiveBackend_BasicAuth_VaultKV(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
 	gi, err := helpers.StartGatewayWithConfigAndVault(
 		ctx, buildLiveBackendGatewayConfig(liveAuthGatewayPort+5, backendCfg), vaultClient)
 	require.NoError(t, err, "failed to start gateway with Vault-KV basic auth")
@@ -336,8 +444,8 @@ func TestIntegration_LiveBackend_BasicAuth_VaultKV(t *testing.T) {
 	require.NoError(t, helpers.WaitForReady(gi.BaseURL+"/gw-health", 10*time.Second))
 
 	t.Run("Vault KV credentials accepted by live backend", func(t *testing.T) {
-		status := requestThroughGateway(t, gi.BaseURL, "/api/v1/items")
-		assert.Equal(t, http.StatusOK, status,
+		status := requestThroughGatewayEventually(t, gi.BaseURL, "/api/v1/items", http.StatusOK)
+		require.Equal(t, http.StatusOK, status,
 			"credentials from Vault KV %s must be accepted by rest_api_5",
 			live.VaultBasicAuthPath)
 		t.Logf("basic-auth journey OK: gateway -> Vault KV(%s) -> rest_api_5",
@@ -355,8 +463,8 @@ func TestIntegration_LiveBackend_BasicAuth_VaultKV(t *testing.T) {
 		t.Cleanup(func() { _ = gi2.Stop(ctx) })
 		require.NoError(t, helpers.WaitForReady(gi2.BaseURL+"/gw-health", 10*time.Second))
 
-		status := requestThroughGateway(t, gi2.BaseURL, "/api/v1/items")
-		assert.Equal(t, http.StatusUnauthorized, status,
+		status := requestThroughGatewayEventually(t, gi2.BaseURL, "/api/v1/items", http.StatusUnauthorized)
+		require.Equal(t, http.StatusUnauthorized, status,
 			"request without credentials must pass through as 401 from the backend")
 	})
 }
