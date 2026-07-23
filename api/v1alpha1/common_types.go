@@ -289,6 +289,10 @@ type RateLimitRedisSpec struct {
 	// +optional
 	KeyPrefix string `json:"keyPrefix,omitempty"`
 
+	// TLS contains TLS configuration for the Redis connection.
+	// +optional
+	TLS *RedisTLSSpec `json:"tls,omitempty"`
+
 	// PasswordVaultPath is the Vault path for the Redis password (standalone mode).
 	// The secret should have a "password" key. Format: mount/path.
 	// +optional
@@ -350,13 +354,67 @@ type SecurityHeadersConfig struct {
 	// +optional
 	XXSSProtection string `json:"xXSSProtection,omitempty"`
 
+	// CustomHeaders sets additional custom security headers.
+	// +optional
+	CustomHeaders map[string]string `json:"customHeaders,omitempty"`
+
 	// ContentSecurityPolicy sets the Content-Security-Policy header.
+	//
+	// Deprecated: use SecurityConfig.CSP instead. The gateway consumes CSP
+	// from the structured security.csp block; the operator converts this
+	// legacy field into security.csp when csp is not set.
 	// +optional
 	ContentSecurityPolicy string `json:"contentSecurityPolicy,omitempty"`
 
 	// StrictTransportSecurity sets the Strict-Transport-Security header.
+	//
+	// Deprecated: use SecurityConfig.HSTS instead. The gateway consumes HSTS
+	// from the structured security.hsts block; the operator parses this
+	// legacy raw header value into security.hsts when hsts is not set.
 	// +optional
 	StrictTransportSecurity string `json:"strictTransportSecurity,omitempty"`
+}
+
+// SecurityHSTSConfig configures HTTP Strict Transport Security. The JSON
+// shape matches the gateway's security.hsts configuration.
+type SecurityHSTSConfig struct {
+	// Enabled enables HSTS.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// MaxAge is the max-age directive value in seconds.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxAge int `json:"maxAge,omitempty"`
+
+	// IncludeSubDomains adds the includeSubDomains directive.
+	// +optional
+	IncludeSubDomains bool `json:"includeSubDomains,omitempty"`
+
+	// Preload adds the preload directive.
+	// +optional
+	Preload bool `json:"preload,omitempty"`
+}
+
+// SecurityCSPConfig configures Content Security Policy. The JSON shape
+// matches the gateway's security.csp configuration.
+type SecurityCSPConfig struct {
+	// Enabled enables CSP.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// Policy is the full CSP policy string.
+	// +optional
+	Policy string `json:"policy,omitempty"`
+
+	// ReportOnly sets the Content-Security-Policy-Report-Only header instead
+	// of Content-Security-Policy.
+	// +optional
+	ReportOnly bool `json:"reportOnly,omitempty"`
+
+	// ReportURI is the URI to report CSP violations to.
+	// +optional
+	ReportURI string `json:"reportUri,omitempty"`
 }
 
 // SecurityConfig represents security configuration.
@@ -368,6 +426,18 @@ type SecurityConfig struct {
 	// Headers configures security headers.
 	// +optional
 	Headers *SecurityHeadersConfig `json:"headers,omitempty"`
+
+	// HSTS configures HTTP Strict Transport Security.
+	// +optional
+	HSTS *SecurityHSTSConfig `json:"hsts,omitempty"`
+
+	// CSP configures Content Security Policy.
+	// +optional
+	CSP *SecurityCSPConfig `json:"csp,omitempty"`
+
+	// ReferrerPolicy sets the Referrer-Policy header.
+	// +optional
+	ReferrerPolicy string `json:"referrerPolicy,omitempty"`
 }
 
 // MaxSessionsConfig configures maximum concurrent sessions.
@@ -901,8 +971,18 @@ type AuthzCacheConfig struct {
 	// +optional
 	Type string `json:"type,omitempty"`
 
+	// Redis contains Redis connection configuration for the authorization
+	// decision cache. Only used when Type is "redis". The JSON shape matches
+	// the gateway's authorization.cache.redis configuration.
+	// +optional
+	Redis *RedisCacheSpec `json:"redis,omitempty"`
+
 	// Sentinel configures Redis Sentinel connection for authorization cache.
-	// Only used when Type is "redis". Mutually exclusive with standalone Redis URL.
+	// Only used when Type is "redis".
+	//
+	// Deprecated: use Redis.Sentinel instead. The gateway consumes the
+	// authorization cache connection from the "redis" key; the operator
+	// converts this legacy field into redis.sentinel when redis is not set.
 	// +optional
 	Sentinel *RedisSentinelSpec `json:"sentinel,omitempty"`
 }
@@ -1021,6 +1101,10 @@ type RedisCacheSpec struct {
 	// +optional
 	KeyPrefix string `json:"keyPrefix,omitempty"`
 
+	// TLS contains TLS configuration for the Redis connection.
+	// +optional
+	TLS *RedisTLSSpec `json:"tls,omitempty"`
+
 	// TTLJitter is the maximum percentage of jitter to add to TTL values (0.0 to 1.0).
 	// For example, 0.1 means ±10% jitter. Default is 0 (no jitter).
 	// +optional
@@ -1058,6 +1142,42 @@ type RedisRetrySpec struct {
 	// Default is 30s.
 	// +optional
 	MaxBackoff Duration `json:"maxBackoff,omitempty"`
+}
+
+// RedisTLSSpec configures TLS for Redis client connections (route caching,
+// distributed rate limiting, and the authorization decision cache). The JSON
+// shape matches the gateway's Redis TLS configuration so it round-trips to
+// the data plane unchanged.
+type RedisTLSSpec struct {
+	// Enabled enables TLS for the Redis connection.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// CertFile is the path to the client certificate file (mTLS).
+	// +optional
+	CertFile string `json:"certFile,omitempty"`
+
+	// KeyFile is the path to the client private key file (mTLS).
+	// +optional
+	KeyFile string `json:"keyFile,omitempty"`
+
+	// CAFile is the path to the CA certificate file for server verification.
+	// +optional
+	CAFile string `json:"caFile,omitempty"`
+
+	// MinVersion is the minimum TLS version (TLS12, TLS13).
+	// +kubebuilder:validation:Enum=TLS12;TLS13
+	// +optional
+	MinVersion string `json:"minVersion,omitempty"`
+
+	// MaxVersion is the maximum TLS version.
+	// +kubebuilder:validation:Enum=TLS12;TLS13
+	// +optional
+	MaxVersion string `json:"maxVersion,omitempty"`
+
+	// InsecureSkipVerify skips server certificate verification (dev only).
+	// +optional
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // BackendCacheConfig represents backend caching configuration.

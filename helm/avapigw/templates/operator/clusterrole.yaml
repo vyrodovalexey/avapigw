@@ -30,7 +30,10 @@ rules:
       - list
       - watch
   
-  # ConfigMaps - for configuration storage and leader election (legacy)
+  # ConfigMaps - read-only access for validation spec resolution
+  # (OpenAPI/proto/GraphQL ConfigMap refs) and ConfigMap watches.
+  # Controllers declare only get;list;watch (kubebuilder RBAC markers);
+  # leader election uses coordination.k8s.io Leases, not ConfigMaps.
   - apiGroups:
       - ""
     resources:
@@ -39,10 +42,6 @@ rules:
       - get
       - list
       - watch
-      - create
-      - update
-      - patch
-      - delete
   
   # Services and Endpoints - for backend service discovery
   # Required for: Ingress backend resolution, health checking
@@ -179,22 +178,13 @@ rules:
   
   # ValidatingWebhookConfiguration - for CA bundle injection and webhook management
   # Required for: self-signed and Vault PKI modes to inject CA bundle at startup
+  # NOTE: mutatingwebhookconfigurations intentionally NOT granted - the
+  # operator registers no mutating webhooks (least privilege); add the grant
+  # back only when a mutating webhook is introduced.
   - apiGroups:
       - admissionregistration.k8s.io
     resources:
       - validatingwebhookconfigurations
-    verbs:
-      - get
-      - list
-      - watch
-      - update
-      - patch
-  
-  # MutatingWebhookConfiguration - for future use if mutating webhooks are added
-  - apiGroups:
-      - admissionregistration.k8s.io
-    resources:
-      - mutatingwebhookconfigurations
     verbs:
       - get
       - list

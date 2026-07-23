@@ -278,7 +278,19 @@ func (v *BackendValidator) validate(backend *avapigwv1alpha1.Backend) (admission
 
 	// Distributed rate limiting is not enforced in the backend data path.
 	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
-	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, "Backend")...)
+	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, kindBackend)...)
+
+	// Transparency warnings: fields with no counterpart on the gateway's
+	// backend configuration type are accepted but not applied.
+	if spec.RequestLimits != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.requestLimits", kindBackend)...)
+	}
+	if spec.Transform != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.transform", kindBackend)...)
+	}
+	if spec.Encoding != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.encoding", kindBackend)...)
+	}
 
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))

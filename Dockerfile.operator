@@ -33,7 +33,7 @@ ARG VERSION=dev
 ARG BUILD_TIME
 ARG GIT_COMMIT=unknown
 
-# Build the operator binary with optimizations
+# Build the operator binary with optimizations (static, CGO disabled)
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} go build \
     -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.gitCommit=${GIT_COMMIT}" \
     -trimpath \
@@ -41,9 +41,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} go build \
     ./cmd/operator
 
 # ==============================================================================
-# Runtime stage - Alpine for minimal footprint with shell access
+# Runtime stage - distroless static (no shell, no package manager)
 # ==============================================================================
-FROM alpine:3.23
+# gcr.io/distroless/static-debian12 ships CA certificates and tzdata; the
+# operator binary is fully static (CGO_ENABLED=0), so nothing else is needed.
+# The :nonroot variant runs as UID/GID 65532 by default, matching the Helm
+# chart's operator securityContext (runAsUser/runAsGroup 65532).
+FROM gcr.io/distroless/static-debian12:nonroot
 
 # Build arguments for dynamic OCI labels
 ARG VERSION=dev
@@ -60,31 +64,10 @@ LABEL org.opencontainers.image.title="avapigw-operator" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.created="${BUILD_TIME}" \
-      org.opencontainers.image.base.name="alpine:3.23"
-
-
-# Upgrade to fix CVE
-RUN apk upgrade --no-cache
-
-# Install runtime dependencies (sorted alphanumerically)
-# ca-certificates: for TLS connections
-# curl: for health checks
-# tzdata: for timezone support
-RUN apk add --no-cache \
-    ca-certificates \
-    curl \
-    tzdata \
-    && rm -rf /var/cache/apk/*
-
-# Create non-root user and group for security
-RUN addgroup -g 1000 -S operator && \
-    adduser -u 1000 -S operator -G operator -h /home/operator -s /sbin/nologin
+      org.opencontainers.image.base.name="gcr.io/distroless/static-debian12:nonroot"
 
 # Copy the operator binary
-COPY --from=builder /operator /operator
-
-# Ensure binary is executable
-RUN chmod +x /operator
+COPY --from=builder --chown=65532:65532 /operator /operator
 
 # Expose ports
 # 8080 - Metrics
@@ -93,12 +76,18 @@ RUN chmod +x /operator
 # 9444 - gRPC server
 EXPOSE 8080 8081 9443 9444
 
-# Run as non-root user
-USER 1000:1000
+# Run as non-root user (distroless nonroot, UID/GID 65532)
+USER nonroot:nonroot
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8081/healthz || exit 1
+# NOTE: no container-level HEALTHCHECK - distroless has no shell/curl.
+# Health checking is provided by Kubernetes HTTP probes against
+# /healthz and /readyz on the health port (see helm/avapigw values:
+# operator.livenessProbe/operator.readinessProbe), which the chart wires
+# by default.
+#
+# NOTE: the operator writes webhook serving certificates to a temporary
+# directory under /tmp at startup; in Kubernetes the chart mounts an
+# emptyDir at /tmp (required with readOnlyRootFilesystem: true).
 
 # Set entrypoint
 ENTRYPOINT ["/operator"]

@@ -255,6 +255,24 @@ const (
 	matchTypeRegex  = "regex"
 )
 
+// Specificity computes the routing specificity (priority) score of a gRPC
+// route. It is the single source of truth for route precedence, shared by
+// AddRoute (data plane ordering) and admission-webhook duplicate/parity
+// checks, so the webhook and the data plane cannot drift.
+//
+// The score is the sum over all match blocks of:
+//
+//	service:   exact=1000 | prefix=500+len(prefix) | regex=100 | unset/wildcard=0
+//	method:    exact=500  | prefix=250+len(prefix) | regex=50  | unset/wildcard=0
+//	authority: set (non-empty, non-wildcard)=100
+//	metadata:  +10 per metadata condition
+//	withoutHeaders: +5 per excluded header
+//
+// A route without match blocks (catch-all) scores 0 and therefore sorts last.
+func Specificity(route config.GRPCRoute) int {
+	return calculatePriority(route)
+}
+
 // calculatePriority calculates the priority of a gRPC route.
 // Higher priority routes are matched first.
 func calculatePriority(route config.GRPCRoute) int {

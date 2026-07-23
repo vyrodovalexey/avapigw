@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"time"
 
+	"github.com/vyrodovalexey/avapigw/internal/httputil"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
+
+// maxOPAResponseBytes bounds OPA decision-response reads so a misbehaving
+// or compromised OPA endpoint cannot inflate gateway memory.
+const maxOPAResponseBytes = httputil.DefaultMaxResponseBytes
 
 // RetryConfig holds retry configuration for OPA requests.
 type RetryConfig struct {
@@ -244,9 +248,15 @@ func (c *opaClient) doAuthorizeRequest(ctx context.Context, url string, bodyByte
 	}
 	defer resp.Body.Close()
 
-	// Read the response
-	respBody, err := io.ReadAll(resp.Body)
+	// Read the response (bounded: over-limit bodies are rejected, logged,
+	// and surface through the caller's error metrics)
+	respBody, err := httputil.ReadAllLimited(resp.Body, maxOPAResponseBytes)
 	if err != nil {
+		if errors.Is(err, httputil.ErrResponseTooLarge) {
+			c.logger.Warn("OPA response exceeded size limit, rejecting",
+				observability.Int64("limit_bytes", maxOPAResponseBytes),
+			)
+		}
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 

@@ -11,8 +11,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"sync"
@@ -22,6 +22,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/vyrodovalexey/avapigw/internal/httputil"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 )
 
@@ -40,6 +41,10 @@ const (
 	// refreshFlightKey is the singleflight key used to coalesce concurrent
 	// JWKS refreshes into a single in-flight fetch.
 	refreshFlightKey = "jwks-refresh"
+
+	// maxJWKSResponseBytes bounds JWKS document reads so a misbehaving or
+	// compromised endpoint cannot inflate gateway memory.
+	maxJWKSResponseBytes = httputil.DefaultMaxResponseBytes
 )
 
 // RetryConfig contains configuration for retry with exponential backoff.
@@ -94,7 +99,15 @@ type JWKSKeySet struct {
 	// in-flight JWKS fetch so an IdP outage cannot stall every caller.
 	refreshGroup singleflight.Group
 
-	// Background refresh
+	// Background refresh lifecycle. lifecycleMu guards started/closed:
+	// Close() must not block waiting for a refresh loop that was never
+	// started (Start not called, or its initial fetch failed), and a second
+	// Close() must be a safe no-op instead of a close-of-closed-channel
+	// panic (mirrors the vault client renewalStarted pattern).
+	lifecycleMu sync.Mutex
+	started     bool
+	closed      bool
+
 	stopCh    chan struct{}
 	stoppedCh chan struct{}
 	refreshes atomic.Int64
@@ -157,12 +170,26 @@ func NewJWKSKeySet(url string, opts ...JWKSKeySetOption) (*JWKSKeySet, error) {
 	return ks, nil
 }
 
-// Start starts background refresh of the key set.
+// Start starts background refresh of the key set. It is idempotent: a
+// second successful Start does not launch a duplicate refresh loop, and
+// Start after Close is rejected.
 func (ks *JWKSKeySet) Start(ctx context.Context) error {
 	// Initial fetch
 	if err := ks.Refresh(ctx); err != nil {
 		return fmt.Errorf("initial JWKS fetch failed: %w", err)
 	}
+
+	ks.lifecycleMu.Lock()
+	defer ks.lifecycleMu.Unlock()
+
+	if ks.closed {
+		return errors.New("JWKS key set is closed")
+	}
+	if ks.started {
+		// Refresh loop already running; nothing to launch.
+		return nil
+	}
+	ks.started = true
 
 	// Start background refresh
 	// The refresh loop runs independently with its own context management
@@ -385,8 +412,16 @@ func (ks *JWKSKeySet) fetchJWKS(ctx context.Context) (jwk.Set, error) {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Bounded read: an over-limit JWKS document is rejected (counted through
+	// the fetch-error path) instead of inflating memory.
+	body, err := httputil.ReadAllLimited(resp.Body, maxJWKSResponseBytes)
 	if err != nil {
+		if errors.Is(err, httputil.ErrResponseTooLarge) {
+			ks.logger.Warn("JWKS response exceeded size limit, rejecting",
+				observability.String("url", ks.url),
+				observability.Int64("limit_bytes", maxJWKSResponseBytes),
+			)
+		}
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
@@ -422,10 +457,25 @@ func secureRandomFloat() float64 {
 	return float64(binary.LittleEndian.Uint64(b[:])) / float64(math.MaxUint64)
 }
 
-// Close closes the key set.
+// Close closes the key set. It returns immediately when Start was never
+// called (or its initial fetch failed, so no refresh loop is running), and
+// repeated Close calls are safe no-ops.
 func (ks *JWKSKeySet) Close() error {
+	ks.lifecycleMu.Lock()
+	if ks.closed {
+		ks.lifecycleMu.Unlock()
+		return nil
+	}
+	ks.closed = true
+	started := ks.started
+	ks.lifecycleMu.Unlock()
+
 	close(ks.stopCh)
-	<-ks.stoppedCh
+	if started {
+		// Wait for the refresh loop only when it is actually running,
+		// otherwise Close would block forever on stoppedCh.
+		<-ks.stoppedCh
+	}
 	return nil
 }
 

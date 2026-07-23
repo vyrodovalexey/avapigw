@@ -39,10 +39,19 @@ type SelfSignedProviderConfig struct {
 	Organization []string
 
 	// SecretName is the name of the Kubernetes secret to store certificates.
+	// Persistence is enabled only when both SecretName and SecretClient are
+	// set: the CA (certificate + key) and the current serving certificate
+	// are stored in the Secret so the CA survives operator restarts and the
+	// gateway can mount ca.crt for TLS verification.
 	SecretName string
 
 	// SecretNamespace is the namespace of the Kubernetes secret.
 	SecretNamespace string
+
+	// SecretClient is the Kubernetes client used to load and persist the
+	// certificate Secret. When nil, persistence is disabled and the CA is
+	// held in memory only (legacy behavior).
+	SecretClient SecretStore
 }
 
 // selfSignedProvider implements Manager using self-signed certificates.
@@ -57,7 +66,19 @@ type selfSignedProvider struct {
 }
 
 // NewSelfSignedProvider creates a new self-signed certificate provider.
+// It is a convenience wrapper around NewSelfSignedProviderWithContext for
+// callers without a context (Secret persistence bootstrap is bounded
+// internally when enabled).
 func NewSelfSignedProvider(config *SelfSignedProviderConfig) (Manager, error) {
+	return NewSelfSignedProviderWithContext(context.Background(), config)
+}
+
+// NewSelfSignedProviderWithContext creates a new self-signed certificate
+// provider. When Secret persistence is configured (SecretName +
+// SecretClient), the CA is loaded from the Secret when present and still
+// valid (reuse-if-valid) and regenerated + persisted otherwise
+// (regenerate-if-expired), so the CA is stable across operator restarts.
+func NewSelfSignedProviderWithContext(ctx context.Context, config *SelfSignedProviderConfig) (Manager, error) {
 	if config == nil {
 		config = &SelfSignedProviderConfig{}
 	}
@@ -88,19 +109,52 @@ func NewSelfSignedProvider(config *SelfSignedProviderConfig) (Manager, error) {
 		certs:  make(map[string]*Certificate),
 	}
 
-	// Generate CA certificate
-	ca, err := p.generateCA()
+	// Bootstrap the CA: reuse a persisted CA when valid, otherwise
+	// generate a fresh one (and persist it when a store is configured).
+	ca, err := p.bootstrapCA(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate CA: %w", err)
+		return nil, err
 	}
 	p.ca = ca
+
+	cm := GetCertMetrics()
+	cm.expirySeconds.WithLabelValues(config.CACommonName).Set(time.Until(ca.Expiration).Seconds())
 
 	p.logger.Info("self-signed certificate provider initialized",
 		observability.String("ca_cn", config.CACommonName),
 		observability.Duration("ca_validity", config.CAValidity),
+		observability.Bool("secret_persistence", p.persistenceEnabled()),
+		observability.Time("ca_expiration", ca.Expiration),
 	)
 
 	return p, nil
+}
+
+// bootstrapCA returns the provider CA: a persisted CA when reusable, or a
+// newly generated (and best-effort persisted) one.
+func (p *selfSignedProvider) bootstrapCA(ctx context.Context) (*Certificate, error) {
+	if p.persistenceEnabled() {
+		if ca := p.loadPersistedCA(ctx); ca != nil {
+			return ca, nil
+		}
+	}
+
+	ca, err := p.generateCA()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate CA: %w", err)
+	}
+
+	if p.persistenceEnabled() {
+		// Persistence failures are non-fatal: the provider keeps working
+		// with the in-memory CA, but restarts will regenerate it.
+		if persisted := p.persistCA(ctx, ca); persisted != nil {
+			// Another replica persisted a valid CA first; adopt it so all
+			// replicas issue from the same CA (TOCTOU-safe adoption).
+			return persisted, nil
+		}
+	}
+
+	return ca, nil
 }
 
 // GetCertificate returns a certificate for the given request.
@@ -153,6 +207,22 @@ func (p *selfSignedProvider) GetCA(ctx context.Context) (*x509.CertPool, error) 
 	return pool, nil
 }
 
+// GetCAPEM returns the PEM-encoded CA certificate.
+func (p *selfSignedProvider) GetCAPEM(_ context.Context) ([]byte, error) {
+	if p.closed.Load() {
+		return nil, fmt.Errorf("certificate provider is closed")
+	}
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.ca == nil || len(p.ca.CertificatePEM) == 0 {
+		return nil, fmt.Errorf("CA certificate not available")
+	}
+
+	return p.ca.CertificatePEM, nil
+}
+
 // RotateCertificate rotates the certificate for the given request.
 func (p *selfSignedProvider) RotateCertificate(
 	ctx context.Context,
@@ -172,7 +242,7 @@ func (p *selfSignedProvider) RotateCertificate(
 	}
 
 	GetCertMetrics().rotationsTotal.WithLabelValues(
-		"selfsigned",
+		providerSelfSigned,
 	).Inc()
 
 	return p.issueCertificate(ctx, req)
@@ -233,7 +303,7 @@ func (p *selfSignedProvider) generateCA() (*Certificate, error) {
 
 	// Encode to PEM
 	certPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
+		Type:  pemTypeCertificate,
 		Bytes: certDER,
 	})
 
@@ -345,7 +415,7 @@ func (p *selfSignedProvider) issueCertificate(ctx context.Context, req *Certific
 
 	// Encode to PEM
 	certPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
+		Type:  pemTypeCertificate,
 		Bytes: certDER,
 	})
 
@@ -370,10 +440,14 @@ func (p *selfSignedProvider) issueCertificate(ctx context.Context, req *Certific
 	p.mu.Unlock()
 
 	cm := GetCertMetrics()
-	cm.issuedTotal.WithLabelValues("selfsigned").Inc()
+	cm.issuedTotal.WithLabelValues(providerSelfSigned).Inc()
 	cm.expirySeconds.WithLabelValues(
 		req.CommonName,
 	).Set(time.Until(cert.NotAfter).Seconds())
+
+	// Persist the freshly issued serving certificate alongside the CA so
+	// it survives operator restarts (best-effort; failures are logged).
+	p.persistServingCertificate(ctx, certificate)
 
 	p.logger.Info("certificate issued",
 		observability.String("common_name", req.CommonName),

@@ -173,7 +173,6 @@ var validGraphQLOperations = map[string]bool{
 //
 //nolint:gocognit,gocyclo,unparam // Validation requires checking matches, routes, policies; warnings for interface
 func (v *GraphQLRouteValidator) validate(graphqlRoute *avapigwv1alpha1.GraphQLRoute) (admission.Warnings, error) {
-	var warnings admission.Warnings
 	var errs []string
 
 	spec := &graphqlRoute.Spec
@@ -279,6 +278,21 @@ func (v *GraphQLRouteValidator) validate(graphqlRoute *avapigwv1alpha1.GraphQLRo
 		}
 	}
 
+	warnings := admission.Warnings(collectGraphQLRouteWarnings(spec))
+
+	if len(errs) > 0 {
+		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
+	}
+
+	return warnings, nil
+}
+
+// collectGraphQLRouteWarnings assembles the non-blocking admission warnings
+// for a GraphQLRoute spec: plaintext-secret warnings plus transparency
+// warnings for deprecated, unusable, or not-yet-applied fields.
+func collectGraphQLRouteWarnings(spec *avapigwv1alpha1.GraphQLRouteSpec) []string {
+	var warnings []string
+
 	// Security warnings for plaintext secrets in authentication config,
 	// plus a warning when mTLS is enabled without an explicit caFile
 	// (valid only with a gateway-level CA source such as Vault-managed PKI).
@@ -287,10 +301,12 @@ func (v *GraphQLRouteValidator) validate(graphqlRoute *avapigwv1alpha1.GraphQLRo
 		warnings = append(warnings, warnMTLSMissingCAFile(spec.Authentication)...)
 	}
 
-	// Security warnings for plaintext secrets in authorization cache sentinel config
-	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
-		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
-	}
+	// Security warnings for plaintext secrets in authorization cache
+	// (both redis.sentinel and the deprecated sentinel block), plus
+	// transparency warnings for deprecated/unusable authz cache config.
+	warnings = append(warnings, warnAuthzCacheSecrets(spec.Authorization)...)
+	warnings = append(warnings, warnAuthzCacheSentinelDeprecated(spec.Authorization)...)
+	warnings = append(warnings, warnAuthzCacheRedisWithoutConnection(spec.Authorization, kindGraphQLRoute)...)
 
 	// Security warnings for plaintext secrets in route cache and rate limiter
 	// Redis Sentinel configurations
@@ -305,11 +321,17 @@ func (v *GraphQLRouteValidator) validate(graphqlRoute *avapigwv1alpha1.GraphQLRo
 	// takes effect.
 	warnings = append(warnings, warnGraphQLRouteCacheIneffective(spec.Cache)...)
 
-	if len(errs) > 0 {
-		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
+	// Transparency warnings: fields with no counterpart on the gateway's
+	// GraphQL route configuration type, plus the deprecated cache.keyComponents.
+	if spec.MaxSessions != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.maxSessions", kindGraphQLRoute)...)
 	}
+	if spec.RequestLimits != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.requestLimits", kindGraphQLRoute)...)
+	}
+	warnings = append(warnings, warnCacheKeyComponentsUnapplied(spec.Cache, kindGraphQLRoute)...)
 
-	return warnings, nil
+	return warnings
 }
 
 // validateGraphQLMatches validates GraphQL route match conditions.

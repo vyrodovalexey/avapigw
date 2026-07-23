@@ -83,7 +83,7 @@ func newVaultAuthMetricsWithFactory(factory promauto.Factory) *vaultAuthMetrics 
 				Name:      "auth_retries_total",
 				Help:      "Total number of Vault authentication retry attempts",
 			},
-			[]string{"result"},
+			[]string{labelResult},
 		),
 	}
 }
@@ -174,7 +174,7 @@ func NewVaultProvider(ctx context.Context, config *VaultProviderConfig) (Manager
 	}
 
 	if config.RotateBefore == 0 {
-		config.RotateBefore = 1 * time.Hour
+		config.RotateBefore = DefaultVaultRotateBefore
 	}
 
 	// Apply retry configuration defaults
@@ -334,6 +334,21 @@ func (p *vaultProvider) GetCA(ctx context.Context) (*x509.CertPool, error) {
 	return p.vaultClient.PKI().GetCA(ctx, p.config.PKIMount)
 }
 
+// GetCAPEM returns the PEM-encoded CA certificate from Vault PKI
+// (pki/cert/ca). Reading the CA directly requires no issuance permissions,
+// so it works with restrictive PKI roles.
+func (p *vaultProvider) GetCAPEM(ctx context.Context) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled: %w", err)
+	}
+
+	if p.closed.Load() {
+		return nil, fmt.Errorf("certificate provider is closed")
+	}
+
+	return p.vaultClient.PKI().GetCAPEM(ctx, p.config.PKIMount)
+}
+
 // RotateCertificate rotates the certificate for the given request.
 // Unlike GetCertificate, this always issues a new certificate regardless of cache state.
 func (p *vaultProvider) RotateCertificate(ctx context.Context, req *CertificateRequest) (*Certificate, error) {
@@ -350,7 +365,7 @@ func (p *vaultProvider) RotateCertificate(ctx context.Context, req *CertificateR
 		return nil, fmt.Errorf("common name is required")
 	}
 
-	GetCertMetrics().rotationsTotal.WithLabelValues("vault").Inc()
+	GetCertMetrics().rotationsTotal.WithLabelValues(providerVault).Inc()
 
 	return p.issueCertificate(ctx, req)
 }
@@ -380,7 +395,7 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.String("cert.common_name", req.CommonName),
-			attribute.String("cert.provider", "vault"),
+			attribute.String("cert.provider", providerVault),
 		),
 	)
 	defer span.End()
@@ -405,7 +420,7 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 		TTL:        ttl,
 	})
 	if err != nil {
-		GetCertMetrics().errorsTotal.WithLabelValues("vault", "issue").Inc()
+		GetCertMetrics().errorsTotal.WithLabelValues(providerVault, "issue").Inc()
 		return nil, fmt.Errorf("failed to issue certificate from vault: %w", err)
 	}
 
@@ -431,7 +446,7 @@ func (p *vaultProvider) issueCertificate(ctx context.Context, req *CertificateRe
 
 	// Record certificate metrics
 	cm := GetCertMetrics()
-	cm.issuedTotal.WithLabelValues("vault").Inc()
+	cm.issuedTotal.WithLabelValues(providerVault).Inc()
 	cm.expirySeconds.WithLabelValues(
 		req.CommonName,
 	).Set(time.Until(certificate.Expiration).Seconds())

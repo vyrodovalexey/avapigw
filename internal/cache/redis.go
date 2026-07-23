@@ -3,7 +3,6 @@ package cache
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/redisclient"
 	"github.com/vyrodovalexey/avapigw/internal/retry"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
@@ -374,6 +374,11 @@ func applyPasswordToRedisURL(cfg *config.RedisCacheConfig, password string) erro
 // It dispatches between standalone and Sentinel modes based on configuration.
 // The context bounds initialization (Vault password reads and the
 // connectivity ping) and honors caller cancellation.
+//
+// Copy-on-resolve (mirrors internal/redisclient): the caller's cfg is never
+// mutated — Vault-resolved passwords are injected into a private deep copy
+// so secrets never leak back into the shared GatewayConfig tree (where they
+// would surface in config serializations and spurious reload diffs).
 func newRedisCache(
 	ctx context.Context, cfg *config.CacheConfig, logger observability.Logger, opts *cacheOptions,
 ) (*redisCache, error) {
@@ -381,26 +386,28 @@ func newRedisCache(
 		return nil, errors.New("redis configuration is required")
 	}
 
-	// Resolve passwords from Vault before connecting
+	// Resolve passwords from Vault into a private copy before connecting.
 	var vaultClient vault.Client
 	if opts != nil {
 		vaultClient = opts.vaultClient
 	}
-	if err := resolveRedisPasswords(ctx, cfg.Redis, vaultClient, logger); err != nil {
+	effective := *cfg
+	effective.Redis = cfg.Redis.Clone()
+	if err := resolveRedisPasswords(ctx, effective.Redis, vaultClient, logger); err != nil {
 		return nil, fmt.Errorf("failed to resolve redis passwords: %w", err)
 	}
 
 	// Sentinel mode takes precedence when configured
-	if cfg.Redis.Sentinel != nil && cfg.Redis.Sentinel.MasterName != "" {
-		return newRedisSentinelCache(ctx, cfg, logger, opts)
+	if effective.Redis.Sentinel != nil && effective.Redis.Sentinel.MasterName != "" {
+		return newRedisSentinelCache(ctx, &effective, logger, opts)
 	}
 
 	// Standalone mode requires a URL
-	if cfg.Redis.URL == "" {
+	if effective.Redis.URL == "" {
 		return nil, errors.New("redis URL is required for standalone mode")
 	}
 
-	return newRedisStandaloneCache(ctx, cfg, logger)
+	return newRedisStandaloneCache(ctx, &effective, logger)
 }
 
 // newRedisStandaloneCache creates a new Redis cache using standalone mode.
@@ -414,11 +421,10 @@ func newRedisStandaloneCache(
 
 	applyRedisPoolOptions(opts, cfg.Redis)
 
-	// Configure TLS if enabled
-	if cfg.Redis.TLS != nil && cfg.Redis.TLS.Enabled {
-		opts.TLSConfig = &tls.Config{
-			InsecureSkipVerify: cfg.Redis.TLS.InsecureSkipVerify, //nolint:gosec // User-configurable
-		}
+	// Configure TLS if enabled (honors certFile/keyFile/caFile/versions via
+	// the shared redisclient builder; unreadable files fail construction).
+	if tlsErr := applyRedisTLSConfig(opts, cfg.Redis); tlsErr != nil {
+		return nil, tlsErr
 	}
 
 	client := redis.NewClient(opts)
@@ -484,11 +490,14 @@ func newRedisSentinelCache(
 		opts.WriteTimeout = cfg.Redis.WriteTimeout.Duration()
 	}
 
-	// Configure TLS if enabled
+	// Configure TLS if enabled (honors certFile/keyFile/caFile/versions via
+	// the shared redisclient builder; unreadable files fail construction).
 	if cfg.Redis.TLS != nil && cfg.Redis.TLS.Enabled {
-		opts.TLSConfig = &tls.Config{
-			InsecureSkipVerify: cfg.Redis.TLS.InsecureSkipVerify, //nolint:gosec // User-configurable
+		tlsCfg, tlsErr := redisclient.NewTLSConfig(cfg.Redis.TLS)
+		if tlsErr != nil {
+			return nil, tlsErr
 		}
+		opts.TLSConfig = tlsCfg
 	}
 
 	client := redis.NewFailoverClient(opts)
@@ -534,6 +543,21 @@ func applyRedisPoolOptions(opts *redis.Options, redisCfg *config.RedisCacheConfi
 	if redisCfg.WriteTimeout > 0 {
 		opts.WriteTimeout = redisCfg.WriteTimeout.Duration()
 	}
+}
+
+// applyRedisTLSConfig builds and applies the TLS client configuration for
+// standalone Redis when TLS is enabled, honoring the full certificate
+// material (mTLS client keypair, private CA, protocol versions).
+func applyRedisTLSConfig(opts *redis.Options, redisCfg *config.RedisCacheConfig) error {
+	if redisCfg.TLS == nil || !redisCfg.TLS.Enabled {
+		return nil
+	}
+	tlsCfg, err := redisclient.NewTLSConfig(redisCfg.TLS)
+	if err != nil {
+		return err
+	}
+	opts.TLSConfig = tlsCfg
+	return nil
 }
 
 // pingRedis tests the Redis connection. It honors the caller's context and

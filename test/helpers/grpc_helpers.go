@@ -13,6 +13,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/vyrodovalexey/avapigw/internal/backend"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/gateway"
 	grpcproxy "github.com/vyrodovalexey/avapigw/internal/grpc/proxy"
@@ -79,6 +80,11 @@ type GRPCGatewayInstance struct {
 	Server   *grpcserver.Server
 	Address  string
 	Listener *gateway.GRPCListener
+
+	// Registry is the backend registry backing the listener's proxy. It is
+	// only set when the gateway was started through
+	// StartGRPCGatewayWithBackends and is stopped by Stop.
+	Registry *backend.Registry
 }
 
 // StartGRPCGateway starts a gRPC gateway instance with the given configuration.
@@ -142,6 +148,9 @@ func StartGRPCGatewayWithConfig(ctx context.Context, cfg *config.GatewayConfig) 
 
 // Stop stops the gRPC gateway instance.
 func (gi *GRPCGatewayInstance) Stop(ctx context.Context) error {
+	if gi.Registry != nil {
+		_ = gi.Registry.StopAll(ctx)
+	}
 	if gi.Listener != nil {
 		return gi.Listener.Stop(ctx)
 	}

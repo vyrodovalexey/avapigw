@@ -3,10 +3,12 @@ package redisclient
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/retry"
+	tlspkg "github.com/vyrodovalexey/avapigw/internal/tls"
 	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
@@ -192,7 +195,11 @@ func New(
 // buildClient dispatches between Sentinel failover and standalone modes.
 func buildClient(cfg *Config, o *options) (redis.UniversalClient, error) {
 	if !cfg.Sentinel.IsEmpty() {
-		return redis.NewFailoverClient(BuildFailoverOptions(cfg, o.dialer)), nil
+		foOpts, err := BuildFailoverOptions(cfg, o.dialer)
+		if err != nil {
+			return nil, err
+		}
+		return redis.NewFailoverClient(foOpts), nil
 	}
 
 	if cfg.URL == "" {
@@ -230,7 +237,12 @@ func BuildStandaloneOptions(cfg *Config) (*redis.Options, error) {
 	if cfg.WriteTimeout > 0 {
 		opts.WriteTimeout = cfg.WriteTimeout
 	}
-	opts.TLSConfig = tlsConfigFor(cfg, opts.TLSConfig)
+
+	tlsCfg, err := tlsConfigFor(cfg, opts.TLSConfig)
+	if err != nil {
+		return nil, err
+	}
+	opts.TLSConfig = tlsCfg
 
 	return opts, nil
 }
@@ -240,7 +252,7 @@ func BuildStandaloneOptions(cfg *Config) (*redis.Options, error) {
 // a live Sentinel deployment.
 func BuildFailoverOptions(
 	cfg *Config, dialer func(ctx context.Context, network, addr string) (net.Conn, error),
-) *redis.FailoverOptions {
+) (*redis.FailoverOptions, error) {
 	sentinel := cfg.Sentinel
 	opts := &redis.FailoverOptions{
 		MasterName:       sentinel.MasterName,
@@ -265,20 +277,91 @@ func BuildFailoverOptions(
 	if cfg.WriteTimeout > 0 {
 		opts.WriteTimeout = cfg.WriteTimeout
 	}
-	opts.TLSConfig = tlsConfigFor(cfg, opts.TLSConfig)
 
-	return opts
+	tlsCfg, err := tlsConfigFor(cfg, opts.TLSConfig)
+	if err != nil {
+		return nil, err
+	}
+	opts.TLSConfig = tlsCfg
+
+	return opts, nil
 }
 
 // tlsConfigFor returns the TLS client configuration when TLS is enabled,
 // otherwise the existing configuration (which may come from a rediss:// URL).
-func tlsConfigFor(cfg *Config, existing *tls.Config) *tls.Config {
+func tlsConfigFor(cfg *Config, existing *tls.Config) (*tls.Config, error) {
 	if cfg.TLS == nil || !cfg.TLS.Enabled {
-		return existing
+		return existing, nil
 	}
-	return &tls.Config{
-		InsecureSkipVerify: cfg.TLS.InsecureSkipVerify, //nolint:gosec // User-configurable for dev environments
+	return NewTLSConfig(cfg.TLS)
+}
+
+// NewTLSConfig builds a *tls.Config from the shared Redis TLS configuration,
+// honoring the client certificate (certFile/keyFile for mTLS-to-Redis), the
+// private CA bundle (caFile), the min/max protocol versions, and
+// insecureSkipVerify. A clear error is returned when a referenced file is
+// unreadable or unparsable so misconfigured TLS never silently degrades to
+// system-trust-only. It is shared by the redisclient and cache Redis
+// builders.
+func NewTLSConfig(cfg *config.TLSConfig) (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // User-configurable for dev environments
+		MinVersion:         tls.VersionTLS12,
 	}
+
+	if cfg.MinVersion != "" {
+		tlsCfg.MinVersion = tlspkg.TLSVersion(cfg.MinVersion).ToTLSVersion()
+	}
+	if cfg.MaxVersion != "" {
+		tlsCfg.MaxVersion = tlspkg.TLSVersion(cfg.MaxVersion).ToTLSVersion()
+	}
+
+	if err := loadRedisClientCertificate(cfg, tlsCfg); err != nil {
+		return nil, err
+	}
+	if err := loadRedisCA(cfg, tlsCfg); err != nil {
+		return nil, err
+	}
+
+	return tlsCfg, nil
+}
+
+// loadRedisClientCertificate loads the X.509 client keypair for
+// mTLS-to-Redis when configured. Both certFile and keyFile must be present.
+func loadRedisClientCertificate(cfg *config.TLSConfig, tlsCfg *tls.Config) error {
+	if cfg.CertFile == "" && cfg.KeyFile == "" {
+		return nil
+	}
+	if cfg.CertFile == "" || cfg.KeyFile == "" {
+		return errors.New("redis TLS requires both certFile and keyFile for a client certificate")
+	}
+
+	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	if err != nil {
+		return fmt.Errorf("failed to load redis TLS client certificate (certFile=%s): %w",
+			cfg.CertFile, err)
+	}
+	tlsCfg.Certificates = []tls.Certificate{cert}
+	return nil
+}
+
+// loadRedisCA loads the private CA bundle used to verify the Redis server
+// certificate when configured.
+func loadRedisCA(cfg *config.TLSConfig, tlsCfg *tls.Config) error {
+	if cfg.CAFile == "" {
+		return nil
+	}
+
+	caPEM, err := os.ReadFile(cfg.CAFile) // #nosec G304 -- path comes from validated gateway configuration
+	if err != nil {
+		return fmt.Errorf("failed to read redis TLS CA file %s: %w", cfg.CAFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return fmt.Errorf("failed to parse redis TLS CA file %s: no valid PEM certificates", cfg.CAFile)
+	}
+	tlsCfg.RootCAs = pool
+	return nil
 }
 
 // pingWithRetry verifies connectivity using exponential backoff. Each

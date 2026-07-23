@@ -46,6 +46,10 @@ func runGateway(app *application, configPath string, logger observability.Logger
 		return // unreachable in production; allows test to continue
 	}
 
+	// Register readiness dependency checks (vault/redis/backends) so /ready
+	// reflects dependency health, not just the draining flag.
+	app.readinessChecks = registerReadinessChecks(app, logger)
+
 	startMetricsServerIfEnabled(app, logger)
 	watcher := startConfigWatcher(ctx, app, configPath, logger)
 
@@ -189,9 +193,12 @@ func stopDependencies(ctx context.Context, app *application, logger observabilit
 	}
 }
 
-// stopBackgroundWorkers stops rate limiter, max sessions limiter, and
-// flushes the audit logger.
+// stopBackgroundWorkers stops the readiness refresher, rate limiter, max
+// sessions limiter, and flushes the audit logger.
 func stopBackgroundWorkers(app *application, logger observability.Logger) {
+	// Stop the cached readiness check refresher (nil-safe).
+	app.readinessChecks.stop()
+
 	// Stop rate limiter cleanup goroutine
 	if app.rateLimiter != nil {
 		app.rateLimiter.Stop()

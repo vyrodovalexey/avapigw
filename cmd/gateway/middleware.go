@@ -30,6 +30,14 @@ type middlewareChainResult struct {
 	maxSessionsLimiter *middleware.MaxSessionsLimiter
 }
 
+// middlewareChainDeps carries optional dependencies for the middleware chain.
+type middlewareChainDeps struct {
+	// routeCORSSkip, when set, exempts requests whose matched route defines
+	// a route-level CORS policy from the GLOBAL CORS middleware, so the
+	// route policy takes precedence (including preflight OPTIONS).
+	routeCORSSkip func(*http.Request) bool
+}
+
 // buildMiddlewareChain builds the middleware chain.
 // The execution order (outermost executes first):
 // Recovery -> RequestID -> Logging -> Tracing -> Audit -> Metrics ->
@@ -49,6 +57,7 @@ func buildMiddlewareChain(
 	authCfg *config.AuthenticationConfig,
 	authMetrics *auth.Metrics,
 	vaultClient vault.Client,
+	deps ...middlewareChainDeps,
 ) (middlewareChainResult, error) {
 	h := handler
 	var rateLimiter middleware.RateLimiterHandle
@@ -114,9 +123,7 @@ func buildMiddlewareChain(
 		h = maxSessionsMiddleware(h)
 	}
 
-	if cfg.Spec.CORS != nil {
-		h = middleware.CORSFromConfig(cfg.Spec.CORS)(h)
-	}
+	h = wrapGlobalCORS(h, cfg, deps)
 
 	h = observability.MetricsMiddleware(metrics)(h)
 	h = middleware.Audit(auditLogger)(h)
@@ -130,6 +137,22 @@ func buildMiddlewareChain(
 		rateLimiter:        rateLimiter,
 		maxSessionsLimiter: maxSessionsLimiter,
 	}, nil
+}
+
+// wrapGlobalCORS applies the global CORS middleware when configured.
+// Route-level CORS policies take precedence over the global policy: the
+// skipper (deps.routeCORSSkip) exempts matched routes that define their own
+// cors block, so their route chain answers preflight and owns the
+// Access-Control-* headers (see gateway.NewRouteCORSSkipper).
+func wrapGlobalCORS(h http.Handler, cfg *config.GatewayConfig, deps []middlewareChainDeps) http.Handler {
+	if cfg.Spec.CORS == nil {
+		return h
+	}
+	var routeCORSSkip func(*http.Request) bool
+	if len(deps) > 0 {
+		routeCORSSkip = deps[0].routeCORSSkip
+	}
+	return middleware.CORSFromConfigWithSkipper(cfg.Spec.CORS, routeCORSSkip)(h)
 }
 
 // buildAuthMiddleware creates the authentication middleware from gateway config.

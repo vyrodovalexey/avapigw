@@ -87,6 +87,7 @@ TEST_ENV_COMPOSE := docker compose -f $(TEST_ENV_DIR)/docker-compose.yml -p avap
         test-env-restart-auth-backends test-env-verify \
         lint lint-fix fmt vet vuln \
         docker-build docker-run docker-push docker-clean \
+        docker-build-local k8s-load-images \
         run dev clean deps tools generate proto-generate \
         perf-test perf-test-http perf-test-post perf-test-mixed perf-test-all \
         perf-test-grpc-unary perf-test-grpc-streaming perf-test-websocket \
@@ -468,6 +469,38 @@ docker-push:
 docker-clean:
 	@echo "==> Cleaning Docker images..."
 	docker rmi $(DOCKER_IMAGE):$(DOCKER_TAG) $(DOCKER_IMAGE):latest 2>/dev/null || true
+
+# Local K8s test image names (match helm/avapigw/values-local.yaml:
+# image.repository=avapigw tag=test, operator.image.repository=avapigw-operator tag=latest)
+LOCAL_GATEWAY_IMAGE ?= avapigw:test
+LOCAL_OPERATOR_IMAGE ?= avapigw-operator:latest
+
+## docker-build-local: Build local test images (gateway + operator) for K8s deploys with values-local.yaml
+docker-build-local:
+	@echo "==> Building local test images..."
+	docker build \
+		-f Dockerfile.gateway \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		-t $(LOCAL_GATEWAY_IMAGE) \
+		.
+	docker build \
+		-f Dockerfile.operator \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		-t $(LOCAL_OPERATOR_IMAGE) \
+		.
+	@echo "==> Local test images built: $(LOCAL_GATEWAY_IMAGE), $(LOCAL_OPERATOR_IMAGE)"
+
+## k8s-load-images: Load the local test images into the local K8s cluster runtime
+# Handles kind (kind load), minikube (image load), classic Docker Desktop
+# (shared daemon no-op) and kind-based Docker Desktop / containerd nodes
+# (streamed ctr import via a helper pod). See test/scripts/k8s-load-images.sh.
+k8s-load-images:
+	@echo "==> Loading images into the Kubernetes cluster..."
+	@test/scripts/k8s-load-images.sh $(LOCAL_GATEWAY_IMAGE) $(LOCAL_OPERATOR_IMAGE)
 	@echo "==> Docker images cleaned"
 
 # ==============================================================================

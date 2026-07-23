@@ -115,7 +115,8 @@ func TestBuildOTLPExporterOptions_WithRetryConfig(t *testing.T) {
 		},
 	}
 
-	opts := buildOTLPExporterOptions(cfg)
+	opts, err := buildOTLPExporterOptions(cfg)
+	assert.NoError(t, err)
 	assert.NotEmpty(t, opts)
 }
 

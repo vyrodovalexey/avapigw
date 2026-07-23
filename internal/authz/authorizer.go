@@ -13,7 +13,10 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/authz/abac"
 	"github.com/vyrodovalexey/avapigw/internal/authz/external"
 	"github.com/vyrodovalexey/avapigw/internal/authz/rbac"
+	"github.com/vyrodovalexey/avapigw/internal/cache"
+	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/vault"
 )
 
 // Authorization result and engine constants.
@@ -23,6 +26,9 @@ const (
 	engineExternal = "external"
 	engineRBAC     = "rbac"
 	engineABAC     = "abac"
+
+	// cacheTypeRedis selects the Redis-backed external decision cache.
+	cacheTypeRedis = config.CacheTypeRedis
 )
 
 // authzTracer is the OTEL tracer used for authorization operations.
@@ -72,13 +78,14 @@ type Authorizer interface {
 
 // authorizer implements the Authorizer interface.
 type authorizer struct {
-	config     *Config
-	rbacEngine rbac.Engine
-	abacEngine abac.Engine
-	opaClient  external.OPAClient
-	cache      DecisionCache
-	logger     observability.Logger
-	metrics    *Metrics
+	config      *Config
+	rbacEngine  rbac.Engine
+	abacEngine  abac.Engine
+	opaClient   external.OPAClient
+	cache       DecisionCache
+	logger      observability.Logger
+	metrics     *Metrics
+	vaultClient vault.Client
 }
 
 // AuthorizerOption is a functional option for the authorizer.
@@ -123,6 +130,14 @@ func WithOPAClient(client external.OPAClient) AuthorizerOption {
 func WithDecisionCache(cache DecisionCache) AuthorizerOption {
 	return func(a *authorizer) {
 		a.cache = cache
+	}
+}
+
+// WithAuthorizerVaultClient supplies a Vault client used to resolve
+// Vault-referenced Redis passwords when the decision cache type is "redis".
+func WithAuthorizerVaultClient(client vault.Client) AuthorizerOption {
+	return func(a *authorizer) {
+		a.vaultClient = client
 	}
 }
 
@@ -213,7 +228,10 @@ func (a *authorizer) initializeOPA(config *Config) error {
 	return nil
 }
 
-// initializeCache initializes the decision cache.
+// initializeCache initializes the decision cache. Type "redis" builds an
+// external (shared) decision cache; when the Redis connection is missing or
+// unusable, the authorizer logs loudly and falls back to the in-memory
+// cache so authorization keeps functioning (never silently memory-only).
 func (a *authorizer) initializeCache(config *Config) {
 	if a.cache != nil {
 		return
@@ -230,9 +248,59 @@ func (a *authorizer) initializeCache(config *Config) {
 	if config.Cache.MaxSize > 0 {
 		maxSize = config.Cache.MaxSize
 	}
+
+	if config.Cache.Type == cacheTypeRedis {
+		if external := a.buildRedisDecisionCache(config.Cache, ttl); external != nil {
+			a.cache = external
+			return
+		}
+		// buildRedisDecisionCache already logged the fallback reason.
+	}
+
 	a.cache = NewMemoryDecisionCache(ttl, maxSize,
 		WithMemoryCacheLogger(a.logger),
 		WithMemoryCacheMetrics(a.metrics),
+	)
+}
+
+// buildRedisDecisionCache constructs the Redis-backed external decision
+// cache. It returns nil (with loud logging) when the Redis configuration is
+// absent or the connection cannot be established, letting the caller fall
+// back to the in-memory cache.
+func (a *authorizer) buildRedisDecisionCache(cacheCfg *CacheConfig, ttl time.Duration) DecisionCache {
+	if cacheCfg.Redis == nil {
+		a.logger.Warn("authorization cache type is redis but no redis/sentinel connection is " +
+			"configured; falling back to in-memory decision cache")
+		return nil
+	}
+
+	backingCfg := &config.CacheConfig{
+		Enabled: true,
+		Type:    config.CacheTypeRedis,
+		TTL:     config.Duration(ttl),
+		Redis:   cacheCfg.Redis,
+	}
+
+	var cacheOpts []cache.CacheOption
+	if a.vaultClient != nil {
+		cacheOpts = append(cacheOpts, cache.WithVaultClient(a.vaultClient))
+	}
+
+	backing, err := cache.New(backingCfg, a.logger, cacheOpts...)
+	if err != nil {
+		a.logger.Error("failed to initialize redis authorization decision cache; "+
+			"falling back to in-memory decision cache",
+			observability.Error(err),
+		)
+		return nil
+	}
+
+	a.logger.Info("redis-backed authorization decision cache initialized",
+		observability.Duration("ttl", ttl),
+	)
+	return NewExternalDecisionCache(backing, ttl,
+		WithExternalCacheLogger(a.logger),
+		WithExternalCacheMetrics(a.metrics),
 	)
 }
 

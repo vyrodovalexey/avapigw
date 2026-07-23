@@ -16,12 +16,31 @@ const (
 	subsystemWebhook = "webhook"
 )
 
+// Provider label values shared across metrics and providers.
+const (
+	providerSelfSigned = "selfsigned"
+	providerVault      = "vault"
+	providerFile       = "file"
+)
+
+// Result label values shared across metrics.
+const (
+	labelResult   = "result"
+	resultSuccess = "success"
+	resultError   = "error"
+)
+
+// pemTypeCertificate is the PEM block type for X.509 certificates.
+const pemTypeCertificate = "CERTIFICATE"
+
 // CertMetrics holds Prometheus metrics for certificate operations.
 type CertMetrics struct {
-	issuedTotal    *prometheus.CounterVec
-	rotationsTotal *prometheus.CounterVec
-	errorsTotal    *prometheus.CounterVec
-	expirySeconds  *prometheus.GaugeVec
+	issuedTotal     *prometheus.CounterVec
+	rotationsTotal  *prometheus.CounterVec
+	errorsTotal     *prometheus.CounterVec
+	expirySeconds   *prometheus.GaugeVec
+	caReuseTotal    *prometheus.CounterVec
+	secretSyncTotal *prometheus.CounterVec
 }
 
 var (
@@ -55,17 +74,25 @@ func GetCertMetrics() *CertMetrics {
 func InitCertVecMetrics() {
 	m := GetCertMetrics()
 
-	providers := []string{"selfsigned", "vault"}
-	operations := []string{"issue", "rotate", "renew"}
+	providers := []string{providerSelfSigned, providerVault, providerFile}
+	operations := []string{"issue", "rotate", "renew", "load"}
 
 	for _, p := range providers {
 		// issuedTotal: provider
 		m.issuedTotal.WithLabelValues(p)
 		// rotationsTotal: provider
 		m.rotationsTotal.WithLabelValues(p)
+		// caReuseTotal: provider
+		m.caReuseTotal.WithLabelValues(p)
 		// errorsTotal: provider × operation
 		for _, op := range operations {
 			m.errorsTotal.WithLabelValues(p, op)
+		}
+	}
+
+	for _, op := range []string{"get", "create", "update"} {
+		for _, r := range []string{resultSuccess, resultError} {
+			m.secretSyncTotal.WithLabelValues(op, r)
 		}
 	}
 }
@@ -112,6 +139,26 @@ func newCertMetricsWithFactory(factory promauto.Factory) *CertMetrics {
 					"expiry in seconds",
 			},
 			[]string{"common_name"},
+		),
+		caReuseTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
+				Name:      "ca_reuse_total",
+				Help: "Total number of times a persisted " +
+					"CA was reused instead of generating a new one",
+			},
+			[]string{labelProvider},
+		),
+		secretSyncTotal: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: metricsSubsystem,
+				Name:      "secret_sync_total",
+				Help: "Total number of certificate Secret " +
+					"persistence operations",
+			},
+			[]string{"operation", labelResult},
 		),
 	}
 }

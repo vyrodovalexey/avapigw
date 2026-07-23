@@ -20,7 +20,11 @@
         },
         "pullPolicy": {
           "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"],
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ],
           "default": "IfNotPresent",
           "description": "Image pull policy"
         },
@@ -30,7 +34,10 @@
           "description": "Overrides the image tag whose default is the chart appVersion"
         }
       },
-      "required": ["repository", "pullPolicy"]
+      "required": [
+        "repository",
+        "pullPolicy"
+      ]
     },
     "imagePullSecrets": {
       "type": "array",
@@ -143,7 +150,9 @@
               "items": {
                 "type": "string"
               },
-              "default": ["ALL"]
+              "default": [
+                "ALL"
+              ]
             }
           }
         }
@@ -155,7 +164,11 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ],
           "default": "ClusterIP",
           "description": "Service type"
         },
@@ -198,6 +211,12 @@
           "type": "object",
           "default": {},
           "description": "Annotations to add to the service"
+        },
+        "metricsNodePort": {
+          "type": "integer",
+          "minimum": 30000,
+          "maximum": 32767,
+          "description": "Fixed NodePort for the metrics endpoint (NodePort service type)"
         }
       }
     },
@@ -237,10 +256,17 @@
                     },
                     "pathType": {
                       "type": "string",
-                      "enum": ["Prefix", "Exact", "ImplementationSpecific"]
+                      "enum": [
+                        "Prefix",
+                        "Exact",
+                        "ImplementationSpecific"
+                      ]
                     },
                     "port": {
-                      "type": ["string", "integer"]
+                      "type": [
+                        "string",
+                        "integer"
+                      ]
                     }
                   }
                 }
@@ -340,11 +366,17 @@
           "description": "Enable pod disruption budget"
         },
         "minAvailable": {
-          "type": ["integer", "string"],
+          "type": [
+            "integer",
+            "string"
+          ],
           "description": "Minimum available pods"
         },
         "maxUnavailable": {
-          "type": ["integer", "string"],
+          "type": [
+            "integer",
+            "string"
+          ],
           "description": "Maximum unavailable pods"
         }
       }
@@ -354,13 +386,21 @@
       "properties": {
         "logLevel": {
           "type": "string",
-          "enum": ["debug", "info", "warn", "error"],
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
           "default": "info",
           "description": "Log level"
         },
         "logFormat": {
           "type": "string",
-          "enum": ["json", "console"],
+          "enum": [
+            "json",
+            "console"
+          ],
           "default": "json",
           "description": "Log format"
         },
@@ -392,6 +432,11 @@
                   "items": {
                     "type": "string"
                   }
+                },
+                "plainAlongsideTls": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Render an additional plain HTTP listener (http-plain) on the HTTP port alongside the TLS HTTP listener when TLS is active"
                 }
               }
             },
@@ -561,7 +606,11 @@
                   },
                   "failMode": {
                     "type": "string",
-                    "enum": ["all", "any", "quorum"],
+                    "enum": [
+                      "all",
+                      "any",
+                      "quorum"
+                    ],
                     "default": "all",
                     "description": "Partial-failure handling mode"
                   },
@@ -596,7 +645,12 @@
                       },
                       "strategy": {
                         "type": "string",
-                        "enum": ["deep", "shallow", "replace", "ndjson"],
+                        "enum": [
+                          "deep",
+                          "shallow",
+                          "replace",
+                          "ndjson"
+                        ],
                         "default": "deep",
                         "description": "Merge strategy. 'ndjson' merges newline-delimited JSON record streams (with optional sort/de-dupe/limit) instead of merging JSON documents"
                       },
@@ -625,7 +679,10 @@
                       },
                       "backend": {
                         "type": "string",
-                        "enum": ["memory", "redis"],
+                        "enum": [
+                          "memory",
+                          "redis"
+                        ],
                         "default": "memory"
                       },
                       "thresholdBytes": {
@@ -655,13 +712,21 @@
             },
             "format": {
               "type": "string",
-              "enum": ["json", "text"],
+              "enum": [
+                "json",
+                "text"
+              ],
               "default": "json",
               "description": "Audit log format"
             },
             "level": {
               "type": "string",
-              "enum": ["debug", "info", "warn", "error"],
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ],
               "default": "info",
               "description": "Minimum audit level"
             },
@@ -792,7 +857,9 @@
                 }
               }
             },
-            "required": ["name"]
+            "required": [
+              "name"
+            ]
           }
         },
         "openAPIValidation": {
@@ -857,7 +924,11 @@
             },
             "authMethod": {
               "type": "string",
-              "enum": ["token", "kubernetes", "approle"],
+              "enum": [
+                "token",
+                "kubernetes",
+                "approle"
+              ],
               "description": "Authentication method (empty defaults to token)"
             },
             "token": {
@@ -1000,6 +1071,275 @@
               }
             }
           }
+        },
+        "operatorMode": {
+          "type": "object",
+          "description": "Operator mode: gateway receives configuration from the operator via gRPC",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "tls": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable TLS for the operator connection"
+            },
+            "tlsInsecure": {
+              "type": "boolean",
+              "default": false,
+              "description": "Skip TLS certificate verification (dev/test only)"
+            },
+            "caSecret": {
+              "type": "string",
+              "default": "",
+              "description": "Secret containing the operator CA certificate (key ca.crt); empty uses <operator-fullname>-grpc-cert"
+            }
+          },
+          "additionalProperties": false
+        },
+        "observability": {
+          "type": "object",
+          "description": "Observability configuration (metrics, tracing, logging)",
+          "properties": {
+            "metrics": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "path": {
+                  "type": "string",
+                  "default": "/metrics"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "default": 9090
+                }
+              },
+              "additionalProperties": false
+            },
+            "tracing": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "samplingRate": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 1.0
+                },
+                "otlpEndpoint": {
+                  "type": "string"
+                },
+                "serviceName": {
+                  "type": "string",
+                  "default": "avapigw"
+                },
+                "otlpInsecure": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "default": null,
+                  "description": "OTLP exporter transport security (tri-state). Unset/null: TLS material forces TLS, otherwise plaintext only for unset/loopback endpoints and remote endpoints default to TLS with system roots. true forces plaintext, false forces TLS."
+                },
+                "otlpTLS": {
+                  "type": "object",
+                  "description": "TLS material for the OTLP exporter connection (mTLS and/or private CA)",
+                  "properties": {
+                    "certFile": {
+                      "type": "string",
+                      "description": "Client certificate path (PEM), requires keyFile"
+                    },
+                    "keyFile": {
+                      "type": "string",
+                      "description": "Client private key path (PEM), requires certFile"
+                    },
+                    "caFile": {
+                      "type": "string",
+                      "description": "CA bundle path (PEM); empty uses system trust store"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "logging": {
+              "type": "object",
+              "properties": {
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "debug",
+                    "info",
+                    "warn",
+                    "error"
+                  ],
+                  "default": "info"
+                },
+                "format": {
+                  "type": "string",
+                  "enum": [
+                    "json",
+                    "console"
+                  ],
+                  "default": "json"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "cors": {
+          "type": "object",
+          "description": "CORS configuration",
+          "properties": {
+            "allowOrigins": {
+              "type": "array",
+              "description": "Allowed origins",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowMethods": {
+              "type": "array",
+              "description": "Allowed methods",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowHeaders": {
+              "type": "array",
+              "description": "Allowed headers",
+              "items": {
+                "type": "string"
+              }
+            },
+            "exposeHeaders": {
+              "type": "array",
+              "description": "Exposed headers",
+              "items": {
+                "type": "string"
+              }
+            },
+            "maxAge": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "allowCredentials": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "security": {
+          "type": "object",
+          "description": "Security headers configuration",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "headers": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "xFrameOptions": {
+                  "type": "string"
+                },
+                "xContentTypeOptions": {
+                  "type": "string"
+                },
+                "xXSSProtection": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "hsts": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "maxAge": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "includeSubDomains": {
+                  "type": "boolean"
+                },
+                "preload": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "requestLimits": {
+          "type": "object",
+          "description": "Default request limits (overridable per route)",
+          "properties": {
+            "maxBodySize": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum request body size in bytes"
+            },
+            "maxHeaderSize": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum header size in bytes"
+            }
+          },
+          "additionalProperties": false
+        },
+        "customConfig": {
+          "type": "object",
+          "description": "Custom gateway configuration merged into the generated config (free-form; do not put a 'vault' key here - use gateway.vault)"
+        },
+        "cache": {
+          "type": "object",
+          "description": "DEPRECATED/unused by templates: global cache block is not rendered into the gateway config; configure caching per-route (CRDs or route config) or via customConfig"
+        },
+        "grpcRoutes": {
+          "type": "array",
+          "description": "gRPC routes configuration (rendered verbatim as spec.grpcRoutes)",
+          "items": {
+            "type": "object"
+          }
+        },
+        "grpcBackends": {
+          "type": "array",
+          "description": "gRPC backends configuration (rendered verbatim as spec.grpcBackends)",
+          "items": {
+            "type": "object"
+          }
+        },
+        "graphqlRoutes": {
+          "type": "array",
+          "description": "GraphQL routes configuration (rendered verbatim as spec.graphqlRoutes)",
+          "items": {
+            "type": "object"
+          }
+        },
+        "graphqlBackends": {
+          "type": "array",
+          "description": "GraphQL backends configuration (rendered verbatim as spec.graphqlBackends)",
+          "items": {
+            "type": "object"
+          }
         }
       },
       "description": "Gateway configuration"
@@ -1034,7 +1374,11 @@
         },
         "authMethod": {
           "type": "string",
-          "enum": ["token", "kubernetes", "approle"],
+          "enum": [
+            "token",
+            "kubernetes",
+            "approle"
+          ],
           "default": "kubernetes",
           "description": "Vault authentication method"
         },
@@ -1234,7 +1578,11 @@
             },
             "pullPolicy": {
               "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"],
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ],
               "default": "IfNotPresent",
               "description": "Operator image pull policy"
             },
@@ -1290,11 +1638,59 @@
               "properties": {
                 "mode": {
                   "type": "string",
-                  "enum": ["selfsigned", "vault"],
+                  "enum": [
+                    "selfsigned",
+                    "vault"
+                  ],
                   "default": "selfsigned",
                   "description": "TLS mode for gRPC server"
+                },
+                "caBundle": {
+                  "type": "string",
+                  "default": "",
+                  "description": "PEM CA bundle that verifies the operator's gRPC serving certificate; stored as ca.crt in the <operator-fullname>-grpc-cert Secret mounted by the gateway. Required for a verified chain with mode=vault (set to the Vault PKI CA)."
+                },
+                "selfsigned": {
+                  "type": "object",
+                  "properties": {
+                    "validity": {
+                      "type": "string",
+                      "description": "Certificate validity duration"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "vault": {
+                  "type": "object",
+                  "properties": {
+                    "pkiMount": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "commonName": {
+                      "type": "string"
+                    },
+                    "altNames": {
+                      "type": "array",
+                      "description": "Subject alternative names",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "ttl": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
                 }
               }
+            },
+            "requireClientCert": {
+              "type": "boolean",
+              "default": false,
+              "description": "Require client certificates for gRPC connections (mTLS)"
             }
           }
         },
@@ -1318,11 +1714,86 @@
               "properties": {
                 "mode": {
                   "type": "string",
-                  "enum": ["selfsigned", "vault", "cert-manager"],
+                  "enum": [
+                    "selfsigned",
+                    "vault",
+                    "cert-manager"
+                  ],
                   "default": "selfsigned",
                   "description": "TLS mode for webhook server"
+                },
+                "caBundle": {
+                  "type": "string",
+                  "description": "Base64-encoded CA bundle for webhook validation"
+                },
+                "selfsigned": {
+                  "type": "object",
+                  "properties": {
+                    "validity": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "vault": {
+                  "type": "object",
+                  "properties": {
+                    "pkiMount": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "commonName": {
+                      "type": "string"
+                    },
+                    "altNames": {
+                      "type": "array",
+                      "description": "Subject alternative names",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "ttl": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "certManager": {
+                  "type": "object",
+                  "properties": {
+                    "issuerRef": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
                 }
               }
+            },
+            "duplicateDetection": {
+              "type": "object",
+              "properties": {
+                "clusterWide": {
+                  "type": "boolean"
+                },
+                "cacheEnabled": {
+                  "type": "boolean"
+                },
+                "cacheTTL": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
             }
           }
         },
@@ -1341,7 +1812,11 @@
             },
             "authMethod": {
               "type": "string",
-              "enum": ["token", "kubernetes", "approle"],
+              "enum": [
+                "token",
+                "kubernetes",
+                "approle"
+              ],
               "default": "kubernetes",
               "description": "Vault authentication method"
             },
@@ -1391,7 +1866,11 @@
           "properties": {
             "type": {
               "type": "string",
-              "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ],
               "default": "ClusterIP",
               "description": "Service type"
             },
@@ -1472,11 +1951,17 @@
               "description": "Enable pod disruption budget"
             },
             "minAvailable": {
-              "type": ["integer", "string"],
+              "type": [
+                "integer",
+                "string"
+              ],
               "description": "Minimum available pods"
             },
             "maxUnavailable": {
-              "type": ["integer", "string"],
+              "type": [
+                "integer",
+                "string"
+              ],
               "description": "Maximum unavailable pods"
             }
           }
@@ -1500,9 +1985,276 @@
               "description": "Enable network policies for operator"
             }
           }
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "description": "Image pull secrets for private registries (operator-specific; merged with global)",
+          "items": {
+            "type": "object"
+          }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "description": "Annotations to add to the operator pod"
+        },
+        "podLabels": {
+          "type": "object",
+          "description": "Labels to add to the operator pod"
+        },
+        "extraEnv": {
+          "type": "array",
+          "description": "Extra environment variables for the operator",
+          "items": {
+            "type": "object"
+          }
+        },
+        "extraEnvFrom": {
+          "type": "array",
+          "description": "Extra env from secrets/configmaps for the operator",
+          "items": {
+            "type": "object"
+          }
+        },
+        "livenessProbe": {
+          "type": "object",
+          "description": "Operator liveness probe (kubernetes probe spec: httpGet/exec/tcpSocket, delays, thresholds)"
+        },
+        "readinessProbe": {
+          "type": "object",
+          "description": "Operator readiness probe (kubernetes probe spec: httpGet/exec/tcpSocket, delays, thresholds)"
+        },
+        "volumes": {
+          "type": "array",
+          "description": "Additional volumes for the operator pod",
+          "items": {
+            "type": "object"
+          }
+        },
+        "volumeMounts": {
+          "type": "array",
+          "description": "Additional volume mounts for the operator container",
+          "items": {
+            "type": "object"
+          }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "description": "Node selector for operator pod scheduling"
+        },
+        "tolerations": {
+          "type": "array",
+          "description": "Tolerations for operator pod scheduling",
+          "items": {
+            "type": "object"
+          }
+        },
+        "affinity": {
+          "type": "object",
+          "description": "Affinity rules for operator pod scheduling"
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "description": "Topology spread constraints for operator pod scheduling",
+          "items": {
+            "type": "object"
+          }
+        },
+        "ingressController": {
+          "type": "object",
+          "description": "Kubernetes Ingress controller configuration",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "className": {
+              "type": "string",
+              "default": "avapigw"
+            },
+            "isDefaultClass": {
+              "type": "boolean",
+              "default": false
+            },
+            "lbAddress": {
+              "type": "string",
+              "default": ""
+            }
+          },
+          "additionalProperties": false
         }
       }
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Informational namespace hint used by local test values/scripts (not applied by templates)"
+    },
+    "affinity": {
+      "type": "object",
+      "description": "Affinity rules for pod scheduling"
+    },
+    "nodeSelector": {
+      "type": "object",
+      "description": "Node selector for pod scheduling"
+    },
+    "tolerations": {
+      "type": "array",
+      "description": "Tolerations for pod scheduling",
+      "items": {
+        "type": "object"
+      }
+    },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "description": "Topology spread constraints for pod scheduling",
+      "items": {
+        "type": "object"
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "description": "Extra environment variables",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "valueFrom": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "extraEnvFrom": {
+      "type": "array",
+      "description": "Extra environment variables from secrets or configmaps",
+      "items": {
+        "type": "object"
+      }
+    },
+    "livenessProbe": {
+      "type": "object",
+      "description": "Gateway liveness probe (kubernetes probe spec: httpGet/exec/tcpSocket, delays, thresholds)"
+    },
+    "readinessProbe": {
+      "type": "object",
+      "description": "Gateway readiness probe (kubernetes probe spec: httpGet/exec/tcpSocket, delays, thresholds)"
+    },
+    "volumes": {
+      "type": "array",
+      "description": "Additional volumes for the pod",
+      "items": {
+        "type": "object"
+      }
+    },
+    "volumeMounts": {
+      "type": "array",
+      "description": "Additional volume mounts for the container",
+      "items": {
+        "type": "object"
+      }
+    },
+    "redisEnv": {
+      "type": "object",
+      "description": "Redis Sentinel environment variables for the gateway (ENV > YAML precedence)",
+      "properties": {
+        "sentinelMasterName": {
+          "type": "string"
+        },
+        "sentinelAddrs": {
+          "type": "string"
+        },
+        "sentinelPassword": {
+          "type": "string"
+        },
+        "masterPassword": {
+          "type": "string"
+        },
+        "sentinelDB": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "db": {
+          "type": "string"
+        },
+        "ttlJitter": {
+          "type": "string"
+        },
+        "hashKeys": {
+          "type": "string"
+        },
+        "passwordVaultPath": {
+          "type": "string"
+        },
+        "sentinelPasswordVaultPath": {
+          "type": "string"
+        },
+        "sentinelAuthPasswordVaultPath": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tls": {
+      "type": "object",
+      "description": "TLS configuration for backend mTLS certificate mounting",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "clientCertSecret": {
+          "type": "string"
+        },
+        "caCertSecret": {
+          "type": "string"
+        },
+        "mountPath": {
+          "type": "string",
+          "default": "/app/certs"
+        },
+        "routeCerts": {
+          "type": "array",
+          "description": "Route-level TLS certificates for SNI-based certificate selection",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "secretName": {
+                "type": "string"
+              },
+              "caSecretName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "secretName"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
     }
   },
-  "required": ["replicaCount", "image", "service", "gateway"]
+  "required": [
+    "replicaCount",
+    "image",
+    "service",
+    "gateway"
+  ],
+  "additionalProperties": false
 }

@@ -111,13 +111,16 @@ setup_pki() {
     # listener certs from this role with altName 'host.docker.internal' — the
     # 'docker.internal' allowed domain (+ allow_subdomains) MUST stay present or
     # re-running this script crash-loops the k8s gateway on cert renewal.
+    # 'svc' (+ allow_subdomains) MUST also stay present: the k8s operator's
+    # vault cert provider issues its gRPC/webhook serving certificate for
+    # <name>.<namespace>.svc names from this role (operator.grpc.tls.mode=vault).
     # Compose-only additions to the canonical set: bare domains 'rest_api_4' and
     # 'grpc_3' (backend server CNs issued below) and max_ttl 8760h (CERT_TTL
     # default issues 1-year backend certs; k8s requests 720h, under the cap).
     log_info "Creating server PKI role '${PKI_ROLE_SERVER}'..."
     vault_api POST "${PKI_MOUNT}/roles/${PKI_ROLE_SERVER}" \
         -d '{
-            "allowed_domains": "localhost,local,test,avapigw.local,avapigw-test.local,docker.internal,rest_api_4,grpc_3",
+            "allowed_domains": "localhost,local,test,avapigw.local,avapigw-test.local,docker.internal,svc,webhook-ca-injector,rest_api_4,grpc_3",
             "allow_bare_domains": true,
             "allow_subdomains": true,
             "allow_localhost": true,

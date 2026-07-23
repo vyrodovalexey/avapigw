@@ -31,6 +31,11 @@ import (
 func newTestRESTConfig(t *testing.T) *rest.Config {
 	t.Helper()
 
+	avapigwGV := metav1.GroupVersionForDiscovery{
+		GroupVersion: "avapigw.io/v1alpha1",
+		Version:      "v1alpha1",
+	}
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -39,9 +44,41 @@ func newTestRESTConfig(t *testing.T) *rest.Config {
 			resp := metav1.APIVersions{Versions: []string{"v1"}}
 			resp.TypeMeta = metav1.TypeMeta{Kind: "APIVersions"}
 			_ = json.NewEncoder(w).Encode(resp)
+		case "/api/v1":
+			resp := metav1.APIResourceList{
+				GroupVersion: "v1",
+				APIResources: []metav1.APIResource{
+					{Name: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+				},
+			}
+			resp.TypeMeta = metav1.TypeMeta{Kind: "APIResourceList"}
+			_ = json.NewEncoder(w).Encode(resp)
 		case "/apis":
-			resp := metav1.APIGroupList{}
+			// Advertise the avapigw.io group so the controllers' field
+			// indexers (ConfigMap reference indexes) can resolve REST
+			// mappings for the CRD kinds during SetupWithManager.
+			resp := metav1.APIGroupList{
+				Groups: []metav1.APIGroup{{
+					Name:             "avapigw.io",
+					Versions:         []metav1.GroupVersionForDiscovery{avapigwGV},
+					PreferredVersion: avapigwGV,
+				}},
+			}
 			resp.TypeMeta = metav1.TypeMeta{Kind: "APIGroupList"}
+			_ = json.NewEncoder(w).Encode(resp)
+		case "/apis/avapigw.io/v1alpha1":
+			resp := metav1.APIResourceList{
+				GroupVersion: "avapigw.io/v1alpha1",
+				APIResources: []metav1.APIResource{
+					{Name: "apiroutes", Kind: "APIRoute", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+					{Name: "grpcroutes", Kind: "GRPCRoute", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+					{Name: "graphqlroutes", Kind: "GraphQLRoute", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+					{Name: "backends", Kind: "Backend", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+					{Name: "grpcbackends", Kind: "GRPCBackend", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+					{Name: "graphqlbackends", Kind: "GraphQLBackend", Namespaced: true, Verbs: []string{"get", "list", "watch"}},
+				},
+			}
+			resp.TypeMeta = metav1.TypeMeta{Kind: "APIResourceList"}
 			_ = json.NewEncoder(w).Encode(resp)
 		default:
 			w.WriteHeader(http.StatusNotFound)

@@ -8,6 +8,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/authz/abac"
 	"github.com/vyrodovalexey/avapigw/internal/authz/external"
 	"github.com/vyrodovalexey/avapigw/internal/authz/rbac"
+	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
@@ -57,6 +58,12 @@ type CacheConfig struct {
 
 	// Type is the cache type (memory, redis).
 	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+
+	// Redis contains the Redis connection configuration (standalone URL or
+	// Sentinel) backing the external decision cache when Type is "redis".
+	// When nil with Type "redis", the authorizer logs a warning and falls
+	// back to the in-memory decision cache.
+	Redis *config.RedisCacheConfig `yaml:"redis,omitempty" json:"redis,omitempty"`
 }
 
 // Validate validates the authorization configuration.

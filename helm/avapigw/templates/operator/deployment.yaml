@@ -26,11 +26,10 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      {{- with .Values.operator.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.imagePullSecrets }}
+      {{- /* Merge operator-specific and global pull secrets into a single
+             imagePullSecrets key (duplicate map keys are rejected by strict
+             YAML parsers). */}}
+      {{- with (concat (.Values.operator.imagePullSecrets | default list) (.Values.imagePullSecrets | default list) | uniq) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -110,14 +109,51 @@ spec:
             - name: VAULT_PKI_ROLE
               value: {{ .Values.operator.grpc.tls.vault.role | quote }}
             {{- end }}
-            {{- if .Values.operator.webhook.enabled }}
+            {{- /*
+              Certificate identity. The effective cert provider is
+              webhook.tls.mode when webhooks are enabled, grpc.tls.mode
+              otherwise (matches the --cert-provider flag above). One
+              certificate serves BOTH the webhook server (called by the API
+              server) and the gRPC server (dialed by the gateway), so the SAN
+              list must always cover both service names.
+
+              vault provider: FQDN forms are used for CN/SANs because Vault
+              PKI roles typically restrict allowed domains (e.g. "svc" with
+              subdomains) and reject bare service names.
+              selfsigned provider: short service name CN with default SANs
+              plus explicit SANs covering both services.
+            */}}
+            {{- $certProvider := include "avapigw.operator.certProvider" . }}
+            {{- $grpcSvc := include "avapigw.operator.fullname" . }}
+            {{- $webhookSvc := include "avapigw.operator.webhookServiceName" . }}
+            {{- $primarySvc := ternary $webhookSvc $grpcSvc .Values.operator.webhook.enabled }}
+            {{- $ns := .Release.Namespace }}
+            {{- if eq $certProvider "vault" }}
             - name: CERT_SERVICE_NAME
-              value: {{ include "avapigw.operator.webhookServiceName" . | quote }}
+              value: {{ printf "%s.%s.svc" $primarySvc $ns | quote }}
+            - name: CERT_DNS_NAMES
+              value: {{ printf "%s.%s.svc,%s.%s.svc.cluster.local,%s.%s.svc,%s.%s.svc.cluster.local" $webhookSvc $ns $webhookSvc $ns $grpcSvc $ns $grpcSvc $ns | quote }}
             {{- else }}
             - name: CERT_SERVICE_NAME
-              value: {{ include "avapigw.operator.fullname" . | quote }}
+              value: {{ $primarySvc | quote }}
+            - name: CERT_DNS_NAMES
+              value: {{ printf "%s,%s.%s,%s.%s.svc,%s.%s.svc.cluster.local,%s,%s.%s,%s.%s.svc,%s.%s.svc.cluster.local" $webhookSvc $webhookSvc $ns $webhookSvc $ns $webhookSvc $ns $grpcSvc $grpcSvc $ns $grpcSvc $ns $grpcSvc $ns | quote }}
             {{- end }}
             - name: CERT_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            {{- end }}
+            {{- if eq (include "avapigw.operator.certProvider" .) "selfsigned" }}
+            {{- /*
+              selfsigned CA persistence: the operator stores its CA (+ serving
+              cert) in the gRPC cert Secret mounted by the gateway, so the CA
+              survives operator restarts and the gateway verifies TLS against
+              a stable ca.crt. The Secret is seeded by grpc-cert-secret.yaml
+              (helm genCA incl. ca.key) and adopted/refreshed by the operator.
+              RBAC: operator/cert-secret-role.yaml.
+            */}}
+            - name: CERT_SECRET_NAME
+              value: {{ printf "%s-grpc-cert" (include "avapigw.operator.fullname" .) | quote }}
+            - name: CERT_SECRET_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             {{- end }}
             {{- if .Values.operator.webhook.duplicateDetection }}
@@ -166,7 +202,7 @@ spec:
             {{- if .Values.operator.webhook.enabled }}
             - name: webhook-cert
               mountPath: /tmp/k8s-webhook-server/serving-certs
-              {{- if ne .Values.operator.webhook.tls.mode "selfsigned" }}
+              {{- if not (or (eq .Values.operator.webhook.tls.mode "selfsigned") (eq .Values.operator.webhook.tls.mode "vault")) }}
               readOnly: true
               {{- end }}
             {{- end }}
@@ -178,11 +214,13 @@ spec:
       volumes:
         {{- if .Values.operator.webhook.enabled }}
         - name: webhook-cert
-          {{- if eq .Values.operator.webhook.tls.mode "selfsigned" }}
-          # For self-signed mode, use emptyDir so the operator can generate certificates at runtime
+          {{- if or (eq .Values.operator.webhook.tls.mode "selfsigned") (eq .Values.operator.webhook.tls.mode "vault") }}
+          # For selfsigned and vault modes the operator obtains certificates
+          # from its certificate manager at runtime and writes them itself;
+          # an emptyDir keeps the path writable (no pre-existing Secret needed).
           emptyDir: {}
           {{- else }}
-          # For cert-manager or vault modes, mount the certificate secret
+          # For cert-manager mode, mount the certificate secret
           secret:
             secretName: {{ include "avapigw.operator.webhookCertSecretName" . }}
             defaultMode: 420

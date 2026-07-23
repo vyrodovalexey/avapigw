@@ -127,8 +127,8 @@ spec:
   # grpcRoutes:
   #   - name: test-service-route
   #     match:
-  #       service:
-  #         exact: api.v1.TestService
+  #       - service:
+  #           exact: api.v1.TestService
   #     route:
   #       - destination:
   #           host: 127.0.0.1
@@ -142,14 +142,15 @@ spec:
   #     retries:
   #       attempts: 3
   #       perTryTimeout: 10s
-  #       retryOn:
-  #         - UNAVAILABLE
-  #         - RESOURCE_EXHAUSTED
+  #       # Comma-separated gRPC status conditions (lowercase-hyphen), one string.
+  #       # Valid values: canceled, deadline-exceeded, internal,
+  #       # resource-exhausted, unavailable
+  #       retryOn: "unavailable,resource-exhausted"
   #
   #   - name: catch-all-grpc
   #     match:
-  #       service:
-  #         prefix: ""
+  #       - service:
+  #           prefix: "*"
   #     route:
   #       - destination:
   #           host: 127.0.0.1
@@ -168,8 +169,9 @@ spec:
   #       interval: 10s
   #       timeout: 5s
   #     connectionPool:
-  #       maxConnections: 100
-  #       connectTimeout: 5s
+  #       maxConnsPerHost: 100
+  #       maxIdleConns: 10
+  #       idleConnTimeout: 90s
   #
   #   - name: grpc-backend-2
   #     hosts:
@@ -182,8 +184,9 @@ spec:
   #       interval: 10s
   #       timeout: 5s
   #     connectionPool:
-  #       maxConnections: 100
-  #       connectTimeout: 5s
+  #       maxConnsPerHost: 100
+  #       maxIdleConns: 10
+  #       idleConnTimeout: 90s
 
   rateLimit:
     enabled: true
@@ -250,6 +253,76 @@ spec:
       samplingRate: 1.0
       otlpEndpoint: ""
       serviceName: avapigw
+      # OTLP exporter transport security (optional). When omitted:
+      # otlpTLS material forces TLS; otherwise plaintext is used only for
+      # unset/loopback endpoints and remote endpoints default to TLS with
+      # system roots. Set otlpInsecure: true explicitly for a remote
+      # plaintext collector.
+      # otlpInsecure: false
+      # otlpTLS:
+      #   certFile: /etc/gateway/otlp/tls.crt   # client cert for mTLS (requires keyFile)
+      #   keyFile: /etc/gateway/otlp/tls.key
+      #   caFile: /etc/gateway/otlp/ca.crt      # private CA for collector verification
     logging:
       level: info
       format: json
+
+  # Gateway-wide Vault CLIENT CONNECTION (uncomment to enable).
+  # This configures how the gateway reaches and authenticates against the
+  # Vault server. It is distinct from the per-listener/route/backend
+  # `tls.vault` blocks, which configure PKI certificate ISSUANCE and require
+  # this client (or VAULT_ADDR). Environment variables override these values
+  # per-field: ENV (VAULT_ADDR, VAULT_TOKEN, VAULT_APPROLE_SECRET_ID, ...) >
+  # config file > defaults.
+  #
+  # NOTE: when enabled: true, `address` plus auth material for the selected
+  # authMethod are required or the gateway fails validation at boot.
+  # vault:
+  #   enabled: true
+  #   address: ${VAULT_ADDR:-https://vault:8200}
+  #   # namespace: my-namespace              # Vault Enterprise namespace
+  #   authMethod: kubernetes                 # token | kubernetes | approle
+  #
+  #   # --- token auth (authMethod: token) ---
+  #   # token: <discouraged inline>          # prefer tokenFile or VAULT_TOKEN
+  #   # tokenFile: /vault/secrets/token      # mutually exclusive with token
+  #
+  #   # --- kubernetes auth (authMethod: kubernetes) ---
+  #   kubernetes:
+  #     role: avapigw
+  #     mountPath: kubernetes
+  #     tokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
+  #
+  #   # --- approle auth (authMethod: approle) ---
+  #   # appRole:
+  #   #   roleId: gateway
+  #   #   secretIdFile: /vault/secrets/secret-id   # prefer over inline secretId
+  #   #   mountPath: approle
+  #
+  #   # TLS for the connection TO the Vault server
+  #   tls:
+  #     caCert: /etc/vault/ca.crt
+  #     # caPath: /etc/vault/ca-dir
+  #     # clientCert: /etc/vault/tls.crt     # mTLS to Vault (requires clientKey)
+  #     # clientKey: /etc/vault/tls.key
+  #     # serverName: vault.internal         # SNI override
+  #     # skipVerify: true                   # testing only
+  #
+  #   # Client-side secret caching
+  #   cache:
+  #     enabled: true
+  #     ttl: 5m
+  #     maxSize: 1000
+  #
+  #   # Request retry behavior (exponential backoff)
+  #   retry:
+  #     maxRetries: 3
+  #     backoffBase: 100ms
+  #     backoffMax: 5s
+  #
+  #   # Startup authentication retry bounds
+  #   auth:
+  #     maxRetries: 3
+  #     initialBackoff: 1s
+  #     maxBackoff: 10s
+  #     timeout: 30s

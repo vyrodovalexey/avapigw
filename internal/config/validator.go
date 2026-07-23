@@ -564,13 +564,26 @@ func (v *Validator) validateRouteDestinations(route *Route, path string) {
 	}
 
 	totalWeight := 0
+	zeroWeightCount := 0
 	for j, dest := range route.Route {
 		destPath := fmt.Sprintf("%s.route[%d]", path, j)
 		totalWeight += v.validateRouteDestination(&dest, destPath)
+		if dest.Weight == 0 {
+			zeroWeightCount++
+		}
 	}
 
 	if len(route.Route) > 1 && totalWeight > 0 && totalWeight != 100 {
 		v.addError(path+".route", fmt.Sprintf("route weights must sum to 100, got %d", totalWeight))
+	}
+
+	// Mixed zero/non-zero weights: zero-weight destinations receive NO
+	// traffic (weighted mode), which is usually an intentional 0% canary but
+	// worth surfacing because all-zero configs behave differently (uniform).
+	if totalWeight > 0 && zeroWeightCount > 0 {
+		v.addWarning(path+".route", fmt.Sprintf(
+			"%d destination(s) with weight 0 will receive no traffic while other destinations "+
+				"carry positive weights; remove them or assign a positive weight", zeroWeightCount))
 	}
 }
 
@@ -1036,9 +1049,7 @@ func (v *Validator) validateObservability(obs *ObservabilityConfig, path string)
 	}
 
 	if obs.Tracing != nil {
-		if obs.Tracing.SamplingRate < 0 || obs.Tracing.SamplingRate > 1 {
-			v.addError(path+".tracing.samplingRate", "samplingRate must be between 0 and 1")
-		}
+		v.validateTracing(obs.Tracing, path+".tracing")
 	}
 
 	if obs.Logging != nil {
@@ -1063,6 +1074,30 @@ func (v *Validator) validateObservability(obs *ObservabilityConfig, path string)
 		if !validFormats[strings.ToLower(obs.Logging.Format)] {
 			v.addError(path+".logging.format", fmt.Sprintf("invalid log format: %s", obs.Logging.Format))
 		}
+	}
+}
+
+// validateTracing validates the tracing configuration, including the OTLP
+// exporter TLS material (certFile and keyFile must be provided together and
+// TLS material conflicts with an explicit otlpInsecure=true).
+func (v *Validator) validateTracing(tracing *TracingConfig, path string) {
+	if tracing.SamplingRate < 0 || tracing.SamplingRate > 1 {
+		v.addError(path+".samplingRate", "samplingRate must be between 0 and 1")
+	}
+
+	tls := tracing.OTLPTLS
+	if tls.IsEmpty() {
+		return
+	}
+	if tls.CertFile != "" && tls.KeyFile == "" {
+		v.addError(path+".otlpTLS.keyFile", "keyFile is required when certFile is provided")
+	}
+	if tls.KeyFile != "" && tls.CertFile == "" {
+		v.addError(path+".otlpTLS.certFile", "certFile is required when keyFile is provided")
+	}
+	if tracing.OTLPInsecure != nil && *tracing.OTLPInsecure {
+		v.addWarning(path+".otlpTLS",
+			"otlpTLS material is ignored because otlpInsecure is true; remove one of them")
 	}
 }
 
@@ -1296,6 +1331,20 @@ func (v *Validator) validateAuthzCacheConfig(cache *AuthzCacheConfig, path strin
 		if !validTypes[cache.Type] {
 			v.addError(path+".type", fmt.Sprintf("invalid cache type: %s (must be 'memory' or 'redis')", cache.Type))
 		}
+	}
+
+	// Both serialization shapes are accepted (redis block or the CRD's
+	// top-level sentinel block), but a standalone URL combined with a
+	// top-level sentinel block is ambiguous.
+	if cache.Sentinel != nil && cache.Redis != nil && cache.Redis.URL != "" {
+		v.addError(path+".sentinel",
+			"sentinel and redis.url are mutually exclusive for the authorization cache")
+	}
+
+	if cache.Type == CacheTypeRedis && cache.Redis == nil && cache.Sentinel == nil {
+		v.addWarning(path+".type",
+			"cache type is redis but no redis/sentinel connection is configured; "+
+				"the gateway falls back to the in-memory decision cache")
 	}
 }
 

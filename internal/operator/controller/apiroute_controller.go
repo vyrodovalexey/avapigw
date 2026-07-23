@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
@@ -88,6 +91,9 @@ func (r *APIRouteReconciler) callbacks() *ReconcileCallbacks {
 			}
 			return r.GRPCServer.HasAPIRoute(resource.GetName(), resource.GetNamespace())
 		},
+		ReferencesExternalConfig: func(resource Reconcilable) bool {
+			return apiRouteConfigMapName(resource.(*avapigwv1alpha1.APIRoute)) != ""
+		},
 	}
 }
 
@@ -100,6 +106,14 @@ func (r *APIRouteReconciler) reconcileAPIRoute(ctx context.Context, apiRoute *av
 		r.Recorder.Eventf(apiRoute, "Warning", EventReasonReconcileFailed,
 			"Failed to resolve OpenAPI validation spec: %v", err)
 		return fmt.Errorf("failed to resolve OpenAPI validation spec: %w", err)
+	}
+
+	// Rewrite deprecated CRD field shapes (authorization cache sentinel,
+	// legacy CSP/HSTS header strings) into the gateway-consumable shape.
+	if converted := normalizeRouteSpecShared(apiRoute.Spec.Authorization, apiRoute.Spec.Security); converted > 0 {
+		GetControllerMetrics().RecordLegacyFieldConversions(KindAPIRoute, converted)
+		log.FromContext(ctx).Info("converted deprecated APIRoute spec fields to gateway shape",
+			"name", apiRoute.Name, "namespace", apiRoute.Namespace, "converted_fields", converted)
 	}
 
 	// Convert APIRoute spec to JSON
@@ -165,8 +179,25 @@ func (r *APIRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.StatusUpdater = NewStatusUpdater(r.Client)
 	}
 
+	// Index APIRoutes by their referenced OpenAPI spec ConfigMap so ConfigMap
+	// edits re-reconcile exactly the routes that inline the spec content.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &avapigwv1alpha1.APIRoute{},
+		apiRouteConfigMapIndexField, func(obj client.Object) []string {
+			route, ok := obj.(*avapigwv1alpha1.APIRoute)
+			if !ok {
+				return nil
+			}
+			return configMapIndexValues(apiRouteConfigMapName(route))
+		}); err != nil {
+		return fmt.Errorf("failed to index APIRoute ConfigMap references: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&avapigwv1alpha1.APIRoute{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(
+			configMapMapFunc(r.Client, KindAPIRoute, apiRouteConfigMapIndexField,
+				func() client.ObjectList { return &avapigwv1alpha1.APIRouteList{} }),
+		)).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: MaxConcurrentReconciles,
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](

@@ -189,6 +189,12 @@ supported and resolved by the operator** before the configuration is pushed to t
 4. gRPC (`protoValidation.descriptorConfigMapRef`) and GraphQL
    (`schemaValidation.schemaConfigMapRef`) references are resolved the same way. Because a
    proto descriptor is binary, the operator base64-encodes it during resolution.
+5. **Referenced ConfigMaps are watched**: editing a ConfigMap referenced by an
+   APIRoute/GRPCRoute/GraphQLRoute automatically **re-reconciles the referencing routes**
+   (field-indexed ConfigMap watch, namespace-local), so an updated OpenAPI spec, proto
+   descriptor, or GraphQL schema propagates to the gateway without touching the route or
+   restarting the operator. Re-reconciles triggered this way are counted by
+   `avapigw_operator_configmap_watch_enqueues_total{kind}`.
 
 > **Note:** Earlier releases required `specFile`/`specURL` in gateway configuration and the
 > gateway rejected routes that used `specConfigMapRef`. The operator now resolves these

@@ -425,7 +425,7 @@ func TestRouterDirector_ResolveTarget_NoRegistry(t *testing.T) {
 		Destination: config.Destination{Host: "my-service", Port: 8080},
 	}
 
-	target, host, sb, err := director.resolveTarget(dest)
+	target, host, sb, err := director.resolveTarget("test-route", dest)
 	require.NoError(t, err)
 	assert.Equal(t, "my-service:8080", target)
 	assert.Nil(t, host)
@@ -452,7 +452,7 @@ func TestRouterDirector_ResolveTarget_NoMatchingBackend(t *testing.T) {
 		Destination: config.Destination{Host: "unknown-service", Port: 9090},
 	}
 
-	target, host, sb, err := director.resolveTarget(dest)
+	target, host, sb, err := director.resolveTarget("test-route", dest)
 	require.NoError(t, err)
 	assert.Equal(t, "unknown-service:9090", target)
 	assert.Nil(t, host)
@@ -495,7 +495,7 @@ func TestRouterDirector_ResolveTarget_WithBackend(t *testing.T) {
 		},
 	}
 
-	target, host, sb, err := director.resolveTarget(dest)
+	target, host, sb, err := director.resolveTarget("test-route", dest)
 	require.NoError(t, err)
 	assert.Equal(t, "10.0.0.1:50051", target)
 	assert.NotNil(t, host)
@@ -546,7 +546,7 @@ func TestRouterDirector_ResolveTarget_UnhealthyBackend(t *testing.T) {
 		},
 	}
 
-	_, _, _, err = director.resolveTarget(dest)
+	_, _, _, err = director.resolveTarget("test-route", dest)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no available hosts")
 }

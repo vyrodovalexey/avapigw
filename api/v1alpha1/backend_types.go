@@ -80,7 +80,8 @@ type BackendHost struct {
 
 // HealthCheckConfig represents health check configuration.
 type HealthCheckConfig struct {
-	// Path is the health check path.
+	// Path is the health check path. Ignored when UseGRPC is true (gRPC
+	// health checks address the grpc.health.v1.Health service instead).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Path string `json:"path"`
@@ -104,6 +105,23 @@ type HealthCheckConfig struct {
 	// +kubebuilder:default=3
 	// +optional
 	UnhealthyThreshold int `json:"unhealthyThreshold,omitempty"`
+
+	// UseGRPC enables native gRPC health checking using
+	// grpc.health.v1.Health/Check instead of HTTP GET.
+	// +optional
+	UseGRPC bool `json:"useGRPC,omitempty"`
+
+	// GRPCService is the service name for gRPC health check requests.
+	// An empty string checks overall server health.
+	// +optional
+	GRPCService string `json:"grpcService,omitempty"`
+
+	// Port overrides the backend host port for health checks. Useful for
+	// backends that expose a separate monitoring/probe port.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	Port int `json:"port,omitempty"`
 }
 
 // BackendTLSConfig contains TLS configuration for backend connections.

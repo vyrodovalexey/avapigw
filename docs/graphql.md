@@ -466,7 +466,16 @@ spec:
 ### WebSocket Protocol Support
 
 - **Protocol**: `graphql-ws` (GraphQL over WebSocket Protocol)
-- **Subprotocol**: `graphql-ws` in WebSocket handshake
+- **Subprotocol Negotiation**: the gateway upgrader negotiates the
+  `graphql-transport-ws` (modern graphql-ws protocol) and `graphql-ws`
+  (legacy subscriptions-transport-ws) subprotocols on the client-side
+  upgrade. Per RFC 6455 the first client-offered protocol in that supported
+  list is selected and **echoed back in the 101 response's
+  `Sec-WebSocket-Protocol` header** — strict graphql-ws clients (e.g. the
+  `graphql-ws` JS library) reject handshakes without this echo. The
+  client-requested protocol is also forwarded on the backend dial. Clients
+  offering no subprotocol keep the historical no-echo behavior. The
+  negotiated subprotocol is logged with each established subscription.
 - **Connection Lifecycle**: Automatic connection management and cleanup
 - **Origin Checking**: Configurable allowed origins for WebSocket connections
 - **Message Types**: Support for all `graphql-ws` message types:

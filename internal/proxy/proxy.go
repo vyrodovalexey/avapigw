@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -128,6 +129,10 @@ type ReverseProxy struct {
 	aggregateHandler      AggregateHandler
 	websocketConfig       *config.WebSocketConfig
 	wsOriginPolicy        *wsOriginPolicy
+	// ambiguousEndpointWarned deduplicates the WARN emitted when several
+	// backends declare the same destination endpoint, keeping the
+	// per-request resolution path quiet after the first report.
+	ambiguousEndpointWarned sync.Map
 }
 
 // ProxyOption is a functional option for configuring the proxy.
@@ -285,9 +290,12 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx = util.ContextWithRoute(ctx, route.Name)
 	r = r.WithContext(ctx)
 
-	// Handle direct response
+	// Handle direct response. It is served through the same per-route
+	// middleware chain as proxied requests so cross-cutting concerns
+	// (CORS at minimum, security headers, authentication, rate limits)
+	// apply to direct-response routes exactly as they do to proxied ones.
 	if route.Config.DirectResponse != nil {
-		p.handleDirectResponse(w, route.Config.DirectResponse)
+		p.serveDirectResponse(w, r, route)
 		return
 	}
 
@@ -348,18 +356,54 @@ func (p *ReverseProxy) handleAggregate(
 		}
 	})
 
-	// Apply per-route middleware if configured and the route has any, mirroring
-	// the proxyRequest wrapping so aggregate routes honor cross-cutting concerns.
+	// Apply per-route middleware, mirroring the proxyRequest wrapping so
+	// aggregate routes honor cross-cutting concerns.
+	p.serveThroughRouteMiddleware(fanout, w, r, route)
+	return true
+}
+
+// serveDirectResponse serves a configured direct response through the
+// route's middleware chain. Direct responses previously bypassed the chain
+// entirely, so route/global CORS (including preflight answers), security
+// headers, and admission middleware never ran on direct-response routes.
+// The configured status/body/headers semantics are unchanged; only the
+// wrapping is added.
+func (p *ReverseProxy) serveDirectResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	route *router.CompiledRoute,
+) {
+	terminal := http.HandlerFunc(func(innerW http.ResponseWriter, _ *http.Request) {
+		p.handleDirectResponse(innerW, route.Config.DirectResponse)
+	})
+
+	p.logger.Debug("serving direct response",
+		observability.String("route", route.Name),
+		observability.String("path", r.URL.Path),
+		observability.String("method", r.Method),
+	)
+
+	p.serveThroughRouteMiddleware(terminal, w, r, route)
+}
+
+// serveThroughRouteMiddleware runs handler wrapped in the route's
+// middleware chain when a route middleware applier is configured and the
+// route has at least one middleware; otherwise the handler runs directly.
+// Shared by the proxy, aggregate, and direct-response serving paths so all
+// route kinds execute the same cross-cutting chain.
+func (p *ReverseProxy) serveThroughRouteMiddleware(
+	handler http.Handler,
+	w http.ResponseWriter,
+	r *http.Request,
+	route *router.CompiledRoute,
+) {
 	if p.routeMiddleware != nil {
 		if middlewares := p.routeMiddleware.GetMiddleware(&route.Config); len(middlewares) > 0 {
-			handler := p.routeMiddleware.ApplyMiddleware(fanout, &route.Config)
-			handler.ServeHTTP(w, r)
-			return true
+			p.routeMiddleware.ApplyMiddleware(handler, &route.Config).ServeHTTP(w, r)
+			return
 		}
 	}
-
-	fanout.ServeHTTP(w, r)
-	return true
+	handler.ServeHTTP(w, r)
 }
 
 // proxyTracerName is the OpenTelemetry tracer name for proxy operations.
@@ -389,23 +433,12 @@ func (p *ReverseProxy) proxyRequest(
 		return
 	}
 
-	// Apply per-route middleware if configured and the route has any
-	if p.routeMiddleware != nil {
-		middlewares := p.routeMiddleware.GetMiddleware(&route.Config)
-		if len(middlewares) > 0 {
-			// Create a handler that performs the actual proxying
-			proxyHandler := http.HandlerFunc(func(innerW http.ResponseWriter, innerR *http.Request) {
-				p.doProxy(innerW, innerR, route)
-			})
-			// Wrap the proxy handler with per-route middleware
-			handler := p.routeMiddleware.ApplyMiddleware(proxyHandler, &route.Config)
-			handler.ServeHTTP(w, r)
-			return
-		}
-	}
-
-	// No per-route middleware — proxy directly
-	p.doProxy(w, r, route)
+	// The terminal handler performs the actual proxying; per-route
+	// middleware (when configured) wraps it via the shared helper.
+	proxyHandler := http.HandlerFunc(func(innerW http.ResponseWriter, innerR *http.Request) {
+		p.doProxy(innerW, innerR, route)
+	})
+	p.serveThroughRouteMiddleware(proxyHandler, w, r, route)
 }
 
 // doProxy performs the actual proxying logic: destination selection, backend
@@ -445,7 +478,7 @@ func (p *ReverseProxy) doProxy(
 	span.SetAttributes(attribute.String("proxy.backend", dest.Destination.Host))
 
 	// Get backend and resolve target host
-	serviceBackend := p.getServiceBackend(dest.Destination.Host)
+	serviceBackend := p.resolveServiceBackend(route.Name, dest)
 
 	var backendHost *backend.Host
 	if serviceBackend != nil {
@@ -522,7 +555,22 @@ func (p *ReverseProxy) doProxy(
 	span.SetAttributes(attribute.Float64("proxy.backend_duration_ms", float64(duration.Milliseconds())))
 }
 
-// getServiceBackend retrieves the service backend from the registry.
+// resolveServiceBackend resolves the route destination to a registered
+// backend: by resource name first (existing behavior), then by declared
+// host endpoint (address:port), mirroring the gRPC director's lookup so
+// literal-host destinations still attach the backend's features (TLS/mTLS,
+// auth, transport, load balancing). Returns nil when no backend matches,
+// in which case the destination is proxied directly.
+func (p *ReverseProxy) resolveServiceBackend(
+	routeName string, dest *config.RouteDestination,
+) *backend.ServiceBackend {
+	if sb := p.getServiceBackend(dest.Destination.Host); sb != nil {
+		return sb
+	}
+	return p.getServiceBackendByAddress(routeName, dest.Destination.Host, dest.Destination.Port)
+}
+
+// getServiceBackend retrieves the service backend from the registry by name.
 func (p *ReverseProxy) getServiceBackend(host string) *backend.ServiceBackend {
 	if p.backendRegistry == nil {
 		return nil
@@ -532,6 +580,46 @@ func (p *ReverseProxy) getServiceBackend(host string) *backend.ServiceBackend {
 		return nil
 	}
 	sb, _ := b.(*backend.ServiceBackend)
+	return sb
+}
+
+// getServiceBackendByAddress retrieves the service backend whose configured
+// hosts declare the destination address:port endpoint. Ambiguous matches
+// (several backends declaring the endpoint) resolve deterministically to
+// the lexicographically smallest backend name and are logged once per
+// route+endpoint.
+func (p *ReverseProxy) getServiceBackendByAddress(
+	routeName, address string, port int,
+) *backend.ServiceBackend {
+	if p.backendRegistry == nil {
+		return nil
+	}
+	b, matches, ok := p.backendRegistry.GetByHostPort(address, port)
+	if !ok {
+		return nil
+	}
+	sb, isService := b.(*backend.ServiceBackend)
+	if !isService {
+		return nil
+	}
+
+	endpoint := backend.HostPortKey(address, port)
+	if matches > 1 {
+		key := routeName + "|" + endpoint
+		if _, loaded := p.ambiguousEndpointWarned.LoadOrStore(key, struct{}{}); !loaded {
+			p.logger.Warn("multiple backends declare the destination endpoint; "+
+				"deterministically selected the lexicographically smallest backend name",
+				observability.String("route", routeName),
+				observability.String("endpoint", endpoint),
+				observability.String("backend", sb.Name()),
+			)
+		}
+	}
+	p.logger.Debug("resolved backend by host address",
+		observability.String("route", routeName),
+		observability.String("endpoint", endpoint),
+		observability.String("backend", sb.Name()),
+	)
 	return sb
 }
 
@@ -874,7 +962,15 @@ func (p *ReverseProxy) director(req *http.Request, target *url.URL, originalReq 
 	req.Host = target.Host
 }
 
-// selectDestination selects a destination based on weights using weighted random selection.
+// selectDestination selects a destination based on weights using weighted
+// random selection.
+//
+// Weight semantics:
+//   - when ALL destinations have weight 0 (unset), selection is uniform —
+//     the historical "no weights configured" behavior;
+//   - when at least one destination has a positive weight, zero-weight
+//     destinations are EXCLUDED and receive no traffic (a canary set to 0%
+//     must get 0%, not a residual share).
 func (p *ReverseProxy) selectDestination(destinations []config.RouteDestination) *config.RouteDestination {
 	if len(destinations) == 0 {
 		return nil
@@ -884,25 +980,26 @@ func (p *ReverseProxy) selectDestination(destinations []config.RouteDestination)
 		return &destinations[0]
 	}
 
-	// Calculate total weight
+	// Calculate the total of positive weights.
 	totalWeight := 0
-	for _, dest := range destinations {
-		weight := dest.Weight
-		if weight == 0 {
-			weight = 1 // Default weight
+	for i := range destinations {
+		if destinations[i].Weight > 0 {
+			totalWeight += destinations[i].Weight
 		}
-		totalWeight += weight
 	}
 
-	// Generate a cryptographically secure random number
-	randomValue := secureRandomInt(totalWeight)
+	// All weights unset/zero: uniform selection across every destination.
+	if totalWeight == 0 {
+		return &destinations[secureRandomInt(len(destinations))]
+	}
 
-	// Select destination based on weighted random selection
+	// Weighted mode: zero-weight destinations are skipped entirely.
+	randomValue := secureRandomInt(totalWeight)
 	cumulativeWeight := 0
 	for i := range destinations {
 		weight := destinations[i].Weight
-		if weight == 0 {
-			weight = 1
+		if weight <= 0 {
+			continue
 		}
 		cumulativeWeight += weight
 		if randomValue < cumulativeWeight {

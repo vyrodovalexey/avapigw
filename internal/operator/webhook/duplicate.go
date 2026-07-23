@@ -17,6 +17,7 @@ import (
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	graphqlrouter "github.com/vyrodovalexey/avapigw/internal/graphql/router"
+	grpcrouter "github.com/vyrodovalexey/avapigw/internal/grpc/router"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
 	"github.com/vyrodovalexey/avapigw/internal/operator/keys"
 )
@@ -721,7 +722,8 @@ func (c *DuplicateChecker) CheckGRPCRouteDuplicate(
 			observability.Any("conflicting_routes", conflicts),
 		)
 		return fmt.Errorf(
-			"GRPCRoute %s/%s conflicts with existing route(s) %s: overlapping service/method",
+			"GRPCRoute %s/%s conflicts with existing route(s) %s: "+
+				"identical-specificity overlapping service/method match",
 			route.Namespace, route.Name, strings.Join(conflicts, ", "))
 	}
 
@@ -916,28 +918,27 @@ func (c *DuplicateChecker) backendsConflict(a, b *avapigwv1alpha1.Backend) bool 
 }
 
 // grpcRoutesOverlap checks if two GRPCRoutes are TRUE duplicates, i.e. the
-// data plane cannot deterministically order them.
+// data plane cannot deterministically order them for a user.
 //
-// The gRPC router resolves matches by specificity (see internal/grpc/router
-// calculatePriority: exact service=1000 > prefix service=500+len > regex=100;
-// exact method=500 > prefix method=250+len > regex=50) and sorts routes by
-// that priority, so match conditions with DIFFERENT specificity coexist
-// deterministically and are not admission conflicts. Only identical-
-// specificity duplicates (same match type with the same service/method
-// values) are ambiguous and rejected.
+// The gRPC router (internal/grpc/router) sorts routes by descending
+// Specificity (service exact=1000 | prefix=500+len | regex=100; method
+// exact=500 | prefix=250+len | regex=50; authority=+100; +10 per metadata
+// condition; +5 per withoutHeaders entry) with a route-name tie-break, and
+// Match is first-match over that order. Match blocks of DIFFERENT
+// specificity therefore coexist deterministically (higher wins) and are not
+// admission conflicts — e.g. a catch-all vs a service-specific route, a
+// nil-method route vs a method-specific one, or metadata-discriminated
+// routes vs a generic one on the same service/method. Only IDENTICAL-
+// specificity blocks whose match values can cover the same request remain
+// ambiguous (the name tie-break is arbitrary from a user's perspective) and
+// are rejected. This mirrors the GraphQL checker (graphqlRoutesOverlap).
 func (c *DuplicateChecker) grpcRoutesOverlap(a, b *avapigwv1alpha1.GRPCRoute) bool {
-	// An empty match list means "catch-all" — it matches everything.
-	// If either route is a catch-all, it overlaps with any other route.
-	if len(a.Spec.Match) == 0 || len(b.Spec.Match) == 0 {
-		return true
-	}
+	aMatches := grpcEffectiveMatches(a)
+	bMatches := grpcEffectiveMatches(b)
 
-	// Check if service/method combinations overlap
-	for i := range a.Spec.Match {
-		matchA := &a.Spec.Match[i]
-		for j := range b.Spec.Match {
-			matchB := &b.Spec.Match[j]
-			if c.grpcMatchConditionsOverlap(matchA, matchB) {
+	for i := range aMatches {
+		for j := range bMatches {
+			if c.grpcMatchConditionsOverlap(&aMatches[i], &bMatches[j]) {
 				return true
 			}
 		}
@@ -945,87 +946,132 @@ func (c *DuplicateChecker) grpcRoutesOverlap(a, b *avapigwv1alpha1.GRPCRoute) bo
 	return false
 }
 
-// grpcMatchConditionsOverlap checks if two GRPCRouteMatch conditions overlap.
-//
-//nolint:gocognit // gRPC matching requires checking multiple nested conditions for service and method patterns
+// grpcEffectiveMatches returns the route's match blocks, normalizing a
+// match-less route (catch-all) to a single empty block so catch-all
+// semantics flow through the same specificity/value comparison: two
+// catch-alls have identical zero specificity (true duplicates), while a
+// catch-all vs any specific block differs in specificity and is ordered
+// deterministically by the router.
+func grpcEffectiveMatches(route *avapigwv1alpha1.GRPCRoute) []avapigwv1alpha1.GRPCRouteMatch {
+	if len(route.Spec.Match) == 0 {
+		return []avapigwv1alpha1.GRPCRouteMatch{{}}
+	}
+	return route.Spec.Match
+}
+
+// grpcMatchConditionsOverlap checks if two GRPCRouteMatch blocks are TRUE
+// duplicates: identical specificity (the sorted router cannot order them)
+// AND overlapping match values in every dimension (some request could
+// satisfy both blocks).
 func (c *DuplicateChecker) grpcMatchConditionsOverlap(
 	a, b *avapigwv1alpha1.GRPCRouteMatch,
 ) bool {
-	if a.Service == nil || b.Service == nil {
+	// Blocks of different specificity are ordered deterministically by the
+	// router's sort — never an admission conflict.
+	if grpcMatchSpecificity(a) != grpcMatchSpecificity(b) {
 		return false
 	}
 
-	// Check exact service match
-	if c.exactServicesMatch(a, b) {
-		return c.grpcMethodsOverlap(a, b)
-	}
-
-	// Check prefix service overlap
-	if c.prefixServicesOverlap(a, b) {
-		return c.grpcMethodsOverlapForPrefix(a, b)
-	}
-
-	return false
+	return stringMatchValuesOverlap(a.Service, b.Service) &&
+		stringMatchValuesOverlap(a.Method, b.Method) &&
+		stringMatchValuesOverlap(a.Authority, b.Authority) &&
+		grpcMetadataSetsCompatible(a.Metadata, b.Metadata)
 }
 
-// exactServicesMatch checks if two services have exact match.
-func (c *DuplicateChecker) exactServicesMatch(
-	a, b *avapigwv1alpha1.GRPCRouteMatch,
-) bool {
-	return a.Service.Exact != "" && b.Service.Exact != "" && a.Service.Exact == b.Service.Exact
+// grpcMatchSpecificity scores one CRD match block with the data plane's
+// authoritative weights by converting it into a synthetic single-match
+// config route and delegating to grpcrouter.Specificity — the single
+// source of truth shared with the gRPC router's priority ordering, so the
+// webhook and the data plane cannot drift.
+func grpcMatchSpecificity(m *avapigwv1alpha1.GRPCRouteMatch) int {
+	return grpcrouter.Specificity(config.GRPCRoute{
+		Match: []config.GRPCRouteMatch{grpcMatchToConfig(m)},
+	})
 }
 
-// prefixServicesOverlap checks if two service prefixes are identical.
-// Identical prefixes have identical specificity — a true duplicate the gRPC
-// router cannot order deterministically. Nested but non-identical prefixes
-// (e.g. "com.example" and "com.example.user") are NOT conflicts: the router
-// resolves them by longest-prefix specificity (calculateServicePriority
-// assigns prefix matches 500+len(prefix)).
-func (c *DuplicateChecker) prefixServicesOverlap(
-	a, b *avapigwv1alpha1.GRPCRouteMatch,
-) bool {
-	if a.Service.Prefix == "" || b.Service.Prefix == "" {
+// grpcMatchToConfig converts the routing-relevant fields of a CRD
+// GRPCRouteMatch to the config type consumed by the gRPC router's
+// Specificity scoring. The conversion is field-for-field: service, method,
+// authority, every metadata condition, and every withoutHeaders entry
+// (specificity counts metadata and withoutHeaders entries, so the
+// one-to-one mapping preserves the score).
+func grpcMatchToConfig(m *avapigwv1alpha1.GRPCRouteMatch) config.GRPCRouteMatch {
+	out := config.GRPCRouteMatch{
+		Service:        stringMatchToConfig(m.Service),
+		Method:         stringMatchToConfig(m.Method),
+		Authority:      stringMatchToConfig(m.Authority),
+		WithoutHeaders: append([]string(nil), m.WithoutHeaders...),
+	}
+	for i := range m.Metadata {
+		out.Metadata = append(out.Metadata, config.MetadataMatch{
+			Name:    m.Metadata[i].Name,
+			Exact:   m.Metadata[i].Exact,
+			Prefix:  m.Metadata[i].Prefix,
+			Regex:   m.Metadata[i].Regex,
+			Present: m.Metadata[i].Present,
+			Absent:  m.Metadata[i].Absent,
+		})
+	}
+	return out
+}
+
+// grpcMetadataSetsCompatible reports whether two metadata condition sets
+// can be satisfied by a single request. Conditions on different metadata
+// keys are independent (one request can carry all of them), so the sets are
+// compatible — and the blocks conflict-overlap — unless some key
+// constrained by BOTH blocks has provably disjoint constraints. This
+// mirrors graphqlHeaderSetsCompatible; metadata keys compare
+// case-insensitively per gRPC metadata semantics.
+func grpcMetadataSetsCompatible(a, b []avapigwv1alpha1.MetadataMatch) bool {
+	for i := range a {
+		for j := range b {
+			if !strings.EqualFold(a[i].Name, b[j].Name) {
+				continue
+			}
+			if !grpcMetadataValuesCompatible(&a[i], &b[j]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// grpcMetadataValuesCompatible reports whether two constraints on the SAME
+// metadata key can hold simultaneously: identical exacts, an exact carrying
+// the required prefix, or nested/identical prefixes. A presence/absence
+// contradiction is always disjoint. Regex constraints fall through as
+// compatible because their disjointness is unprovable.
+func grpcMetadataValuesCompatible(a, b *avapigwv1alpha1.MetadataMatch) bool {
+	if grpcMetadataPresenceDisjoint(a, b) || grpcMetadataPresenceDisjoint(b, a) {
 		return false
 	}
-	return a.Service.Prefix == b.Service.Prefix
+
+	switch {
+	case a.Exact != "" && b.Exact != "":
+		return a.Exact == b.Exact
+	case a.Exact != "" && b.Prefix != "":
+		return strings.HasPrefix(a.Exact, b.Prefix)
+	case b.Exact != "" && a.Prefix != "":
+		return strings.HasPrefix(b.Exact, a.Prefix)
+	case a.Prefix != "" && b.Prefix != "":
+		return strings.HasPrefix(a.Prefix, b.Prefix) ||
+			strings.HasPrefix(b.Prefix, a.Prefix)
+	default:
+		return true
+	}
 }
 
-// grpcMethodsOverlap checks if gRPC methods overlap for exact service match.
-func (c *DuplicateChecker) grpcMethodsOverlap(
-	a, b *avapigwv1alpha1.GRPCRouteMatch,
-) bool {
-	// If no method specified on either, all methods match
-	if a.Method == nil || b.Method == nil {
-		return true
+// grpcMetadataPresenceDisjoint reports whether one matcher requires the key
+// to be absent while the other requires it present (explicitly or by
+// constraining its value) — no single request can satisfy both.
+func grpcMetadataPresenceDisjoint(absentSide, presentSide *avapigwv1alpha1.MetadataMatch) bool {
+	requiresAbsent := absentSide.Absent != nil && *absentSide.Absent
+	if !requiresAbsent {
+		return false
 	}
-
-	// Check exact method match
-	if a.Method.Exact != "" && b.Method.Exact != "" && a.Method.Exact == b.Method.Exact {
-		return true
-	}
-
-	// Identical method prefixes → identical specificity → true duplicate.
-	// Nested but non-identical prefixes are NOT conflicts: the gRPC router
-	// resolves them by longest-prefix specificity (calculateMethodPriority
-	// assigns prefix matches 250+len(prefix)).
-	if a.Method.Prefix != "" && b.Method.Prefix != "" {
-		return a.Method.Prefix == b.Method.Prefix
-	}
-
-	return false
-}
-
-// grpcMethodsOverlapForPrefix checks if gRPC methods overlap for prefix service match.
-func (c *DuplicateChecker) grpcMethodsOverlapForPrefix(
-	a, b *avapigwv1alpha1.GRPCRouteMatch,
-) bool {
-	// If no method specified on either, all methods match
-	if a.Method == nil || b.Method == nil {
-		return true
-	}
-
-	// Check exact method match
-	return a.Method.Exact != "" && b.Method.Exact != "" && a.Method.Exact == b.Method.Exact
+	requiresPresent := (presentSide.Present != nil && *presentSide.Present) ||
+		presentSide.Exact != "" || presentSide.Prefix != "" || presentSide.Regex != ""
+	return requiresPresent
 }
 
 // grpcBackendsConflict checks if two GRPCBackends have the same host:port combination.
@@ -1408,9 +1454,9 @@ func (c *DuplicateChecker) graphqlMatchConditionsOverlap(
 		return false
 	}
 
-	return graphqlStringMatchValuesOverlap(a.Path, b.Path) &&
+	return stringMatchValuesOverlap(a.Path, b.Path) &&
 		graphqlOperationTypesOverlap(a.OperationType, b.OperationType) &&
-		graphqlStringMatchValuesOverlap(a.OperationName, b.OperationName) &&
+		stringMatchValuesOverlap(a.OperationName, b.OperationName) &&
 		graphqlHeaderSetsCompatible(a.Headers, b.Headers)
 }
 
@@ -1433,9 +1479,9 @@ func graphqlMatchSpecificity(m *avapigwv1alpha1.GraphQLRouteMatch) int {
 // score).
 func graphqlMatchToConfig(m *avapigwv1alpha1.GraphQLRouteMatch) config.GraphQLRouteMatch {
 	out := config.GraphQLRouteMatch{
-		Path:          graphqlStringMatchToConfig(m.Path),
+		Path:          stringMatchToConfig(m.Path),
 		OperationType: m.OperationType,
-		OperationName: graphqlStringMatchToConfig(m.OperationName),
+		OperationName: stringMatchToConfig(m.OperationName),
 	}
 	for i := range m.Headers {
 		out.Headers = append(out.Headers, config.HeaderMatchConfig{
@@ -1448,25 +1494,25 @@ func graphqlMatchToConfig(m *avapigwv1alpha1.GraphQLRouteMatch) config.GraphQLRo
 	return out
 }
 
-// graphqlStringMatchToConfig converts a CRD StringMatch to its config
-// counterpart (nil-safe).
-func graphqlStringMatchToConfig(sm *avapigwv1alpha1.StringMatch) *config.StringMatch {
+// stringMatchToConfig converts a CRD StringMatch to its config counterpart
+// (nil-safe). Shared by the GraphQL and gRPC specificity conversions.
+func stringMatchToConfig(sm *avapigwv1alpha1.StringMatch) *config.StringMatch {
 	if sm == nil {
 		return nil
 	}
 	return &config.StringMatch{Exact: sm.Exact, Prefix: sm.Prefix, Regex: sm.Regex}
 }
 
-// graphqlStringMatchValuesOverlap reports whether two StringMatch conditions
-// (path or operationName) can match the same value: nil or empty conditions
-// match everything; identical exacts, nested or identical prefixes, and an
-// exact carrying a required prefix all intersect. Regex intersection is
-// statically undecidable and regex combinations are treated as
-// non-overlapping, mirroring the APIRoute and gRPC checkers (equal-
-// specificity regex routes stay admitted; the router still orders them
-// deterministically via the name tie-break).
-func graphqlStringMatchValuesOverlap(a, b *avapigwv1alpha1.StringMatch) bool {
-	if graphqlStringMatchIsCatchAll(a) || graphqlStringMatchIsCatchAll(b) {
+// stringMatchValuesOverlap reports whether two StringMatch conditions (a
+// GraphQL path/operationName or a gRPC service/method/authority) can match
+// the same value: nil or empty conditions match everything; identical
+// exacts, nested or identical prefixes, and an exact carrying a required
+// prefix all intersect. Regex intersection is statically undecidable and
+// regex combinations are treated as non-overlapping, mirroring the APIRoute
+// checker (equal-specificity regex routes stay admitted; the router still
+// orders them deterministically via the name tie-break).
+func stringMatchValuesOverlap(a, b *avapigwv1alpha1.StringMatch) bool {
+	if stringMatchIsCatchAll(a) || stringMatchIsCatchAll(b) {
 		return true
 	}
 
@@ -1486,9 +1532,9 @@ func graphqlStringMatchValuesOverlap(a, b *avapigwv1alpha1.StringMatch) bool {
 	}
 }
 
-// graphqlStringMatchIsCatchAll reports whether the StringMatch matches every
+// stringMatchIsCatchAll reports whether the StringMatch matches every
 // value: nil or with no matcher fields set.
-func graphqlStringMatchIsCatchAll(sm *avapigwv1alpha1.StringMatch) bool {
+func stringMatchIsCatchAll(sm *avapigwv1alpha1.StringMatch) bool {
 	return sm == nil || (sm.Exact == "" && sm.Prefix == "" && sm.Regex == "")
 }
 

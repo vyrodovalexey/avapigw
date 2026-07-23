@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	avapigwv1alpha1 "github.com/vyrodovalexey/avapigw/api/v1alpha1"
@@ -88,6 +91,9 @@ func (r *GRPCRouteReconciler) callbacks() *ReconcileCallbacks {
 			}
 			return r.GRPCServer.HasGRPCRoute(resource.GetName(), resource.GetNamespace())
 		},
+		ReferencesExternalConfig: func(resource Reconcilable) bool {
+			return grpcRouteConfigMapName(resource.(*avapigwv1alpha1.GRPCRoute)) != ""
+		},
 	}
 }
 
@@ -101,6 +107,14 @@ func (r *GRPCRouteReconciler) reconcileGRPCRoute(ctx context.Context, grpcRoute 
 		r.Recorder.Eventf(grpcRoute, "Warning", EventReasonReconcileFailed,
 			"Failed to resolve proto validation descriptor: %v", err)
 		return fmt.Errorf("failed to resolve proto validation descriptor: %w", err)
+	}
+
+	// Rewrite deprecated CRD field shapes (authorization cache sentinel,
+	// legacy CSP/HSTS header strings) into the gateway-consumable shape.
+	if converted := normalizeRouteSpecShared(grpcRoute.Spec.Authorization, grpcRoute.Spec.Security); converted > 0 {
+		GetControllerMetrics().RecordLegacyFieldConversions(KindGRPCRoute, converted)
+		log.FromContext(ctx).Info("converted deprecated GRPCRoute spec fields to gateway shape",
+			"name", grpcRoute.Name, "namespace", grpcRoute.Namespace, "converted_fields", converted)
 	}
 
 	configJSON, err := json.Marshal(grpcRoute.Spec)
@@ -155,8 +169,25 @@ func (r *GRPCRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.StatusUpdater = NewStatusUpdater(r.Client)
 	}
 
+	// Index GRPCRoutes by their referenced proto descriptor ConfigMap so
+	// ConfigMap edits re-reconcile exactly the routes that inline it.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &avapigwv1alpha1.GRPCRoute{},
+		grpcRouteConfigMapIndexField, func(obj client.Object) []string {
+			route, ok := obj.(*avapigwv1alpha1.GRPCRoute)
+			if !ok {
+				return nil
+			}
+			return configMapIndexValues(grpcRouteConfigMapName(route))
+		}); err != nil {
+		return fmt.Errorf("failed to index GRPCRoute ConfigMap references: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&avapigwv1alpha1.GRPCRoute{}).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(
+			configMapMapFunc(r.Client, KindGRPCRoute, grpcRouteConfigMapIndexField,
+				func() client.ObjectList { return &avapigwv1alpha1.GRPCRouteList{} }),
+		)).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: MaxConcurrentReconciles,
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](

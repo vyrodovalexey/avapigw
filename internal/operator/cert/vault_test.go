@@ -103,6 +103,14 @@ func (m *MockPKIClient) GetCA(ctx context.Context, mount string) (*x509.CertPool
 	return args.Get(0).(*x509.CertPool), args.Error(1)
 }
 
+func (m *MockPKIClient) GetCAPEM(ctx context.Context, mount string) ([]byte, error) {
+	args := m.Called(ctx, mount)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]byte), args.Error(1)
+}
+
 func (m *MockPKIClient) GetCRL(ctx context.Context, mount string) ([]byte, error) {
 	args := m.Called(ctx, mount)
 	if args.Get(0) == nil {
@@ -552,6 +560,94 @@ func TestVaultProvider_GetCA_Error(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, pool)
 	mockPKI.AssertExpectations(t)
+}
+
+// ============================================================================
+// GetCAPEM Tests
+// ============================================================================
+
+func TestVaultProvider_GetCAPEM_Success(t *testing.T) {
+	// Arrange
+	mockClient := new(MockVaultClient)
+	mockPKI := new(MockPKIClient)
+	config := &VaultProviderConfig{
+		Address:  "http://localhost:8200",
+		PKIMount: "pki",
+		Role:     "test-role",
+	}
+	provider := newTestVaultProvider(mockClient, config)
+
+	caPEM := []byte("-----BEGIN CERTIFICATE-----\nvault-ca\n-----END CERTIFICATE-----\n")
+	mockClient.On("PKI").Return(mockPKI)
+	mockPKI.On("GetCAPEM", mock.Anything, "pki").Return(caPEM, nil)
+
+	// Act
+	got, err := provider.GetCAPEM(context.Background())
+
+	// Assert: the raw pki/cert/ca PEM is returned; no leaf issuance happens
+	// (mockPKI would fail on an unexpected IssueCertificate call).
+	require.NoError(t, err)
+	assert.Equal(t, caPEM, got)
+	mockPKI.AssertExpectations(t)
+}
+
+func TestVaultProvider_GetCAPEM_Error(t *testing.T) {
+	// Arrange
+	mockClient := new(MockVaultClient)
+	mockPKI := new(MockPKIClient)
+	config := &VaultProviderConfig{
+		Address:  "http://localhost:8200",
+		PKIMount: "pki",
+		Role:     "test-role",
+	}
+	provider := newTestVaultProvider(mockClient, config)
+
+	mockClient.On("PKI").Return(mockPKI)
+	mockPKI.On("GetCAPEM", mock.Anything, "pki").Return(nil, errors.New("vault error"))
+
+	// Act
+	_, err := provider.GetCAPEM(context.Background())
+
+	// Assert
+	require.Error(t, err)
+	mockPKI.AssertExpectations(t)
+}
+
+func TestVaultProvider_GetCAPEM_ProviderClosed(t *testing.T) {
+	// Arrange
+	mockClient := new(MockVaultClient)
+	provider := newTestVaultProvider(mockClient, &VaultProviderConfig{
+		Address:  "http://localhost:8200",
+		PKIMount: "pki",
+		Role:     "test-role",
+	})
+	provider.closed.Store(true)
+
+	// Act
+	_, err := provider.GetCAPEM(context.Background())
+
+	// Assert
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate provider is closed")
+}
+
+func TestVaultProvider_GetCAPEM_ContextCanceled(t *testing.T) {
+	// Arrange
+	mockClient := new(MockVaultClient)
+	provider := newTestVaultProvider(mockClient, &VaultProviderConfig{
+		Address:  "http://localhost:8200",
+		PKIMount: "pki",
+		Role:     "test-role",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Act
+	_, err := provider.GetCAPEM(ctx)
+
+	// Assert
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled")
 }
 
 // ============================================================================

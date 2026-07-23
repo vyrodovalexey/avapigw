@@ -263,11 +263,21 @@ func (c *VaultAuthRetryConfig) clone() *VaultAuthRetryConfig {
 	return &cp
 }
 
-// RequiresVaultTLS reports whether any listener or route in the spec enables
-// Vault-issued TLS certificates (tls.vault PKI issuance), which requires the
-// gateway-wide Vault client. cmd/gateway gating and the validator both use
-// this single implementation.
+// RequiresVaultTLS reports whether any listener, route, or backend in the
+// spec enables Vault-issued TLS certificates (tls.vault PKI issuance), which
+// requires the gateway-wide Vault client. cmd/gateway gating and the
+// validator both use this single implementation, so extending the scan here
+// fixes both the client-init gating and the disabled-conflict validation
+// rule at once.
 func (s *GatewaySpec) RequiresVaultTLS() bool {
+	return s.listenersRequireVaultTLS() ||
+		s.routesRequireVaultTLS() ||
+		s.backendsRequireVaultTLS()
+}
+
+// listenersRequireVaultTLS reports whether any HTTP/HTTPS or gRPC listener
+// enables Vault PKI certificate issuance for its serving certificate.
+func (s *GatewaySpec) listenersRequireVaultTLS() bool {
 	for i := range s.Listeners {
 		l := &s.Listeners[i]
 		if l.TLS != nil && l.TLS.Vault != nil && l.TLS.Vault.Enabled {
@@ -277,11 +287,82 @@ func (s *GatewaySpec) RequiresVaultTLS() bool {
 			return true
 		}
 	}
+	return false
+}
+
+// routesRequireVaultTLS reports whether any HTTP, gRPC, or GraphQL route
+// declares a route-level (SNI) TLS certificate override backed by Vault PKI
+// issuance.
+func (s *GatewaySpec) routesRequireVaultTLS() bool {
 	for i := range s.Routes {
-		r := &s.Routes[i]
-		if r.TLS != nil && r.TLS.Vault != nil && r.TLS.Vault.Enabled {
+		if routeTLSUsesVault(s.Routes[i].TLS) {
+			return true
+		}
+	}
+	for i := range s.GRPCRoutes {
+		if routeTLSUsesVault(s.GRPCRoutes[i].TLS) {
+			return true
+		}
+	}
+	for i := range s.GraphQLRoutes {
+		if routeTLSUsesVault(s.GraphQLRoutes[i].TLS) {
 			return true
 		}
 	}
 	return false
+}
+
+// backendsRequireVaultTLS reports whether any HTTP, gRPC, or GraphQL backend
+// requests Vault-issued client certificates — either through the connection
+// TLS block (tls.vault) or through mTLS backend authentication
+// (authentication.mtls.vault). Missing these cases previously let a
+// backend-only PKI configuration boot WITHOUT a Vault client and fail later
+// at TLS-build time with an opaque "vault client is required" runtime error
+// (internal/backend/tls.go) instead of a clear startup validation error.
+func (s *GatewaySpec) backendsRequireVaultTLS() bool {
+	for i := range s.Backends {
+		b := &s.Backends[i]
+		if backendTLSUsesVault(b.TLS) || backendAuthUsesVaultTLS(b.Authentication) {
+			return true
+		}
+	}
+	for i := range s.GRPCBackends {
+		b := &s.GRPCBackends[i]
+		if b.TLS != nil && b.TLS.Vault != nil && b.TLS.Vault.Enabled {
+			return true
+		}
+		if backendAuthUsesVaultTLS(b.Authentication) {
+			return true
+		}
+	}
+	for i := range s.GraphQLBackends {
+		b := &s.GraphQLBackends[i]
+		if backendTLSUsesVault(b.TLS) || backendAuthUsesVaultTLS(b.Authentication) {
+			return true
+		}
+	}
+	return false
+}
+
+// routeTLSUsesVault reports whether a route-level TLS override requests
+// Vault PKI issuance (nil-safe).
+func routeTLSUsesVault(tls *RouteTLSConfig) bool {
+	return tls != nil && tls.Vault != nil && tls.Vault.Enabled
+}
+
+// backendTLSUsesVault reports whether a backend connection TLS block
+// requests Vault PKI issuance (nil-safe).
+func backendTLSUsesVault(tls *BackendTLSConfig) bool {
+	return tls != nil && tls.Vault != nil && tls.Vault.Enabled
+}
+
+// backendAuthUsesVaultTLS reports whether backend mTLS authentication
+// requests Vault-issued client certificates (nil-safe). This is the same
+// PKI-issuance class as tls.vault and equally requires the gateway-wide
+// Vault client.
+func backendAuthUsesVaultTLS(auth *BackendAuthConfig) bool {
+	if auth == nil || auth.MTLS == nil || !auth.MTLS.Enabled {
+		return false
+	}
+	return auth.MTLS.Vault != nil && auth.MTLS.Vault.Enabled
 }

@@ -11,6 +11,7 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -143,6 +144,19 @@ func TestWebhookCAInjector_InjectCABundle(t *testing.T) {
 	// Verify the CA bundle was updated
 	caBundle := injector.GetCABundle()
 	assert.NotEmpty(t, caBundle)
+
+	// The injected bundle must be exactly the provider's CA PEM (no
+	// throwaway leaf issuance, no chain derived from a probe certificate).
+	caPEM, err := certManager.GetCAPEM(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, caPEM, caBundle,
+		"injected caBundle must equal the certificate manager's CA PEM")
+
+	// And it must land in the webhook configuration itself.
+	updated := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+	require.NoError(t, fakeClient.Get(ctx,
+		types.NamespacedName{Name: "test-webhook"}, updated))
+	assert.Equal(t, caPEM, updated.Webhooks[0].ClientConfig.CABundle)
 
 	// Verify base64 encoding works
 	caBase64 := injector.GetCABundleBase64()

@@ -223,7 +223,6 @@ func (v *APIRouteValidator) ValidateDelete(_ context.Context, _ *avapigwv1alpha1
 //
 //nolint:gocognit,gocyclo // Validation requires checking multiple fields: matches, routes, redirects, policies
 func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admission.Warnings, error) {
-	var warnings admission.Warnings
 	var errs []string
 
 	spec := &apiRoute.Spec
@@ -287,6 +286,13 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		}
 	}
 
+	// Validate transform configuration
+	if spec.Transform != nil {
+		if err := validateRouteTransform(spec.Transform); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+
 	// Validate CORS configuration
 	if spec.CORS != nil {
 		if err := validateCORS(spec.CORS); err != nil {
@@ -329,6 +335,21 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		}
 	}
 
+	warnings := admission.Warnings(collectAPIRouteWarnings(spec))
+
+	if len(errs) > 0 {
+		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
+	}
+
+	return warnings, nil
+}
+
+// collectAPIRouteWarnings assembles the non-blocking admission warnings for
+// an APIRoute spec: plaintext-secret warnings, deprecated/unusable field
+// transparency warnings, and conflicting-configuration notices.
+func collectAPIRouteWarnings(spec *avapigwv1alpha1.APIRouteSpec) []string {
+	var warnings []string
+
 	// Security warnings for plaintext secrets in authentication config,
 	// plus a warning when mTLS is enabled without an explicit caFile
 	// (valid only with a gateway-level CA source such as Vault-managed PKI).
@@ -337,15 +358,20 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		warnings = append(warnings, warnMTLSMissingCAFile(spec.Authentication)...)
 	}
 
-	// Security warnings for plaintext secrets in authorization cache sentinel config
-	if spec.Authorization != nil && spec.Authorization.Cache != nil && spec.Authorization.Cache.Sentinel != nil {
-		warnings = append(warnings, warnPlaintextSentinelSecrets(spec.Authorization.Cache.Sentinel)...)
-	}
+	// Security warnings for plaintext secrets in authorization cache
+	// (both redis.sentinel and the deprecated sentinel block), plus
+	// transparency warnings for deprecated/unusable authz cache config.
+	warnings = append(warnings, warnAuthzCacheSecrets(spec.Authorization)...)
+	warnings = append(warnings, warnAuthzCacheSentinelDeprecated(spec.Authorization)...)
+	warnings = append(warnings, warnAuthzCacheRedisWithoutConnection(spec.Authorization, kindAPIRoute)...)
 
 	// Security warnings for plaintext secrets in route cache and rate limiter
 	// Redis Sentinel configurations
 	warnings = append(warnings, warnRouteCacheSentinelSecrets(spec.Cache)...)
 	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
+
+	// Deprecated cache.keyComponents has no gateway counterpart.
+	warnings = append(warnings, warnCacheKeyComponentsUnapplied(spec.Cache, kindAPIRoute)...)
 
 	// Check for conflicting configurations
 	if spec.Redirect != nil && len(spec.Route) > 0 {
@@ -355,11 +381,7 @@ func (v *APIRouteValidator) validate(apiRoute *avapigwv1alpha1.APIRoute) (admiss
 		warnings = append(warnings, "directResponse and route are both specified; directResponse will take precedence")
 	}
 
-	if len(errs) > 0 {
-		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))
-	}
-
-	return warnings, nil
+	return warnings
 }
 
 // validateMatches validates route match conditions.

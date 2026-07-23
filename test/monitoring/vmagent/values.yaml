@@ -5,6 +5,12 @@ image:
   tag: "v1.108.1"
   pullPolicy: IfNotPresent
 
+# Remote-write target: the docker-compose VictoriaMetrics on the HOST.
+# host.docker.internal resolves from in-cluster pods on Docker Desktop
+# (macOS/Windows) clusters. On other platforms override the URL at install:
+#   - kind/minikube on Linux: --set remoteWrite.url=http://<host-gateway-IP>:8428/api/v1/write
+#     (e.g. the docker bridge gateway 172.17.0.1, or the host LAN IP)
+#   - OrbStack: host.docker.internal also resolves; otherwise use 198.19.248.254
 remoteWrite:
   url: "http://host.docker.internal:8428/api/v1/write"
 

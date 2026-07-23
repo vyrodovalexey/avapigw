@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -56,6 +57,19 @@ var (
 
 // defaultWebhookConfigName is the default name of the ValidatingWebhookConfiguration resource.
 const defaultWebhookConfigName = "avapigw-operator-validating-webhook-configuration"
+
+// defaultCertManagerCertDir is controller-runtime's default webhook
+// serving-certs directory, where cert-manager-provisioned Secrets are
+// mounted by convention.
+const defaultCertManagerCertDir = "/tmp/k8s-webhook-server/serving-certs"
+
+// defaultString returns s, or fallback when s is empty.
+func defaultString(s, fallback string) string {
+	if s != "" {
+		return s
+	}
+	return fallback
+}
 
 var setupTracingFunc = defaultSetupTracing
 
@@ -151,6 +165,15 @@ type Config struct {
 	// If empty, the controller-runtime default cert directory is used.
 	WebhookCertDir string
 
+	// WebhookCertName is the certificate file name inside WebhookCertDir
+	// (default "tls.crt"). Set automatically for the file provider when the
+	// webhook cert dir is derived from --cert-file.
+	WebhookCertName string
+
+	// WebhookKeyName is the key file name inside WebhookCertDir
+	// (default "tls.key").
+	WebhookKeyName string
+
 	// WebhookConfigName is the name of the ValidatingWebhookConfiguration resource.
 	// Defaults to "avapigw-operator-validating-webhook-configuration".
 	WebhookConfigName string
@@ -158,8 +181,27 @@ type Config struct {
 	// GRPCPort is the port that the gRPC server serves at.
 	GRPCPort int
 
-	// CertProvider is the certificate provider (selfsigned, vault).
+	// CertProvider is the certificate provider (selfsigned, vault, file, cert-manager).
 	CertProvider string
+
+	// CertFile is the path to a PEM serving certificate (file provider).
+	CertFile string
+
+	// KeyFile is the path to the PEM private key (file provider).
+	KeyFile string
+
+	// CACertFile is the path to the PEM CA bundle (file provider, optional).
+	CACertFile string
+
+	// CertSecretName is the Kubernetes Secret used by the selfsigned
+	// provider to persist its CA and serving certificate so the CA is
+	// stable across operator restarts and the gateway can mount ca.crt
+	// for TLS verification. Empty disables persistence.
+	CertSecretName string
+
+	// CertSecretNamespace is the namespace of CertSecretName. Defaults to
+	// the POD_NAMESPACE environment variable, then CertNamespace.
+	CertSecretNamespace string
 
 	// VaultAddr is the Vault server address.
 	VaultAddr string
@@ -232,6 +274,20 @@ type Config struct {
 
 	// DuplicateCacheTTL is the TTL for duplicate detection cache entries.
 	DuplicateCacheTTL time.Duration
+
+	// envWarnings collects environment variables whose values failed to
+	// parse during applyEnvOverrides. Parsing happens before the logger is
+	// configured, so the warnings are recorded here and logged by
+	// logEnvWarnings once logging is set up.
+	envWarnings []envWarning
+}
+
+// envWarning describes an environment variable override that was ignored
+// because its value could not be parsed.
+type envWarning struct {
+	key    string
+	value  string
+	reason string
 }
 
 func main() {
@@ -247,12 +303,17 @@ func run() error {
 }
 
 // runWithConfig is the main orchestration function that accepts a REST config.
-// When restConfig is nil, it uses ctrl.GetConfigOrDie() (production mode).
+// When restConfig is nil, it is resolved via the getRESTConfig seam
+// (ctrl.GetConfigOrDie in production, a fake config in tests).
 // This separation enables unit testing without a real Kubernetes cluster.
 func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	// Setup logging
 	logger := setupLogger(cfg.LogLevel, cfg.LogFormat)
 	ctrl.SetLogger(logger)
+
+	// Surface environment variable parse failures collected before the
+	// logger was available (parity with the gateway's env warnings).
+	logEnvWarnings(cfg)
 
 	// Use controller-runtime's signal handler as the base context.
 	// It handles SIGINT/SIGTERM and cancels the context on the first signal.
@@ -316,6 +377,13 @@ func runWithConfig(cfg *Config, restConfig *rest.Config) error {
 	return nil
 }
 
+// getRESTConfig resolves the Kubernetes REST configuration when none was
+// supplied by the caller. It defaults to ctrl.GetConfigOrDie, which
+// terminates the process when neither a kubeconfig nor an in-cluster
+// environment is available. It is a package-level variable so tests can
+// substitute a fake config and keep the nil-restConfig fallback hermetic.
+var getRESTConfig = ctrl.GetConfigOrDie
+
 // setupCertManagerAndControllerManager initializes the certificate manager,
 // writes webhook TLS certificates if needed, and creates the controller-runtime manager.
 func setupCertManagerAndControllerManager(
@@ -323,34 +391,96 @@ func setupCertManagerAndControllerManager(
 	cfg *Config,
 	restConfig *rest.Config,
 ) (cert.Manager, ctrl.Manager, error) {
-	certManager, err := setupCertManager(ctx, cfg)
+	// Resolve the REST config once: it is shared by the certificate
+	// manager (Secret persistence client) and the controller manager.
+	if restConfig == nil {
+		restConfig = getRESTConfig()
+	}
+
+	certManager, err := setupCertManager(ctx, cfg, restConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to setup certificate manager: %w", err)
 	}
 
-	// Write webhook TLS certificates from the cert manager when webhooks are enabled.
-	// This wires the cert manager's certificates to the webhook server's TLS configuration.
+	// Configure webhook serving certificates (internal provisioning or
+	// externally mounted cert dir) when webhooks are enabled.
 	if cfg.EnableWebhooks {
-		certDir, certErr := writeWebhookCertificates(ctx, cfg, certManager)
-		if certErr != nil {
-			return nil, nil, fmt.Errorf("unable to write webhook certificates: %w", certErr)
-		}
-		if certDir != "" {
-			cfg.WebhookCertDir = certDir
+		if err := configureWebhookCertificates(ctx, cfg, certManager); err != nil {
+			return nil, nil, err
 		}
 	}
 
-	var mgr ctrl.Manager
-	if restConfig != nil {
-		mgr, err = createManagerWithConfig(restConfig, cfg)
-	} else {
-		mgr, err = createManager(cfg)
-	}
+	mgr, err := createManagerWithConfig(restConfig, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return certManager, mgr, nil
+}
+
+// configureWebhookCertificates wires the webhook server's TLS certificates.
+// With the cert-manager and file providers the certificates are provisioned
+// externally into the (mounted) webhook cert dir, which controller-runtime
+// watches for rotation natively — internal provisioning must not override
+// it. Otherwise the cert manager's certificates are written to a temp dir.
+func configureWebhookCertificates(ctx context.Context, cfg *Config, certManager cert.Manager) error {
+	if usesExternalWebhookCerts(cfg) {
+		return resolveExternalWebhookCertDir(cfg)
+	}
+
+	certDir, err := writeWebhookCertificates(ctx, cfg, certManager)
+	if err != nil {
+		return fmt.Errorf("unable to write webhook certificates: %w", err)
+	}
+	if certDir != "" {
+		cfg.WebhookCertDir = certDir
+	}
+	return nil
+}
+
+// usesExternalWebhookCerts reports whether webhook serving certificates are
+// provisioned externally (mounted into the cert dir) rather than written by
+// the operator's certificate manager.
+func usesExternalWebhookCerts(cfg *Config) bool {
+	switch cert.CertificateMode(cfg.CertProvider) {
+	case cert.CertModeCertManager, cert.CertModeFile:
+		return true
+	default:
+		return false
+	}
+}
+
+// resolveExternalWebhookCertDir determines the webhook certificate
+// directory (and file names) for externally provisioned certificates.
+// Precedence: an explicitly configured WebhookCertDir is honored as-is
+// (cert-manager convention: tls.crt/tls.key inside it); otherwise the file
+// provider's cert/key paths are used when they share a directory; otherwise
+// the cert-manager default mount path is assumed.
+func resolveExternalWebhookCertDir(cfg *Config) error {
+	if cfg.WebhookCertDir == "" {
+		switch {
+		case cfg.CertFile != "" && cfg.KeyFile != "":
+			certDir := filepath.Dir(cfg.CertFile)
+			if filepath.Dir(cfg.KeyFile) != certDir {
+				return fmt.Errorf(
+					"webhook certificates require cert-file and key-file in the same directory "+
+						"(got %q and %q); set --webhook-cert-dir explicitly",
+					cfg.CertFile, cfg.KeyFile,
+				)
+			}
+			cfg.WebhookCertDir = certDir
+			cfg.WebhookCertName = filepath.Base(cfg.CertFile)
+			cfg.WebhookKeyName = filepath.Base(cfg.KeyFile)
+		default:
+			cfg.WebhookCertDir = defaultCertManagerCertDir
+		}
+	}
+
+	setupLog.Info("using externally provisioned webhook certificates",
+		"cert_provider", cfg.CertProvider,
+		"cert_dir", cfg.WebhookCertDir,
+	)
+	return nil
 }
 
 // setupOperatorComponents sets up gRPC server, controllers, webhooks, CA injector,
@@ -366,6 +496,10 @@ func setupOperatorComponents(
 		return nil, err
 	}
 
+	// SetupWithManager follows the standard kubebuilder signature (no ctx);
+	// its ConfigMap field-index registration uses a Background context
+	// because indexer setup is synchronous and manager-lifetime scoped.
+	//nolint:contextcheck // kubebuilder SetupWithManager convention has no context parameter
 	if err := setupControllers(mgr, grpcServer, cfg); err != nil {
 		return nil, fmt.Errorf("unable to setup controllers: %w", err)
 	}
@@ -390,7 +524,37 @@ func setupOperatorComponents(
 	startStoreSeedingBackground(ctx, grpcServer, mgr)
 	startGRPCServerBackground(ctx, grpcServer)
 
+	// Start the serving-certificate rotation loop (selfsigned/vault
+	// providers): re-issues before expiry and swaps the certificate into
+	// the running gRPC server and the webhook cert dir.
+	startCertRotationForComponents(ctx, cfg, certManager, grpcServer)
+
 	return caInjector, nil
+}
+
+// startCertRotationForComponents resolves the current serving certificate
+// (a cache hit on the certificate manager) and starts the rotation loop for
+// internally provisioned certificates.
+func startCertRotationForComponents(
+	ctx context.Context,
+	cfg *Config,
+	certManager cert.Manager,
+	grpcServer *operatorgrpc.Server,
+) {
+	if usesExternalWebhookCerts(cfg) || (grpcServer == nil && !cfg.EnableWebhooks) {
+		return
+	}
+
+	currentCert, err := certManager.GetCertificate(ctx, &cert.CertificateRequest{
+		CommonName: cfg.CertServiceName,
+		DNSNames:   getCertDNSNames(cfg),
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to resolve current serving certificate; rotation loop not started")
+		return
+	}
+
+	startCertRotationIfNeeded(ctx, cfg, certManager, grpcServer, currentCert)
 }
 
 // Store seeding constants for the gRPC configuration store readiness gate.
@@ -564,25 +728,23 @@ func setupTracingIfEnabled(cfg *Config) (func(), error) {
 	}, nil
 }
 
-// createManager creates the controller-runtime manager.
-func createManager(cfg *Config) (ctrl.Manager, error) {
-	return createManagerWithConfig(ctrl.GetConfigOrDie(), cfg)
-}
-
 // createManagerWithConfig creates the controller-runtime manager using the provided REST config.
-// This is separated from createManager to enable unit testing with a fake API server.
+// The REST config is resolved by setupCertManagerAndControllerManager via the
+// getRESTConfig seam (production: ctrl.GetConfigOrDie; tests: a fake API
+// server config).
 func createManagerWithConfig(restConfig *rest.Config, cfg *Config) (ctrl.Manager, error) {
 	webhookOpts := webhook.Options{
 		Port: cfg.WebhookPort,
 	}
 
 	// Configure TLS certificate paths for the webhook server if cert directory is set.
-	// The cert manager writes certificates to this directory, and the webhook server
-	// reads them for TLS termination.
+	// The certificates are either written by the cert manager (selfsigned/vault) or
+	// mounted externally (file/cert-manager); controller-runtime watches the files
+	// and reloads them on rotation.
 	if cfg.WebhookCertDir != "" {
 		webhookOpts.CertDir = cfg.WebhookCertDir
-		webhookOpts.CertName = "tls.crt"
-		webhookOpts.KeyName = "tls.key"
+		webhookOpts.CertName = defaultString(cfg.WebhookCertName, "tls.crt")
+		webhookOpts.KeyName = defaultString(cfg.WebhookKeyName, "tls.key")
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
@@ -689,101 +851,156 @@ func setupHealthChecks(mgr healthCheckAdder) error {
 	return nil
 }
 
-// startGRPCServerBackground starts the gRPC server in a background goroutine.
+// startGRPCServerBackground starts the gRPC server in a background goroutine
+// and launches the gateway registry staleness reaper alongside it, so
+// registrations of gateways that disappeared without unregistering are
+// removed after three missed heartbeats.
 func startGRPCServerBackground(ctx context.Context, grpcServer *operatorgrpc.Server) {
 	if grpcServer == nil {
 		return
 	}
+	grpcServer.StartGatewayReaper(ctx, 0, 0) // 0,0 = default interval and TTL
 	go func() {
 		if err := grpcServer.Start(ctx); err != nil {
+			// Start returns ctx.Err() when the shutdown context is
+			// canceled; that is a clean shutdown, not a server error.
+			if errors.Is(err, context.Canceled) {
+				setupLog.Info("gRPC server stopped")
+				return
+			}
 			setupLog.Error(err, "gRPC server error")
 		}
 	}()
 }
 
+// parseFlags parses the operator configuration from the process command
+// line (flag.CommandLine and os.Args[1:]) and applies environment variable
+// overrides. flag.CommandLine uses ExitOnError handling, so an invalid
+// command line terminates the process exactly as the previous flag.Parse
+// call did and the parse error can never propagate here. Tests must use
+// parseFlagsFrom with a local FlagSet and explicit arguments instead of
+// mutating the global flag state.
 func parseFlags() *Config {
-	cfg := &Config{}
-
-	defineFlags(cfg)
-	flag.Parse()
-	applyEnvOverrides(cfg)
-
+	cfg, _ := parseFlagsFrom(flag.CommandLine, os.Args[1:])
 	return cfg
 }
 
-func defineFlags(cfg *Config) {
-	flag.StringVar(&cfg.MetricsAddr, "metrics-bind-address", ":8080",
+// parseFlagsFrom registers the operator flags on fs, parses args against
+// it, and applies environment variable overrides (environment values take
+// precedence over parsed flag values). Injecting the FlagSet and argument
+// list keeps flag handling unit-testable without touching flag.CommandLine,
+// which carries the testing framework's -test.* flag definitions during
+// `go test` runs and must never be replaced or re-parsed by tests.
+func parseFlagsFrom(fs *flag.FlagSet, args []string) (*Config, error) {
+	cfg := &Config{}
+	registerFlags(fs, cfg)
+	if err := fs.Parse(args); err != nil {
+		return nil, fmt.Errorf("parsing flags: %w", err)
+	}
+	applyEnvOverrides(cfg)
+	return cfg, nil
+}
+
+// registerFlags defines all operator flags on the given FlagSet, binding
+// them to the corresponding Config fields.
+func registerFlags(fs *flag.FlagSet, cfg *Config) {
+	fs.StringVar(&cfg.MetricsAddr, "metrics-bind-address", ":8080",
 		"The address the metric endpoint binds to.")
-	flag.StringVar(&cfg.ProbeAddr, "health-probe-bind-address", ":8081",
+	fs.StringVar(&cfg.ProbeAddr, "health-probe-bind-address", ":8081",
 		"The address the probe endpoint binds to.")
-	flag.BoolVar(&cfg.EnableLeaderElection, "leader-elect", false,
+	fs.BoolVar(&cfg.EnableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager.")
-	flag.StringVar(&cfg.LeaderElectionID, "leader-election-id",
+	fs.StringVar(&cfg.LeaderElectionID, "leader-election-id",
 		"avapigw-operator-leader.avapigw.io",
 		"The name of the resource that leader election will use for holding the leader lock.")
-	flag.IntVar(&cfg.WebhookPort, "webhook-port", 9443,
+	fs.IntVar(&cfg.WebhookPort, "webhook-port", 9443,
 		"The port that the webhook server serves at.")
-	flag.StringVar(&cfg.WebhookCertDir, "webhook-cert-dir", "",
+	fs.StringVar(&cfg.WebhookCertDir, "webhook-cert-dir", "",
 		"The directory containing TLS certificates for the webhook server. "+
 			"If empty, certificates are generated from the cert manager.")
-	flag.StringVar(&cfg.WebhookConfigName, "webhook-config-name", defaultWebhookConfigName,
+	fs.StringVar(&cfg.WebhookConfigName, "webhook-config-name", defaultWebhookConfigName,
 		"The name of the ValidatingWebhookConfiguration resource.")
-	flag.IntVar(&cfg.GRPCPort, "grpc-port", 9444,
+	fs.IntVar(&cfg.GRPCPort, "grpc-port", 9444,
 		"The port that the gRPC server serves at.")
-	flag.StringVar(&cfg.CertProvider, "cert-provider", "selfsigned",
-		"The certificate provider (selfsigned, vault).")
-	flag.StringVar(&cfg.VaultAddr, "vault-addr", "",
+	fs.StringVar(&cfg.CertProvider, "cert-provider", "selfsigned",
+		"The certificate provider (selfsigned, vault, file, cert-manager).")
+	fs.StringVar(&cfg.CertFile, "cert-file", "",
+		"Path to the PEM serving certificate (file provider).")
+	fs.StringVar(&cfg.KeyFile, "key-file", "",
+		"Path to the PEM private key (file provider).")
+	fs.StringVar(&cfg.CACertFile, "ca-file", "",
+		"Path to the PEM CA bundle (file provider, optional).")
+	fs.StringVar(&cfg.CertSecretName, "cert-secret-name", "",
+		"Kubernetes Secret used by the selfsigned provider to persist its CA and "+
+			"serving certificate (empty disables persistence).")
+	fs.StringVar(&cfg.CertSecretNamespace, "cert-secret-namespace", "",
+		"Namespace of the certificate persistence Secret "+
+			"(defaults to POD_NAMESPACE, then the cert namespace).")
+	fs.StringVar(&cfg.VaultAddr, "vault-addr", "",
 		"The Vault server address.")
-	flag.StringVar(&cfg.VaultPKIMount, "vault-pki-mount", "pki",
+	fs.StringVar(&cfg.VaultPKIMount, "vault-pki-mount", "pki",
 		"The Vault PKI mount path.")
-	flag.StringVar(&cfg.VaultPKIRole, "vault-pki-role", "operator",
+	fs.StringVar(&cfg.VaultPKIRole, "vault-pki-role", "operator",
 		"The Vault PKI role name.")
-	flag.StringVar(&cfg.VaultK8sRole, "vault-k8s-role", "",
+	fs.StringVar(&cfg.VaultK8sRole, "vault-k8s-role", "",
 		"The Vault role for Kubernetes authentication.")
-	flag.StringVar(&cfg.VaultK8sMountPath, "vault-k8s-mount-path", "kubernetes",
+	fs.StringVar(&cfg.VaultK8sMountPath, "vault-k8s-mount-path", "kubernetes",
 		"The mount path for the Kubernetes auth method.")
-	flag.StringVar(&cfg.LogLevel, "log-level", "info",
+	fs.StringVar(&cfg.LogLevel, "log-level", "info",
 		"The log level (debug, info, warn, error).")
-	flag.StringVar(&cfg.LogFormat, "log-format", "json",
+	fs.StringVar(&cfg.LogFormat, "log-format", "json",
 		"The log format (json, console).")
-	flag.BoolVar(&cfg.EnableWebhooks, "enable-webhooks", true,
+	fs.BoolVar(&cfg.EnableWebhooks, "enable-webhooks", true,
 		"Enable admission webhooks.")
-	flag.BoolVar(&cfg.EnableGRPCServer, "enable-grpc-server", true,
+	fs.BoolVar(&cfg.EnableGRPCServer, "enable-grpc-server", true,
 		"Enable the gRPC configuration server.")
-	flag.BoolVar(&cfg.GRPCRequireClientCert, "grpc-require-client-cert", false,
+	fs.BoolVar(&cfg.GRPCRequireClientCert, "grpc-require-client-cert", false,
 		"Require client certificates for gRPC connections (mTLS). When false, uses server-side TLS only.")
-	flag.BoolVar(&cfg.EnableTracing, "enable-tracing", false,
+	fs.BoolVar(&cfg.EnableTracing, "enable-tracing", false,
 		"Enable OpenTelemetry tracing.")
-	flag.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "",
+	fs.StringVar(&cfg.OTLPEndpoint, "otlp-endpoint", "",
 		"The OTLP exporter endpoint (e.g., localhost:4317).")
-	flag.Float64Var(&cfg.TracingSamplingRate, "tracing-sampling-rate", 1.0,
+	fs.Float64Var(&cfg.TracingSamplingRate, "tracing-sampling-rate", 1.0,
 		"The sampling rate for tracing (0.0 to 1.0).")
-	flag.DurationVar(&cfg.VaultInitTimeout, "vault-init-timeout", 30*time.Second,
+	fs.DurationVar(&cfg.VaultInitTimeout, "vault-init-timeout", 30*time.Second,
 		"The timeout for Vault certificate manager initialization.")
-	flag.StringVar(&cfg.CertServiceName, "cert-service-name", "avapigw-operator",
+	fs.StringVar(&cfg.CertServiceName, "cert-service-name", "avapigw-operator",
 		"The service name for generating default certificate DNS names.")
-	flag.StringVar(&cfg.CertNamespace, "cert-namespace", "avapigw-system",
+	fs.StringVar(&cfg.CertNamespace, "cert-namespace", "avapigw-system",
 		"The namespace for generating default certificate DNS names.")
-	flag.BoolVar(&cfg.EnableIngressController, "enable-ingress-controller", false,
+	fs.BoolVar(&cfg.EnableIngressController, "enable-ingress-controller", false,
 		"Enable the Kubernetes Ingress controller.")
-	flag.StringVar(&cfg.IngressClassName, "ingress-class-name", controller.DefaultIngressClassName,
+	fs.StringVar(&cfg.IngressClassName, "ingress-class-name", controller.DefaultIngressClassName,
 		"The IngressClass name this controller handles.")
-	flag.StringVar(&cfg.IngressLBAddress, "ingress-lb-address", "",
+	fs.StringVar(&cfg.IngressLBAddress, "ingress-lb-address", "",
 		"The load balancer address (IP or hostname) to set on Ingress status.")
-	flag.BoolVar(&cfg.EnableClusterWideDuplicateCheck, "enable-cluster-wide-duplicate-check", false,
+	fs.BoolVar(&cfg.EnableClusterWideDuplicateCheck, "enable-cluster-wide-duplicate-check", false,
 		"Enable cluster-wide duplicate detection for webhooks (default: namespace-scoped).")
-	flag.BoolVar(&cfg.DuplicateCacheEnabled, "duplicate-cache-enabled", true,
+	fs.BoolVar(&cfg.DuplicateCacheEnabled, "duplicate-cache-enabled", true,
 		"Enable caching for duplicate detection.")
-	flag.DurationVar(&cfg.DuplicateCacheTTL, "duplicate-cache-ttl", 30*time.Second,
+	fs.DurationVar(&cfg.DuplicateCacheTTL, "duplicate-cache-ttl", 30*time.Second,
 		"TTL for duplicate detection cache entries.")
 }
 
 func applyEnvOverrides(cfg *Config) {
+	// collect records a parse warning; parse failures keep the flag/default
+	// value in effect and are logged by logEnvWarnings after logger setup.
+	collect := func(w *envWarning) {
+		if w != nil {
+			cfg.envWarnings = append(cfg.envWarnings, *w)
+		}
+	}
+
 	// String overrides
 	applyStringEnv(&cfg.MetricsAddr, "METRICS_BIND_ADDRESS")
 	applyStringEnv(&cfg.ProbeAddr, "HEALTH_PROBE_BIND_ADDRESS")
 	applyStringEnv(&cfg.LeaderElectionID, "LEADER_ELECTION_ID")
 	applyStringEnv(&cfg.CertProvider, "CERT_PROVIDER")
+	applyStringEnv(&cfg.CertFile, "CERT_FILE")
+	applyStringEnv(&cfg.KeyFile, "KEY_FILE")
+	applyStringEnv(&cfg.CACertFile, "CA_FILE")
+	applyStringEnv(&cfg.CertSecretName, "CERT_SECRET_NAME")
+	applyStringEnv(&cfg.CertSecretNamespace, "CERT_SECRET_NAMESPACE")
 	applyStringEnv(&cfg.VaultAddr, "VAULT_ADDR")
 	applyStringEnv(&cfg.VaultPKIMount, "VAULT_PKI_MOUNT")
 	applyStringEnv(&cfg.VaultPKIRole, "VAULT_PKI_ROLE")
@@ -794,16 +1011,16 @@ func applyEnvOverrides(cfg *Config) {
 	applyStringEnv(&cfg.OTLPEndpoint, "OTLP_ENDPOINT")
 
 	// Int overrides
-	applyIntEnv(&cfg.WebhookPort, "WEBHOOK_PORT")
+	collect(applyIntEnv(&cfg.WebhookPort, "WEBHOOK_PORT"))
 	applyStringEnv(&cfg.WebhookCertDir, "WEBHOOK_CERT_DIR")
 	applyStringEnv(&cfg.WebhookConfigName, "WEBHOOK_CONFIG_NAME")
-	applyIntEnv(&cfg.GRPCPort, "GRPC_PORT")
+	collect(applyIntEnv(&cfg.GRPCPort, "GRPC_PORT"))
 
 	// Float overrides
-	applyFloat64Env(&cfg.TracingSamplingRate, "TRACING_SAMPLING_RATE")
+	collect(applyFloat64Env(&cfg.TracingSamplingRate, "TRACING_SAMPLING_RATE"))
 
 	// Duration overrides
-	applyDurationEnv(&cfg.VaultInitTimeout, "VAULT_INIT_TIMEOUT")
+	collect(applyDurationEnv(&cfg.VaultInitTimeout, "VAULT_INIT_TIMEOUT"))
 
 	// Certificate DNS names override
 	applyStringEnv(&cfg.CertServiceName, "CERT_SERVICE_NAME")
@@ -811,32 +1028,55 @@ func applyEnvOverrides(cfg *Config) {
 	applyCertDNSNamesEnv(cfg)
 
 	// Bool overrides
-	applyBoolEnv(&cfg.EnableLeaderElection, "LEADER_ELECT")
-	applyBoolEnv(&cfg.EnableWebhooks, "ENABLE_WEBHOOKS")
-	applyBoolEnv(&cfg.EnableGRPCServer, "ENABLE_GRPC_SERVER")
-	applyBoolEnv(&cfg.GRPCRequireClientCert, "GRPC_REQUIRE_CLIENT_CERT")
-	applyBoolEnv(&cfg.EnableTracing, "ENABLE_TRACING")
-	applyBoolEnv(&cfg.EnableIngressController, "ENABLE_INGRESS_CONTROLLER")
+	collect(applyBoolEnv(&cfg.EnableLeaderElection, "LEADER_ELECT"))
+	collect(applyBoolEnv(&cfg.EnableWebhooks, "ENABLE_WEBHOOKS"))
+	collect(applyBoolEnv(&cfg.EnableGRPCServer, "ENABLE_GRPC_SERVER"))
+	collect(applyBoolEnv(&cfg.GRPCRequireClientCert, "GRPC_REQUIRE_CLIENT_CERT"))
+	collect(applyBoolEnv(&cfg.EnableTracing, "ENABLE_TRACING"))
+	collect(applyBoolEnv(&cfg.EnableIngressController, "ENABLE_INGRESS_CONTROLLER"))
 	applyStringEnv(&cfg.IngressClassName, "INGRESS_CLASS_NAME")
 	applyStringEnv(&cfg.IngressLBAddress, "INGRESS_LB_ADDRESS")
 
 	// Duplicate detection configuration
-	applyBoolEnv(&cfg.EnableClusterWideDuplicateCheck, "ENABLE_CLUSTER_WIDE_DUPLICATE_CHECK")
-	applyBoolEnv(&cfg.DuplicateCacheEnabled, "DUPLICATE_CACHE_ENABLED")
-	applyDurationEnv(&cfg.DuplicateCacheTTL, "DUPLICATE_CACHE_TTL")
+	collect(applyBoolEnv(&cfg.EnableClusterWideDuplicateCheck, "ENABLE_CLUSTER_WIDE_DUPLICATE_CHECK"))
+	collect(applyBoolEnv(&cfg.DuplicateCacheEnabled, "DUPLICATE_CACHE_ENABLED"))
+	collect(applyDurationEnv(&cfg.DuplicateCacheTTL, "DUPLICATE_CACHE_TTL"))
+}
+
+// logEnvWarnings logs environment variables whose values failed to parse and
+// were ignored during applyEnvOverrides. It runs after the logger is
+// configured because env parsing happens before logging setup. The values
+// logged here are operational settings (ports, durations, booleans), never
+// secrets.
+func logEnvWarnings(cfg *Config) {
+	for _, w := range cfg.envWarnings {
+		setupLog.Info("WARNING: ignoring invalid environment variable value; keeping current setting",
+			"env", w.key,
+			"value", w.value,
+			"reason", w.reason,
+		)
+	}
 }
 
 // applyBoolEnv applies a boolean environment variable override.
-// It handles both true and false values symmetrically.
-func applyBoolEnv(target *bool, envKey string) {
-	if v := os.Getenv(envKey); v != "" {
-		switch strings.ToLower(v) {
-		case "true", "1", "yes":
-			*target = true
-		case "false", "0", "no":
-			*target = false
-		}
+// It handles both true and false values symmetrically. An unrecognized
+// value keeps the current setting and returns a warning instead of being
+// silently ignored.
+func applyBoolEnv(target *bool, envKey string) *envWarning {
+	v := os.Getenv(envKey)
+	if v == "" {
+		return nil
 	}
+	switch strings.ToLower(v) {
+	case "true", "1", "yes":
+		*target = true
+	case "false", "0", "no":
+		*target = false
+	default:
+		return &envWarning{key: envKey, value: v,
+			reason: "not a valid boolean (use true/false, 1/0, or yes/no)"}
+	}
+	return nil
 }
 
 func applyStringEnv(target *string, envKey string) {
@@ -845,29 +1085,49 @@ func applyStringEnv(target *string, envKey string) {
 	}
 }
 
-func applyIntEnv(target *int, envKey string) {
-	if v := os.Getenv(envKey); v != "" {
-		var port int
-		if err := parseIntEnv(v, &port); err == nil {
-			*target = port
-		}
+// applyIntEnv applies an integer environment variable override. An
+// unparsable value keeps the current setting and returns a warning.
+func applyIntEnv(target *int, envKey string) *envWarning {
+	v := os.Getenv(envKey)
+	if v == "" {
+		return nil
 	}
+	var parsed int
+	if err := parseIntEnv(v, &parsed); err != nil {
+		return &envWarning{key: envKey, value: v, reason: "not a valid integer"}
+	}
+	*target = parsed
+	return nil
 }
 
-func applyFloat64Env(target *float64, envKey string) {
-	if v := os.Getenv(envKey); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			*target = f
-		}
+// applyFloat64Env applies a float environment variable override. An
+// unparsable value keeps the current setting and returns a warning.
+func applyFloat64Env(target *float64, envKey string) *envWarning {
+	v := os.Getenv(envKey)
+	if v == "" {
+		return nil
 	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return &envWarning{key: envKey, value: v, reason: "not a valid number"}
+	}
+	*target = f
+	return nil
 }
 
-func applyDurationEnv(target *time.Duration, envKey string) {
-	if v := os.Getenv(envKey); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			*target = d
-		}
+// applyDurationEnv applies a duration environment variable override. An
+// unparsable value keeps the current setting and returns a warning.
+func applyDurationEnv(target *time.Duration, envKey string) *envWarning {
+	v := os.Getenv(envKey)
+	if v == "" {
+		return nil
 	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return &envWarning{key: envKey, value: v, reason: "not a valid duration (e.g. 30s, 5m)"}
+	}
+	*target = d
+	return nil
 }
 
 // applyCertDNSNamesEnv applies the CERT_DNS_NAMES environment variable override.
@@ -951,48 +1211,148 @@ func setupTracing(cfg *Config) (*observability.Tracer, error) {
 	})
 }
 
-func setupCertManager(ctx context.Context, cfg *Config) (cert.Manager, error) {
-	switch cfg.CertProvider {
-	case "vault":
-		// Create a context with timeout for Vault initialization
-		vaultCtx, cancel := context.WithTimeout(ctx, cfg.VaultInitTimeout)
-		defer cancel()
-
-		setupLog.Info("initializing Vault certificate manager",
-			"address", cfg.VaultAddr,
-			"timeout", cfg.VaultInitTimeout.String(),
-		)
-
-		manager, err := cert.NewVaultProvider(vaultCtx, &cert.VaultProviderConfig{
-			Address:             cfg.VaultAddr,
-			PKIMount:            cfg.VaultPKIMount,
-			Role:                cfg.VaultPKIRole,
-			KubernetesRole:      cfg.VaultK8sRole,
-			KubernetesMountPath: cfg.VaultK8sMountPath,
-		})
-		if err != nil {
-			// Check if the error is due to context timeout
-			if vaultCtx.Err() != nil {
-				return nil, fmt.Errorf(
-					"vault certificate manager initialization timed out after %s: %w",
-					cfg.VaultInitTimeout, err,
-				)
-			}
-			return nil, fmt.Errorf("failed to initialize vault certificate manager: %w", err)
-		}
-		return manager, nil
+func setupCertManager(ctx context.Context, cfg *Config, restConfig *rest.Config) (cert.Manager, error) {
+	switch cert.CertificateMode(cfg.CertProvider) {
+	case cert.CertModeVault:
+		return setupVaultCertManager(ctx, cfg)
+	case cert.CertModeFile, cert.CertModeCertManager:
+		return setupFileCertManager(cfg)
 	default:
-		return cert.NewSelfSignedProvider(&cert.SelfSignedProviderConfig{
-			CACommonName:    cert.DefaultCACommonName,
-			CAValidity:      cert.DefaultCAValidity,
-			CertValidity:    cert.DefaultCertValidity,
-			RotateBefore:    cert.DefaultRotateBefore,
-			KeySize:         cert.DefaultKeySize,
-			Organization:    []string{cert.DefaultOrganization},
-			SecretName:      cert.DefaultSecretName,
-			SecretNamespace: cert.DefaultSecretNamespace,
-		})
+		return setupSelfSignedCertManager(ctx, cfg, restConfig)
 	}
+}
+
+// setupVaultCertManager initializes the Vault PKI certificate manager.
+func setupVaultCertManager(ctx context.Context, cfg *Config) (cert.Manager, error) {
+	// Create a context with timeout for Vault initialization
+	vaultCtx, cancel := context.WithTimeout(ctx, cfg.VaultInitTimeout)
+	defer cancel()
+
+	setupLog.Info("initializing Vault certificate manager",
+		"address", cfg.VaultAddr,
+		"timeout", cfg.VaultInitTimeout.String(),
+	)
+
+	manager, err := cert.NewVaultProvider(vaultCtx, &cert.VaultProviderConfig{
+		Address:             cfg.VaultAddr,
+		PKIMount:            cfg.VaultPKIMount,
+		Role:                cfg.VaultPKIRole,
+		KubernetesRole:      cfg.VaultK8sRole,
+		KubernetesMountPath: cfg.VaultK8sMountPath,
+	})
+	if err != nil {
+		// Check if the error is due to context timeout
+		if vaultCtx.Err() != nil {
+			return nil, fmt.Errorf(
+				"vault certificate manager initialization timed out after %s: %w",
+				cfg.VaultInitTimeout, err,
+			)
+		}
+		return nil, fmt.Errorf("failed to initialize vault certificate manager: %w", err)
+	}
+	return manager, nil
+}
+
+// setupFileCertManager initializes the file-based certificate manager used
+// by the file and cert-manager providers. When explicit cert/key paths are
+// not configured (cert-manager convention), the certificates are loaded
+// from the webhook cert dir (default: the cert-manager mount path).
+func setupFileCertManager(cfg *Config) (cert.Manager, error) {
+	certFile, keyFile, caFile := cfg.CertFile, cfg.KeyFile, cfg.CACertFile
+
+	if certFile == "" && keyFile == "" {
+		certDir := defaultString(cfg.WebhookCertDir, defaultCertManagerCertDir)
+		certFile = filepath.Join(certDir, "tls.crt")
+		keyFile = filepath.Join(certDir, "tls.key")
+		if caFile == "" {
+			// cert-manager includes ca.crt for CA/self-signed issuers;
+			// when absent the CA chain falls back to the cert bundle.
+			candidate := filepath.Join(certDir, "ca.crt")
+			if _, err := os.Stat(candidate); err == nil {
+				caFile = candidate
+			}
+		}
+	}
+
+	setupLog.Info("initializing file certificate manager",
+		"provider", cfg.CertProvider,
+		"cert_file", certFile,
+		"key_file", keyFile,
+		"ca_file", caFile,
+	)
+
+	return cert.NewFileProvider(&cert.FileProviderConfig{
+		CertFile:     certFile,
+		KeyFile:      keyFile,
+		CAFile:       caFile,
+		RotateBefore: cert.DefaultRotateBefore,
+	})
+}
+
+// setupSelfSignedCertManager initializes the self-signed certificate
+// manager. When a persistence Secret is configured, the CA (and serving
+// certificate) are stored in it so the CA is stable across operator
+// restarts and the gateway can mount ca.crt for verified TLS.
+func setupSelfSignedCertManager(
+	ctx context.Context,
+	cfg *Config,
+	restConfig *rest.Config,
+) (cert.Manager, error) {
+	providerCfg := &cert.SelfSignedProviderConfig{
+		CACommonName: cert.DefaultCACommonName,
+		CAValidity:   cert.DefaultCAValidity,
+		CertValidity: cert.DefaultCertValidity,
+		RotateBefore: cert.DefaultRotateBefore,
+		KeySize:      cert.DefaultKeySize,
+		Organization: []string{cert.DefaultOrganization},
+	}
+
+	if cfg.CertSecretName != "" {
+		secretClient, err := newSecretClient(restConfig)
+		if err != nil {
+			// Persistence is best-effort: fall back to the in-memory CA
+			// (legacy behavior) instead of failing operator startup.
+			setupLog.Error(err, "unable to create client for certificate secret persistence; "+
+				"continuing with in-memory CA (CA will NOT survive restarts)")
+		} else {
+			providerCfg.SecretName = cfg.CertSecretName
+			providerCfg.SecretNamespace = resolveCertSecretNamespace(cfg)
+			providerCfg.SecretClient = secretClient
+			setupLog.Info("self-signed CA persistence enabled",
+				"secret", providerCfg.SecretName,
+				"namespace", providerCfg.SecretNamespace,
+			)
+		}
+	}
+
+	return cert.NewSelfSignedProviderWithContext(ctx, providerCfg)
+}
+
+// newSecretClient creates a lightweight Kubernetes client for Secret
+// persistence. It is separate from the manager's cached client because the
+// certificate manager starts BEFORE the controller manager.
+var newSecretClient = func(restConfig *rest.Config) (cert.SecretStore, error) {
+	if restConfig == nil {
+		return nil, fmt.Errorf("kubernetes REST config is required for secret persistence")
+	}
+	c, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+	return c, nil
+}
+
+// resolveCertSecretNamespace resolves the namespace for the certificate
+// persistence Secret: explicit flag/env, then the pod's own namespace
+// (POD_NAMESPACE, injected via the downward API), then the cert namespace.
+func resolveCertSecretNamespace(cfg *Config) string {
+	if cfg.CertSecretNamespace != "" {
+		return cfg.CertSecretNamespace
+	}
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return cfg.CertNamespace
 }
 
 // writeWebhookCertificates obtains a TLS certificate from the cert manager and

@@ -87,6 +87,20 @@ type ReconcileCallbacks struct {
 	// restart, resources may appear Ready in Kubernetes but are missing from the gRPC server's
 	// in-memory maps. If IsApplied returns false for a Ready resource, reconciliation is forced.
 	IsApplied func(ctx context.Context, resource Reconcilable) bool
+
+	// ReferencesExternalConfig reports whether the resource inlines external
+	// configuration (e.g. a ConfigMap-referenced OpenAPI spec, proto
+	// descriptor, or GraphQL schema) that can change without bumping the
+	// resource generation. This is optional. When it returns true, the
+	// generation-based reconciliation skip is bypassed so ConfigMap-watch
+	// triggered reconciles re-resolve and re-apply the referenced content.
+	ReferencesExternalConfig func(resource Reconcilable) bool
+}
+
+// referencesExternalConfig reports whether the callbacks declare the
+// resource as inlining external configuration that can change out-of-band.
+func referencesExternalConfig(cb *ReconcileCallbacks, resource Reconcilable) bool {
+	return cb.ReferencesExternalConfig != nil && cb.ReferencesExternalConfig(resource)
 }
 
 // BaseReconcile performs the common reconciliation flow for all CRD controllers.
@@ -159,7 +173,11 @@ func BaseReconcile(
 	// However, after an operator restart the in-memory route maps are empty. If the
 	// resource is Ready in K8s but not present in the gRPC server's memory, force
 	// reconciliation to restore the in-memory state.
-	if isResourceReady(resource) {
+	// Resources that inline external configuration (ConfigMap-referenced
+	// validation specs) are never skipped: the referenced content can change
+	// without bumping the resource generation, and the ConfigMap watch
+	// enqueues them precisely to re-resolve it.
+	if isResourceReady(resource) && !referencesExternalConfig(cb, resource) {
 		if cb.IsApplied != nil && !cb.IsApplied(ctx, resource) {
 			logger.Info("forcing "+cb.ResourceKind+" reconciliation after restart, "+
 				"resource is Ready but not applied in memory",

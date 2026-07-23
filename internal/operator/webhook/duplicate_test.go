@@ -675,6 +675,11 @@ func TestDuplicateChecker_CheckGRPCRouteDuplicate_SameServiceNoMethod(t *testing
 
 	checker := NewDuplicateChecker(client)
 
+	// A method-specific route has HIGHER specificity than the existing
+	// nil-method route on the same service: the gRPC router orders them
+	// deterministically (method-specific first, nil-method as fallback),
+	// so this is NOT an admission conflict. A nil-method route must not
+	// block every other route for its service.
 	newRoute := &avapigwv1alpha1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "new-route",
@@ -691,8 +696,29 @@ func TestDuplicateChecker_CheckGRPCRouteDuplicate_SameServiceNoMethod(t *testing
 	}
 
 	err := checker.CheckGRPCRouteDuplicate(context.Background(), newRoute)
+	if err != nil {
+		t.Errorf("CheckGRPCRouteDuplicate() should admit a method-specific route over a nil-method route, got %v", err)
+	}
+
+	// A second nil-method route on the same service has IDENTICAL
+	// specificity and identical coverage — a true duplicate.
+	dupRoute := &avapigwv1alpha1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dup-route",
+			Namespace: "default",
+		},
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			Match: []avapigwv1alpha1.GRPCRouteMatch{
+				{
+					Service: &avapigwv1alpha1.StringMatch{Exact: "service.v1.UserService"},
+				},
+			},
+		},
+	}
+
+	err = checker.CheckGRPCRouteDuplicate(context.Background(), dupRoute)
 	if err == nil {
-		t.Error("CheckGRPCRouteDuplicate() should return error when existing has no method (catch-all)")
+		t.Error("CheckGRPCRouteDuplicate() should reject a second nil-method route on the same service")
 	}
 }
 
@@ -1126,6 +1152,7 @@ func TestDuplicateChecker_ClusterScoped_GRPCRoute(t *testing.T) {
 			Match: []avapigwv1alpha1.GRPCRouteMatch{
 				{
 					Service: &avapigwv1alpha1.StringMatch{Exact: "service.v1.UserService"},
+					Method:  &avapigwv1alpha1.StringMatch{Exact: "GetUser"},
 				},
 			},
 		},
@@ -1139,7 +1166,8 @@ func TestDuplicateChecker_ClusterScoped_GRPCRoute(t *testing.T) {
 	// Create cluster-scoped checker
 	checker := NewDuplicateChecker(client, WithNamespaceScoped(false))
 
-	// Try to create conflicting route in different namespace
+	// Try to create an identical (true-duplicate) route in a different
+	// namespace — the cluster-scoped checker must still detect it.
 	newRoute := &avapigwv1alpha1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "route2",
@@ -1529,27 +1557,29 @@ func TestDuplicateChecker_PrefixURIsIdentical(t *testing.T) {
 	}
 }
 
-func TestDuplicateChecker_ExactServicesMatch_DifferentExact(t *testing.T) {
+func TestDuplicateChecker_GRPCMatchConditionsOverlap_DifferentExactServices(t *testing.T) {
 	checker := &DuplicateChecker{}
 
+	// Identical specificity (both exact services, no other conditions) but
+	// disjoint service values — no request satisfies both, not a conflict.
 	a := &avapigwv1alpha1.GRPCRouteMatch{Service: &avapigwv1alpha1.StringMatch{Exact: "service1"}}
 	b := &avapigwv1alpha1.GRPCRouteMatch{Service: &avapigwv1alpha1.StringMatch{Exact: "service2"}}
 
-	result := checker.exactServicesMatch(a, b)
-	if result {
-		t.Error("exactServicesMatch() should return false for different exact services")
+	if checker.grpcMatchConditionsOverlap(a, b) {
+		t.Error("grpcMatchConditionsOverlap() should return false for different exact services")
 	}
 }
 
-func TestDuplicateChecker_PrefixServicesOverlap_EmptyPrefix(t *testing.T) {
+func TestDuplicateChecker_GRPCMatchConditionsOverlap_EmptyPrefixService(t *testing.T) {
 	checker := &DuplicateChecker{}
 
+	// An empty-prefix StringMatch scores 0 while a real prefix scores
+	// 500+len — different specificity, ordered deterministically.
 	a := &avapigwv1alpha1.GRPCRouteMatch{Service: &avapigwv1alpha1.StringMatch{Prefix: ""}}
 	b := &avapigwv1alpha1.GRPCRouteMatch{Service: &avapigwv1alpha1.StringMatch{Prefix: "service"}}
 
-	result := checker.prefixServicesOverlap(a, b)
-	if result {
-		t.Error("prefixServicesOverlap() should return false when prefix is empty")
+	if checker.grpcMatchConditionsOverlap(a, b) {
+		t.Error("grpcMatchConditionsOverlap() should return false for empty vs non-empty prefix (specificity ordering)")
 	}
 }
 
@@ -1614,7 +1644,9 @@ func TestDuplicateChecker_RoutesOverlap_EmptyMatch(t *testing.T) {
 func TestDuplicateChecker_GRPCRoutesOverlap_EmptyMatch(t *testing.T) {
 	checker := &DuplicateChecker{}
 
-	// Empty match means catch-all — it should overlap with any other route
+	// A match-less catch-all (specificity 0) vs a service-specific route
+	// (specificity 1000): the router orders them deterministically
+	// (specific first, catch-all as fallback) — NOT an admission conflict.
 	a := &avapigwv1alpha1.GRPCRoute{
 		Spec: avapigwv1alpha1.GRPCRouteSpec{
 			Match: []avapigwv1alpha1.GRPCRouteMatch{},
@@ -1628,9 +1660,21 @@ func TestDuplicateChecker_GRPCRoutesOverlap_EmptyMatch(t *testing.T) {
 		},
 	}
 
-	result := checker.grpcRoutesOverlap(a, b)
-	if !result {
-		t.Error("grpcRoutesOverlap() should return true when match is empty (catch-all)")
+	if checker.grpcRoutesOverlap(a, b) {
+		t.Error("grpcRoutesOverlap() should return false for catch-all vs specific route (specificity ordering)")
+	}
+	if checker.grpcRoutesOverlap(b, a) {
+		t.Error("grpcRoutesOverlap() should be symmetric for catch-all vs specific route")
+	}
+
+	// Two match-less catch-alls have identical specificity — true duplicates.
+	c := &avapigwv1alpha1.GRPCRoute{
+		Spec: avapigwv1alpha1.GRPCRouteSpec{
+			Match: []avapigwv1alpha1.GRPCRouteMatch{},
+		},
+	}
+	if !checker.grpcRoutesOverlap(a, c) {
+		t.Error("grpcRoutesOverlap() should return true for two match-less catch-all routes")
 	}
 }
 
@@ -3041,9 +3085,9 @@ func TestDuplicateChecker_GraphqlStringMatchValuesOverlap(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := graphqlStringMatchValuesOverlap(tt.a, tt.b)
+			result := stringMatchValuesOverlap(tt.a, tt.b)
 			if result != tt.expected {
-				t.Errorf("graphqlStringMatchValuesOverlap() = %v, want %v", result, tt.expected)
+				t.Errorf("stringMatchValuesOverlap() = %v, want %v", result, tt.expected)
 			}
 		})
 	}

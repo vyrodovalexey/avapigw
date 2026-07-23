@@ -419,6 +419,23 @@ func (rl *RedisRateLimiter) Stop() {
 	}
 }
 
+// Ping verifies Redis connectivity for readiness probes. It returns an
+// error when the limiter has been stopped or Redis is unreachable.
+func (rl *RedisRateLimiter) Ping(ctx context.Context) error {
+	if rl.stopped.Load() {
+		return errors.New("redis rate limiter is stopped")
+	}
+	return rl.client.Ping(ctx).Err()
+}
+
+// IsFailOpen reports the limiter's failure policy. Readiness reporting uses
+// it to distinguish a hard-down state (fail-closed limiter rejecting all
+// traffic → unhealthy) from a degraded one (fail-open limiter allowing
+// traffic without limits → degraded).
+func (rl *RedisRateLimiter) IsFailOpen() bool {
+	return rl.failOpen
+}
+
 // UpdateConfig applies new rate limiting parameters. Connection settings
 // (URL, Sentinel, pool, timeouts) are intentionally not hot-swapped; the
 // new rps/burst values take effect on the next decision because they are

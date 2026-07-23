@@ -46,21 +46,21 @@ PARALLEL="${PERF_PARALLEL:-0}"
 maybe_bg() { if [ "$PARALLEL" = "1" ]; then "$@" & else "$@"; fi; }
 
 TOK_LH="$(refresh_tok localhost)"
-maybe_bg gscn basic
+# X-Perf-Scenario headers let per-feature GraphQL routes match distinctly
+# (operator mode: pt-graphql-* routes match exact /graphql + one header each,
+# specificity 1010 > graphql-basic 1000 - see operator/crds-pt-k8s.yaml)
+maybe_bg gscn basic     -H 'X-Perf-Scenario: basic'
 maybe_bg gscn apikey    -H "X-API-Key: $APIKEY"
 maybe_bg gscn oidc      -H "Authorization: Bearer $TOK_LH"
-# X-Perf-Scenario headers let per-feature GraphQL routes match distinctly
-# (ratelimit/transform routes carry the feature config in the gateway config)
 maybe_bg gscn ratelimit -H 'X-Perf-Scenario: ratelimit'
 maybe_bg gscn transform -H 'X-Perf-Scenario: transform'
 maybe_bg gscn cors      -H 'Origin: http://example.com'
 maybe_bg wscn ws        "$WSBASE/ws"
 # group6 = tls graphql + mirroring: drive the GraphQL AGGREGATE fan-out route
-# (do04-graphql-route has aggregate enabled). The /graphql query path is the
-# aggregate route; gscn already POSTs to /graphql so the aggregate scenario is
-# the same path. Add an explicit aggregate-labeled run for clarity/metrics.
+# (pt-graphql-aggregate matches X-Perf-Scenario: aggregate and fans out to
+# both host mock instances with a deep data merge).
 if [ "$GROUP" = "group6" ]; then
-  maybe_bg gscn aggregate
+  maybe_bg gscn aggregate -H 'X-Perf-Scenario: aggregate'
 fi
 [ "$PARALLEL" = "1" ] && wait
 

@@ -17,6 +17,7 @@ import (
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	backendmetrics "github.com/vyrodovalexey/avapigw/internal/metrics/backend"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // HealthStatusFunc is called when a host's health status changes.
@@ -468,8 +469,11 @@ func (hc *HealthChecker) getGRPCConn(
 		creds = insecure.NewCredentials()
 	}
 
+	// Normalize to the passthrough resolver so dual-stack hostnames get
+	// net.Dialer's Happy Eyeballs IPv4 fallback (see util.GRPCDialTarget),
+	// keeping health-check reachability consistent with data-path dials.
 	conn, err := grpc.NewClient(
-		addr,
+		util.GRPCDialTarget(addr),
 		grpc.WithTransportCredentials(creds),
 	)
 	if err != nil {

@@ -124,21 +124,44 @@ func initAuditLogger(cfg *config.GatewayConfig, logger observability.Logger, opt
 	return auditLogger
 }
 
-// initTracer initializes the tracer.
+// initTracer initializes the tracer. OTLP transport security comes from
+// observability.tracing (otlpInsecure / otlpTLS): explicit settings win,
+// TLS material forces TLS, and the plaintext default is retained only for
+// unset/loopback endpoints (remote endpoints default to TLS with system
+// roots).
 func initTracer(cfg *config.GatewayConfig, logger observability.Logger) *observability.Tracer {
 	tracerCfg := observability.TracerConfig{
 		ServiceName:  "avapigw",
 		Enabled:      false,
 		SamplingRate: 1.0,
-		OTLPInsecure: true, // Default insecure for backward compatibility
+		// No tracing section: no exporter is built, the insecure flag is
+		// inert; keep the historical plaintext default for completeness.
+		OTLPInsecure: true,
 	}
 
 	if cfg.Spec.Observability != nil && cfg.Spec.Observability.Tracing != nil {
-		tracerCfg.Enabled = cfg.Spec.Observability.Tracing.Enabled
-		tracerCfg.SamplingRate = cfg.Spec.Observability.Tracing.SamplingRate
-		tracerCfg.OTLPEndpoint = cfg.Spec.Observability.Tracing.OTLPEndpoint
-		if cfg.Spec.Observability.Tracing.ServiceName != "" {
-			tracerCfg.ServiceName = cfg.Spec.Observability.Tracing.ServiceName
+		tracing := cfg.Spec.Observability.Tracing
+		tracerCfg.Enabled = tracing.Enabled
+		tracerCfg.SamplingRate = tracing.SamplingRate
+		tracerCfg.OTLPEndpoint = tracing.OTLPEndpoint
+		if tracing.ServiceName != "" {
+			tracerCfg.ServiceName = tracing.ServiceName
+		}
+
+		tracerCfg.OTLPInsecure = tracing.EffectiveOTLPInsecure()
+		if tracing.OTLPTLS != nil {
+			tracerCfg.OTLPTLSCertFile = tracing.OTLPTLS.CertFile
+			tracerCfg.OTLPTLSKeyFile = tracing.OTLPTLS.KeyFile
+			tracerCfg.OTLPTLSCAFile = tracing.OTLPTLS.CAFile
+		}
+
+		if tracing.Enabled && tracing.OTLPEndpoint != "" {
+			logger.Info("OTLP trace exporter transport resolved",
+				observability.String("endpoint", tracing.OTLPEndpoint),
+				observability.Bool("insecure", tracerCfg.OTLPInsecure),
+				observability.Bool("mtls", tracerCfg.OTLPTLSCertFile != ""),
+				observability.Bool("custom_ca", tracerCfg.OTLPTLSCAFile != ""),
+			)
 		}
 	}
 

@@ -63,6 +63,10 @@ func (m *mockPKIClientForWiring) GetCA(_ context.Context, _ string) (*x509.CertP
 	return nil, nil
 }
 
+func (m *mockPKIClientForWiring) GetCAPEM(_ context.Context, _ string) ([]byte, error) {
+	return nil, nil
+}
+
 func (m *mockPKIClientForWiring) GetCRL(_ context.Context, _ string) ([]byte, error) {
 	return nil, nil
 }

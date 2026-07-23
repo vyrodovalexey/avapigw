@@ -41,7 +41,7 @@ func TestSetupGRPCServerIfEnabled_Enabled_Final(t *testing.T) {
 	// Create a self-signed cert manager
 	certManager, err := setupCertManager(ctx, &Config{
 		CertProvider: "selfsigned",
-	})
+	}, nil)
 	require.NoError(t, err)
 	defer certManager.Close()
 
@@ -76,7 +76,7 @@ func TestSetupCertManager_VaultWithShortTimeout_Final(t *testing.T) {
 	}
 
 	// Should fail due to timeout
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	assert.Error(t, err)
 }
 
@@ -212,10 +212,10 @@ func TestApplyEnvOverrides_AllNumericOverrides_Final(t *testing.T) {
 // ============================================================================
 
 func TestDefineFlags_AllFlags_Final(t *testing.T) {
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	args := []string{
 		"-metrics-bind-address=:9999",
@@ -246,7 +246,7 @@ func TestDefineFlags_AllFlags_Final(t *testing.T) {
 		"-duplicate-cache-ttl=1m",
 	}
 
-	err := flag.CommandLine.Parse(args)
+	err := fs.Parse(args)
 	require.NoError(t, err)
 
 	assert.Equal(t, ":9999", cfg.MetricsAddr)

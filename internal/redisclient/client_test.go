@@ -199,7 +199,10 @@ func TestBuildFailoverOptions(t *testing.T) {
 		TLS:            &config.TLSConfig{Enabled: true},
 	}
 
-	opts := BuildFailoverOptions(cfg, nil)
+	opts, err := BuildFailoverOptions(cfg, nil)
+	if err != nil {
+		t.Fatalf("BuildFailoverOptions: %v", err)
+	}
 
 	if opts.MasterName != "mymaster" || len(opts.SentinelAddrs) != 2 {
 		t.Errorf("sentinel identity not mapped: %+v", opts)
@@ -224,10 +227,13 @@ func TestBuildFailoverOptions(t *testing.T) {
 func TestBuildFailoverOptions_Dialer(t *testing.T) {
 	cfg := &Config{Sentinel: &config.RedisSentinelConfig{MasterName: "m"}}
 	dialCalled := false
-	opts := BuildFailoverOptions(cfg, func(_ context.Context, _, _ string) (net.Conn, error) {
+	opts, err := BuildFailoverOptions(cfg, func(_ context.Context, _, _ string) (net.Conn, error) {
 		dialCalled = true
 		return nil, errors.New("test dialer")
 	})
+	if err != nil {
+		t.Fatalf("BuildFailoverOptions: %v", err)
+	}
 	if opts.Dialer == nil {
 		t.Fatal("dialer not applied")
 	}

@@ -186,7 +186,7 @@ func TestSetupCertManager_VaultContextTimeout_Targeted(t *testing.T) {
 		VaultInitTimeout: 1 * time.Millisecond,
 	}
 
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	// Should fail due to timeout or connection error
 	assert.Error(t, err)
 }

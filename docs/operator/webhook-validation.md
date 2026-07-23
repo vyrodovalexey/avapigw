@@ -384,31 +384,47 @@ spec:
 
 ### gRPC Route Conflicts
 
-Like HTTP routes, gRPC routes are rejected only when they are **true
-duplicates** — match conditions with **identical specificity** that the gRPC
-router cannot order deterministically:
+gRPC routes are rejected only when two match blocks have **identical
+specificity** AND **overlapping match values** in every dimension (some
+request could satisfy both blocks) — mirroring the GraphQL checker. The
+specificity formula is shared with the data-plane router
+(`internal/grpc/router.Specificity`):
 
-- **Identical exact matches** — same `service.exact` with overlapping method
-  conditions (same `method.exact`, identical `method.prefix`, or a method
-  catch-all on either side)
-- **Identical prefixes** — same `service.prefix` value (or, for the same
-  service condition, the same `method.prefix` value)
-- **Match-less catch-alls** — a gRPC route with **no match conditions**
-  still conflicts with **any** other gRPC route (unlike GraphQL, the gRPC
-  checker does not fold catch-alls into the specificity comparison)
+| Condition | Weight |
+|-----------|--------|
+| `service.exact` | 1000 |
+| `service.prefix` | 500 + prefix length |
+| `service.regex` | 100 |
+| `method.exact` | 500 |
+| `method.prefix` | 250 + prefix length |
+| `method.regex` | 50 |
+| `authority` set | +100 |
+| Each `metadata` condition | +10 |
+| Each `withoutHeaders` entry | +5 |
+| No match block (catch-all) | 0 |
 
-Overlaps of **different specificity are admitted** and resolved by the gRPC
-router's longest-prefix priority (exact service = 1000 > prefix service =
-500 + prefix length > regex = 100; exact method = 500 > prefix method =
-250 + prefix length > regex = 50):
+Consequences:
 
-- **Nested service prefixes** (e.g. `com.example` and `com.example.user`) —
-  admitted; the longer prefix wins for requests matching both
-- **Nested method prefixes** for the same service — admitted; resolved the
-  same way
-- **Exact vs prefix service** — admitted; exact wins
-- **Identical service with disjoint exact methods** — admitted (e.g. `Get`
-  vs `Create` on the same service prefix)
+- **Different specificity → admitted.** A match-less catch-all coexists with
+  any service-specific route (it conflicts only with **another catch-all**);
+  a nil-method route coexists with a method-specific route on the same
+  service; **metadata-discriminated routes** (e.g. header-differentiated
+  variants of the same service/method) coexist with each other and with a
+  generic route — the metadata/authority/withoutHeaders weights
+  differentiate them, and the router orders all of them deterministically
+  (higher specificity wins, route-name tie-break)
+- **Identical specificity, disjoint values → admitted.** For example disjoint
+  exact methods (`Get` vs `Create`) on the same service, or different exact
+  services
+- **Identical specificity, overlapping values → rejected.** For example two
+  routes with the same `service.exact`/`method.exact` pair and no other
+  distinguishing conditions, identical prefixes, or two match-less
+  catch-alls (rejection message:
+  `identical-specificity overlapping service/method match`)
+- **Nested prefixes → admitted** (e.g. `com.example` and
+  `com.example.user`); the longer prefix wins for requests matching both
+- **Regex pairs → admitted** (intersection statically undecidable); the
+  name tie-break keeps ordering stable
 
 ```yaml
 # This would be rejected as a duplicate:
@@ -491,9 +507,10 @@ allows them and the gateway router orders them deterministically:
 4. **Empty match** — priority 0 (catch-all)
 
 The same scheme applies to gRPC routes (service weights as above; method
-weights halved: exact 500, prefix 250 + length, regex 50) and to GraphQL
-routes (see [GraphQL Route Conflicts](#graphql-route-conflicts) for the full
-formula).
+weights halved: exact 500, prefix 250 + length, regex 50; plus authority
++100, +10 per metadata condition, +5 per `withoutHeaders` entry — see
+[gRPC Route Conflicts](#grpc-route-conflicts)) and to GraphQL routes (see
+[GraphQL Route Conflicts](#graphql-route-conflicts) for the full formula).
 
 Routes with **equal priority** are ordered by route name (ascending), so
 first-match-wins is a stable total order independent of load order. Only
@@ -516,6 +533,21 @@ Some configurations are admitted with a **warning** instead of a rejection:
   wired for the HTTP APIRoute data path; GraphQL routes attach the shared
   cache middleware but only GET requests are cached
 - Backend `spec.cache` — RESERVED; accepted but not applied by the gateway
+- `cache.keyComponents` — deprecated, **not applied** (no gateway
+  counterpart); use `cache.keyConfig` instead
+- `authorization.cache.sentinel` (legacy top-level block) — deprecated in
+  favor of `authorization.cache.redis.sentinel`; the operator converts it so
+  it still takes effect
+- `authorization.cache.type: redis` without a `redis`/`sentinel` connection
+  — not applied; the gateway falls back to the in-memory decision cache
+- Inline plaintext `password`/`sentinelPassword` in any Redis Sentinel block
+  (including the authorization cache) — prefer the `*VaultPath` references
+- "Accepted but not applied" fields with no gateway counterpart:
+  `spec.rateLimit` on GRPCBackend/GraphQLBackend; `spec.maxSessions` and
+  `spec.requestLimits` on GRPCRoute/GraphQLRoute; `spec.requestLimits`,
+  `spec.transform`, `spec.encoding` on Backend/GRPCBackend;
+  `spec.maxSessions`/`spec.encoding` on GraphQLBackend. The contract is
+  **no silent drops** — every unconsumed field is converted or warned about
 
 ### ABAC CEL Validation
 

@@ -633,6 +633,46 @@ spec:
                         - masterName
                         - sentinelAddrs
                         type: object
+                      tls:
+                        description: TLS contains TLS configuration for the Redis
+                          connection.
+                        properties:
+                          caFile:
+                            description: CAFile is the path to the CA certificate
+                              file for server verification.
+                            type: string
+                          certFile:
+                            description: CertFile is the path to the client certificate
+                              file (mTLS).
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables TLS for the Redis connection.
+                            type: boolean
+                          insecureSkipVerify:
+                            description: InsecureSkipVerify skips server certificate
+                              verification (dev only).
+                            type: boolean
+                          keyFile:
+                            description: KeyFile is the path to the client private
+                              key file (mTLS).
+                            type: string
+                          maxVersion:
+                            description: MaxVersion is the maximum TLS version.
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                          minVersion:
+                            description: MinVersion is the minimum TLS version (TLS12,
+                              TLS13).
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                        required:
+                        - enabled
+                        type: object
                       url:
                         description: |-
                           URL is the Redis connection URL for standalone mode.

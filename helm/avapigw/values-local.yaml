@@ -6,18 +6,24 @@
 #
 # TLS Configuration:
 #   - HTTP listener: HTTPS on port 8443 via Vault PKI (TLS enabled)
+#     plus an additional PLAIN HTTP listener on port 8080 (plainAlongsideTls)
 #   - gRPC listener: gRPC TLS on port 9443 via Vault PKI (TLS enabled)
+#   - Operator gRPC server: Vault PKI TLS, VERIFIED by the gateway against
+#     the PKI CA (Secret avapigw-vault-pki-ca; no tlsInsecure needed)
 #   - Vault running in Docker Compose at http://host.docker.internal:8200
-#   - Vault token auth with K8s secret "vault-token" in namespace avapigw-test
+#   - Vault KUBERNETES auth: gateway SA "avapigw" -> role "avapigw",
+#     operator SA "avapigw-operator" -> role "avapigw-operator"
 #   - Vault PKI engine with role "test-role"
 #
-# Vault must be configured with:
-#   - PKI engine enabled with test-role (allows localhost, *.local, *.test, avapigw.local)
-#   - Token stored in K8s secret "vault-token" (key: token) in namespace avapigw-test
+# Vault must be configured with (setup-vault-k8s.sh --setup-pki does all):
+#   - Kubernetes auth for the local cluster + roles avapigw/avapigw-operator
+#   - PKI engine enabled with test-role (allows localhost, *.local, *.test,
+#     avapigw.local, *.docker.internal, *.svc)
 #   - Policy avapigw granting PKI issue, KV read, Transit operations
+#   - K8s Secret avapigw-vault-pki-ca (ca.crt = PKI CA) in avapigw-test
 #
 # Setup scripts:
-#   - ./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test
+#   - ./test/performance/scripts/setup-vault-k8s.sh --namespace=avapigw-test --setup-pki
 #   - ./test/performance/scripts/run-k8s-test.sh --namespace=avapigw-test
 
 # Explicit namespace configuration for local testing
@@ -92,14 +98,31 @@ gateway:
   logFormat: json
   environment: local-k8s
 
-  # Operator mode - gateway connects to operator via gRPC with mTLS
+  # Operator mode - gateway connects to operator via gRPC with VERIFIED TLS.
+  # The operator issues its gRPC serving certificate from Vault PKI
+  # (operator.grpc.tls.mode=vault below), whose CA is stable across operator
+  # restarts. The CA is stored in the "avapigw-vault-pki-ca" Secret created by
+  # test/performance/scripts/setup-vault-k8s.sh --setup-pki (make perf-setup-vault-k8s).
+  # Set tlsInsecure: true only to skip verification for quick dev loops.
+  #
+  # NOTE: the chart DEFAULT (operator tls.mode=selfsigned, no caSecret) now
+  # also yields verified TLS without Vault: the operator persists/reuses its
+  # CA in the "<operator-fullname>-grpc-cert" Secret mounted by the gateway
+  # (see values.yaml operator.grpc.tls). This overlay keeps vault mode to
+  # exercise the Vault PKI integration; to test the selfsigned default use:
+  #   --set operator.grpc.tls.mode=selfsigned \
+  #   --set operator.webhook.tls.mode=selfsigned \
+  #   --set gateway.operatorMode.caSecret=""
   operatorMode:
     enabled: true
     tls: true
-    tlsInsecure: true  # Use insecure TLS for local testing (skip CA verification)
+    tlsInsecure: false
+    caSecret: avapigw-vault-pki-ca
 
   # Listener configuration
-  # HTTP and gRPC listeners with Vault PKI TLS
+  # HTTP and gRPC listeners with Vault PKI TLS. A PLAIN HTTP listener is
+  # rendered alongside the HTTPS one (plainAlongsideTls) so local/perf runs
+  # can exercise plaintext 8080 without dropping the TLS listeners.
   listeners:
     http:
       enabled: true
@@ -107,6 +130,7 @@ gateway:
       bind: "0.0.0.0"
       hosts:
         - "*"
+      plainAlongsideTls: true
     grpc:
       enabled: true
       port: 9000
@@ -119,19 +143,9 @@ gateway:
       reflection: true
       healthCheck: true
 
-  # Cache configuration with Redis Sentinel
-  cache:
-    redis:
-      sentinel:
-        enabled: true
-        masterName: mymaster
-        addrs:
-          - host.docker.internal:26379
-          - host.docker.internal:26380
-          - host.docker.internal:26381
-        password: password
-      poolSize: 20
-      minIdleConns: 5
+  # NOTE: no global cache block here - gateway.cache is NOT rendered by the
+  # chart templates (dead value). Route-level caching (incl. Redis Sentinel)
+  # is configured through APIRoute/GRPCRoute CRDs in operator mode.
 
   # No inline routes - all config comes from CRDs via operator
   routes: []
@@ -156,11 +170,14 @@ gateway:
   openAPIValidation:
     enabled: false
 
-  # Global rate limit defaults
+  # Global rate limit defaults — perf-friendly for local load testing.
+  # 100 rps capped every PT suite run at ~97% 429 through a single
+  # port-forward client; 5000/10000 keeps the limiter exercised without
+  # choking throughput (route-level limits still apply where configured).
   rateLimit:
     enabled: true
-    requestsPerSecond: 100
-    burst: 200
+    requestsPerSecond: 5000
+    burst: 10000
     perClient: true
 
   # Global circuit breaker defaults
@@ -236,9 +253,15 @@ gateway:
     tracing:
       enabled: true
       samplingRate: 1.0
-      # OTLP gRPC endpoint of the otel-collector deployed by Phase 7b in the
-      # dedicated "monitoring" namespace (traces are forwarded to Tempo).
-      otlpEndpoint: "otel-collector.monitoring.svc:4317"
+      # OTLP gRPC endpoint of the otel-collector chart
+      # (test/monitoring/otel-collector) deployed into avapigw-test; the
+      # collector forwards traces to the docker-compose Tempo on the host.
+      otlpEndpoint: "otel-collector.avapigw-test.svc:4317"
+      # The in-cluster test collector serves PLAINTEXT OTLP gRPC. Without
+      # this explicit override the gateway's tri-state transport resolution
+      # defaults non-loopback endpoints to TLS (secure-by-default) and the
+      # export would fail against the plaintext collector.
+      otlpInsecure: true
       serviceName: avapigw
     logging:
       level: info
@@ -311,35 +334,54 @@ operator:
     retryPeriod: 2s
     resourceName: avapigw-operator-leader.avapigw.io
 
-  # gRPC server configuration - Self-signed TLS for local testing
-  # Note: Vault PKI mode requires Kubernetes auth which is not available in local Docker Desktop
+  # gRPC server configuration - Vault PKI TLS (kubernetes auth).
+  # setup-vault-k8s.sh configures Vault k8s auth against the local
+  # Docker Desktop cluster (kubernetes.docker.internal:6443), so the operator
+  # authenticates with its ServiceAccount token and issues its gRPC serving
+  # certificate from the pki mount (role test-role). The PKI CA is STABLE
+  # across operator restarts, so the gateway can verify the connection
+  # against the avapigw-vault-pki-ca Secret (see gateway.operatorMode above).
   grpc:
     port: 9444
     requireClientCert: false
     tls:
-      mode: selfsigned
-      selfsigned:
-        validity: 8760h
+      mode: vault
+      vault:
+        pkiMount: pki
+        role: test-role
 
   # Webhook configuration - ENABLED (matches the production posture).
   # The validating webhook is safe to run locally since the finalizer-deadlock
   # fix; it validates APIRoute/Backend/GRPCRoute/GRPCBackend/GraphQL* CRs.
+  # tls.mode drives the operator --cert-provider flag when webhooks are
+  # enabled, so it must be "vault" too (one cert manager serves both the
+  # webhook and the gRPC server; the CA injector publishes the Vault PKI CA
+  # into the ValidatingWebhookConfiguration).
   webhook:
     enabled: true
     port: 9443
     tls:
-      mode: selfsigned
-      selfsigned:
-        validity: 8760h
+      mode: vault
+      vault:
+        pkiMount: pki
+        role: test-role
 
-  # Vault integration - enabled with Kubernetes auth for local testing
-  # Used for operator gRPC TLS when tls.mode is "vault"
+  # Vault integration - enabled with Kubernetes auth for local testing.
+  # Provides VAULT_ADDR / VAULT_K8S_ROLE for the vault certificate provider
+  # (grpc/webhook tls.mode=vault above). The k8s auth role "avapigw-operator"
+  # is bound to this ServiceAccount by setup-vault-k8s.sh.
   vault:
     enabled: true
     address: "http://host.docker.internal:8200"
     authMethod: kubernetes
     role: "avapigw-operator"
     kubernetesMountPath: kubernetes
+
+  # NOTE: certificate identity (CERT_SERVICE_NAME / CERT_DNS_NAMES) is
+  # rendered by the chart automatically: with the vault cert provider the CN
+  # and SANs use FQDN forms (<svc>.<ns>.svc[.cluster.local]) covering BOTH
+  # the webhook and the operator gRPC services, matching the Vault PKI
+  # test-role "svc" allowed domain.
 
   # Metrics configuration
   metrics:

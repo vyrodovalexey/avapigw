@@ -876,8 +876,22 @@ func TestCalculatePriority(t *testing.T) {
 			t.Parallel()
 			priority := calculatePriority(tt.route)
 			assert.GreaterOrEqual(t, priority, tt.minPrio)
+
+			// The exported Specificity is the single source of truth
+			// shared with the admission webhook — it must never drift
+			// from the router's internal priority calculation.
+			assert.Equal(t, priority, Specificity(tt.route))
 		})
 	}
+}
+
+// TestSpecificity_CatchAllScoresZero pins the catch-all anchor used by the
+// admission webhook's grpcEffectiveMatches normalization.
+func TestSpecificity_CatchAllScoresZero(t *testing.T) {
+	t.Parallel()
+
+	assert.Zero(t, Specificity(config.GRPCRoute{}))
+	assert.Zero(t, Specificity(config.GRPCRoute{Match: []config.GRPCRouteMatch{{}}}))
 }
 
 func TestRouter_Concurrency(t *testing.T) {

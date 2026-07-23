@@ -14,6 +14,7 @@ import (
 
 	"github.com/vyrodovalexey/avapigw/internal/config"
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // ConnectionPool manages gRPC client connections.
@@ -173,8 +174,11 @@ func (p *ConnectionPool) Get(ctx context.Context, target string) (*grpc.ClientCo
 
 	metrics := getGRPCProxyMetrics()
 
-	// Use grpc.NewClient (non-blocking) instead of deprecated DialContext
-	conn, err := grpc.NewClient(target, p.dialOpts...)
+	// Use grpc.NewClient (non-blocking) instead of deprecated DialContext.
+	// The target is normalized to the passthrough resolver so hostname
+	// resolution happens inside net.Dialer with dual-stack Happy Eyeballs
+	// (IPv4 fallback when an unreachable IPv6 record is returned first).
+	conn, err := grpc.NewClient(util.GRPCDialTarget(target), p.dialOpts...)
 	if err != nil {
 		metrics.connectionErrors.WithLabelValues(target, "dial").Inc()
 		return nil, fmt.Errorf("failed to create client for %s: %w", target, err)
@@ -234,7 +238,8 @@ func (p *ConnectionPool) GetWithTLS(
 
 	metrics := getGRPCProxyMetrics()
 
-	newConn, err := grpc.NewClient(target, dialOpts...)
+	// See Get for why the target is normalized to the passthrough resolver.
+	newConn, err := grpc.NewClient(util.GRPCDialTarget(target), dialOpts...)
 	if err != nil {
 		metrics.connectionErrors.WithLabelValues(target, "dial_tls").Inc()
 		return nil, fmt.Errorf("failed to create TLS client for %s: %w", target, err)

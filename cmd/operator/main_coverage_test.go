@@ -366,16 +366,16 @@ func TestApplyEnvOverrides_VaultInitTimeout(t *testing.T) {
 // ============================================================================
 
 func TestDefineFlags_VaultInitTimeout(t *testing.T) {
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	args := []string{
 		"-vault-init-timeout=1m",
 	}
 
-	err := flag.CommandLine.Parse(args)
+	err := fs.Parse(args)
 	if err != nil {
 		t.Fatalf("Failed to parse flags: %v", err)
 	}
@@ -386,17 +386,17 @@ func TestDefineFlags_VaultInitTimeout(t *testing.T) {
 }
 
 func TestDefineFlags_CertServiceNameAndNamespace(t *testing.T) {
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	args := []string{
 		"-cert-service-name=my-operator",
 		"-cert-namespace=my-system",
 	}
 
-	err := flag.CommandLine.Parse(args)
+	err := fs.Parse(args)
 	if err != nil {
 		t.Fatalf("Failed to parse flags: %v", err)
 	}
@@ -410,10 +410,10 @@ func TestDefineFlags_CertServiceNameAndNamespace(t *testing.T) {
 }
 
 func TestDefineFlags_DuplicateDetection(t *testing.T) {
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	cfg := &Config{}
-	defineFlags(cfg)
+	registerFlags(fs, cfg)
 
 	args := []string{
 		"-enable-cluster-wide-duplicate-check=true",
@@ -421,7 +421,7 @@ func TestDefineFlags_DuplicateDetection(t *testing.T) {
 		"-duplicate-cache-ttl=1m",
 	}
 
-	err := flag.CommandLine.Parse(args)
+	err := fs.Parse(args)
 	if err != nil {
 		t.Fatalf("Failed to parse flags: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestSetupCertManager_VaultWithTimeout(t *testing.T) {
 	// Wait for context to expire
 	time.Sleep(10 * time.Millisecond)
 
-	_, err := setupCertManager(ctx, cfg)
+	_, err := setupCertManager(ctx, cfg, nil)
 	// Should fail due to timeout or connection error
 	assert.Error(t, err)
 }
@@ -527,7 +527,9 @@ func TestConfig_DuplicateDetection(t *testing.T) {
 // ============================================================================
 
 func TestParseFlags_AllFlags(t *testing.T) {
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	// Parse against a local FlagSet with explicit (empty) arguments; the
+	// global flag.CommandLine must stay untouched in tests.
+	fs := flag.NewFlagSet("operator-test", flag.ContinueOnError)
 
 	// Clear all env vars
 	envVars := []string{
@@ -544,8 +546,9 @@ func TestParseFlags_AllFlags(t *testing.T) {
 		os.Unsetenv(env)
 	}
 
-	cfg := parseFlags()
+	cfg, err := parseFlagsFrom(fs, []string{})
 
+	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, ":8080", cfg.MetricsAddr)
 	assert.Equal(t, ":8081", cfg.ProbeAddr)

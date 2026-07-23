@@ -34,11 +34,12 @@ const cacheFillTimeout = 5 * time.Second
 //
 //   - Per-request CORS headers: the CORS middleware runs BEFORE this cache
 //     middleware on the request path (see RouteMiddlewareManager
-//     buildMiddlewareChain: CORS wraps cache) and eagerly sets its response
-//     headers on the live header map. A grant issued to the origin that
-//     filled the cache (e.g. Access-Control-Allow-Origin) must never be
-//     replayed to other origins; the live CORS middleware is the single
-//     source of truth on every request, including cache hits.
+//     buildMiddlewareChain: CORS wraps cache) and applies its response
+//     headers authoritatively at response-write time. A grant issued to
+//     the origin that filled the cache (e.g. Access-Control-Allow-Origin)
+//     — or emitted by the backend — must never be replayed to other
+//     origins; the live CORS middleware is the single source of truth on
+//     every request, including cache hits.
 //   - Set-Cookie: per-client credential material.
 //   - X-Cache: replay marker, set per response.
 //   - Hop-by-hop headers (RFC 9110 section 7.6.1): connection-scoped, not

@@ -272,6 +272,11 @@ func (m *RouteMiddlewareManager) buildRouteAuthzMiddleware(route *config.Route) 
 		authz.WithAuthorizerLogger(m.logger),
 		authz.WithAuthorizerMetrics(metrics),
 	}
+	// Vault client enables Vault-referenced Redis password resolution for
+	// the redis-backed decision cache.
+	if m.vaultClient != nil {
+		opts = append(opts, authz.WithAuthorizerVaultClient(m.vaultClient))
+	}
 
 	authorizer, err := authz.New(authzConfig, opts...)
 	if err != nil {

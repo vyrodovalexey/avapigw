@@ -35,6 +35,9 @@ run() {
 
 PARALLEL="${PERF_PARALLEL:-0}"
 maybe_bg() { if [ "$PARALLEL" = "1" ]; then "$@" & else "$@"; fi; }
+# run_c: like run but with an explicit concurrency override as $1
+# (also caps connections - ghz requires connections <= concurrency)
+run_c() { local c="$1"; shift; CONC="$c" CONNS="$c" run "$@"; }
 
 if [ "$GROUP" = "group1" ]; then
   maybe_bg run unary       api.v1.TestService/Unary               '{"message":"perf"}'        '{"x-perf-baseline":"true"}'
@@ -49,6 +52,13 @@ elif [ "$GROUP" = "group2" ]; then
   maybe_bg run tls_serverstream api.v1.TestService/ServerStream '{"count":10,"interval_ms":10}' '{"x-perf-baseline":"true"}'
   maybe_bg run mtls_stream     api.v1.TestService/ServerStream '{"count":5,"interval_ms":10}' '{"x-test-scenario":"mtls-stream"}'
   maybe_bg run tls_oidc_unary  api.v1.TestService/Unary        '{"message":"perf"}'           "{\"x-test-scenario\":\"oidc\",\"authorization\":\"Bearer $TOK_LH\"}"
+  # mirroring: gRPC unary AGGREGATE fan-out probe (pt-grpc-aggregate matches
+  # x-perf-aggregate metadata). KNOWN BUG: the adapter sends the JSON merge
+  # envelope as the raw reply frame (internal/aggregate/grpcadapter/
+  # proxy_handler.go:110), so typed clients fail to unmarshal -> expect
+  # Internal errors client-side while gateway_aggregate_* still increments.
+  # Run at low concurrency as a liveness probe for the fan-out engine only.
+  maybe_bg run_c 5 tls_agg_unary api.v1.TestService/Unary      '{"message":"perf"}'           '{"x-perf-aggregate":"true"}'
   [ "$PARALLEL" = "1" ] && wait
 fi
 

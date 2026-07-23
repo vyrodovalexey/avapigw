@@ -191,6 +191,10 @@ func runOperatorGateway(opApp *operatorApplication, logger observability.Logger)
 		return
 	}
 
+	// Register readiness dependency checks (vault/redis/backends) so /ready
+	// reflects dependency health, not just the draining flag.
+	opApp.readinessChecks = registerReadinessChecks(opApp.application, logger)
+
 	// Start metrics server if enabled
 	startMetricsServerIfEnabled(opApp.application, logger)
 

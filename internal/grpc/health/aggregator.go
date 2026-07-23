@@ -10,6 +10,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/vyrodovalexey/avapigw/internal/observability"
+	"github.com/vyrodovalexey/avapigw/internal/util"
 )
 
 // BackendHealth represents the health status of a backend.
@@ -151,8 +152,10 @@ func (a *HealthAggregator) checkBackend(ctx context.Context, backend BackendConf
 	healthy := false
 	var checkErr error
 
-	// Create gRPC connection using NewClient (non-blocking)
-	conn, err := grpc.NewClient(backend.Address,
+	// Create gRPC connection using NewClient (non-blocking). The address is
+	// normalized to the passthrough resolver so dual-stack hostnames get
+	// net.Dialer's Happy Eyeballs IPv4 fallback (see util.GRPCDialTarget).
+	conn, err := grpc.NewClient(util.GRPCDialTarget(backend.Address),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

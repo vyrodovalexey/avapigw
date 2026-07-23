@@ -46,7 +46,8 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Cipher Suite Control** - Modern, secure cipher suite configuration
 - **ALPN Support** - Application-Layer Protocol Negotiation for HTTP/2 and gRPC
 - **HashiCorp Vault Integration** - Dynamic secrets, PKI certificates, and secure credential management
-- **Multiple Auth Methods** - Kubernetes, AppRole, Token, AWS, and GCP authentication for Vault
+- **Multiple Auth Methods** - Token, Kubernetes, and AppRole authentication for Vault
+- **File-Configurable Vault Client** - Gateway-wide `spec.vault` config-file section with per-field `VAULT_*` environment override (ENV > file > defaults)
 - **Secret Injection** - Dynamic secret injection into configuration and backends
 - **Vault PKI Integration** - Automated certificate management for listener, route, and backend TLS
 - **Certificate Auto-Renewal** - Automatic certificate renewal with Vault PKI and hot-reload
@@ -114,6 +115,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **In-Memory Cache** - Fast local caching with TTL and max entries
 - **Redis Cache** - Distributed caching with Redis standalone or Sentinel
 - **Redis Sentinel Support** - High availability Redis with automatic failover
+- **Redis TLS/mTLS** - Client certificate, private CA, and TLS version settings honored on every Redis connection (route cache, distributed rate limiter, authorization decision cache); unreadable material fails fast instead of silently falling back to system trust
 - **TTL Jitter** - Random jitter added to TTL values to prevent thundering herd
 - **Hash Keys** - SHA256 hashing of cache keys for privacy/length control
 - **Vault Password Integration** - Redis passwords resolved from HashiCorp Vault KV secrets
@@ -148,7 +150,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **4 Grafana Dashboards** - Complete monitoring coverage with 100% metrics visualization
 - **Production Monitoring Stack** - VMAgent and OpenTelemetry Collector Helm charts (`test/monitoring`) scrape gateway/operator metrics and feed VictoriaMetrics for enterprise observability
 - **Structured Logging** - JSON and console logging formats
-- **Health Endpoints** - Health, readiness, and liveness probes
+- **Health Endpoints** - Health, readiness, and liveness probes; `/ready` aggregates cached dependency checks (Vault health, rate-limiter Redis, backend registry)
 - **Access Logs** - Detailed request/response logging
 
 ### Operations
@@ -343,6 +345,17 @@ make docker-build
 
 The gateway uses a declarative YAML configuration format inspired by Kubernetes.
 
+The published JSON Schema for the configuration file lives at
+[`pkg/schema/gateway.schema.json`](pkg/schema/gateway.schema.json) (embedded
+in the `pkg/schema` Go package). It covers the **entire** `spec` — including
+`vault`, `grpcRoutes`/`grpcBackends`, `graphqlRoutes`/`graphqlBackends`,
+`authentication`, `authorization`, `security`, `audit`, `requestLimits`,
+`maxSessions`, `trustedProxies`, `graphql`, `openAPIValidation`, and
+`websocket` — and accepts every listener protocol (`HTTP`, `HTTPS`, `HTTP2`,
+`GRPC`, `GRAPHQL`). A reflection guard test keeps the schema in lockstep with
+`config.GatewaySpec`: adding a spec field without a schema property fails the
+build.
+
 ### Basic Configuration Structure
 
 ```yaml
@@ -467,6 +480,10 @@ spec:
         attempts: 3
         perTryTimeout: 10s
         retryOn: "5xx,reset,connect-failure"
+      # Weight semantics: when at least one destination has weight > 0,
+      # zero-weight destinations receive NO traffic (0% canary). Only when
+      # ALL destinations leave weight unset/0 is traffic spread uniformly.
+      # Mixing zero and positive weights emits a validation warning.
     
     # Regex matching with rewriting
     - name: user-service
@@ -780,6 +797,26 @@ spec:
     allowCredentials: true
 ```
 
+CORS policy semantics:
+
+- **The gateway policy is authoritative.** When a global or route-level CORS
+  policy is configured, `Access-Control-*` headers produced by proxied
+  backends are **stripped and replaced** by the gateway's own grant decision
+  on actual (non-preflight) responses — a denied origin can never receive a
+  backend-issued grant through the gateway. Backend `Vary` values are merged
+  (never replaced) with the gateway's `Vary: Origin`. Routes without any CORS
+  policy pass backend CORS headers through untouched.
+- **Preflight `OPTIONS` requests are answered entirely by the gateway**; the
+  backend is never called.
+- **Route-level CORS fully overrides the global policy** for matching routes,
+  including preflight: the global CORS middleware steps aside for any route
+  that declares its own `cors` block (HTTP routes and GraphQL routes alike),
+  so route-level origins, methods, and `maxAge` win end-to-end. Routes
+  without a route-level policy keep the global behavior.
+- **`directResponse` routes run the route middleware chain** (CORS included),
+  so preflight and grants work on direct-response routes exactly as on
+  proxied ones.
+
 ### WebSocket Configuration
 
 Restrict which browser origins may open WebSocket connections through the
@@ -823,14 +860,19 @@ spec:
     tracing:
       enabled: true
       samplingRate: 0.1
-      otlpEndpoint: "http://jaeger:14268/api/traces"
+      otlpEndpoint: "otel-collector.observability.svc:4317"
       serviceName: avapigw
       
-      # OTLP TLS Configuration (DEV-003)
-      otlpInsecure: false              # Use secure gRPC connection (default: true for backward compatibility)
-      otlpTLSCertFile: "/certs/client.crt"  # Client certificate for mTLS
-      otlpTLSKeyFile: "/certs/client.key"   # Client private key for mTLS
-      otlpTLSCAFile: "/certs/ca.crt"        # CA certificate for server verification
+      # OTLP transport security (tri-state). When otlpInsecure is omitted:
+      # otlpTLS material forces TLS; plaintext is kept only for
+      # unset/loopback endpoints; remote endpoints default to TLS with
+      # system roots. Set otlpInsecure: true for a remote plaintext
+      # collector.
+      # otlpInsecure: false
+      otlpTLS:
+        certFile: "/certs/client.crt"  # Client certificate for mTLS (requires keyFile)
+        keyFile: "/certs/client.key"   # Client private key for mTLS
+        caFile: "/certs/ca.crt"        # CA certificate for collector verification
     
     logging:
       level: info              # debug, info, warn, error
@@ -1970,6 +2012,7 @@ When the same option is configured at multiple levels, the more specific level t
 | `rateLimit.redis.keyPrefix` | ✅ | ✅ | - | ✅ | - | Prefix for rate limiter keys |
 | `rateLimit.redis.passwordVaultPath` | ✅ | ✅ | - | ✅ | - | Vault path for the Redis password (standalone mode) |
 | `rateLimit.redis.failOpen` | ✅ | ✅ | - | ✅ | - | Allow (`true`, default) or reject with 429 (`false`) on Redis outage |
+| `rateLimit.redis.tls.*` | ✅ | ✅ | - | ✅ | - | TLS to Redis: `enabled`, `certFile`+`keyFile` (mTLS), `caFile`, `minVersion`/`maxVersion`, `insecureSkipVerify` |
 | `rateLimit.redis.retry.*` | ✅ | ✅ | - | ✅ | - | Initial connection retry (maxRetries, initialBackoff, maxBackoff) |
 
 > Distributed (`store: redis`) enforcement applies to the gateway-level rate
@@ -3122,169 +3165,70 @@ For detailed configuration and troubleshooting, see:
 
 ## 🔐 Vault Integration
 
-The AV API Gateway integrates with HashiCorp Vault for secure secret management, including dynamic certificate provisioning, secret storage, and authentication token management.
+The AV API Gateway integrates with HashiCorp Vault for secure secret management: PKI certificate issuance (see [Vault PKI Integration](#-vault-pki-integration) above) and Vault-KV-referenced credentials.
 
-### Vault Configuration
+### Vault Client Connection (`spec.vault`)
 
-Enable and configure Vault integration:
+The gateway-wide Vault **client connection** — how the gateway reaches and
+authenticates against the Vault server — is configured through `spec.vault`,
+overlaid per-field by `VAULT_*` environment variables (**ENV > config file >
+defaults**). It is distinct from the per-listener/route/backend `tls.vault`
+blocks, which request PKI certificate *issuance* and require this client.
+See the full field/ENV reference in the
+[Configuration Reference](docs/configuration-reference.md#vault-client-connection-specvault);
+a fully commented example ships in [`configs/gateway.yaml`](configs/gateway.yaml).
 
 ```yaml
 spec:
   vault:
     enabled: true
     address: https://vault.example.com:8200
-    authMethod: kubernetes        # token, kubernetes, approle, aws, gcp
-    namespace: "admin/gateway"    # Vault namespace (Vault Enterprise)
-    
+    authMethod: kubernetes        # token | kubernetes | approle
+    # namespace: admin/gateway    # Vault namespace (Vault Enterprise)
+
     # Kubernetes authentication
     kubernetes:
       role: gateway
       mountPath: kubernetes
       tokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
-    
-    # Token authentication (for development)
-    token:
-      value: "hvs.CAESIJ..."      # Direct token (not recommended for production)
-      file: /etc/vault/token      # Token from file
-    
-    # AppRole authentication
-    approle:
-      roleId: "role-id-here"
-      secretId: "secret-id-here"
-      mountPath: approle
-    
-    # Connection settings
-    timeout: 30s
-    maxRetries: 3
-    retryWaitMin: 1s
-    retryWaitMax: 30s
-    
-    # Caching
+
+    # TLS for the connection TO the Vault server
+    tls:
+      caCert: /etc/ssl/certs/vault-ca.crt
+      # caPath: /etc/ssl/vault-ca-dir
+      # clientCert: /etc/ssl/certs/vault-client.crt   # mTLS (requires clientKey)
+      # clientKey: /etc/ssl/private/vault-client.key
+      # serverName: vault.internal                    # SNI override
+      # skipVerify: false
+
+    # Client-side secret caching
     cache:
       enabled: true
       ttl: 5m
-      maxEntries: 1000
-    
-    # TLS settings for Vault connection
-    tls:
-      caFile: /etc/ssl/certs/vault-ca.crt
-      certFile: /etc/ssl/certs/vault-client.crt
-      keyFile: /etc/ssl/private/vault-client.key
-      skipVerify: false
+      maxSize: 1000
+
+    # Request retry behavior (exponential backoff)
+    retry:
+      maxRetries: 3
+      backoffBase: 100ms
+      backoffMax: 5s
+
+    # Startup authentication retry bounds
+    auth:
+      maxRetries: 3
+      initialBackoff: 1s
+      maxBackoff: 10s
+      timeout: 30s
 ```
 
-### PKI Secrets Engine for Certificates
-
-Configure dynamic certificate generation using Vault's PKI secrets engine:
-
-```yaml
-spec:
-  vault:
-    pki:
-      enabled: true
-      mountPath: pki
-      role: gateway-certs
-      
-      # Certificate configuration
-      certificates:
-        - name: server-cert
-          commonName: "gateway.example.com"
-          altNames:
-            - "api.example.com"
-            - "*.api.example.com"
-          ipSans:
-            - "10.0.1.100"
-          ttl: 720h                # 30 days
-          renewBefore: 168h        # Renew 7 days before expiration
-          keyType: rsa
-          keyBits: 2048
-          
-        - name: client-cert
-          commonName: "gateway-client"
-          ttl: 168h                # 7 days
-          renewBefore: 24h         # Renew 1 day before expiration
-          keyType: ec
-          keyBits: 256
-          usage: client
-      
-      # Auto-renewal settings
-      autoRenew:
-        enabled: true
-        checkInterval: 1h
-        renewThreshold: 0.3       # Renew when 30% of TTL remains
-```
-
-### KV Secrets Engine
-
-Store and retrieve secrets using Vault's KV secrets engine:
-
-```yaml
-spec:
-  vault:
-    kv:
-      enabled: true
-      mountPath: secret
-      version: 2                  # KV version 1 or 2
-      
-      # Secret mappings
-      secrets:
-        - name: database-credentials
-          path: database/postgres
-          keys:
-            - username
-            - password
-          refreshInterval: 1h
-          
-        - name: api-keys
-          path: api/external
-          keys:
-            - stripe_key
-            - sendgrid_key
-          refreshInterval: 24h
-        
-        - name: jwt-signing-key
-          path: auth/jwt
-          keys:
-            - private_key
-            - public_key
-          refreshInterval: 168h     # Weekly refresh
-```
-
-### Dynamic Secrets
-
-Configure dynamic secrets for databases and other services:
-
-```yaml
-spec:
-  vault:
-    dynamic:
-      enabled: true
-      
-      # Database dynamic secrets
-      database:
-        - name: postgres-creds
-          mountPath: database
-          role: gateway-readonly
-          ttl: 1h
-          maxTTL: 24h
-          renewBefore: 10m
-          
-        - name: redis-creds
-          mountPath: database
-          role: gateway-cache
-          ttl: 2h
-          maxTTL: 12h
-          renewBefore: 15m
-      
-      # AWS dynamic secrets
-      aws:
-        - name: s3-access
-          mountPath: aws
-          role: s3-readonly
-          ttl: 1h
-          maxTTL: 6h
-          renewBefore: 10m
-```
+The Vault client is initialized when `spec.vault.enabled` is `true`, when
+`VAULT_ADDR` is set, or when any listener, route, or backend requests
+`tls.vault` PKI issuance (including backend mTLS with Vault-issued client
+certificates). `enabled: false` combined with any configured `tls.vault`
+block is a startup validation error. `spec.vault` is **not hot-reloadable**
+— changes are skipped on reload (counted by
+`gateway_config_reload_component_total{component="vault",result="skipped"}`)
+and apply on restart.
 
 ### Vault Authentication Methods
 
@@ -3293,13 +3237,13 @@ spec:
 ```yaml
 spec:
   vault:
+    enabled: true
+    address: https://vault.example.com:8200
     authMethod: kubernetes
     kubernetes:
-      role: gateway
-      mountPath: kubernetes
-      tokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
-      # Optional: custom service account
-      serviceAccount: vault-auth
+      role: gateway                # Required
+      mountPath: kubernetes        # Default
+      tokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token  # Default
 ```
 
 #### AppRole Authentication
@@ -3307,89 +3251,85 @@ spec:
 ```yaml
 spec:
   vault:
+    enabled: true
+    address: https://vault.example.com:8200
     authMethod: approle
-    approle:
-      roleId: "{{ .Env.VAULT_ROLE_ID }}"
-      secretId: "{{ .Env.VAULT_SECRET_ID }}"
-      mountPath: approle
-      wrapTTL: 300s               # Secret ID wrapping
+    appRole:
+      roleId: "role-id-here"                    # Required
+      secretIdFile: /vault/secrets/secret-id    # Preferred over inline secretId
+      # secretId: "secret-id-here"              # Inline (validation warning)
+      mountPath: approle                        # Default
 ```
+
+The secret ID can also come from the `VAULT_APPROLE_SECRET_ID` environment
+variable (Secret-mounted), which overrides the file settings per-field.
 
 #### Token Authentication
 
 ```yaml
 spec:
   vault:
+    enabled: true
+    address: https://vault.example.com:8200
     authMethod: token
-    token:
-      # From environment variable
-      value: "{{ .Env.VAULT_TOKEN }}"
-      # Or from file
-      file: /etc/vault/token
-      # Token renewal
-      renewable: true
-      renewThreshold: 0.9         # Renew when 90% of TTL used
+    tokenFile: /etc/vault/token   # Preferred file reference
+    # token: "hvs.CAESIJ..."      # Inline token (validation warning)
 ```
 
-### Vault Secret Injection
+`token` and `tokenFile` are mutually exclusive; the `VAULT_TOKEN` environment
+variable overrides both. Startup authentication is retried with exponential
+backoff (tunable via `spec.vault.auth`).
 
-Inject Vault secrets into gateway configuration:
+### Vault-Referenced Credentials
+
+Configuration references let the gateway pull credentials from Vault KV at
+runtime instead of embedding them in the file:
 
 ```yaml
 spec:
+  # API keys validated against hashed entries stored in Vault KV
+  authentication:
+    apiKey:
+      enabled: true
+      hashAlgorithm: sha256
+      vaultPath: secret/apikeys
+
   backends:
+    # Backend basic-auth credentials from Vault KV
     - name: database-backend
       hosts:
         - address: db.example.com
           port: 5432
-      auth:
-        type: basic
-        username: "{{ vault.secret.database-credentials.username }}"
-        password: "{{ vault.secret.database-credentials.password }}"
-  
-  # TLS certificates from Vault PKI
-  listeners:
-    - name: https
-      port: 8443
-      protocol: HTTPS
-      tls:
-        mode: SIMPLE
-        certFile: "{{ vault.pki.server-cert.cert }}"
-        keyFile: "{{ vault.pki.server-cert.key }}"
+      authentication:
+        basic:
+          enabled: true
+          vaultPath: secret/backend-auth/basic   # keys: username, password
+
+  routes:
+    # Redis cache/rate-limit passwords from Vault KV
+    - name: cached-route
+      match:
+        - uri:
+            prefix: /api/v1/cached
+      route:
+        - destination:
+            host: database-backend
+            port: 5432
+      cache:
+        enabled: true
+        type: redis
+        redis:
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs: ["sentinel-0:26379", "sentinel-1:26379"]
+            passwordVaultPath: secret/redis-master
+            sentinelPasswordVaultPath: secret/redis-sentinel
 ```
 
-### Development/Testing Mode
-
-For development and testing environments:
-
-```yaml
-# Development configuration (NOT for production)
-spec:
-  listeners:
-    - name: http-dev
-      port: 8080
-      protocol: HTTP
-      # No TLS for development
-    
-    - name: grpc-dev
-      port: 9090
-      protocol: GRPC
-      grpc:
-        tls:
-          enabled: false          # Insecure mode for development
-        reflection: true
-        healthCheck: true
-  
-  # Disable Vault in development
-  vault:
-    enabled: false
-  
-  # Use static secrets for development
-  secrets:
-    static:
-      database_url: "postgres://user:pass@localhost:5432/db"
-      api_key: "dev-api-key-12345"
-```
+Backend JWT tokens (`authentication.jwt.vaultPath`) and OIDC client secrets
+(`authentication.jwt.oidc.clientSecretVaultPath`) support the same pattern.
+TLS certificates are issued through the per-listener/route/backend
+`tls.vault` PKI blocks — see [Vault PKI Integration](#-vault-pki-integration).
 
 ### Vault Setup for Testing
 
@@ -3513,18 +3453,14 @@ vault write pki_int/roles/gateway \
   require_cn=true
 ```
 
-### TLS and Vault Endpoints
+### Vault Health in Readiness
 
-The gateway exposes additional endpoints when TLS and Vault are enabled:
-
-| Endpoint | Port | Description | Response |
-|----------|------|-------------|----------|
-| `GET /tls/certificates` | 9090 | List active certificates | JSON certificate info |
-| `GET /tls/certificates/{name}` | 9090 | Get certificate details | Certificate metadata |
-| `POST /tls/certificates/{name}/renew` | 9090 | Force certificate renewal | Renewal status |
-| `GET /vault/status` | 9090 | Vault connection status | Connection health |
-| `GET /vault/secrets` | 9090 | List configured secrets | Secret metadata |
-| `POST /vault/secrets/refresh` | 9090 | Force secret refresh | Refresh status |
+When a Vault client is enabled, the gateway registers a cached `vault`
+readiness check: `/ready` (metrics port, default 9090) reports Vault
+sealed/uninitialized/unreachable states (see
+[Health Probes](#health-probes)). Vault API activity is observable through
+the `gateway_vault_requests_total`, `gateway_vault_request_duration_seconds`
+and certificate lifecycle metrics.
 
 ### Security Considerations
 
@@ -3551,25 +3487,26 @@ The gateway exposes additional endpoints when TLS and Vault are enabled:
 ❌ **Don't do this:**
 ```yaml
 # Insecure configuration
-tls:
-  skipVerify: true              # Never skip verification in production
-  minVersion: TLS10             # Use TLS 1.2 minimum
 vault:
-  token:
-    value: "hardcoded-token"    # Never hardcode tokens
+  enabled: true
+  address: https://vault.example.com:8200
+  authMethod: token
+  token: "hardcoded-token"      # Never hardcode tokens (validation warning)
+  tls:
+    skipVerify: true            # Never skip verification in production
 ```
 
 ✅ **Do this instead:**
 ```yaml
 # Secure configuration
-tls:
-  skipVerify: false
-  minVersion: TLS12
-  maxVersion: TLS13
 vault:
+  enabled: true
+  address: https://vault.example.com:8200
   authMethod: kubernetes
   kubernetes:
     role: gateway
+  tls:
+    caCert: /etc/ssl/certs/vault-ca.crt
 ```
 
 ## ⚙️ Environment Variable Configuration
@@ -3615,13 +3552,13 @@ export TLS_MIN_VERSION=1.2
 
 # Vault integration
 # These VAULT_* variables override the corresponding spec.vault fields
-# per-field (ENV > file > defaults). The gateway-wide Vault client can also be
-# configured in the config file under spec.vault — see
+# per-field (ENV > file > defaults). VAULT_ADDR also forces the client on
+# (legacy trigger). The gateway-wide Vault client can also be configured in
+# the config file under spec.vault — see
 # docs/configuration-reference.md#vault-client-connection-specvault.
-export VAULT_ENABLED=true
 export VAULT_ADDR=https://vault.example.com:8200
 export VAULT_AUTH_METHOD=kubernetes
-export VAULT_ROLE=gateway-role
+export VAULT_K8S_ROLE=gateway-role
 
 # Metrics and observability
 export METRICS_ENABLED=true
@@ -4244,11 +4181,26 @@ spec:
       - /metrics
       - /public/*
     
-    # Policy caching
+    # Decision caching. type: memory (default) keeps decisions per replica;
+    # type: redis shares them across gateway replicas through Redis or
+    # Redis Sentinel (standalone url and sentinel are mutually exclusive).
+    # On Redis connection failure the gateway logs loudly and falls back to
+    # the in-memory decision cache — authorization keeps functioning.
     cache:
       enabled: true
       ttl: 5m
-      maxEntries: 10000
+      maxSize: 10000
+      type: redis                      # memory (default) | redis
+      redis:
+        # url: "redis://redis.authz.svc:6379/0"
+        sentinel:
+          masterName: mymaster
+          sentinelAddrs:
+            - "redis-sentinel-0.redis.svc:26379"
+            - "redis-sentinel-1.redis.svc:26379"
+          passwordVaultPath: secret/redis-master
+        keyPrefix: "authz:"
+        # tls: { enabled: true, caFile: /etc/redis/ca.crt }
     
     # Enable specific authorization methods
     rbac:
@@ -4258,6 +4210,10 @@ spec:
     external:
       enabled: true
 ```
+
+> Legacy shape: a top-level `authorization.cache.sentinel` block (the shape
+> older operator CRD versions serialized) is still accepted and folded into
+> `cache.redis.sentinel`; it is mutually exclusive with `redis.url`.
 
 ### Role-Based Access Control (RBAC)
 
@@ -5198,6 +5154,29 @@ match:
 
 ### gRPC Traffic Management
 
+#### Destination-to-Backend Resolution
+
+A gRPC route destination attaches a registered GRPCBackend's features
+(TLS/mTLS, backend authentication, connection pools, load balancing) when
+`destination.host` matches the backend by resource **name**, or — new — when
+`destination.host`/`destination.port` match a **declared host endpoint**
+(`address:port`) of a backend. Destinations matching neither dial the
+address directly, feature-less; when a backend registry is configured this
+plain dial is surfaced with a one-time WARN log per route+target. If several
+backends declare the same endpoint, the lexicographically smallest backend
+name is selected deterministically (one-time WARN).
+
+#### Dual-Stack Dialing
+
+Bare `host:port` gRPC dial targets are normalized to
+`passthrough:///host:port` so the hostname reaches `net.Dialer` unresolved:
+per-attempt resolution with RFC 6555 Happy Eyeballs then falls back to IPv4
+natively on dual-stack hostnames (A + AAAA) whose IPv6 address is
+unreachable (e.g. `host.docker.internal`). The default gRPC `dns` resolver
+pins individual literal IPs and would bypass this fallback. Targets with an
+explicit resolver scheme (`dns:`, `unix:`, `passthrough:`, `ipv4:`, `ipv6:`,
+`xds:`, ...) pass through unchanged so any resolver can still be opted into.
+
 #### Timeouts and Deadlines
 ```yaml
 grpcRoutes:
@@ -5731,8 +5710,12 @@ observability:
   tracing:
     enabled: true
     samplingRate: 0.1
-    otlpEndpoint: "http://jaeger:14268/api/traces"
+    otlpEndpoint: "otel-collector.observability.svc:4317"   # OTLP gRPC endpoint
     serviceName: avapigw
+    # Transport security: otlpInsecure (tri-state) + otlpTLS
+    # (certFile/keyFile/caFile). When otlpInsecure is omitted, remote
+    # endpoints default to TLS with system roots; plaintext is retained only
+    # for unset/loopback endpoints. See the configuration reference.
 ```
 
 > **Semantic-convention version:** The gateway tracks the OpenTelemetry SDK **v1.44.0**
@@ -5770,15 +5753,32 @@ Log fields include:
 Kubernetes-compatible health endpoints:
 
 - `/health` - Overall health
-- `/ready` - Readiness probe
+- `/ready` - Readiness probe (dependency-aware, see below)
 - `/live` - Liveness probe
+
+`/ready` reflects the gateway's critical dependencies through registered
+readiness checks, so Kubernetes steers traffic away from a degraded pod:
+
+| Check | Registered when | Healthy | Degraded | Unhealthy |
+|-------|-----------------|---------|----------|-----------|
+| `vault` | A Vault client is enabled | Vault reachable, unsealed, initialized (standby counts as healthy) | Health status unavailable | Unreachable, sealed, or uninitialized |
+| `redis_rate_limiter` | The global rate limiter is Redis-backed | Redis `PING` succeeds | Redis down with `failOpen: true` (traffic passes unlimited) | Redis down with fail-closed policy (every request rejected) |
+| `backends` | Any HTTP/gRPC backend registry exists | All backends healthy (or none configured) | Some backends unhealthy | **All** backends unhealthy |
+
+Expensive probes (Vault health, Redis `PING`) are evaluated by a background
+refresher every 10 seconds and served from an atomic snapshot; the backend
+check reads in-memory status atomics. `/ready` therefore stays O(1) with no
+per-request dependency calls. A `degraded` overall status still reports
+ready (HTTP 200 with details); `unhealthy` fails the probe.
 
 ### Monitoring Stack Deployment
 
 For local Kubernetes validation, the project ships Helm charts that deploy a VMAgent
 and an OpenTelemetry Collector into the `avapigw-test` namespace. VMAgent scrapes the
-gateway and operator `/metrics` endpoints and remote-writes to VictoriaMetrics, while
-the OpenTelemetry Collector receives OTLP traces/metrics from the gateway.
+gateway and operator `/metrics` endpoints (plus the collector's own `:8888`
+telemetry) and remote-writes to VictoriaMetrics, while the OpenTelemetry
+Collector receives OTLP traces/metrics from the gateway and forwards traces
+to Tempo.
 
 ```bash
 # Deploy the VMAgent chart (scrapes gateway/operator metrics into VictoriaMetrics)
@@ -5790,14 +5790,31 @@ helm upgrade --install otel-collector test/monitoring/otel-collector \
   -n avapigw-test
 ```
 
+Host addressing: both charts default to the docker-compose observability
+stack on the host (`host.docker.internal` — VictoriaMetrics `:8428`, Tempo
+`:4317`). On Linux/kind/minikube topologies override the remoteWrite/exporter
+hosts in each chart's `values.yaml` (alternatives are documented inline
+there). The collector's internal telemetry uses the current
+`service.telemetry.metrics.readers` (pull Prometheus on `0.0.0.0:8888`)
+syntax — the pre-v0.120 `metrics.address` form was removed. Point the gateway
+at the in-cluster collector with
+`gateway.observability.tracing.otlpEndpoint: otel-collector.avapigw-test.svc:4317`
+and `otlpInsecure: true` (the test collector is plaintext, and remote
+endpoints now default to TLS).
+
 The four Grafana dashboards under `monitoring/grafana`
 (`gateway-dashboard.json`, `gateway-operator-dashboard.json`,
-`telemetry-dashboard.json`, and `spans-dashboard.json`) are published to Grafana with:
+`telemetry-dashboard.json`, and `spans-dashboard.json`) are published to
+Grafana — idempotently, into the **`avapigw` folder** (override with the
+`FOLDER_NAME` env variable) — with:
 
 ```bash
 # Publish all Grafana dashboards from monitoring/grafana
 ./test/monitoring/scripts/publish-dashboards.sh
 ```
+
+`test/scripts/publish-dashboards.sh` is a thin wrapper delegating to the same
+canonical script.
 
 ## 📊 Performance Testing
 
@@ -7027,8 +7044,33 @@ For more detailed troubleshooting, see the [operator documentation](docs/operato
 make docker-build
 
 # Or build directly
-docker build -t avapigw:latest .
+docker build -f Dockerfile.gateway -t avapigw:latest .
+
+# Build BOTH local images matching helm/avapigw/values-local.yaml
+# (avapigw:test + avapigw-operator:latest)
+make docker-build-local
+
+# Load locally built images into the cluster's container runtime
+# (detects kind / minikube / classic docker-desktop / containerd nodes)
+make k8s-load-images
 ```
+
+### Distroless Runtime Images
+
+Both runtime images (`Dockerfile.gateway`, `Dockerfile.operator`) are built on
+`gcr.io/distroless/static-debian12:nonroot`:
+
+- Containers run as the distroless `nonroot` user (**UID/GID 65532**).
+- There is **no shell and no package manager** in the runtime image —
+  `docker exec ... sh` and curl-based debugging do not work; use
+  `kubectl debug` with an ephemeral container instead.
+- The container-level `HEALTHCHECK` was **removed** (it required a shell);
+  health is covered by the Kubernetes probes (`/health`, `/ready` on the
+  metrics port). Compose users should probe from outside the container (see
+  the example below).
+- Multi-stage builds keep `go mod verify`, `-trimpath`, stripped ldflags, and
+  `TARGETARCH` cross-build support; gateway-writable dirs (`/app/data`,
+  `/app/logs`) are pre-created with correct ownership at build time.
 
 ### Running Container
 
@@ -7103,11 +7145,10 @@ services:
       - keycloak
       - vault
       - opa
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    # NOTE: the runtime image is distroless (no shell/curl), so an in-container
+    # healthcheck cannot run. Probe /health on the metrics port from a sidecar
+    # or the host instead, e.g.:
+    #   curl -f http://localhost:9090/health
 
   # Keycloak for OIDC authentication
   keycloak-db:
@@ -7456,6 +7497,8 @@ make perf-test-k8s-grpc
 | `make perf-test-k8s` | Run all K8s performance tests |
 | `make perf-test-k8s-http` | Run K8s HTTP performance test |
 | `make perf-test-k8s-grpc` | Run K8s gRPC performance test |
+| `make perf-test-pt-suite` | Run all 6 PT scenario groups (PT-01..06, ≥3 min steady state each) |
+| `make perf-test-pt-01` .. `perf-test-pt-06` | Run a single PT scenario group (gRPC / TLS gRPC / HTTP+WS / HTTPS+WSS / GraphQL+WS / TLS GraphQL+WSS) |
 | `make perf-generate-ammo` | Generate ammo files for tests |
 | `make perf-analyze` | Analyze latest test results |
 | `make perf-start-gateway` | Start gateway for performance testing |
@@ -7522,6 +7565,52 @@ See: [test/performance/README.md](test/performance/README.md)
 
 The following items track behavior changes and remaining follow-ups from recent
 release cycles.
+
+### Gateway CORS policy is now authoritative (behavior change)
+
+When a global or route-level CORS policy is configured, backend-produced
+`Access-Control-*` headers are stripped and replaced by the gateway's own
+grant on proxied responses, and route-level CORS fully overrides the global
+policy (including preflight `OPTIONS`). `directResponse` routes now run the
+route middleware chain (CORS included). **Migration note:** deployments that
+relied on backend-issued CORS grants leaking through the gateway, or on the
+global wildcard policy answering preflight for routes with their own `cors`
+block, will observe the configured policy being enforced instead.
+
+### Zero-weight destinations receive no traffic (behavior change)
+
+With mixed weights (at least one destination `weight > 0`), destinations with
+`weight: 0` are now excluded from load balancing (true 0% canary). The
+all-weights-unset uniform distribution is unchanged. Mixed zero/positive
+weights produce a validation warning.
+
+### OTLP export is secure by default for remote endpoints (behavior change)
+
+`otlpInsecure` is now tri-state: when unset, remote (non-loopback) OTLP
+endpoints default to TLS with system roots and configured `otlpTLS` material
+forces TLS; plaintext is retained only for unset/loopback endpoints.
+**Migration note:** deployments exporting to a remote plaintext collector
+must set `otlpInsecure: true` explicitly.
+
+### graphql-ws subprotocol is now negotiated and echoed
+
+The GraphQL subscription upgrader negotiates the `graphql-transport-ws` /
+`graphql-ws` WebSocket subprotocols and echoes the selected one in the 101
+response's `Sec-WebSocket-Protocol` header, as strict graphql-ws clients
+(e.g. the `graphql-ws` JS library) require. Clients offering no subprotocol
+keep the historical no-echo behavior.
+
+### gRPC destinations match backends by name OR host address
+
+gRPC route destinations previously attached backend features (TLS/mTLS,
+backend auth, pools, load balancing) only when `destination.host` equaled a
+GRPCBackend resource **name**; literal-host destinations silently dialed
+plaintext. Destinations are now resolved by resource name first and then by
+declared host endpoint (`address:port`). A remaining unmatched destination
+with a configured registry logs a one-time WARN (`plain_dial`); ambiguous
+endpoints (several backends declaring the same `address:port`)
+deterministically select the lexicographically smallest backend name and WARN
+once.
 
 ### HTTP per-route rate limiting is now enforced (behavior change)
 

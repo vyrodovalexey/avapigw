@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://avapigw.io/schemas/gateway.schema.json",
   "title": "Gateway Configuration",
-  "description": "Configuration schema for avapigw API Gateway",
+  "description": "Configuration schema for avapigw API Gateway (kept in sync with internal/config by pkg/schema guard tests)",
   "type": "object",
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "properties": {
@@ -44,24 +44,38 @@
         "listeners": {
           "type": "array",
           "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/listener"
-          },
+          "items": { "$ref": "#/$defs/listener" },
           "description": "Network listeners"
         },
         "routes": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/route"
-          },
-          "description": "Routing rules"
+          "items": { "$ref": "#/$defs/route" },
+          "description": "HTTP routing rules"
         },
         "backends": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/backend"
-          },
-          "description": "Backend services"
+          "items": { "$ref": "#/$defs/backend" },
+          "description": "HTTP backend services"
+        },
+        "grpcRoutes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/grpcRoute" },
+          "description": "gRPC routing rules"
+        },
+        "grpcBackends": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/grpcBackend" },
+          "description": "gRPC backend services"
+        },
+        "graphqlRoutes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/graphqlRoute" },
+          "description": "GraphQL routing rules"
+        },
+        "graphqlBackends": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/graphqlBackend" },
+          "description": "GraphQL backend services"
         },
         "rateLimit": {
           "$ref": "#/$defs/rateLimit",
@@ -78,81 +92,242 @@
         "observability": {
           "$ref": "#/$defs/observability",
           "description": "Observability configuration"
+        },
+        "authentication": {
+          "$ref": "#/$defs/authentication",
+          "description": "Global authentication configuration"
+        },
+        "authorization": {
+          "$ref": "#/$defs/authorization",
+          "description": "Global authorization configuration"
+        },
+        "security": {
+          "$ref": "#/$defs/security",
+          "description": "Security headers configuration"
+        },
+        "audit": {
+          "$ref": "#/$defs/audit",
+          "description": "Audit logging configuration"
+        },
+        "requestLimits": {
+          "$ref": "#/$defs/requestLimits",
+          "description": "Request size limits"
+        },
+        "maxSessions": {
+          "$ref": "#/$defs/maxSessions",
+          "description": "Maximum concurrent sessions at the gateway level"
+        },
+        "trustedProxies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Trusted proxy CIDRs for X-Forwarded-For validation"
+        },
+        "graphql": {
+          "$ref": "#/$defs/graphqlSettings",
+          "description": "GraphQL endpoint settings (body size limit, path)"
+        },
+        "openAPIValidation": {
+          "$ref": "#/$defs/openAPIValidation",
+          "description": "Global OpenAPI request validation"
+        },
+        "websocket": {
+          "$ref": "#/$defs/websocket",
+          "description": "WebSocket proxying behavior (origin allowlist)"
+        },
+        "vault": {
+          "$ref": "#/$defs/vault",
+          "description": "Gateway-wide Vault client connection (distinct from per-listener/route/backend tls.vault PKI issuance blocks). Environment variables (VAULT_ADDR, VAULT_TOKEN, ...) override these values per-field: ENV > config file > defaults."
         }
       }
     }
   },
   "$defs": {
+    "duration": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+      "description": "Go duration string (e.g. 30s, 1m30s, 100ms)"
+    },
+    "tlsVersion": {
+      "type": "string",
+      "enum": ["TLS10", "TLS11", "TLS12", "TLS13"]
+    },
     "listener": {
       "type": "object",
       "required": ["name", "port", "protocol"],
       "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535
-        },
+        "name": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "protocol": {
           "type": "string",
-          "enum": ["HTTP", "HTTPS", "HTTP2"]
+          "enum": ["HTTP", "HTTPS", "HTTP2", "GRPC", "GRAPHQL"]
         },
         "hosts": {
           "type": "array",
           "items": { "type": "string" }
         },
-        "bind": {
-          "type": "string"
-        }
+        "bind": { "type": "string" },
+        "grpc": { "$ref": "#/$defs/grpcListener" },
+        "tls": { "$ref": "#/$defs/listenerTLS" },
+        "timeouts": { "$ref": "#/$defs/listenerTimeouts" }
+      }
+    },
+    "listenerTimeouts": {
+      "type": "object",
+      "properties": {
+        "readTimeout": { "$ref": "#/$defs/duration" },
+        "readHeaderTimeout": { "$ref": "#/$defs/duration" },
+        "writeTimeout": { "$ref": "#/$defs/duration" },
+        "idleTimeout": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "listenerTLS": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["SIMPLE", "MUTUAL", "OPTIONAL_MUTUAL", "PASSTHROUGH", "INSECURE"]
+        },
+        "minVersion": { "$ref": "#/$defs/tlsVersion" },
+        "maxVersion": { "$ref": "#/$defs/tlsVersion" },
+        "cipherSuites": { "type": "array", "items": { "type": "string" } },
+        "certFile": { "type": "string" },
+        "keyFile": { "type": "string" },
+        "caFile": { "type": "string" },
+        "requireClientCert": { "type": "boolean" },
+        "insecureSkipVerify": { "type": "boolean" },
+        "alpn": { "type": "array", "items": { "type": "string" } },
+        "httpsRedirect": { "type": "boolean" },
+        "hsts": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxAge": { "type": "integer", "minimum": 0 },
+            "includeSubDomains": { "type": "boolean" },
+            "preload": { "type": "boolean" }
+          }
+        },
+        "vault": { "$ref": "#/$defs/vaultPKI" }
+      }
+    },
+    "vaultPKI": {
+      "type": "object",
+      "description": "Vault PKI certificate ISSUANCE block (requires the gateway-wide spec.vault client or VAULT_ADDR)",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "pkiMount": { "type": "string" },
+        "role": { "type": "string" },
+        "commonName": { "type": "string" },
+        "altNames": { "type": "array", "items": { "type": "string" } },
+        "ttl": { "type": "string" }
+      }
+    },
+    "grpcListener": {
+      "type": "object",
+      "properties": {
+        "maxConcurrentStreams": { "type": "integer", "minimum": 0 },
+        "maxRecvMsgSize": { "type": "integer", "minimum": 0 },
+        "maxSendMsgSize": { "type": "integer", "minimum": 0 },
+        "keepalive": {
+          "type": "object",
+          "properties": {
+            "time": { "$ref": "#/$defs/duration" },
+            "timeout": { "$ref": "#/$defs/duration" },
+            "permitWithoutStream": { "type": "boolean" },
+            "maxConnectionIdle": { "$ref": "#/$defs/duration" },
+            "maxConnectionAge": { "$ref": "#/$defs/duration" },
+            "maxConnectionAgeGrace": { "$ref": "#/$defs/duration" }
+          }
+        },
+        "reflection": { "type": "boolean" },
+        "healthCheck": { "type": "boolean" },
+        "tls": { "$ref": "#/$defs/grpcTLS" }
+      }
+    },
+    "grpcTLS": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": {
+          "type": "string",
+          "enum": ["SIMPLE", "MUTUAL", "OPTIONAL_MUTUAL", "INSECURE"]
+        },
+        "certFile": { "type": "string" },
+        "keyFile": { "type": "string" },
+        "caFile": { "type": "string" },
+        "minVersion": { "$ref": "#/$defs/tlsVersion" },
+        "maxVersion": { "$ref": "#/$defs/tlsVersion" },
+        "cipherSuites": { "type": "array", "items": { "type": "string" } },
+        "requireClientCert": { "type": "boolean" },
+        "insecureSkipVerify": { "type": "boolean" },
+        "alpn": { "type": "array", "items": { "type": "string" } },
+        "requireALPN": { "type": "boolean" },
+        "allowedCNs": { "type": "array", "items": { "type": "string" } },
+        "allowedSANs": { "type": "array", "items": { "type": "string" } },
+        "vault": { "$ref": "#/$defs/vaultPKI" }
       }
     },
     "route": {
       "type": "object",
       "required": ["name"],
       "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
+        "name": { "type": "string", "minLength": 1 },
         "match": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/routeMatch"
-          }
+          "items": { "$ref": "#/$defs/routeMatch" }
         },
         "route": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/routeDestination"
+          "items": { "$ref": "#/$defs/routeDestination" }
+        },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "retries": { "$ref": "#/$defs/retryPolicy" },
+        "redirect": { "$ref": "#/$defs/redirect" },
+        "rewrite": { "$ref": "#/$defs/rewrite" },
+        "directResponse": { "$ref": "#/$defs/directResponse" },
+        "headers": { "$ref": "#/$defs/headerManipulation" },
+        "mirror": { "type": "object", "description": "Traffic mirroring configuration" },
+        "aggregate": { "type": "object", "description": "Aggregate (fan-out) configuration" },
+        "fault": { "type": "object", "description": "Fault injection configuration" },
+        "rateLimit": { "$ref": "#/$defs/rateLimit" },
+        "transform": { "type": "object", "description": "Request/response transformation configuration" },
+        "cache": { "$ref": "#/$defs/cache" },
+        "encoding": { "type": "object", "description": "Content encoding configuration" },
+        "requestLimits": { "$ref": "#/$defs/requestLimits" },
+        "cors": { "$ref": "#/$defs/cors" },
+        "security": { "$ref": "#/$defs/security" },
+        "authentication": { "$ref": "#/$defs/authentication" },
+        "authorization": { "$ref": "#/$defs/authorization" },
+        "maxSessions": { "$ref": "#/$defs/maxSessions" },
+        "tls": { "$ref": "#/$defs/routeTLS" },
+        "openAPIValidation": { "$ref": "#/$defs/openAPIValidation" }
+      }
+    },
+    "routeTLS": {
+      "type": "object",
+      "properties": {
+        "certFile": { "type": "string" },
+        "keyFile": { "type": "string" },
+        "sniHosts": { "type": "array", "items": { "type": "string" } },
+        "minVersion": { "$ref": "#/$defs/tlsVersion" },
+        "maxVersion": { "$ref": "#/$defs/tlsVersion" },
+        "cipherSuites": { "type": "array", "items": { "type": "string" } },
+        "clientValidation": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "caFile": { "type": "string" },
+            "requireClientCert": { "type": "boolean" },
+            "allowedCNs": { "type": "array", "items": { "type": "string" } },
+            "allowedSANs": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "timeout": {
-          "type": "string",
-          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
-        },
-        "retries": {
-          "$ref": "#/$defs/retryPolicy"
-        },
-        "redirect": {
-          "$ref": "#/$defs/redirect"
-        },
-        "rewrite": {
-          "$ref": "#/$defs/rewrite"
-        },
-        "directResponse": {
-          "$ref": "#/$defs/directResponse"
-        }
+        "vault": { "$ref": "#/$defs/vaultPKI" }
       }
     },
     "routeMatch": {
       "type": "object",
       "properties": {
-        "uri": {
-          "$ref": "#/$defs/uriMatch"
-        },
+        "uri": { "$ref": "#/$defs/uriMatch" },
         "methods": {
           "type": "array",
           "items": {
@@ -162,15 +337,11 @@
         },
         "headers": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/headerMatch"
-          }
+          "items": { "$ref": "#/$defs/headerMatch" }
         },
         "queryParams": {
           "type": "array",
-          "items": {
-            "$ref": "#/$defs/queryParamMatch"
-          }
+          "items": { "$ref": "#/$defs/queryParamMatch" }
         }
       }
     },
@@ -208,14 +379,8 @@
       "type": "object",
       "required": ["destination"],
       "properties": {
-        "destination": {
-          "$ref": "#/$defs/destination"
-        },
-        "weight": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
-        }
+        "destination": { "$ref": "#/$defs/destination" },
+        "weight": { "type": "integer", "minimum": 0, "maximum": 100 }
       }
     },
     "destination": {
@@ -223,45 +388,28 @@
       "required": ["host"],
       "properties": {
         "host": { "type": "string" },
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535
-        }
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
     "retryPolicy": {
       "type": "object",
       "properties": {
-        "attempts": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "perTryTimeout": {
+        "attempts": { "type": "integer", "minimum": 0 },
+        "perTryTimeout": { "$ref": "#/$defs/duration" },
+        "retryOn": {
           "type": "string",
-          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
-        },
-        "retryOn": { "type": "string" }
+          "description": "Comma-separated retry conditions (e.g. \"5xx,reset,connect-failure\")"
+        }
       }
     },
     "redirect": {
       "type": "object",
       "properties": {
         "uri": { "type": "string" },
-        "code": {
-          "type": "integer",
-          "enum": [301, 302, 303, 307, 308]
-        },
-        "scheme": {
-          "type": "string",
-          "enum": ["http", "https"]
-        },
+        "code": { "type": "integer", "enum": [301, 302, 303, 307, 308] },
+        "scheme": { "type": "string", "enum": ["http", "https"] },
         "host": { "type": "string" },
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535
-        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "stripQuery": { "type": "boolean" }
       }
     },
@@ -276,11 +424,7 @@
       "type": "object",
       "required": ["status"],
       "properties": {
-        "status": {
-          "type": "integer",
-          "minimum": 100,
-          "maximum": 599
-        },
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
         "body": { "type": "string" },
         "headers": {
           "type": "object",
@@ -288,27 +432,55 @@
         }
       }
     },
+    "headerManipulation": {
+      "type": "object",
+      "properties": {
+        "request": { "$ref": "#/$defs/headerOperations" },
+        "response": { "$ref": "#/$defs/headerOperations" }
+      }
+    },
+    "headerOperations": {
+      "type": "object",
+      "properties": {
+        "add": { "type": "object", "additionalProperties": { "type": "string" } },
+        "set": { "type": "object", "additionalProperties": { "type": "string" } },
+        "remove": { "type": "array", "items": { "type": "string" } }
+      }
+    },
     "backend": {
       "type": "object",
       "required": ["name", "hosts"],
       "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
+        "name": { "type": "string", "minLength": 1 },
         "hosts": {
           "type": "array",
           "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/backendHost"
-          }
+          "items": { "$ref": "#/$defs/backendHost" }
         },
-        "healthCheck": {
-          "$ref": "#/$defs/healthCheck"
-        },
-        "loadBalancer": {
-          "$ref": "#/$defs/loadBalancer"
-        }
+        "healthCheck": { "$ref": "#/$defs/healthCheck" },
+        "loadBalancer": { "$ref": "#/$defs/loadBalancer" },
+        "tls": { "$ref": "#/$defs/backendTLS" },
+        "circuitBreaker": { "$ref": "#/$defs/circuitBreaker" },
+        "authentication": { "type": "object", "description": "Backend authentication (jwt/basic/mtls)" },
+        "maxSessions": { "$ref": "#/$defs/maxSessions" },
+        "rateLimit": { "$ref": "#/$defs/rateLimit" }
+      }
+    },
+    "backendTLS": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "type": "string", "enum": ["SIMPLE", "MUTUAL", "INSECURE"] },
+        "caFile": { "type": "string" },
+        "certFile": { "type": "string" },
+        "keyFile": { "type": "string" },
+        "serverName": { "type": "string" },
+        "insecureSkipVerify": { "type": "boolean" },
+        "minVersion": { "$ref": "#/$defs/tlsVersion" },
+        "maxVersion": { "$ref": "#/$defs/tlsVersion" },
+        "cipherSuites": { "type": "array", "items": { "type": "string" } },
+        "alpn": { "type": "array", "items": { "type": "string" } },
+        "vault": { "$ref": "#/$defs/vaultPKI" }
       }
     },
     "backendHost": {
@@ -316,15 +488,8 @@
       "required": ["address", "port"],
       "properties": {
         "address": { "type": "string" },
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535
-        },
-        "weight": {
-          "type": "integer",
-          "minimum": 0
-        }
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "weight": { "type": "integer", "minimum": 0 }
       }
     },
     "healthCheck": {
@@ -332,22 +497,13 @@
       "required": ["path"],
       "properties": {
         "path": { "type": "string" },
-        "interval": {
-          "type": "string",
-          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
-        },
-        "timeout": {
-          "type": "string",
-          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
-        },
-        "healthyThreshold": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "unhealthyThreshold": {
-          "type": "integer",
-          "minimum": 1
-        }
+        "interval": { "$ref": "#/$defs/duration" },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "healthyThreshold": { "type": "integer", "minimum": 1 },
+        "unhealthyThreshold": { "type": "integer", "minimum": 1 },
+        "useGRPC": { "type": "boolean" },
+        "grpcService": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
     "loadBalancer": {
@@ -359,77 +515,240 @@
         }
       }
     },
+    "grpcRoute": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "match": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "gRPC match conditions (service/method/metadata/authority)"
+        },
+        "route": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/routeDestination" }
+        },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "retries": { "$ref": "#/$defs/grpcRetryPolicy" },
+        "headers": { "$ref": "#/$defs/headerManipulation" },
+        "mirror": { "type": "object" },
+        "aggregate": { "type": "object" },
+        "rateLimit": { "$ref": "#/$defs/rateLimit" },
+        "transform": { "type": "object" },
+        "cache": { "$ref": "#/$defs/cache" },
+        "encoding": { "type": "object" },
+        "cors": { "$ref": "#/$defs/cors" },
+        "security": { "$ref": "#/$defs/security" },
+        "tls": { "$ref": "#/$defs/routeTLS" },
+        "authentication": { "$ref": "#/$defs/authentication" },
+        "authorization": { "$ref": "#/$defs/authorization" },
+        "protoValidation": { "type": "object", "description": "Proto descriptor-based request validation" }
+      }
+    },
+    "grpcRetryPolicy": {
+      "type": "object",
+      "properties": {
+        "attempts": { "type": "integer", "minimum": 0 },
+        "perTryTimeout": { "$ref": "#/$defs/duration" },
+        "retryOn": {
+          "type": "string",
+          "description": "Comma-separated gRPC status conditions: canceled, deadline-exceeded, internal, resource-exhausted, unavailable (e.g. \"unavailable,resource-exhausted\")"
+        },
+        "backoffBaseInterval": { "$ref": "#/$defs/duration" },
+        "backoffMaxInterval": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "grpcBackend": {
+      "type": "object",
+      "required": ["name", "hosts"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/backendHost" }
+        },
+        "healthCheck": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "service": { "type": "string" },
+            "useHTTP": { "type": "boolean" },
+            "httpPath": { "type": "string" },
+            "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "interval": { "$ref": "#/$defs/duration" },
+            "timeout": { "$ref": "#/$defs/duration" },
+            "healthyThreshold": { "type": "integer", "minimum": 1 },
+            "unhealthyThreshold": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "loadBalancer": { "$ref": "#/$defs/loadBalancer" },
+        "tls": { "$ref": "#/$defs/grpcTLS" },
+        "connectionPool": {
+          "type": "object",
+          "properties": {
+            "maxIdleConns": { "type": "integer", "minimum": 0 },
+            "maxConnsPerHost": { "type": "integer", "minimum": 0 },
+            "idleConnTimeout": { "$ref": "#/$defs/duration" }
+          }
+        },
+        "circuitBreaker": { "$ref": "#/$defs/circuitBreaker" },
+        "authentication": { "type": "object", "description": "Backend authentication (jwt/basic/mtls)" }
+      }
+    },
+    "graphqlRoute": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "match": { "type": "array", "items": { "type": "object" } },
+        "route": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/routeDestination" }
+        },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "retries": { "$ref": "#/$defs/retryPolicy" },
+        "headers": { "$ref": "#/$defs/headerManipulation" },
+        "rateLimit": { "$ref": "#/$defs/rateLimit" },
+        "aggregate": { "type": "object" },
+        "cache": { "$ref": "#/$defs/cache" },
+        "cors": { "$ref": "#/$defs/cors" },
+        "security": { "$ref": "#/$defs/security" },
+        "tls": { "$ref": "#/$defs/routeTLS" },
+        "authentication": { "$ref": "#/$defs/authentication" },
+        "authorization": { "$ref": "#/$defs/authorization" },
+        "depthLimit": { "type": "integer", "minimum": 0 },
+        "complexityLimit": { "type": "integer", "minimum": 0 },
+        "introspectionEnabled": { "type": "boolean" },
+        "allowedOperations": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["query", "mutation", "subscription"] }
+        },
+        "schemaValidation": { "type": "object" }
+      }
+    },
+    "graphqlBackend": {
+      "type": "object",
+      "required": ["name", "hosts"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/backendHost" }
+        },
+        "healthCheck": { "$ref": "#/$defs/healthCheck" },
+        "loadBalancer": { "$ref": "#/$defs/loadBalancer" },
+        "tls": { "$ref": "#/$defs/backendTLS" },
+        "circuitBreaker": { "$ref": "#/$defs/circuitBreaker" },
+        "authentication": { "type": "object", "description": "Backend authentication (jwt/basic/mtls)" }
+      }
+    },
     "rateLimit": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "requestsPerSecond": {
-          "type": "integer",
-          "minimum": 1
+        "requestsPerSecond": { "type": "integer", "minimum": 1 },
+        "burst": { "type": "integer", "minimum": 0 },
+        "perClient": { "type": "boolean" },
+        "store": { "type": "string", "enum": ["memory", "redis"] },
+        "redis": { "$ref": "#/$defs/redisConnection" }
+      }
+    },
+    "redisConnection": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string" },
+        "sentinel": { "$ref": "#/$defs/redisSentinel" },
+        "poolSize": { "type": "integer", "minimum": 0 },
+        "connectTimeout": { "$ref": "#/$defs/duration" },
+        "readTimeout": { "$ref": "#/$defs/duration" },
+        "writeTimeout": { "$ref": "#/$defs/duration" },
+        "keyPrefix": { "type": "string" },
+        "tls": { "$ref": "#/$defs/grpcTLS" },
+        "passwordVaultPath": { "type": "string" },
+        "retry": { "$ref": "#/$defs/redisRetry" },
+        "failOpen": { "type": "boolean" },
+        "ttlJitter": { "type": "number", "minimum": 0, "maximum": 1 },
+        "hashKeys": { "type": "boolean" }
+      }
+    },
+    "redisSentinel": {
+      "type": "object",
+      "required": ["masterName", "sentinelAddrs"],
+      "properties": {
+        "masterName": { "type": "string", "minLength": 1 },
+        "sentinelAddrs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
         },
-        "burst": {
-          "type": "integer",
-          "minimum": 0
+        "sentinelPassword": { "type": "string" },
+        "password": { "type": "string" },
+        "db": { "type": "integer", "minimum": 0 },
+        "passwordVaultPath": { "type": "string" },
+        "sentinelPasswordVaultPath": { "type": "string" }
+      }
+    },
+    "redisRetry": {
+      "type": "object",
+      "properties": {
+        "maxRetries": { "type": "integer", "minimum": 0 },
+        "initialBackoff": { "$ref": "#/$defs/duration" },
+        "maxBackoff": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "type": { "type": "string", "enum": ["memory", "redis"] },
+        "ttl": { "$ref": "#/$defs/duration" },
+        "maxEntries": { "type": "integer", "minimum": 0 },
+        "redis": { "$ref": "#/$defs/redisConnection" },
+        "keyConfig": {
+          "type": "object",
+          "properties": {
+            "includeMethod": { "type": "boolean" },
+            "includePath": { "type": "boolean" },
+            "includeQueryParams": { "type": "array", "items": { "type": "string" } },
+            "includeHeaders": { "type": "array", "items": { "type": "string" } },
+            "includeBodyHash": { "type": "boolean" },
+            "keyTemplate": { "type": "string" }
+          }
         },
-        "perClient": { "type": "boolean" }
+        "honorCacheControl": { "type": "boolean" },
+        "staleWhileRevalidate": { "$ref": "#/$defs/duration" },
+        "negativeCacheTTL": { "$ref": "#/$defs/duration" }
       }
     },
     "circuitBreaker": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "threshold": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "timeout": {
-          "type": "string",
-          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
-        },
-        "halfOpenRequests": {
-          "type": "integer",
-          "minimum": 1
-        }
+        "threshold": { "type": "integer", "minimum": 1 },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "halfOpenRequests": { "type": "integer", "minimum": 1 }
       }
     },
     "cors": {
       "type": "object",
       "properties": {
-        "allowOrigins": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "allowMethods": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "allowHeaders": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "exposeHeaders": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "maxAge": {
-          "type": "integer",
-          "minimum": 0
-        },
+        "allowOrigins": { "type": "array", "items": { "type": "string" } },
+        "allowMethods": { "type": "array", "items": { "type": "string" } },
+        "allowHeaders": { "type": "array", "items": { "type": "string" } },
+        "exposeHeaders": { "type": "array", "items": { "type": "string" } },
+        "maxAge": { "type": "integer", "minimum": 0 },
         "allowCredentials": { "type": "boolean" }
       }
     },
     "observability": {
       "type": "object",
       "properties": {
-        "metrics": {
-          "$ref": "#/$defs/metricsConfig"
-        },
-        "tracing": {
-          "$ref": "#/$defs/tracingConfig"
-        },
-        "logging": {
-          "$ref": "#/$defs/loggingConfig"
-        }
+        "metrics": { "$ref": "#/$defs/metricsConfig" },
+        "tracing": { "$ref": "#/$defs/tracingConfig" },
+        "logging": { "$ref": "#/$defs/loggingConfig" }
       }
     },
     "metricsConfig": {
@@ -437,38 +756,340 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "path": { "type": "string" },
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535
-        }
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
       }
     },
     "tracingConfig": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
-        "samplingRate": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
+        "samplingRate": { "type": "number", "minimum": 0, "maximum": 1 },
         "otlpEndpoint": { "type": "string" },
-        "serviceName": { "type": "string" }
+        "serviceName": { "type": "string" },
+        "otlpInsecure": {
+          "type": "boolean",
+          "description": "Explicit OTLP exporter transport security; when omitted, TLS material forces TLS and plaintext is retained only for unset/loopback endpoints"
+        },
+        "otlpTLS": {
+          "type": "object",
+          "properties": {
+            "certFile": { "type": "string", "description": "Client certificate (PEM) for mTLS to the OTLP collector; requires keyFile" },
+            "keyFile": { "type": "string", "description": "Client private key (PEM); requires certFile" },
+            "caFile": { "type": "string", "description": "PEM CA bundle used to verify the OTLP collector certificate" }
+          }
+        }
       }
     },
     "loggingConfig": {
       "type": "object",
       "properties": {
-        "level": {
-          "type": "string",
-          "enum": ["debug", "info", "warn", "error"]
-        },
-        "format": {
-          "type": "string",
-          "enum": ["json", "console"]
-        },
+        "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+        "format": { "type": "string", "enum": ["json", "console"] },
         "output": { "type": "string" }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "jwt": { "type": "object", "description": "JWT validation (issuer, audiences, jwksUrl, secret, staticKeys, claim mappings)" },
+        "apiKey": { "type": "object", "description": "API key validation (keys, vault paths, header/query names)" },
+        "mtls": { "type": "object", "description": "mTLS client certificate authentication" },
+        "oidc": { "type": "object", "description": "OIDC providers (issuer, clientId, discovery, introspection)" },
+        "allowAnonymous": { "type": "boolean" },
+        "skipPaths": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "defaultPolicy": { "type": "string", "enum": ["allow", "deny"] },
+        "rbac": { "type": "object", "description": "Role-based access control policies" },
+        "abac": { "type": "object", "description": "Attribute-based access control (CEL) policies" },
+        "external": { "type": "object", "description": "External authorization (OPA)" },
+        "skipPaths": { "type": "array", "items": { "type": "string" } },
+        "cache": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "ttl": { "$ref": "#/$defs/duration" },
+            "maxSize": { "type": "integer", "minimum": 0 },
+            "type": { "type": "string", "enum": ["memory", "redis"] },
+            "redis": { "$ref": "#/$defs/redisConnection" },
+            "sentinel": { "$ref": "#/$defs/redisSentinel" }
+          }
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "headers": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "xFrameOptions": { "type": "string" },
+            "xContentTypeOptions": { "type": "string" },
+            "xXSSProtection": { "type": "string" },
+            "customHeaders": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "hsts": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxAge": { "type": "integer", "minimum": 0 },
+            "includeSubDomains": { "type": "boolean" },
+            "preload": { "type": "boolean" }
+          }
+        },
+        "csp": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "policy": { "type": "string" },
+            "reportOnly": { "type": "boolean" },
+            "reportUri": { "type": "string" }
+          }
+        },
+        "referrerPolicy": { "type": "string" }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "level": { "type": "string" },
+        "output": { "type": "string" },
+        "format": { "type": "string" },
+        "filePath": { "type": "string" },
+        "events": {
+          "type": "object",
+          "properties": {
+            "authentication": { "type": "boolean" },
+            "authorization": { "type": "boolean" },
+            "request": { "type": "boolean" },
+            "response": { "type": "boolean" },
+            "configuration": { "type": "boolean" },
+            "security": { "type": "boolean" }
+          }
+        },
+        "skipPaths": { "type": "array", "items": { "type": "string" } },
+        "redactFields": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "requestLimits": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxBodySize": { "type": "integer", "minimum": 0 },
+        "maxHeaderSize": { "type": "integer", "minimum": 0 },
+        "maxURILength": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "maxSessions": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxConcurrent": { "type": "integer", "minimum": 0 },
+        "queueSize": { "type": "integer", "minimum": 0 },
+        "queueTimeout": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "graphqlSettings": {
+      "type": "object",
+      "properties": {
+        "maxBodySize": { "type": "integer", "minimum": 0 },
+        "path": { "type": "string" }
+      }
+    },
+    "openAPIValidation": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "specFile": { "type": "string" },
+        "specInline": { "type": "string" },
+        "validateRequests": { "type": "boolean" },
+        "validateResponses": { "type": "boolean" },
+        "validateRequestBody": { "type": "boolean" },
+        "validateQueryParams": { "type": "boolean" },
+        "validateRequestHeaders": { "type": "boolean" },
+        "validateSecurity": { "type": "boolean" },
+        "failOnError": { "type": "boolean" }
+      }
+    },
+    "websocket": {
+      "type": "object",
+      "properties": {
+        "allowedOrigins": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Origin allowlist enforced during the WebSocket upgrade handshake (empty accepts every origin)"
+        }
+      }
+    },
+    "vault": {
+      "type": "object",
+      "description": "Gateway-wide Vault CLIENT CONNECTION (how the gateway reaches and authenticates against Vault). Environment variables override per-field: ENV > config file > defaults.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable the gateway Vault client"
+        },
+        "address": {
+          "type": "string",
+          "description": "Vault server address (e.g. https://vault:8200); required when enabled unless VAULT_ADDR is set"
+        },
+        "namespace": {
+          "type": "string",
+          "description": "Vault namespace (Enterprise feature)"
+        },
+        "authMethod": {
+          "type": "string",
+          "enum": ["token", "kubernetes", "approle"],
+          "description": "Authentication method (empty defaults to token)"
+        },
+        "token": {
+          "type": "string",
+          "description": "Inline Vault token (discouraged; prefer tokenFile or the VAULT_TOKEN environment variable)"
+        },
+        "tokenFile": {
+          "type": "string",
+          "description": "Path to a file containing the Vault token (mutually exclusive with token)"
+        },
+        "kubernetes": {
+          "type": "object",
+          "description": "Kubernetes ServiceAccount JWT authentication",
+          "properties": {
+            "role": {
+              "type": "string",
+              "description": "Vault role to authenticate as (required)"
+            },
+            "mountPath": {
+              "type": "string",
+              "description": "Mount path of the Kubernetes auth method (default kubernetes)"
+            },
+            "tokenPath": {
+              "type": "string",
+              "description": "Path to the ServiceAccount token file"
+            }
+          }
+        },
+        "appRole": {
+          "type": "object",
+          "description": "AppRole authentication",
+          "properties": {
+            "roleId": {
+              "type": "string",
+              "description": "AppRole role ID (required)"
+            },
+            "secretId": {
+              "type": "string",
+              "description": "Inline AppRole secret ID (discouraged; prefer secretIdFile or the VAULT_APPROLE_SECRET_ID environment variable)"
+            },
+            "secretIdFile": {
+              "type": "string",
+              "description": "Path to a file containing the AppRole secret ID (mutually exclusive with secretId)"
+            },
+            "mountPath": {
+              "type": "string",
+              "description": "Mount path of the AppRole auth method (default approle)"
+            }
+          }
+        },
+        "tls": {
+          "type": "object",
+          "description": "TLS for the connection TO the Vault server (file paths)",
+          "properties": {
+            "caCert": {
+              "type": "string",
+              "description": "Path to a PEM-encoded CA certificate file"
+            },
+            "caPath": {
+              "type": "string",
+              "description": "Path to a directory of PEM-encoded CA certificate files"
+            },
+            "clientCert": {
+              "type": "string",
+              "description": "Path to the client certificate for mTLS to Vault"
+            },
+            "clientKey": {
+              "type": "string",
+              "description": "Path to the client private key for mTLS to Vault"
+            },
+            "serverName": {
+              "type": "string",
+              "description": "TLS server name (SNI) override for Vault server verification"
+            },
+            "skipVerify": {
+              "type": "boolean",
+              "description": "Disable TLS certificate verification (insecure; testing only)"
+            }
+          }
+        },
+        "cache": {
+          "type": "object",
+          "description": "Client-side secret caching",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable secret caching"
+            },
+            "ttl": {
+              "$ref": "#/$defs/duration",
+              "description": "Cache time-to-live (e.g. 5m)"
+            },
+            "maxSize": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum number of cached entries (default 1000)"
+            }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "description": "Request retry behavior of the Vault client",
+          "properties": {
+            "maxRetries": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum number of retry attempts (default 3)"
+            },
+            "backoffBase": {
+              "$ref": "#/$defs/duration",
+              "description": "Base duration for exponential backoff (e.g. 100ms)"
+            },
+            "backoffMax": {
+              "$ref": "#/$defs/duration",
+              "description": "Maximum backoff duration (e.g. 5s)"
+            }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "description": "Startup authentication retry bounds",
+          "properties": {
+            "maxRetries": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum number of authentication retries (default 3)"
+            },
+            "initialBackoff": {
+              "$ref": "#/$defs/duration",
+              "description": "Initial backoff between retries (default 1s)"
+            },
+            "maxBackoff": {
+              "$ref": "#/$defs/duration",
+              "description": "Maximum backoff between retries (default 10s)"
+            },
+            "timeout": {
+              "$ref": "#/$defs/duration",
+              "description": "Overall authentication retry loop timeout (default 30s)"
+            }
+          }
+        }
       }
     }
   }

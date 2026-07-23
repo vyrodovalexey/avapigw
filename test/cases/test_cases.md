@@ -4908,3 +4908,295 @@ Files: `internal/tls/handshake_test.go`, `internal/gateway/listener_handshake_me
   2. Start the gateway; make HTTPS requests through it (InsecureSkipVerify client)
   3. Gather the registry and locate gateway_tls_handshake_duration_seconds
 - **Expected Results**: ≥1 sample after traffic (0 before), sum > 0; response served over TLS with the expected body
+
+## WSS (WebSocket-over-TLS) Gateway Tests
+
+Secure WebSocket journeys through a REAL gateway HTTPS listener (TLS mode
+SIMPLE, self-signed test CA): the gateway terminates TLS, upgrades the
+connection, and proxies frames to the plain-ws backend `/ws`. The backend
+streams data and accepts (does not echo) client messages, so bidirectional
+exchange is asserted as write-then-continue-streaming.
+
+Files: `test/e2e/websocket_wss_e2e_test.go` (build tag `e2e`);
+helpers `test/helpers/wss_helpers.go`.
+
+### TestE2E_WSS_UpgradeAndStream
+- **Description**: Primary secure WebSocket journey — wss:// handshake through the HTTPS listener, then streamed backend data through the TLS-terminating gateway
+- **Preconditions**: Backend 1 running (`TEST_BACKEND1_URL`, default http://127.0.0.1:8801)
+- **Steps**:
+  1. Generate test CA/server certs; start gateway with HTTPS listener (SIMPLE) routing /ws to the backend
+  2. Dial wss://…/ws with a CA-trusting dialer
+  3. Read 3 streamed messages
+- **Expected Results**: 101 Switching Protocols; underlying transport is *tls.Conn; 3 messages relayed over TLS
+
+### TestE2E_WSS_MessageExchange
+- **Description**: Bidirectional exchange over the TLS tunnel — client writes through the gateway, backend streaming continues, graceful close
+- **Preconditions**: Backend 1 running
+- **Steps**:
+  1. Dial wss; write a text frame; read 2 further messages; send close frame
+- **Expected Results**: Write accepted; streaming continues after the write; clean close
+
+### TestE2E_WSS_OriginPolicy
+- **Description**: Cross-Site WebSocket Hijacking policy on the TLS listener (spec.websocket.allowedOrigins)
+- **Preconditions**: Backend 1 running
+- **Steps**:
+  1. Start wss gateway with allowedOrigins=[https://app.example.com]
+  2. Dial with allowed Origin, disallowed Origin, and no Origin header
+- **Expected Results**: Allowed origin connects; disallowed origin rejected with 403 during upgrade; no-Origin (non-browser) connects
+
+### TestE2E_WSS_TLSFailureModes
+- **Description**: TLS layer rejects broken client trust before any WS traffic
+- **Preconditions**: Backend 1 running
+- **Steps**:
+  1. Dial wss with a dialer lacking the test CA
+  2. Dial plaintext ws:// against the HTTPS listener
+- **Expected Results**: Certificate-verification error; plaintext-to-TLS dial fails
+
+### TestE2E_WSS_ConcurrentConnections
+- **Description**: TLS listener sustains multiple concurrent WSS tunnels
+- **Preconditions**: Backend 1 running
+- **Steps**:
+  1. Open 5 concurrent wss connections; read 2 messages each
+- **Expected Results**: 5/5 connect; ≥1 message per connection
+
+## GraphQL-over-WebSocket (graphql-transport-ws) Subscription Tests
+
+The gateway's graphql-ws pipeline (route match → middleware → upgrade →
+bidirectional relay) is exercised end-to-end. LIVE-BACKEND LIMITATION
+(verified): the reference restapi-example image serves NO /graphql endpoint
+(POST and WS upgrade both 404), so subscriptions run against an in-process
+mock backend implementing the graphql-transport-ws protocol
+(`test/helpers/graphql_ws_helpers.go`) — the documented fallback. KNOWN
+PRODUCT LIMITATION (documented in the protocol-negotiation test): the
+gateway's client-side upgrader does not echo the negotiated
+Sec-WebSocket-Protocol back to the client; the requested protocol IS
+forwarded on the backend dial and the relay is protocol-agnostic.
+
+Files: `test/integration/graphql_subscription_test.go` (build tag
+`integration`); `test/e2e/graphql_ws_e2e_test.go` (build tag `e2e`);
+helpers `test/helpers/graphql_ws_helpers.go`,
+`test/helpers/graphql_gateway_helpers.go`.
+
+### TestIntegration_GraphQLWS_SubscriptionLifecycle
+- **Description**: Full graphql-transport-ws lifecycle through the gateway relay: connection_init → connection_ack → subscribe → next×3 → complete, plus ping→pong
+- **Preconditions**: None external (mock graphql-ws backend)
+- **Steps**:
+  1. Build production GraphQLHandler (router+proxy) on an httptest server
+  2. Upgrade with subprotocol graphql-transport-ws; run the message lifecycle
+- **Expected Results**: ack received; 3 next payloads relayed byte-for-byte; terminal complete; pong answered
+
+### TestIntegration_GraphQLWS_ErrorMessage
+- **Description**: Backend subscription error frames relay to the client
+- **Steps**:
+  1. Subscribe with a query the mock fails ("failNow")
+- **Expected Results**: Terminal error message, no next events
+
+### TestIntegration_GraphQLWS_ProtocolNegotiation
+- **Description**: Subprotocol path through the relay — client-requested graphql-transport-ws is forwarded on the backend dial and negotiated/echoed by the gateway upgrader on the 101 response (RFC 6455)
+- **Expected Results**: Backend observes the requested subprotocol; relay functions; client connection negotiates graphql-transport-ws (echoed by the gateway)
+
+### TestIntegration_GraphQLWS_OriginAllowlist
+- **Description**: CSWSH origin allowlist on the graphql-ws upgrade
+- **Expected Results**: Allowed origin upgrades and completes init; disallowed origin rejected with 403
+
+### TestIntegration_GraphQLWS_RouteAndBackendFailureModes
+- **Description**: Failure paths — unmatched route and unreachable backend
+- **Expected Results**: Unmatched upgrade fails with 404; when the backend dial fails after a successful client upgrade, the client connection is closed promptly
+
+### TestE2E_GraphQLWS_QueryAndSubscription
+- **Description**: Primary GraphQL user journey through a REAL running gateway — HTTP query on /graphql plus graphql-ws subscription on the same endpoint
+- **Preconditions**: None external (mock graphql-ws backend)
+- **Steps**:
+  1. Start gateway (embedded GraphQL pipeline) with an HTTP listener
+  2. POST a query; then upgrade and run subscribe → next×3 → complete
+- **Expected Results**: Query returns data without errors; subscription delivers all events and completes
+
+### TestE2E_GraphQLWS_ConcurrentSubscriptions
+- **Description**: Multiple concurrent subscription tunnels through one gateway
+- **Expected Results**: 4/4 subscriptions complete with full event streams
+
+### TestE2E_GraphQLWS_OriginPolicy
+- **Description**: spec.websocket.allowedOrigins enforced on the running gateway's graphql-ws upgrade
+- **Expected Results**: Allowed origin subscribes; disallowed origin rejected with 403
+
+### TestE2E_GraphQLWS_ErrorPropagation
+- **Description**: Backend subscription errors reach the client through the running gateway
+- **Expected Results**: Terminal error message, no next events
+
+## TLS-GraphQL + WSS Tests
+
+Secure GraphQL journeys through a REAL gateway HTTPS listener: queries over
+HTTPS and graphql-transport-ws subscriptions over wss://, TLS-terminated at
+the gateway and relayed to the backend GraphQL WebSocket (mock backend; see
+live-backend limitation above).
+
+Files: `test/e2e/graphql_tls_wss_e2e_test.go` (build tag `e2e`).
+
+### TestE2E_GraphQLTLS_QueryOverHTTPS
+- **Description**: GraphQL query routed through the HTTPS listener
+- **Steps**:
+  1. Start gateway with HTTPS listener (SIMPLE, generated certs) + GraphQL pipeline
+  2. POST query over HTTPS with a CA-trusting client
+- **Expected Results**: Data returned, no errors
+
+### TestE2E_GraphQLTLS_SubscriptionOverWSS
+- **Description**: Full secure subscription journey — wss:// upgrade on the HTTPS listener, graphql-ws lifecycle relayed, transport verified as TLS
+- **Expected Results**: 101 upgrade; underlying transport *tls.Conn; 3 events + complete relayed over TLS
+
+### TestE2E_GraphQLTLS_WSSFailureModes
+- **Description**: TLS trust and origin failures on the secure subscription path
+- **Expected Results**: Untrusted CA fails the wss handshake with a certificate error; disallowed origin 403; allowed origin subscribes
+
+## Dedicated CORS Preflight Tests
+
+The browser cross-origin contract through the production per-route
+middleware chain: OPTIONS preflights, actual-request grants, global
+spec.cors inheritance, and route-level cors overrides. DOCUMENTED PROXY
+BEHAVIOR: the reference backend emits its own permissive CORS headers which
+the gateway forwards on actual (non-preflight) proxied responses; the
+gateway's own deny semantics are asserted against a no-CORS mock backend.
+
+Files: `test/e2e/cors_e2e_test.go` (build tag `e2e`);
+`test/functional/cors_preflight_test.go` (build tag `functional`).
+
+### TestE2E_CORS_PreflightGlobalPolicy
+- **Description**: OPTIONS preflight on a route inheriting the GLOBAL spec.cors policy
+- **Preconditions**: Backend 1 running
+- **Steps**:
+  1. Start gateway (route middleware chain) with global cors: exact origin + `*.wild.example.com` wildcard
+  2. Preflight with allowed, wildcard-subdomain, and denied origins
+- **Expected Results**: 204 with echoed Access-Control-Allow-Origin + methods/headers/max-age + Vary: Origin for allowed and wildcard origins; 204 with NO grant for denied origins
+
+### TestE2E_CORS_ActualRequestHeaders
+- **Description**: Actual-request CORS semantics — gateway grant on allowed origins, no grant on denied origins (no-CORS mock backend), gateway CORS authoritative over backend-emitted CORS headers on proxied routes
+- **Expected Results**: Allowed origin gets exactly the gateway grant (single value) + expose headers; denied origin gets response without any grant (backend grant stripped); no-Origin requests unaffected
+
+### TestE2E_CORS_RouteLevelOverride
+- **Description**: Route-level cors block fully replaces the global policy on that route only
+- **Expected Results**: Route origin granted with credentials + route maxAge; globally-allowed origin denied on the override route; route origin denied on global routes; actual GET honors the route policy
+
+### TestE2E_CORS_UnmatchedPreflight
+- **Description**: Preflight for an unmatched path is not granted CORS
+- **Expected Results**: 404 without CORS headers
+
+### TestFunctional_CORS_Preflight
+- **Description**: Data-driven preflight matrix over global-only, route-only, and route-overriding-global policies through the production RouteMiddlewareManager chain
+- **Expected Results**: Grants/denials, credentials, and max-age per scenario; preflights never reach the terminal handler
+
+### TestFunctional_CORS_ActualRequest
+- **Description**: Actual-request grants through the chain (allowed/denied/no-Origin), expose headers, Vary: Origin
+- **Expected Results**: Terminal handler reached in all cases; grant only for the allowed origin
+
+## Live Auth-Backend Tests (docker-compose environment)
+
+REAL gateway journeys against the LIVE compose auth backends. All endpoints
+are env-overridable (see `helpers.GetLiveAuthBackendConfig`:
+TEST_MTLS_REST_BACKEND_ADDR, TEST_OIDC_REST_BACKEND_URL,
+TEST_BASIC_REST_BACKEND_URL, TEST_MTLS_GRPC_BACKEND_ADDR,
+TEST_OIDC_GRPC_BACKEND_ADDR, TEST_MTLS_CLIENT_CERT_DIR,
+TEST_KEYCLOAK_ADDR, TEST_KEYCLOAK_BACKEND_REALM,
+TEST_BACKEND_OIDC_CLIENT_ID/SECRET, TEST_BACKEND_ISSUER_HOST,
+TEST_VAULT_PKI_CLIENT_ROLE, TEST_VAULT_BASIC_AUTH_PATH).
+
+Guard model (two layers, keeping tests STRICT on a correct env):
+1. Reachability guards — skip when Vault/Keycloak/the backend is not
+   reachable, or when the Keycloak realm / Vault KV secret / provisioned
+   cert files are not provisioned.
+2. Contract pre-flights — each test verifies the backend auth contract
+   DIRECTLY (bypassing the gateway) with the exact material the gateway
+   will use: direct https/grpc mTLS handshake with the client cert+CA;
+   direct 401-without-token / 200-with-live-minted-token (REST OIDC and
+   basic); direct UNAUTHENTICATED-without-token / OK-with-token (gRPC
+   OIDC). Pre-flight failure = environment drift (CA generation mismatch,
+   stale backend certs after a Vault re-provision without
+   `make test-env-restart-auth-backends`, image/auth-mode drift, or a
+   different service on the port — the GitHub Actions topology) → skip
+   with a precise diagnostic. Pre-flight success → gateway-path
+   assertions are strict `require`s, with a bounded retry (5 attempts,
+   ~5s linear backoff) on the first gateway-path request to absorb
+   transient 502/UNAVAILABLE during backend churn.
+
+The mTLS no-cert rejection subtest is file-independent
+(insecureSkipVerify; only the backend's client-cert requirement is under
+test) so it still runs and passes under every drift mode. The
+issuer-rewrite proxy (`helpers.StartIssuerRewriteProxy`) bridges the
+host.docker.internal DNS gap so Keycloak mints tokens with the
+backend-expected iss while OIDC discovery keeps pointing the gateway at
+the proxy.
+
+Files: `test/integration/live_backend_auth_test.go`,
+`test/integration/live_grpc_auth_test.go` (build tag `integration`);
+helpers `test/helpers/live_env_helpers.go`.
+
+### TestIntegration_LiveBackend_MTLS_VaultPKIFileCerts
+- **Description**: Gateway route → rest_api_4 (mTLS) with the client certificate files provisioned from the LIVE Vault PKI by setup-vault.sh (test/docker-compose/certs), configured file-based on the backend TLS block — the same CA generation the backend loaded at container start
+- **Preconditions**: rest_api_4 (:8804) reachable; client.crt/client.key/ca.crt provisioned (missing files skip only the with-cert subtest with a file-missing diagnostic); direct mTLS pre-flight handshake succeeds (otherwise skip with a CA-mismatch/non-mTLS-service diagnostic)
+- **Steps**:
+  1. Resolve provisioned client cert files; pre-flight a DIRECT https request to :8804 with them
+  2. Start gateway with backend TLS MUTUAL (certFile/keyFile/caFile, serverName localhost)
+  3. GET /api/v1/items through the gateway (bounded retry, then strict); repeat with a SIMPLE/insecureSkipVerify (no client cert) backend
+- **Expected Results**: 200 with the client cert; 502 without it (backend rejects the handshake) — the no-cert subtest runs under every drift mode
+
+### TestIntegration_LiveBackend_MTLS_VaultRuntimeCerts
+- **Description**: Same journey with backend tls.vault — the GATEWAY issues its own client certificate from the live Vault PKI at startup (no cert files)
+- **Preconditions**: Vault and rest_api_4 reachable; a freshly Vault-issued probe cert passes the direct mTLS pre-flight (a fresh/rotated Vault CA without a backend restart skips with a CA-generation-mismatch diagnostic)
+- **Expected Results**: 200 through the gateway with the runtime-issued cert (strict require; the success log can never follow a failed assertion)
+
+### TestIntegration_LiveBackend_OIDC_S2S
+- **Description**: Gateway route → rest_api_3 (OIDC) — the gateway acquires a client_credentials token from the LIVE Keycloak backend-test realm (gateway-backend client) and attaches it to backend requests
+- **Preconditions**: Keycloak (:8090) reachable with the backend-test realm provisioned; rest_api_3 (:8803) reachable; direct pre-flights hold (401 without token, live-minted token accepted directly)
+- **Expected Results**: 200 with the gateway-acquired token; 401 pass-through without backend auth
+
+### TestIntegration_LiveBackend_BasicAuth_VaultKV
+- **Description**: Gateway route → rest_api_5 (basic) with credentials read from the LIVE Vault KV secret/backend-auth/basic
+- **Preconditions**: Vault and rest_api_5 (:8805) reachable; the KV secret is provisioned; direct pre-flights hold (401 without credentials, 200 with the KV credentials)
+- **Expected Results**: 200 with KV credentials; 401 pass-through without backend auth
+
+### TestIntegration_LiveGRPCBackend_MTLS_VaultPKI
+- **Description**: Gateway grpcRoute → grpc_3 (mTLS) with a Vault-PKI-issued client cert — UNARY + SERVER STREAMING + BIDI STREAMING all through the gateway (client→gateway plaintext, gateway→backend mTLS)
+- **Preconditions**: Vault and grpc_3 (:8813) reachable; the issued cert passes the direct gRPC mTLS pre-flight (issuance failure or CA mismatch skips with a diagnostic)
+- **Steps**:
+  1. Issue client cert (client-role, skips on provisioning drift); pre-flight a DIRECT gRPC unary to :8813 with it
+  2. Start gRPC gateway with GRPCBackend TLS MUTUAL and backend-registry resolution; warm-up unary with bounded retry
+  3. Unary echo; ServerStream count=4 (sequence-contiguous); Bidi ×3 with operation=double
+  4. Negative: SIMPLE TLS without client cert
+- **Expected Results**: Unary echoes; 4 stream messages with sequences 1..4; bidi doubles each value; no-cert dial surfaces UNAVAILABLE
+
+### TestIntegration_LiveGRPCBackend_OIDC_S2S
+- **Description**: Gateway grpcRoute → grpc_4 (OIDC) — the gateway injects live-Keycloak client_credentials tokens into backend metadata; UNARY + SERVER STREAMING + BIDI STREAMING through the gateway
+- **Preconditions**: Keycloak reachable with the backend-test realm provisioned; grpc_4 (:8814) reachable; direct pre-flights hold (UNAUTHENTICATED without token, live-minted token accepted directly)
+- **Expected Results**: All three call shapes succeed with injected tokens; without backend auth the backend answers UNAUTHENTICATED
+
+## Phase-3 CRD Field Contract Tests (operator functional)
+
+The NEW Phase-3 CRD fields verified at the CR → gateway boundary: admitted
+by the real webhook validator, serialized exactly as the operator pushes
+config, deserialized onto the gateway configuration types, and asserted for
+a lossless wire shape.
+
+Files: `test/functional/operator/phase3_fields_functional_test.go` (build
+tag `functional`).
+
+### TestFunctional_APIRoute_TransformAdvanced_GatewayContract
+- **Description**: transform.request staticHeaders/dynamicHeaders/injectFields/removeFields/defaultValues/validateBeforeTransform + template→bodyTemplate mapping; transform.response groupFields/flattenFields/arrayOperations/mergeStrategy=ndjson
+- **Expected Results**: Every field survives CR → config.Route byte-compatibly; CRD template lands in gateway bodyTemplate; ndjson merge strategy reaches the data plane
+
+### TestFunctional_APIRoute_CacheAdvanced_GatewayContract
+- **Description**: cache maxEntries/keyConfig{includeMethod,includePath,includeQueryParams,includeHeaders,includeBodyHash,keyTemplate}/honorCacheControl/negativeCacheTTL; deprecated keyComponents admission warning
+- **Expected Results**: All cache tuning fields survive the wire; keyComponents warns on admission
+
+### TestFunctional_RedisTLS_GatewayContract
+- **Description**: redis TLS blocks on cache.redis.tls and rateLimit.redis.tls
+- **Expected Results**: Enabled/certFile/keyFile/caFile/minVersion survive to the gateway TLS config on both paths
+
+### TestFunctional_AuthzCache_RedisShape_GatewayContract
+- **Description**: authorization.cache redis shape (preferred) round-trips incl. redis.sentinel; the legacy top-level sentinel key is consumable by the gateway type (operator normalizer folds it into redis.sentinel; gateway deserializes the legacy key for compatibility)
+- **Expected Results**: Preferred redis block survives with sentinel topology intact; legacy sentinel key reaches config.AuthzCacheConfig.Sentinel
+
+### TestFunctional_Security_Structured_GatewayContract
+- **Description**: structured security.hsts (maxAge/includeSubDomains/preload) + security.csp (policy/reportUri) + referrerPolicy + headers.customHeaders
+- **Expected Results**: All structured security fields survive CR → config.SecurityConfig
+
+### TestFunctional_Backend_HealthCheckGRPC_GatewayContract
+- **Description**: Backend healthCheck useGRPC/grpcService/port (probe-port override for backends probing on 9090)
+- **Expected Results**: Fields survive CR → config.Backend and the translated backend passes full gateway validation

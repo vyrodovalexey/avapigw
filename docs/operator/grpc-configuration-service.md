@@ -307,17 +307,26 @@ All communication uses mutual TLS authentication:
 operator:
   grpc:
     port: 9444
+    requireClientCert: false   # true enforces client certificates (mTLS)
     tls:
-      mode: selfsigned  # or vault, cert-manager
-    keepalive:
-      time: 30s
-      timeout: 10s
+      mode: selfsigned         # or vault
 ```
 
 **Certificate Modes:**
-- **Self-signed** - Automatically generated certificates
-- **Vault PKI** - HashiCorp Vault integration
+- **Self-signed** - Operator-generated certificates; the CA and serving
+  certificate are persisted to a Kubernetes Secret (`CERT_SECRET_NAME`) and
+  reused across restarts, so gateways can verify against a stable `ca.crt`
+- **Vault PKI** - HashiCorp Vault integration (kubernetes auth); the PKI CA
+  is stable across operator restarts
+- **File** - Pre-provisioned certificate files (mounted Secret /
+  cert-manager / Helm-generated)
 - **cert-manager** - Kubernetes-native certificate management
+
+The serving certificate is **rotated in place** before expiry by the
+operator's rotation loop (selfsigned/vault providers) and hot-swapped into
+the gRPC server via `tls.Config.GetCertificate` — connected gateways are not
+disrupted. See
+[Certificate Providers](configuration.md#certificate-providers).
 
 ### Connection Security
 
@@ -326,6 +335,35 @@ operator:
 - **Cipher Suite Control** - Secure cipher suites only
 - **Connection Limits** - Configurable connection limits
 - **Rate Limiting** - Protection against abuse
+
+### Graceful Shutdown
+
+`StopWithContext` drains the server without stranding clients:
+
+1. A server-wide **shutdown signal** is broadcast *before* `GracefulStop`,
+   so long-lived `StreamConfiguration` streams (and background loops such as
+   the gateway reaper and store-seed waits) terminate promptly instead of
+   pinning the graceful wait for the full timeout window.
+2. `GracefulStop` then drains in-flight RPCs, bounded by the server's
+   `GracefulShutdownTimeout` (default 30s; not currently exposed as a flag,
+   env variable, or Helm value); on timeout the server is force-stopped.
+3. The server mutex is **not held while waiting**, so concurrent
+   `Apply*`/`Delete*`/snapshot operations are never blocked behind the
+   shutdown drain.
+
+The outcome and duration are recorded in
+`avapigw_operator_grpc_shutdown_duration_seconds{outcome="graceful|forced"}`,
+and a clean shutdown no longer logs a spurious `context canceled` error.
+
+### Gateway Registry Reaper
+
+Registered gateways that stop heartbeating (crash, network partition —
+anything that skips the explicit unregister) are removed by a background
+**staleness reaper**: every 30 s (default) it drops registrations whose
+`lastSeen` is older than 3 missed heartbeat intervals. Each removal
+increments `avapigw_operator_grpc_reaped_gateways_total` and decrements the
+`avapigw_operator_grpc_active_gateways` gauge, so the gauge reflects reality
+even after ungraceful gateway exits. The reaper stops with server shutdown.
 
 ## Observability
 

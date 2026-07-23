@@ -809,10 +809,171 @@ spec:
                         description: MaxSize is the maximum number of entries.
                         minimum: 1
                         type: integer
+                      redis:
+                        description: |-
+                          Redis contains Redis connection configuration for the authorization
+                          decision cache. Only used when Type is "redis". The JSON shape matches
+                          the gateway's authorization.cache.redis configuration.
+                        properties:
+                          connectTimeout:
+                            description: ConnectTimeout is the timeout for establishing
+                              connections.
+                            pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                            type: string
+                          hashKeys:
+                            description: |-
+                              HashKeys when true, SHA256-hashes cache keys before storing in Redis.
+                              This is useful for long keys that might exceed Redis key length limits.
+                            type: boolean
+                          keyPrefix:
+                            description: KeyPrefix is a prefix added to all cache
+                              keys.
+                            type: string
+                          passwordVaultPath:
+                            description: |-
+                              PasswordVaultPath is the Vault path for the Redis password (standalone mode).
+                              The secret should have a "password" key. Format: mount/path.
+                            type: string
+                          poolSize:
+                            description: PoolSize is the maximum number of connections
+                              in the pool.
+                            minimum: 1
+                            type: integer
+                          readTimeout:
+                            description: ReadTimeout is the timeout for read operations.
+                            pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                            type: string
+                          retry:
+                            description: Retry contains retry configuration for the
+                              initial connection.
+                            properties:
+                              initialBackoff:
+                                description: |-
+                                  InitialBackoff is the initial backoff duration between retries.
+                                  Default is 100ms.
+                                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                                type: string
+                              maxBackoff:
+                                description: |-
+                                  MaxBackoff is the maximum backoff duration between retries.
+                                  Default is 30s.
+                                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                                type: string
+                              maxRetries:
+                                description: |-
+                                  MaxRetries is the maximum number of retry attempts for the initial
+                                  connection. Default is 3.
+                                minimum: 0
+                                type: integer
+                            type: object
+                          sentinel:
+                            description: |-
+                              Sentinel configures Redis Sentinel connection for high availability.
+                              Mutually exclusive with standalone Redis URL.
+                            properties:
+                              db:
+                                description: DB is the Redis database number.
+                                maximum: 15
+                                minimum: 0
+                                type: integer
+                              masterName:
+                                description: MasterName is the name of the Redis master
+                                  monitored by Sentinel.
+                                minLength: 1
+                                type: string
+                              password:
+                                description: Password is the password for the Redis
+                                  master.
+                                type: string
+                              passwordVaultPath:
+                                description: |-
+                                  PasswordVaultPath is the Vault path for the Redis master password.
+                                  The secret should have a "password" key. Format: mount/path.
+                                type: string
+                              sentinelAddrs:
+                                description: SentinelAddrs is the list of Sentinel
+                                  addresses (host:port).
+                                items:
+                                  type: string
+                                minItems: 1
+                                type: array
+                              sentinelPassword:
+                                description: SentinelPassword is the password for
+                                  Sentinel authentication.
+                                type: string
+                              sentinelPasswordVaultPath:
+                                description: |-
+                                  SentinelPasswordVaultPath is the Vault path for the Sentinel password.
+                                  The secret should have a "password" key. Format: mount/path.
+                                type: string
+                            required:
+                            - masterName
+                            - sentinelAddrs
+                            type: object
+                          tls:
+                            description: TLS contains TLS configuration for the Redis
+                              connection.
+                            properties:
+                              caFile:
+                                description: CAFile is the path to the CA certificate
+                                  file for server verification.
+                                type: string
+                              certFile:
+                                description: CertFile is the path to the client certificate
+                                  file (mTLS).
+                                type: string
+                              enabled:
+                                default: false
+                                description: Enabled enables TLS for the Redis connection.
+                                type: boolean
+                              insecureSkipVerify:
+                                description: InsecureSkipVerify skips server certificate
+                                  verification (dev only).
+                                type: boolean
+                              keyFile:
+                                description: KeyFile is the path to the client private
+                                  key file (mTLS).
+                                type: string
+                              maxVersion:
+                                description: MaxVersion is the maximum TLS version.
+                                enum:
+                                - TLS12
+                                - TLS13
+                                type: string
+                              minVersion:
+                                description: MinVersion is the minimum TLS version
+                                  (TLS12, TLS13).
+                                enum:
+                                - TLS12
+                                - TLS13
+                                type: string
+                            required:
+                            - enabled
+                            type: object
+                          ttlJitter:
+                            description: |-
+                              TTLJitter is the maximum percentage of jitter to add to TTL values (0.0 to 1.0).
+                              For example, 0.1 means ±10% jitter. Default is 0 (no jitter).
+                            type: number
+                          url:
+                            description: |-
+                              URL is the Redis connection URL for standalone mode.
+                              Format: redis://[user:password@]host:port[/db]
+                              Mutually exclusive with Sentinel configuration.
+                            type: string
+                          writeTimeout:
+                            description: WriteTimeout is the timeout for write operations.
+                            pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                            type: string
+                        type: object
                       sentinel:
                         description: |-
                           Sentinel configures Redis Sentinel connection for authorization cache.
-                          Only used when Type is "redis". Mutually exclusive with standalone Redis URL.
+                          Only used when Type is "redis".
+
+                          Deprecated: use Redis.Sentinel instead. The gateway consumes the
+                          authorization cache connection from the "redis" key; the operator
+                          converts this legacy field into redis.sentinel when redis is not set.
                         properties:
                           db:
                             description: DB is the Redis database number.
@@ -990,12 +1151,63 @@ spec:
                     default: false
                     description: Enabled enables caching.
                     type: boolean
+                  honorCacheControl:
+                    description: HonorCacheControl respects Cache-Control headers
+                      when caching.
+                    type: boolean
                   keyComponents:
-                    description: KeyComponents are the components used to generate
-                      the cache key.
+                    description: |-
+                      KeyComponents are the components used to generate the cache key.
+
+                      Deprecated: the gateway has no corresponding option and ignores this
+                      field. Use KeyConfig instead; setting KeyComponents produces an
+                      admission warning.
                     items:
                       type: string
                     type: array
+                  keyConfig:
+                    description: KeyConfig configures cache key generation.
+                    properties:
+                      includeBodyHash:
+                        description: IncludeBodyHash includes a hash of the request
+                          body in the cache key.
+                        type: boolean
+                      includeHeaders:
+                        description: IncludeHeaders specifies headers to include in
+                          the cache key.
+                        items:
+                          type: string
+                        type: array
+                      includeMethod:
+                        description: IncludeMethod includes the HTTP method in the
+                          cache key.
+                        type: boolean
+                      includePath:
+                        description: IncludePath includes the request path in the
+                          cache key.
+                        type: boolean
+                      includeQueryParams:
+                        description: IncludeQueryParams specifies query parameters
+                          to include in the cache key.
+                        items:
+                          type: string
+                        type: array
+                      keyTemplate:
+                        description: |-
+                          KeyTemplate is a custom template for generating cache keys.
+                          Supports placeholders: {{.Method}}, {{.Path}}, {{.Query.param}}, {{.Header.name}}
+                        type: string
+                    type: object
+                  maxEntries:
+                    description: MaxEntries is the maximum number of entries for the
+                      memory cache.
+                    minimum: 1
+                    type: integer
+                  negativeCacheTTL:
+                    description: NegativeCacheTTL is the time-to-live for caching
+                      error responses.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
                   redis:
                     description: |-
                       Redis contains Redis-specific cache configuration.
@@ -1093,6 +1305,46 @@ spec:
                         required:
                         - masterName
                         - sentinelAddrs
+                        type: object
+                      tls:
+                        description: TLS contains TLS configuration for the Redis
+                          connection.
+                        properties:
+                          caFile:
+                            description: CAFile is the path to the CA certificate
+                              file for server verification.
+                            type: string
+                          certFile:
+                            description: CertFile is the path to the client certificate
+                              file (mTLS).
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables TLS for the Redis connection.
+                            type: boolean
+                          insecureSkipVerify:
+                            description: InsecureSkipVerify skips server certificate
+                              verification (dev only).
+                            type: boolean
+                          keyFile:
+                            description: KeyFile is the path to the client private
+                              key file (mTLS).
+                            type: string
+                          maxVersion:
+                            description: MaxVersion is the maximum TLS version.
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                          minVersion:
+                            description: MinVersion is the minimum TLS version (TLS12,
+                              TLS13).
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                        required:
+                        - enabled
                         type: object
                       ttlJitter:
                         description: |-
@@ -1522,6 +1774,46 @@ spec:
                         - masterName
                         - sentinelAddrs
                         type: object
+                      tls:
+                        description: TLS contains TLS configuration for the Redis
+                          connection.
+                        properties:
+                          caFile:
+                            description: CAFile is the path to the CA certificate
+                              file for server verification.
+                            type: string
+                          certFile:
+                            description: CertFile is the path to the client certificate
+                              file (mTLS).
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled enables TLS for the Redis connection.
+                            type: boolean
+                          insecureSkipVerify:
+                            description: InsecureSkipVerify skips server certificate
+                              verification (dev only).
+                            type: boolean
+                          keyFile:
+                            description: KeyFile is the path to the client private
+                              key file (mTLS).
+                            type: string
+                          maxVersion:
+                            description: MaxVersion is the maximum TLS version.
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                          minVersion:
+                            description: MinVersion is the minimum TLS version (TLS12,
+                              TLS13).
+                            enum:
+                            - TLS12
+                            - TLS13
+                            type: string
+                        required:
+                        - enabled
+                        type: object
                       url:
                         description: |-
                           URL is the Redis connection URL for standalone mode.
@@ -1635,6 +1927,28 @@ spec:
               security:
                 description: Security configures security headers for this gRPC route.
                 properties:
+                  csp:
+                    description: CSP configures Content Security Policy.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables CSP.
+                        type: boolean
+                      policy:
+                        description: Policy is the full CSP policy string.
+                        type: string
+                      reportOnly:
+                        description: |-
+                          ReportOnly sets the Content-Security-Policy-Report-Only header instead
+                          of Content-Security-Policy.
+                        type: boolean
+                      reportUri:
+                        description: ReportURI is the URI to report CSP violations
+                          to.
+                        type: string
+                    required:
+                    - enabled
+                    type: object
                   enabled:
                     default: false
                     description: Enabled enables security features.
@@ -1643,16 +1957,30 @@ spec:
                     description: Headers configures security headers.
                     properties:
                       contentSecurityPolicy:
-                        description: ContentSecurityPolicy sets the Content-Security-Policy
-                          header.
+                        description: |-
+                          ContentSecurityPolicy sets the Content-Security-Policy header.
+
+                          Deprecated: use SecurityConfig.CSP instead. The gateway consumes CSP
+                          from the structured security.csp block; the operator converts this
+                          legacy field into security.csp when csp is not set.
                         type: string
+                      customHeaders:
+                        additionalProperties:
+                          type: string
+                        description: CustomHeaders sets additional custom security
+                          headers.
+                        type: object
                       enabled:
                         default: false
                         description: Enabled enables security headers.
                         type: boolean
                       strictTransportSecurity:
-                        description: StrictTransportSecurity sets the Strict-Transport-Security
-                          header.
+                        description: |-
+                          StrictTransportSecurity sets the Strict-Transport-Security header.
+
+                          Deprecated: use SecurityConfig.HSTS instead. The gateway consumes HSTS
+                          from the structured security.hsts block; the operator parses this
+                          legacy raw header value into security.hsts when hsts is not set.
                         type: string
                       xContentTypeOptions:
                         description: XContentTypeOptions sets the X-Content-Type-Options
@@ -1667,6 +1995,30 @@ spec:
                     required:
                     - enabled
                     type: object
+                  hsts:
+                    description: HSTS configures HTTP Strict Transport Security.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled enables HSTS.
+                        type: boolean
+                      includeSubDomains:
+                        description: IncludeSubDomains adds the includeSubDomains
+                          directive.
+                        type: boolean
+                      maxAge:
+                        description: MaxAge is the max-age directive value in seconds.
+                        minimum: 0
+                        type: integer
+                      preload:
+                        description: Preload adds the preload directive.
+                        type: boolean
+                    required:
+                    - enabled
+                    type: object
+                  referrerPolicy:
+                    description: ReferrerPolicy sets the Referrer-Policy header.
+                    type: string
                 required:
                 - enabled
                 type: object

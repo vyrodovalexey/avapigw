@@ -206,6 +206,29 @@ func (cc *CacheConfig) IsEmpty() bool {
 	return !cc.Enabled
 }
 
+// Clone returns a deep copy of the RedisCacheConfig (nil-safe). Consumers
+// that resolve Vault-referenced passwords MUST resolve into a clone so
+// secrets never leak back into the shared configuration tree
+// (copy-on-resolve pattern, see internal/redisclient).
+func (rcc *RedisCacheConfig) Clone() *RedisCacheConfig {
+	if rcc == nil {
+		return nil
+	}
+	clone := *rcc
+	clone.Sentinel = rcc.Sentinel.Clone()
+	return &clone
+}
+
+// Clone returns a deep copy of the RedisSentinelConfig (nil-safe).
+func (rsc *RedisSentinelConfig) Clone() *RedisSentinelConfig {
+	if rsc == nil {
+		return nil
+	}
+	clone := *rsc
+	clone.SentinelAddrs = append([]string(nil), rsc.SentinelAddrs...)
+	return &clone
+}
+
 // IsEmpty returns true if the RedisCacheConfig has no configuration.
 // A RedisCacheConfig is considered non-empty if either a standalone URL
 // or a Sentinel master name is configured.

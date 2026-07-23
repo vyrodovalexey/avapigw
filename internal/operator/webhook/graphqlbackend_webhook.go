@@ -263,7 +263,17 @@ func (v *GraphQLBackendValidator) validate(graphqlBackend *avapigwv1alpha1.Graph
 
 	// Distributed rate limiting is not enforced in the backend data path.
 	warnings = append(warnings, warnRateLimitSentinelSecrets(spec.RateLimit)...)
-	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, "GraphQLBackend")...)
+	warnings = append(warnings, warnRateLimitRedisStoreUnapplied(spec.RateLimit, kindGraphQLBackend)...)
+
+	// Transparency warnings: fields with no counterpart on the gateway's
+	// GraphQL backend configuration type are accepted but not applied.
+	warnings = append(warnings, warnBackendRateLimitUnapplied(spec.RateLimit, kindGraphQLBackend)...)
+	if spec.MaxSessions != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.maxSessions", kindGraphQLBackend)...)
+	}
+	if spec.Encoding != nil {
+		warnings = append(warnings, warnFieldNotApplied("spec.encoding", kindGraphQLBackend)...)
+	}
 
 	if len(errs) > 0 {
 		return warnings, fmt.Errorf("validation failed: %s", strings.Join(errs, "; "))

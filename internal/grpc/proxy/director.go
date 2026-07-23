@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -43,6 +44,10 @@ type RouterDirector struct {
 	authCache       map[string]auth.GRPCAuthenticator
 	authCacheMu     sync.RWMutex
 	vaultClient     vault.Client
+	// resolveWarned deduplicates resolveTarget WARN logs (ambiguous
+	// endpoint match, feature-less plain dial) so each condition is
+	// reported once per route+destination instead of per request.
+	resolveWarned sync.Map
 }
 
 // DirectorOption is a functional option for configuring the director.
@@ -139,7 +144,7 @@ func (d *RouterDirector) Direct(ctx context.Context, fullMethod string) (context
 
 	// Resolve target address: use backend registry if available, otherwise use
 	// the route destination host and port directly.
-	target, backendHost, serviceBackend, resolveErr := d.resolveTarget(dest)
+	target, backendHost, serviceBackend, resolveErr := d.resolveTarget(result.Route.Name, dest)
 	if resolveErr != nil {
 		d.logger.Warn("no available hosts for backend",
 			observability.String("backend", dest.Destination.Host),
@@ -307,16 +312,29 @@ func (d *RouterDirector) getOrCreateAuthenticator(
 }
 
 // resolveTarget resolves the target address for a destination.
-// When a backend registry is available and the destination host matches a registered
-// backend, the backend's load balancer is used to select an actual host. Otherwise,
-// the destination host and port are used directly.
+// When a backend registry is available, the destination is resolved to a
+// registered backend first by resource name and then by declared host
+// endpoint (address:port), so literal-host destinations still attach the
+// backend's features (TLS/mTLS, auth, pools, load balancing). When a
+// backend is found its load balancer selects the actual host; otherwise the
+// destination host and port are dialed directly (backward compatible).
 func (d *RouterDirector) resolveTarget(
-	dest *config.RouteDestination,
+	routeName string, dest *config.RouteDestination,
 ) (target string, host *backend.Host, sb *backend.ServiceBackend, err error) {
-	sb = d.getServiceBackend(dest.Destination.Host)
+	sb = d.resolveServiceBackend(routeName, dest)
 	if sb == nil {
-		// No backend found — use destination host:port directly (backward compatible)
-		return fmt.Sprintf("%s:%d", dest.Destination.Host, dest.Destination.Port), nil, nil, nil
+		// No backend found — use destination host:port directly
+		// (backward compatible plain dial without backend features).
+		target = net.JoinHostPort(dest.Destination.Host, strconv.Itoa(dest.Destination.Port))
+		if d.backendRegistry != nil {
+			// A registry is configured but nothing matched: the operator
+			// likely expected backend features on this destination, so
+			// surface the feature-less plain dial once per route+target.
+			d.warnOncePerDestination("plain_dial", routeName, target,
+				"no backend matches gRPC route destination; dialing directly without "+
+					"backend features (TLS/mTLS, auth, load balancing)")
+		}
+		return target, nil, nil, nil
 	}
 
 	host, err = sb.GetAvailableHost()
@@ -324,11 +342,26 @@ func (d *RouterDirector) resolveTarget(
 		return "", nil, nil, err
 	}
 
-	target = host.Address + ":" + strconv.Itoa(host.Port)
+	target = net.JoinHostPort(host.Address, strconv.Itoa(host.Port))
 	return target, host, sb, nil
 }
 
-// getServiceBackend retrieves the service backend from the registry.
+// resolveServiceBackend resolves the destination to a registered backend:
+// by resource name first (existing behavior), then by declared host
+// endpoint. Address-based matches are logged at debug; when several
+// backends declare the same endpoint the registry picks the
+// lexicographically smallest name and a WARN is emitted once per
+// route+destination.
+func (d *RouterDirector) resolveServiceBackend(
+	routeName string, dest *config.RouteDestination,
+) *backend.ServiceBackend {
+	if sb := d.getServiceBackend(dest.Destination.Host); sb != nil {
+		return sb
+	}
+	return d.getServiceBackendByAddress(routeName, dest.Destination.Host, dest.Destination.Port)
+}
+
+// getServiceBackend retrieves the service backend from the registry by name.
 func (d *RouterDirector) getServiceBackend(host string) *backend.ServiceBackend {
 	if d.backendRegistry == nil {
 		return nil
@@ -339,6 +372,50 @@ func (d *RouterDirector) getServiceBackend(host string) *backend.ServiceBackend 
 	}
 	sb, _ := b.(*backend.ServiceBackend)
 	return sb
+}
+
+// getServiceBackendByAddress retrieves the service backend whose configured
+// hosts declare the destination address:port endpoint.
+func (d *RouterDirector) getServiceBackendByAddress(
+	routeName, address string, port int,
+) *backend.ServiceBackend {
+	if d.backendRegistry == nil {
+		return nil
+	}
+	b, matches, ok := d.backendRegistry.GetByHostPort(address, port)
+	if !ok {
+		return nil
+	}
+	sb, isService := b.(*backend.ServiceBackend)
+	if !isService {
+		return nil
+	}
+
+	endpoint := backend.HostPortKey(address, port)
+	if matches > 1 {
+		d.warnOncePerDestination("ambiguous_endpoint", routeName, endpoint,
+			"multiple gRPC backends declare the destination endpoint; "+
+				"deterministically selected the lexicographically smallest backend name")
+	}
+	d.logger.Debug("resolved gRPC backend by host address",
+		observability.String("route", routeName),
+		observability.String("endpoint", endpoint),
+		observability.String("backend", sb.Name()),
+	)
+	return sb
+}
+
+// warnOncePerDestination emits a WARN log once per (kind, route, endpoint)
+// tuple to keep resolveTarget noise low on the per-request hot path.
+func (d *RouterDirector) warnOncePerDestination(kind, routeName, endpoint, msg string) {
+	key := kind + "|" + routeName + "|" + endpoint
+	if _, loaded := d.resolveWarned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	d.logger.Warn(msg,
+		observability.String("route", routeName),
+		observability.String("endpoint", endpoint),
+	)
 }
 
 // selectDestination selects a destination based on weights.
