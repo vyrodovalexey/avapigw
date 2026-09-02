@@ -3,7 +3,7 @@
 [![CI](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vyrodovalexey/avapigw)](https://goreportcard.com/report/github.com/vyrodovalexey/avapigw)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/go-1.26.5-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26.7-blue.svg)](https://golang.org/dl/)
 
 A high-performance, production-ready API Gateway built with Go and gin-gonic. Designed for cloud-native environments with comprehensive traffic management, observability, and reliability features.
 
@@ -183,7 +183,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Integration Tests**: 739 tests passed (4 documented skips)
 - **E2E Tests**: 521 tests passed (18 documented skips)
 - **Quality Gates**: `go build`, `go vet`, `golangci-lint` (0 issues), and `govulncheck` (no vulnerabilities) all pass
-- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.5)
+- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.7)
 - **Lint Clean**: Zero linting issues across the entire codebase
 
 #### Performance Validation
@@ -236,7 +236,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.26.5 (for building from source)
+- Go 1.26.7 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -929,6 +929,15 @@ gateway_cache_operation_duration_seconds{backend="api-backend",operation="get"} 
 gateway_cache_errors_total{backend="api-backend",error_type="connection_failed"} 2
 ```
 
+#### Transform Metrics
+```bash
+# Request/response transform metrics (emitted per transform)
+gateway_transform_operations_total{direction="request",result="success"} 850
+gateway_transform_operations_total{direction="response",result="passthrough"} 120
+gateway_transform_operation_duration_seconds{direction="request"} 0.002
+gateway_transform_errors_total{direction="response",error_type="template"} 5
+```
+
 #### WebSocket Metrics
 ```bash
 # WebSocket connection and message metrics
@@ -1009,6 +1018,11 @@ Auth → Authz → RateLimit → Security Headers → CORS → Body Limit →
 - **Go Templates** - Request transformation using Go template engine
 - **Field Operations** - Allow/deny lists and field mappings for responses
 - **JSON Optimization** - Optimized for JSON request/response transformation
+- **Streaming-Safe Flushing** - The response recorder delegates `Flush()` to the underlying `http.Flusher` once the 10MB buffer threshold is exceeded; `Flush()` is a no-op while still buffering
+- **Hijack Awareness** - After a WebSocket/streaming `Hijack()`, the recorder tracks a `hijacked` flag so `WriteHeader`/`Write`/`Flush` and response-transform post-processing early-return (`Write` returns `http.ErrHijacked`), eliminating "response.WriteHeader on hijacked connection" noise
+- **Header De-duplication** - Recorded response headers are copied with replace-per-key semantics (`Del` then `Add`, multi-value preserved, `Content-Length` skipped where appropriate) so outer-middleware headers are never duplicated
+- **Observability** - Emits `gateway_transform_operations_total`, `gateway_transform_operation_duration_seconds`, and `gateway_transform_errors_total` on every request/response transform (see [Metrics Reference](docs/features/metrics.md#transform-metrics))
+- **Single Transformer Construction** - Request/response transformers are built once in the middleware closure instead of per-request
 
 #### Encoding Middleware (`internal/middleware/encoding.go`)
 - **Content Negotiation** - Automatic content type negotiation based on Accept header
@@ -5701,6 +5715,13 @@ The gateway exposes comprehensive metrics:
 - `gateway_external_authz_requests_total{endpoint, status}` - External authorization requests
 - `gateway_external_authz_latency_seconds{endpoint}` - External authorization latency
 
+#### Transform Metrics
+- `gateway_transform_operations_total{direction, result}` - Transform operations (`direction`=`request`|`response`, `result`=`success`|`error`|`passthrough`)
+- `gateway_transform_operation_duration_seconds{direction}` - Transform operation duration histogram
+- `gateway_transform_errors_total{direction, error_type}` - Transform errors by direction and error type
+
+These transform metrics are emitted by the response-transform middleware (`internal/middleware/transform.go`) on every request/response transform and increment live under transform traffic.
+
 ### OpenTelemetry Tracing
 
 Distributed tracing with OpenTelemetry:
@@ -5718,11 +5739,11 @@ observability:
     # for unset/loopback endpoints. See the configuration reference.
 ```
 
-> **Semantic-convention version:** The gateway tracks the OpenTelemetry SDK **v1.44.0**
-> line, whose `resource.Default()` carries semantic-convention schema **v1.41.0**. The
+> **Semantic-convention version:** The gateway tracks the OpenTelemetry SDK **v1.46.0**
+> line, whose `resource.Default()` carries semantic-convention schema **v1.43.0**. The
 > tracer initialization in `internal/observability/tracing.go` imports
-> `go.opentelemetry.io/otel/semconv/v1.41.0` so the tracer resource schema URL matches the
-> SDK default — using an older semconv import (e.g. `v1.40.0`) with the v1.44.0 SDK causes a
+> `go.opentelemetry.io/otel/semconv/v1.43.0` so the tracer resource schema URL matches the
+> SDK default — using an older semconv import (e.g. `v1.41.0`) with the v1.46.0 SDK causes a
 > fatal `conflicting Schema URL` error at gateway startup.
 
 ### Structured Logging
@@ -7220,7 +7241,7 @@ name: CI
 on: [push, pull_request]
 
 env:
-  GO_VERSION: '1.26.5'
+  GO_VERSION: '1.26.7'
   GOLANGCI_LINT_VERSION: 'v2.12.2'
 
 jobs:

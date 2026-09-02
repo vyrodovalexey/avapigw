@@ -78,13 +78,13 @@ The gateway includes **4 comprehensive Grafana dashboards**:
 
 ## OpenTelemetry Version Note
 
-The gateway tracks the OpenTelemetry SDK **v1.44.0** line for tracing and metrics
-export. The v1.44.0 SDK builds `resource.Default()` against semantic-convention schema
-**v1.41.0**, so the tracer initialization imports
-`go.opentelemetry.io/otel/semconv/v1.41.0` to keep the tracer resource schema URL aligned
-with the SDK default. Using an older semconv import (e.g. `v1.40.0`) with the v1.44.0 SDK
+The gateway tracks the OpenTelemetry SDK **v1.46.0** line for tracing and metrics
+export. The v1.46.0 SDK builds `resource.Default()` against semantic-convention schema
+**v1.43.0**, so the tracer initialization imports
+`go.opentelemetry.io/otel/semconv/v1.43.0` to keep the tracer resource schema URL aligned
+with the SDK default. Using an older semconv import (e.g. `v1.41.0`) with the v1.46.0 SDK
 triggers a fatal `conflicting Schema URL` error during tracer initialization. With the
-aligned v1.41.0 import, OTLP export to the OpenTelemetry Collector / Tempo works as
+aligned v1.43.0 import, OTLP export to the OpenTelemetry Collector / Tempo works as
 expected.
 
 ## OTLP Exporter Transport Security
@@ -391,7 +391,7 @@ This pattern allows:
 
 ## Known Issues / Follow-ups
 
-These are **pre-existing** observability findings (not Go 1.26.5 regressions) tracked as follow-ups:
+These are **pre-existing** observability findings (not Go 1.26.7 regressions) tracked as follow-ups:
 
 - **HTTP per-route rate limiting** — RESOLVED: route-level `rateLimit` on HTTP
   routes is now enforced by the per-route middleware chain (memory or redis

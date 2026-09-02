@@ -656,38 +656,26 @@ Metrics for health check operations and backend monitoring.
 
 ## Transform Metrics
 
-Metrics for HTTP request/response transformation operations.
+Metrics for HTTP request/response transformation operations, emitted by the transform
+middleware (`internal/middleware/transform.go`) on every request/response transform.
 
-### gateway_transform_requests_total
+### gateway_transform_operations_total
 - **Type:** Counter
-- **Labels:** `route`, `type`, `status`
-- **Description:** Total number of transformation operations (request/response)
-- **Example:** `gateway_transform_requests_total{route="api-v1",type="request",status="success"} 850`
+- **Labels:** `direction`, `result`
+- **Description:** Total number of transform operations. `direction` is `request` or `response`; `result` is `success`, `error`, or `passthrough`.
+- **Example:** `gateway_transform_operations_total{direction="request",result="success"} 850`
 
-### gateway_transform_duration_seconds
+### gateway_transform_operation_duration_seconds
 - **Type:** Histogram
-- **Labels:** `route`, `type`
-- **Description:** Duration of transformation operations
-- **Example:** `gateway_transform_duration_seconds{route="api-v1",type="request"} 0.002`
-
-### gateway_transform_body_size_bytes
-- **Type:** Histogram
-- **Labels:** `route`, `type`, `direction`
-- **Description:** Size of request/response bodies processed by transform middleware
-- **Buckets:** Exponential buckets for body size distribution
-- **Example:** `gateway_transform_body_size_bytes{route="api-v1",type="request",direction="input"} 1024`
+- **Labels:** `direction`
+- **Description:** Duration of transform operations in seconds.
+- **Example:** `gateway_transform_operation_duration_seconds{direction="request"} 0.002`
 
 ### gateway_transform_errors_total
 - **Type:** Counter
-- **Labels:** `route`, `type`, `error_type`
-- **Description:** Total number of transformation errors
-- **Example:** `gateway_transform_errors_total{route="api-v1",type="request",error_type="template_error"} 5`
-
-### gateway_transform_body_limit_exceeded_total
-- **Type:** Counter
-- **Labels:** `route`, `type`
-- **Description:** Total number of requests exceeding 10MB transform body limit
-- **Example:** `gateway_transform_body_limit_exceeded_total{route="api-v1",type="request"} 2`
+- **Labels:** `direction`, `error_type`
+- **Description:** Total number of transform errors.
+- **Example:** `gateway_transform_errors_total{direction="request",error_type="template"} 5`
 
 ## Encoding Metrics
 
