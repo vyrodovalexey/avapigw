@@ -76,13 +76,16 @@ for f in sorted(glob.glob(os.path.join(od, "*.json"))):
         continue
     if "rps" not in d: continue
     def pct(p):
-        for e in d.get("latencyDistribution", []):
+        # latencyDistribution may be null (JSON null) for scenarios with no
+        # successful latency samples (e.g. the aggregate probe whose responses
+        # fail client-side unmarshal) -> guard against None, not just missing.
+        for e in (d.get("latencyDistribution") or []):
             if e.get("percentage") == p: return round(e["latency"]/1e6, 2)
         return None
     out[name] = {
         "count": d.get("count"),
-        "rps": round(d.get("rps", 0)),
-        "avg_ms": round(d.get("average", 0)/1e6, 2),
+        "rps": round(d.get("rps") or 0),
+        "avg_ms": round((d.get("average") or 0)/1e6, 2),
         "p50": pct(50), "p95": pct(95), "p99": pct(99),
         "status": d.get("statusCodeDistribution", {}),
     }

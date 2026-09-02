@@ -3,6 +3,7 @@ package transform
 
 import (
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -104,4 +105,10 @@ func (m *TransformMetrics) RecordOperation(direction, result string) {
 // RecordError records a transform error.
 func (m *TransformMetrics) RecordError(direction, errorType string) {
 	m.errorsTotal.WithLabelValues(direction, errorType).Inc()
+}
+
+// RecordDuration records the duration of a transform operation for the given
+// direction.
+func (m *TransformMetrics) RecordDuration(direction string, d time.Duration) {
+	m.operationDuration.WithLabelValues(direction).Observe(d.Seconds())
 }

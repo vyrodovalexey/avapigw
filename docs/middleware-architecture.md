@@ -159,6 +159,10 @@ routes:
 - **Template Engine**: Go template engine for request transformation
 - **Field Operations**: Allow/deny lists and field mappings for responses
 - **JSON Optimization**: Optimized for JSON request/response transformation
+- **Streaming-Safe Flushing**: The response recorder delegates `Flush()` to the underlying `http.Flusher` once the 10MB buffer threshold is exceeded (streaming responses keep flush semantics); `Flush()` is a no-op while still buffering
+- **Hijack Awareness**: After a WebSocket/streaming `Hijack()`, the recorder tracks a `hijacked` flag so `WriteHeader`/`Write`/`Flush` and the response-transform post-processing early-return (`Write` returns `http.ErrHijacked`), eliminating "response.WriteHeader on hijacked connection" noise
+- **Header De-duplication**: Recorded response headers are copied with replace-per-key semantics (`Del` then `Add`, multi-value preserved, `Content-Length` skipped where appropriate) so outer-middleware headers are never duplicated
+- **Single Transformer Construction**: Request/response transformers are constructed once in the middleware closure instead of per-request
 
 **Configuration**:
 ```yaml
@@ -181,10 +185,11 @@ routes:
           created_at: "createdAt"
 ```
 
-**Metrics**:
-- `gateway_transform_requests_total{route,type,status}`
-- `gateway_transform_duration_seconds{route,type}`
-- `gateway_transform_body_limit_exceeded_total{route,type}`
+**Metrics** (emitted on every request/response transform via the pre-existing
+Prometheus singleton in `internal/transform/metrics.go`):
+- `gateway_transform_operations_total{direction,result}` — `direction`=`request`|`response`, `result`=`success`|`error`|`passthrough`
+- `gateway_transform_operation_duration_seconds{direction}` — operation duration histogram
+- `gateway_transform_errors_total{direction,error_type}` — errors by direction and error type
 
 ### 3. Encoding Middleware
 
@@ -345,7 +350,7 @@ The middleware architecture implements graceful degradation:
 All middleware components expose error metrics:
 
 - `gateway_cache_errors_total{route,error_type}`
-- `gateway_transform_errors_total{route,type,error_type}`
+- `gateway_transform_errors_total{direction,error_type}`
 - `gateway_encoding_errors_total{route,error_type}`
 - `gateway_middleware_auth_requests_total{provider,status="failed"}`
 

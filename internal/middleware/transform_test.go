@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -138,6 +139,52 @@ func TestTransformFromConfig_ResponseTransform_DenyFields(t *testing.T) {
 	assert.Contains(t, result, "public_data")
 	assert.NotContains(t, result, "internal_id")
 	assert.NotContains(t, result, "debug_info")
+}
+
+// TestTransformFromConfig_ResponseTransform_ContentLength guards against a
+// regression where the transformed (shorter) response body was written but the
+// backend's original Content-Length header was forwarded verbatim, causing
+// clients to hang / see "unexpected EOF". The Content-Length header must always
+// match the transformed body length.
+func TestTransformFromConfig_ResponseTransform_ContentLength(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.TransformConfig{
+		Response: &config.ResponseTransformConfig{
+			DenyFields: []string{"data"},
+		},
+	}
+	logger := observability.NopLogger()
+
+	// Backend sets a large Content-Length matching its full body; the
+	// transform removes the big "data" field, shrinking the body.
+	largePayload := map[string]interface{}{
+		"success": true,
+		"data":    strings.Repeat("x", 4096),
+	}
+	backend := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		b, _ := json.Marshal(largePayload)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+	})
+
+	handler := TransformFromConfig(cfg, logger)(backend)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	body := rec.Body.Bytes()
+	assert.NotContains(t, string(body), `"data"`, "transform must deny the data field")
+
+	cl := rec.Header().Get("Content-Length")
+	require.NotEmpty(t, cl, "Content-Length must be present")
+	assert.Equal(t, strconv.Itoa(len(body)), cl,
+		"Content-Length header must match the transformed body length")
 }
 
 func TestTransformFromConfig_Passthrough(t *testing.T) {
