@@ -124,8 +124,12 @@ spec:
     # auth (secret/backend-auth/basic) toward the basic-auth backend.
     - name: pt-validated-basic
       match:
+        # Aligned with run-http-group.sh (hscn basic /api/v1/validated/basic/items):
+        # the previous prefix /api/v1/validated/items did not match the scenario
+        # path so the basic-auth scenario fell through to catch-all and 404'd
+        # instead of exercising the gateway->backend Basic-auth injection.
         - uri:
-            prefix: /api/v1/validated/items
+            prefix: /api/v1/validated/basic/items
           methods: [GET, POST]
       route:
         - destination:
@@ -416,7 +420,7 @@ spec:
         enabled: true
         jwt:
           enabled: true
-          issuer: http://127.0.0.1:8090/realms/gateway-test
+          issuer: http://localhost:8090/realms/gateway-test
           jwksUrl: http://keycloak_web:8090/realms/gateway-test/protocol/openid-connect/certs
           audience:
             - account
@@ -830,8 +834,119 @@ spec:
         algorithm: roundRobin
 
   # ===========================================================================
+  # MCP routes/backends (PT-07 mcp :8080/mcp, PT-08 tls mcp :8443/mcp)
+  # ===========================================================================
+  # The /mcp dispatcher is wired at boot by the global spec.mcp block below.
+  # These routes carry OIDC (Keycloak gateway-test JWT validated at the gateway)
+  # and a Redis-Sentinel-backed rate limit so the gateway-side MCP path
+  # (routing, mirrored-header/_meta construction, OIDC auth, sentinel rate
+  # limit, avapigw_mcp_* metric emission) is fully exercised and measurable.
+  #
+  # KNOWN MOCK LIMITATION: the Phase-1 MCP mock accepts only BARE _meta keys
+  # (protocolVersion/clientCapabilities) while the spec-correct gateway forwards
+  # VENDORED keys (io.modelcontextprotocol/*), so the terminal tools/call
+  # handshake returns 502 upstream. This is a mock limitation, NOT a gateway
+  # bug: the gateway overhead + auth + rate limit + metrics are all measured.
+  mcpRoutes:
+    # OIDC + Redis-Sentinel rate limit on the whole /mcp path.
+    - name: pt-mcp-oidc-ratelimit
+      match:
+        - path:
+            prefix: /mcp
+      # Weighted single-upstream selection (canary / A-B) across BOTH mocks so
+      # the gateway exercises avapigw_mcp_upstream_selected_total{route,upstream}
+      # under load. 70/30 split => both upstreams selected, verifiable split.
+      # Mutually exclusive with `upstreams`.
+      weightedUpstreams:
+        - name: mcp-backend-1
+          weight: 70
+        - name: mcp-backend-2
+          weight: 30
+      timeout: 30s
+      headers:
+        request:
+          set:
+            X-Gateway: avapigw
+        response:
+          add:
+            X-Processed-By: avapigw-mcp
+      authentication:
+        enabled: true
+        jwt:
+          enabled: true
+          issuer: http://localhost:8090/realms/gateway-test
+          jwksUrl: http://keycloak_web:8090/realms/gateway-test/protocol/openid-connect/certs
+          audience:
+            - account
+      rateLimit:
+        enabled: true
+        requestsPerSecond: 100
+        burst: 200
+        perClient: false
+        store: redis
+        redis:
+          keyPrefix: "pt:rl:mcp:"
+          poolSize: 20
+          connectTimeout: 2s
+          readTimeout: 1s
+          writeTimeout: 1s
+          sentinel:
+            masterName: mymaster
+            sentinelAddrs:
+              - redis-sentinel-1:26379
+              - redis-sentinel-2:26379
+              - redis-sentinel-3:26379
+            password: password
+
+  mcpBackends:
+    - name: mcp-backend-1
+      transport: streamable-http
+      path: /mcp
+      namespacePrefix: m1
+      trustLevel: untrusted
+      hosts:
+        - address: mcp_mock_1
+          port: 8080
+          weight: 1
+      loadBalancer:
+        algorithm: roundRobin
+      healthCheck:
+        # MCP mock serves /healthz on its observability port (container :9090).
+        path: /healthz
+        port: 9090
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+
+    - name: mcp-backend-2
+      transport: streamable-http
+      path: /mcp
+      namespacePrefix: m2
+      trustLevel: untrusted
+      hosts:
+        - address: mcp_mock_2
+          port: 8080
+          weight: 1
+      loadBalancer:
+        algorithm: roundRobin
+      healthCheck:
+        path: /healthz
+        port: 9090
+        interval: 10s
+        timeout: 5s
+        healthyThreshold: 2
+        unhealthyThreshold: 3
+
+  # ===========================================================================
   # Globals
   # ===========================================================================
+  # MCP hub global block — wires the /mcp dispatcher at boot (mcpEnabled is
+  # evaluated once at startup; without spec.mcp the /mcp routes have no entry
+  # point and /mcp returns 404).
+  mcp:
+    path: /mcp
+    namespaceSep: "."
   cors:
     allowOrigins: ["*"]
     allowMethods: [GET, POST, PUT, DELETE, PATCH, OPTIONS]
@@ -856,7 +971,16 @@ spec:
       path: /metrics
       port: 9090
     tracing:
-      enabled: false
+      # OTEL spans -> compose Tempo OTLP gRPC receiver (tempo:4317 on the
+      # avapigw-test_default network). Plaintext exporter (otlpInsecure) since
+      # the compose Tempo receiver is non-TLS. Sampling kept modest so the
+      # 3-min steady-state runs still emit a healthy, verifiable span volume to
+      # Tempo for the HTTP and MCP scenarios without swamping the exporter.
+      enabled: true
+      samplingRate: 0.05
+      otlpEndpoint: tempo:4317
+      otlpInsecure: true
+      serviceName: avapigw-pt-local
     logging:
       level: warn
       format: json

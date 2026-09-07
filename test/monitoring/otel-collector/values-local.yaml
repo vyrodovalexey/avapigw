@@ -1,0 +1,15 @@
+# Local Docker Desktop Kubernetes override for the OpenTelemetry Collector.
+#
+# Export targets are the docker-compose test ENV services running on the HOST,
+# reachable from in-cluster pods via host.docker.internal:
+#   * metrics -> VictoriaMetrics remote-write at :8428/api/v1/write
+#   * traces  -> Tempo OTLP gRPC at :4317 (insecure/plaintext)
+exporters:
+  prometheusremotewrite:
+    endpoint: "http://host.docker.internal:8428/api/v1/write"
+  otlp/tempo:
+    endpoint: "host.docker.internal:4317"
+    tls:
+      insecure: true
+  debug:
+    verbosity: normal

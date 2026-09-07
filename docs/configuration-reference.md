@@ -2130,9 +2130,9 @@ spec:
 
 ### Dependency Upgrades
 
-The project targets the **Go 1.26.7** toolchain (see `go.mod`, the Docker images, and CI). The
+The project targets the **Go 1.26.8** toolchain (see `go.mod`, the Docker images, and CI). The
 following dependencies have been upgraded for improved performance, security, and compatibility
-with Go 1.26.7:
+with Go 1.26.8:
 
 **Go Dependencies:**
 - `github.com/redis/go-redis/v9` upgraded to v9.21.0 (from v9.20.1) - Enhanced Redis client with improved connection pooling and Sentinel support

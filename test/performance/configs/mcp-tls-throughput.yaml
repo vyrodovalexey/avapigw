@@ -1,0 +1,74 @@
+# Yandex Tank Configuration: MCP Hub tools/call Throughput Test (HTTPS / TLS)
+# Purpose: Measure throughput and latency for MCP tools/call requests through
+#          the gateway MCP hub HTTPS endpoint (/mcp) with OIDC bearer auth.
+#          The gateway terminates TLS; the upstream MCP mock stays plain HTTP.
+# Target:  Gateway HTTPS MCP path POST /mcp -> mcp_mock upstream (echo tool)
+# Duration: 5 minutes total (1m warmup + 3m sustain + 1m cooldown)
+#
+# Same ammo as mcp-throughput.yaml (uripost). ssl is enabled so the tank drives
+# the gateway's HTTPS listener. Substitute the ${JWT_TOKEN} placeholder with a
+# valid Keycloak access token before running.
+
+phantom:
+  package: yandextank.plugins.Phantom
+  enabled: true
+  address: host.docker.internal:8443
+  load_profile:
+    load_type: rps
+    # Warmup: 1 min ramp from 50 to 1000 RPS
+    # Sustain: 3 min at 1000 RPS (main measurement phase)
+    # Cooldown: 1 min ramp down
+    schedule: line(50, 1000, 1m) const(1000, 3m) line(1000, 50, 1m)
+
+  ammofile: /var/loadtest/ammo/mcp-toolscall.txt
+  ammo_type: uripost
+
+  # Connection settings
+  connection_test: true
+  writelog: "0"
+
+  # TLS settings - enable SSL for HTTPS (gateway terminates TLS).
+  ssl: true
+
+  timeout: 15s  # Slightly higher timeout for the TLS handshake
+
+  # Instance settings
+  instances: 1000
+  threads: 8
+
+  # HTTP settings. The MCP mirrored headers and the OIDC bearer are global.
+  header_http: "1.1"
+  headers:
+    - "[Host: localhost]"
+    - "[User-Agent: YandexTank/Perftest-MCP-TLS]"
+    - "[Accept: application/json]"
+    - "[Content-Type: application/json]"
+    - "[Connection: keep-alive]"
+    - "[X-Perf-Test: mcp-tls-throughput]"
+    - "[Mcp-Method: tools/call]"
+    - "[Mcp-Name: m1.echo]"
+    - "[MCP-Protocol-Version: 2026-07-28]"
+    - "[Authorization: Bearer ${JWT_TOKEN}]"
+
+console:
+  package: yandextank.plugins.Console
+  enabled: true
+  short_only: false
+
+telegraf:
+  package: yandextank.plugins.Telegraf
+  enabled: false
+
+autostop:
+  package: yandextank.plugins.Autostop
+  enabled: true
+  autostop:
+    # Stop if HTTP 5xx errors exceed 5%
+    - http(5xx,5%,10)
+    # Stop if 401/403 auth failures exceed 5% (bad/expired token)
+    - http(401,5%,30s)
+    - http(403,5%,30s)
+    # Stop if 50% of requests exceed 5000ms for 30 seconds (TLS overhead)
+    - time(5000,50%,30s)
+    # Stop if total network errors exceed 5% for 30 seconds
+    - http(net,5%,30s)

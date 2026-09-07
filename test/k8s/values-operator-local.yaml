@@ -1,0 +1,77 @@
+# =============================================================================
+# values-operator-local.yaml - Phase K local operator-mode deployment override
+# =============================================================================
+# Thin override applied ON TOP of helm/avapigw/values-local.yaml. It pins the
+# locally-built mcp-test images and confirms the Vault Kubernetes-auth roles
+# that test/docker-compose/scripts/setup-vault-k8s.sh creates.
+#
+# Deploy:
+#   kubectl --context=docker-desktop apply -f helm/avapigw/crds/
+#   helm --kube-context docker-desktop upgrade --install avapigw helm/avapigw \
+#     -n avapigw-test \
+#     -f helm/avapigw/values-local.yaml \
+#     -f test/k8s/values-operator-local.yaml
+#
+# Route/backend options are NOT set here — they are all driven through the
+# operator via CRDs (test/k8s/crds-operator-local.yaml).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Gateway image: locally-built avapigw-gateway:mcp-test (in the docker-desktop
+# image store). IfNotPresent finds it without a registry pull.
+# ---------------------------------------------------------------------------
+image:
+  repository: avapigw-gateway
+  tag: "mcp-test"
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Gateway operator-mode: receive ALL config from the operator over gRPC.
+# The operator serves a Vault-PKI-issued cert whose CA the gateway verifies
+# against the avapigw-vault-pki-ca Secret (synced by setup-vault-k8s.sh).
+# ---------------------------------------------------------------------------
+gateway:
+  operatorMode:
+    enabled: true
+    tls: true
+    tlsInsecure: false
+    caSecret: avapigw-vault-pki-ca
+
+  # ---------------------------------------------------------------------------
+  # Global MCP hub block (spec.mcp), rendered verbatim into the gateway's base
+  # ConfigMap via gateway.customConfig. This is GATEWAY-GLOBAL config (endpoint
+  # path + namespace separator), NOT route/backend options — those still come
+  # exclusively from MCPRoute/MCPBackend CRDs via the operator. It is required
+  # so the gateway wires the /mcp dispatcher at startup (mcpEnabled is evaluated
+  # once at boot); without it the operator-streamed MCP routes have no HTTP
+  # entrypoint and /mcp returns 404.
+  customConfig:
+    mcp:
+      path: /mcp
+      namespaceSep: "."
+
+# ---------------------------------------------------------------------------
+# Vault (gateway client): Kubernetes auth, role "avapigw".
+# ---------------------------------------------------------------------------
+vault:
+  enabled: true
+  address: "http://host.docker.internal:8200"
+  authMethod: kubernetes
+  role: "avapigw"
+  kubernetesMountPath: "kubernetes"
+
+# ---------------------------------------------------------------------------
+# Operator: locally-built avapigw-operator:mcp-test + Vault k8s auth.
+# ---------------------------------------------------------------------------
+operator:
+  enabled: true
+  image:
+    repository: avapigw-operator
+    tag: "mcp-test"
+    pullPolicy: IfNotPresent
+  vault:
+    enabled: true
+    address: "http://host.docker.internal:8200"
+    authMethod: kubernetes
+    role: "avapigw-operator"
+    kubernetesMountPath: kubernetes

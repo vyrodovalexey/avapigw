@@ -26,6 +26,8 @@ const (
 	KindGRPCBackend    = "GRPCBackend"
 	KindGraphQLRoute   = "GraphQLRoute"
 	KindGraphQLBackend = "GraphQLBackend"
+	KindMCPRoute       = "MCPRoute"
+	KindMCPBackend     = "MCPBackend"
 )
 
 // controllerTracerName is the OpenTelemetry tracer name for controller operations.
@@ -299,7 +301,7 @@ func recordDeletionOutcome(
 // deletionMessage returns the appropriate deletion message for a resource kind.
 func deletionMessage(kind string) string {
 	switch kind {
-	case KindBackend, KindGRPCBackend, KindGraphQLBackend:
+	case KindBackend, KindGRPCBackend, KindGraphQLBackend, KindMCPBackend:
 		return MessageBackendDeleted
 	default:
 		return MessageRouteDeleted

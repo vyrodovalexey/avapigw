@@ -1,0 +1,8 @@
+220 /mcp
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"m1.echo","arguments":{"message":"perf-1"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+220 /mcp
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"m1.echo","arguments":{"message":"perf-2"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+220 /mcp
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"m1.echo","arguments":{"message":"perf-3"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+220 /mcp
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"m1.echo","arguments":{"message":"perf-4"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}

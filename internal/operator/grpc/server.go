@@ -156,9 +156,11 @@ type Server struct {
 	apiRoutes       map[string][]byte
 	grpcRoutes      map[string][]byte
 	graphqlRoutes   map[string][]byte
+	mcpRoutes       map[string][]byte
 	backends        map[string][]byte
 	grpcBackends    map[string][]byte
 	graphqlBackends map[string][]byte
+	mcpBackends     map[string][]byte
 
 	// Configuration change notification.
 	// configNotify is closed to broadcast a change to all waiting goroutines,
@@ -407,9 +409,11 @@ func newServerInternal(config *ServerConfig, metrics *serverMetrics) (*Server, e
 		apiRoutes:       make(map[string][]byte),
 		grpcRoutes:      make(map[string][]byte),
 		graphqlRoutes:   make(map[string][]byte),
+		mcpRoutes:       make(map[string][]byte),
 		backends:        make(map[string][]byte),
 		grpcBackends:    make(map[string][]byte),
 		graphqlBackends: make(map[string][]byte),
+		mcpBackends:     make(map[string][]byte),
 		configNotify:    make(chan struct{}),
 		storeSeededCh:   make(chan struct{}),
 		gateways:        make(map[string]*gatewayConnection),
@@ -1179,6 +1183,178 @@ func (s *Server) deleteGraphQLBackendInternal(ctx context.Context, name, namespa
 	return nil
 }
 
+// ApplyMCPRoute applies an MCP route configuration.
+func (s *Server) ApplyMCPRoute(ctx context.Context, name, namespace string, config []byte) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "ApplyMCPRoute"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "apply", "mcproute", func() error {
+		return s.applyMCPRouteInternal(ctx, name, namespace, config)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("mcproute", "apply").Inc()
+	s.metrics.operationDuration.WithLabelValues("apply", "mcproute").Observe(time.Since(start).Seconds())
+	s.logger.Info("MCP route applied",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// applyMCPRouteInternal performs the actual MCP route application with mutex handling.
+func (s *Server) applyMCPRouteInternal(ctx context.Context, name, namespace string, config []byte) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.mcpRoutes[key] = config
+
+	return nil
+}
+
+// DeleteMCPRoute deletes an MCP route configuration.
+func (s *Server) DeleteMCPRoute(ctx context.Context, name, namespace string) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "DeleteMCPRoute"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "delete", "mcproute", func() error {
+		return s.deleteMCPRouteInternal(ctx, name, namespace)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("mcproute", "delete").Inc()
+	s.metrics.operationDuration.WithLabelValues("delete", "mcproute").Observe(time.Since(start).Seconds())
+	s.logger.Info("MCP route deleted",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// deleteMCPRouteInternal performs the actual MCP route deletion with mutex handling.
+func (s *Server) deleteMCPRouteInternal(ctx context.Context, name, namespace string) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.mcpRoutes, key)
+
+	return nil
+}
+
+// ApplyMCPBackend applies an MCP backend (upstream) configuration.
+func (s *Server) ApplyMCPBackend(ctx context.Context, name, namespace string, config []byte) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "ApplyMCPBackend"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "apply", "mcpbackend", func() error {
+		return s.applyMCPBackendInternal(ctx, name, namespace, config)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("mcpbackend", "apply").Inc()
+	s.metrics.operationDuration.WithLabelValues("apply", "mcpbackend").Observe(time.Since(start).Seconds())
+	s.logger.Info("MCP backend applied",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// applyMCPBackendInternal performs the actual MCP backend application with mutex handling.
+func (s *Server) applyMCPBackendInternal(ctx context.Context, name, namespace string, config []byte) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	s.mcpBackends[key] = config
+
+	return nil
+}
+
+// DeleteMCPBackend deletes an MCP backend (upstream) configuration.
+func (s *Server) DeleteMCPBackend(ctx context.Context, name, namespace string) error {
+	start := time.Now()
+
+	// Check context cancellation at the start
+	if err := s.checkContextCancellation(ctx, "DeleteMCPBackend"); err != nil {
+		return err
+	}
+
+	err := s.executeWithRetry(ctx, "delete", "mcpbackend", func() error {
+		return s.deleteMCPBackendInternal(ctx, name, namespace)
+	})
+
+	if err != nil {
+		return err
+	}
+
+	s.metrics.configApplied.WithLabelValues("mcpbackend", "delete").Inc()
+	s.metrics.operationDuration.WithLabelValues("delete", "mcpbackend").Observe(time.Since(start).Seconds())
+	s.logger.Info("MCP backend deleted",
+		observability.String("name", name),
+		observability.String("namespace", namespace),
+	)
+
+	s.NotifyConfigChanged()
+
+	return nil
+}
+
+// deleteMCPBackendInternal performs the actual MCP backend deletion with mutex handling.
+func (s *Server) deleteMCPBackendInternal(ctx context.Context, name, namespace string) error {
+	unlock, err := s.withContextLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	key := keys.ResourceKey(namespace, name)
+	delete(s.mcpBackends, key)
+
+	return nil
+}
+
 // HasAPIRoute checks if an API route exists in the in-memory configuration map.
 // This is used to detect cold start conditions where the resource is marked as Ready
 // in Kubernetes but has not been applied to the gRPC server's in-memory state.
@@ -1245,6 +1421,28 @@ func (s *Server) HasGraphQLBackend(name, namespace string) bool {
 	return exists
 }
 
+// HasMCPRoute checks if an MCP route exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasMCPRoute(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.mcpRoutes[key]
+	return exists
+}
+
+// HasMCPBackend checks if an MCP backend exists in the in-memory configuration map.
+// This is used to detect cold start conditions where the resource is marked as Ready
+// in Kubernetes but has not been applied to the gRPC server's in-memory state.
+func (s *Server) HasMCPBackend(name, namespace string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := keys.ResourceKey(namespace, name)
+	_, exists := s.mcpBackends[key]
+	return exists
+}
+
 // GetAllConfigs returns all configurations as JSON.
 func (s *Server) GetAllConfigs() ([]byte, error) {
 	s.mu.RLock()
@@ -1254,9 +1452,11 @@ func (s *Server) GetAllConfigs() ([]byte, error) {
 		"apiRoutes":       s.apiRoutes,
 		"grpcRoutes":      s.grpcRoutes,
 		"graphqlRoutes":   s.graphqlRoutes,
+		"mcpRoutes":       s.mcpRoutes,
 		"backends":        s.backends,
 		"grpcBackends":    s.grpcBackends,
 		"graphqlBackends": s.graphqlBackends,
+		"mcpBackends":     s.mcpBackends,
 	}
 
 	return json.Marshal(configs)
@@ -1445,8 +1645,8 @@ func (s *Server) ConfigRevision() uint64 {
 func (s *Server) StoreResourceCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.apiRoutes) + len(s.grpcRoutes) + len(s.graphqlRoutes) +
-		len(s.backends) + len(s.grpcBackends) + len(s.graphqlBackends)
+	return len(s.apiRoutes) + len(s.grpcRoutes) + len(s.graphqlRoutes) + len(s.mcpRoutes) +
+		len(s.backends) + len(s.grpcBackends) + len(s.graphqlBackends) + len(s.mcpBackends)
 }
 
 // EnableStoreReadinessGate arms the store readiness gate. Once armed, initial

@@ -510,7 +510,27 @@ webhooks:
     resources: ["apiroutes"]
   admissionReviewVersions: ["v1", "v1beta1"]
   failurePolicy: Fail
+# MCPRoute validating webhook (same-kind duplicate + cross-route conflict
+# detection against APIRoute/GraphQLRoute).
+- name: vmcproute.avapigw.io
+  clientConfig:
+    service:
+      name: avapigw-operator-webhook
+      namespace: avapigw-system
+      path: /validate-avapigw-io-v1alpha1-mcproute
+    caBundle: ""  # Injected automatically
+  rules:
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: ["avapigw.io"]
+    apiVersions: ["v1alpha1"]
+    resources: ["mcproutes"]
+  admissionReviewVersions: ["v1", "v1beta1"]
+  failurePolicy: Fail
 ```
+
+> The generated configuration registers a validating webhook for each
+> route/backend kind (APIRoute, GRPCRoute, Backend, GRPCBackend, GraphQLRoute,
+> GraphQLBackend, and MCPRoute); only two are shown above for brevity.
 
 ### Monitoring CA Injection
 

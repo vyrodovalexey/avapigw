@@ -1,0 +1,10 @@
+# Local Docker Desktop Kubernetes override for vmagent.
+#
+# The docker-compose VictoriaMetrics single-node runs on the HOST and listens on
+# 127.0.0.1:8428. From inside docker-desktop kubernetes pods the host is reachable
+# at host.docker.internal, so vmagent remote-writes scraped samples there.
+remoteWrite:
+  url: "http://host.docker.internal:8428/api/v1/write"
+
+scrapeConfig:
+  scrapeInterval: 15s

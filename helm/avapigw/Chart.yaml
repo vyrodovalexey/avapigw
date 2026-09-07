@@ -2,7 +2,7 @@ apiVersion: v2
 name: avapigw
 description: High-performance API Gateway built with Go and gin-gonic, with optional Kubernetes operator for CRD-based configuration
 type: application
-version: 0.3.0
+version: 0.4.0
 appVersion: "1.0.0"
 kubeVersion: ">=1.23.0-0"
 icon: https://raw.githubusercontent.com/vyrodovalexey/avapigw/main/docs/images/logo.png
@@ -47,6 +47,11 @@ annotations:
       name: graphqlroutes.avapigw.io
       displayName: GraphQL Route
       description: GraphQL route configuration for the API Gateway
+    - kind: MCPRoute
+      version: v1alpha1
+      name: mcproutes.avapigw.io
+      displayName: MCP Route
+      description: MCP (Model Context Protocol) route configuration for the API Gateway
     - kind: Backend
       version: v1alpha1
       name: backends.avapigw.io
@@ -62,6 +67,11 @@ annotations:
       name: graphqlbackends.avapigw.io
       displayName: GraphQL Backend
       description: GraphQL backend configuration for the API Gateway
+    - kind: MCPBackend
+      version: v1alpha1
+      name: mcpbackends.avapigw.io
+      displayName: MCP Backend
+      description: MCP (Model Context Protocol) upstream configuration for the API Gateway
   artifacthub.io/crdsExamples: |
     - apiVersion: avapigw.io/v1alpha1
       kind: APIRoute

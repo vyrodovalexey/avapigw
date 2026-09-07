@@ -100,6 +100,27 @@ The test infrastructure includes mock backend services for realistic testing:
 > `grpc-client-streaming.yaml` performance config was removed and
 > client-to-server streaming is covered by the bidirectional scenario.
 
+#### MCP Mock Servers (ports 8821/8822, metrics 9095/9096)
+
+Two deterministic Streamable-HTTP MCP mock servers
+(`ghcr.io/vyrodovalexey/mcp-mock-server`) run in `test/docker-compose` for MCP
+hub and aggregation testing:
+
+- **MCP transport:** `POST /mcp` on the app port (`8821` seed 1, `8822`
+  seed 2). `GET`/`DELETE /mcp` return 405 by design.
+- **Observability:** `/metrics`, `/healthz`, `/readyz` on the mapped metrics
+  port (`9095` for mock 1, `9096` for mock 2).
+- **No authentication** (the mock has no auth support). Each instance is
+  pinned to a fixed `-seed` for deterministic tool output, and the two seeds
+  provide distinct tool sets for aggregation / tool-collision tests.
+
+> **Mock limitation:** the mock only accepts **bare** `_meta` keys, whereas the
+> gateway is spec-correct and emits vendored `io.modelcontextprotocol/*`
+> `_meta` keys (revision `2026-07-28`). An end-to-end `tools/call` against the
+> mock therefore returns HTTP 502 at the terminal handshake. Discovery,
+> aggregation and the cross-cutting middleware path still exercise correctly.
+> See the [MCP Hub Documentation](mcp-hub.md#known-limitations).
+
 ### Test Environment
 
 ```mermaid
@@ -122,12 +143,15 @@ graph TB
             HTTP2[HTTP Backend 8802]
             GRPC1[gRPC Backend 8803]
             GRPC2[gRPC Backend 8804]
+            MCP1[MCP Mock 8821/9095]
+            MCP2[MCP Mock 8822/9096]
         end
         
         subgraph "Infrastructure"
             VAULT[Vault PKI]
             KC[Keycloak OIDC]
-            PROM[Prometheus]
+            VM[VictoriaMetrics]
+            TEMPO[Tempo]
         end
     end
     
@@ -139,13 +163,52 @@ graph TB
     GW --> HTTP2
     GW --> GRPC1
     GW --> GRPC2
+    GW --> MCP1
+    GW --> MCP2
     
     OP -.-> GW
     IC -.-> OP
     
     GW -.-> VAULT
     GW -.-> KC
-    GW -.-> PROM
+    GW -.-> VM
+    GW -.-> TEMPO
+```
+
+### Monitoring Stack (local Kubernetes)
+
+When the gateway is deployed in operator mode on the local cluster, metrics and
+traces are shipped to the docker-compose observability services on the host via
+two Helm charts under `test/monitoring/` (namespace `avapigw-test`):
+
+- **vmagent** (`test/monitoring/vmagent`) — scrapes in-cluster pods and
+  remote-writes to VictoriaMetrics.
+- **otel-collector** (`test/monitoring/otel-collector`) — receives OTLP and
+  exports metrics to VictoriaMetrics (`prometheusremotewrite` →
+  `host.docker.internal:8428/api/v1/write`) and traces to Tempo
+  (`host.docker.internal:4317`, OTLP gRPC).
+
+Both charts use `values-local.yaml` overrides that target the host-side
+docker-compose services through `host.docker.internal`.
+
+```bash
+# Deploy the monitoring charts to the local cluster.
+helm --kube-context docker-desktop upgrade --install vmagent \
+  test/monitoring/vmagent -n avapigw-test \
+  -f test/monitoring/vmagent/values-local.yaml
+helm --kube-context docker-desktop upgrade --install otel-collector \
+  test/monitoring/otel-collector -n avapigw-test \
+  -f test/monitoring/otel-collector/values-local.yaml
+```
+
+**Grafana dashboards** live under `monitoring/grafana/` and are published to
+Grafana via `test/monitoring/scripts/publish-dashboards.sh`, which creates the
+VictoriaMetrics datasource (UID `victoriametrics`) and imports each dashboard
+JSON, validating that it is importable and error-free:
+
+```bash
+# Publish + validate all dashboards (defaults: http://127.0.0.1:3000, admin/admin).
+./test/monitoring/scripts/publish-dashboards.sh
 ```
 
 ## Prerequisites
@@ -230,6 +293,38 @@ kubectl apply -f test/performance/configs/crds-full-features.yaml -n avapigw-tes
 kubectl get pods -n avapigw-test
 kubectl get apiroutes,grpcroutes,backends,grpcbackends -n avapigw-test
 ```
+
+#### Operator-Mode Deploy with Vault Kubernetes Auth (local)
+
+The local operator-mode flow wires the gateway to receive **all** config from
+the operator over gRPC (TLS served with a Vault-PKI-issued cert) and drives MCP
+routing/backends entirely through CRDs:
+
+```bash
+# 1. Configure Vault Kubernetes auth for the local cluster. This enables the
+#    'kubernetes' auth method, binds the gateway/operator ServiceAccounts to
+#    Vault roles, and syncs the PKI CA into the avapigw-vault-pki-ca Secret.
+./test/docker-compose/scripts/setup-vault-k8s.sh
+#   (use --verify to check, or --login-test to run a k8s->Vault login test)
+
+# 2. Install the CRDs and the gateway+operator via Helm with the local override.
+kubectl --context=docker-desktop apply -f helm/avapigw/crds/
+helm --kube-context docker-desktop upgrade --install avapigw helm/avapigw \
+  -n avapigw-test \
+  -f helm/avapigw/values-local.yaml \
+  -f test/k8s/values-operator-local.yaml
+
+# 3. Apply the MCP CRs (two MCPBackends aggregated by one MCPRoute, pointing at
+#    the docker-compose MCP mocks on host.docker.internal:8821/8822).
+kubectl --context=docker-desktop apply -f test/k8s/crds-mcp-local.yaml -n avapigw-test
+
+# Verify MCP resources reconciled and streamed to the gateway.
+kubectl get mcproutes,mcpbackends -n avapigw-test
+```
+
+`test/k8s/values-operator-local.yaml` enables `gateway.operatorMode` with TLS
+verified against the `avapigw-vault-pki-ca` Secret. See the
+[MCP Hub Documentation](mcp-hub.md#operator--crd-usage) for the CRD reference.
 
 ### 3. Start Backend Services
 

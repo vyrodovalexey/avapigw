@@ -180,9 +180,18 @@ gateway:
     burst: 10000
     perClient: true
 
-  # Global circuit breaker defaults
+  # Global circuit breaker defaults.
+  # Disabled for the local weighted-MCP proof: the docker-compose MCP mocks
+  # return HTTP 400 for tools/call (the known _meta short-key contract mismatch
+  # documented in test/integration/mcp_test.go). Weighted single-upstream
+  # SELECTION is counted (avapigw_mcp_upstream_selected_total) BEFORE the
+  # upstream call, so the upstream 400 is irrelevant to routing — but with the
+  # CB enabled those 400s trip the breaker (state=open) and it rejects with 503
+  # BEFORE reaching selection, capping the observable sample. Disabling the CB
+  # lets every request reach the weighted selector so the 80/20 split is
+  # measurable end-to-end. Routing behaviour itself is unchanged.
   circuitBreaker:
-    enabled: true
+    enabled: false
     threshold: 5
     timeout: 30s
     halfOpenRequests: 3
@@ -266,6 +275,19 @@ gateway:
     logging:
       level: info
       format: json
+
+  # customConfig is merged verbatim into spec of the base gateway config file
+  # (configmap gateway.yaml). In operator mode the MCP subsystem (the /mcp HTTP
+  # dispatcher + handler) is wired ONCE at gateway boot, gated by mcpEnabled()
+  # which is true when spec.mcp is present OR at least one mcpRoute exists in the
+  # BASE file. The operator streams MCPRoutes/MCPBackends AFTER boot, so without
+  # a base spec.mcp block the dispatcher never mounts and /mcp returns 404 even
+  # though the operator-applied weighted route is in the config snapshot. This
+  # minimal block enables MCP at boot; all routes/backends still flow via the
+  # operator. path defaults to /mcp.
+  customConfig:
+    mcp:
+      path: /mcp
 
 # =============================================================================
 # Vault Configuration

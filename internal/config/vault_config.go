@@ -309,6 +309,11 @@ func (s *GatewaySpec) routesRequireVaultTLS() bool {
 			return true
 		}
 	}
+	for i := range s.MCPRoutes {
+		if routeTLSUsesVault(s.MCPRoutes[i].TLS) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -338,6 +343,12 @@ func (s *GatewaySpec) backendsRequireVaultTLS() bool {
 	for i := range s.GraphQLBackends {
 		b := &s.GraphQLBackends[i]
 		if backendTLSUsesVault(b.TLS) || backendAuthUsesVaultTLS(b.Authentication) {
+			return true
+		}
+	}
+	for i := range s.MCPBackends {
+		b := &s.MCPBackends[i]
+		if backendTLSUsesVault(b.TLS) || backendAuthUsesVaultTLS(b.Credential) {
 			return true
 		}
 	}

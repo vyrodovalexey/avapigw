@@ -29,6 +29,7 @@ const (
 	labelResourceType   = "resource_type"
 	resTypeAPIRoute     = "apiroute"
 	resTypeGraphQLRoute = "graphqlroute"
+	resTypeMCPRoute     = "mcproute"
 )
 
 // DuplicateCheckerConfig holds configuration for creating a DuplicateChecker.
@@ -136,7 +137,7 @@ func InitDuplicateVecMetrics() {
 	m := getDuplicateMetrics()
 
 	resourceTypes := []string{
-		resTypeAPIRoute, "grpcroute", resTypeGraphQLRoute,
+		resTypeAPIRoute, "grpcroute", resTypeGraphQLRoute, resTypeMCPRoute,
 		"backend", "grpcbackend", "graphqlbackend",
 	}
 	scopes := []string{"namespace", "cluster"}
@@ -221,6 +222,7 @@ type resourceCache struct {
 	apiRoutes       map[string]*avapigwv1alpha1.APIRouteList
 	grpcRoutes      map[string]*avapigwv1alpha1.GRPCRouteList
 	graphqlRoutes   map[string]*avapigwv1alpha1.GraphQLRouteList
+	mcpRoutes       map[string]*avapigwv1alpha1.MCPRouteList
 	backends        map[string]*avapigwv1alpha1.BackendList
 	grpcBackends    map[string]*avapigwv1alpha1.GRPCBackendList
 	graphqlBackends map[string]*avapigwv1alpha1.GraphQLBackendList
@@ -233,6 +235,7 @@ func newResourceCache() *resourceCache {
 		apiRoutes:       make(map[string]*avapigwv1alpha1.APIRouteList),
 		grpcRoutes:      make(map[string]*avapigwv1alpha1.GRPCRouteList),
 		graphqlRoutes:   make(map[string]*avapigwv1alpha1.GraphQLRouteList),
+		mcpRoutes:       make(map[string]*avapigwv1alpha1.MCPRouteList),
 		backends:        make(map[string]*avapigwv1alpha1.BackendList),
 		grpcBackends:    make(map[string]*avapigwv1alpha1.GRPCBackendList),
 		graphqlBackends: make(map[string]*avapigwv1alpha1.GraphQLBackendList),
@@ -406,6 +409,7 @@ func (c *DuplicateChecker) InvalidateCache() {
 	c.cache.apiRoutes = make(map[string]*avapigwv1alpha1.APIRouteList)
 	c.cache.grpcRoutes = make(map[string]*avapigwv1alpha1.GRPCRouteList)
 	c.cache.graphqlRoutes = make(map[string]*avapigwv1alpha1.GraphQLRouteList)
+	c.cache.mcpRoutes = make(map[string]*avapigwv1alpha1.MCPRouteList)
 	c.cache.backends = make(map[string]*avapigwv1alpha1.BackendList)
 	c.cache.grpcBackends = make(map[string]*avapigwv1alpha1.GRPCBackendList)
 	c.cache.graphqlBackends = make(map[string]*avapigwv1alpha1.GraphQLBackendList)
@@ -471,6 +475,7 @@ func (c *DuplicateChecker) cleanupExpiredEntries() {
 		delete(c.cache.apiRoutes, key)
 		delete(c.cache.grpcRoutes, key)
 		delete(c.cache.graphqlRoutes, key)
+		delete(c.cache.mcpRoutes, key)
 		delete(c.cache.backends, key)
 		delete(c.cache.grpcBackends, key)
 		delete(c.cache.graphqlBackends, key)
@@ -2054,16 +2059,33 @@ func (c *DuplicateChecker) apiRouteAndGraphQLRoutePathsOverlap(
 		return false
 	}
 
-	// Identical exact paths → identical specificity → true duplicate: the
-	// APIRoute would be fully shadowed by the GraphQL pipeline on that path.
-	if apiMatch.URI.Exact != "" && graphqlMatch.Path.Exact != "" {
-		return apiMatch.URI.Exact == graphqlMatch.Path.Exact
+	return pathMatchesIdenticalSpecificity(
+		apiMatch.URI.Exact, apiMatch.URI.Prefix,
+		graphqlMatch.Path.Exact, graphqlMatch.Path.Prefix,
+	)
+}
+
+// pathMatchesIdenticalSpecificity reports whether two cross-kind path
+// conditions are TRUE duplicates: the same match TYPE carrying the same
+// value. Identical exact paths or identical prefixes have identical
+// specificity and would be silently shadowed at the data plane, so they are
+// conflicts. Every other combination — exact vs prefix, nested but
+// non-identical prefixes, or regex on either side — has different
+// specificity and is resolved deterministically by the data plane's
+// specificity ordering, so it is not an admission conflict. This is the
+// single source of truth reused by every cross-kind path overlap helper
+// (APIRoute↔GraphQLRoute, MCPRoute↔APIRoute, MCPRoute↔GraphQLRoute) to avoid
+// duplicating the literal comparison logic.
+func pathMatchesIdenticalSpecificity(aExact, aPrefix, bExact, bPrefix string) bool {
+	// Identical exact paths → identical specificity → true duplicate.
+	if aExact != "" && bExact != "" {
+		return aExact == bExact
 	}
 
 	// Identical prefixes → identical specificity → true duplicate. Nested
 	// but non-identical prefixes resolve by longest-prefix specificity.
-	if apiMatch.URI.Prefix != "" && graphqlMatch.Path.Prefix != "" {
-		return apiMatch.URI.Prefix == graphqlMatch.Path.Prefix
+	if aPrefix != "" && bPrefix != "" {
+		return aPrefix == bPrefix
 	}
 
 	// Exact vs prefix (either direction), regex, and remaining combinations
@@ -2132,5 +2154,641 @@ func (c *DuplicateChecker) CheckGRPCBackendCrossConflictsWithGraphQL(
 			grpcBackend.Namespace, grpcBackend.Name, strings.Join(conflicts, ", "))
 	}
 
+	return nil
+}
+
+// ============================================================================
+// MCPRoute Same-Kind and Cross-Route Intersection Detection
+// ============================================================================
+
+// mcpRoutesOverlap reports whether two MCPRoutes are TRUE same-kind
+// duplicates: the data plane cannot deterministically order them. Two
+// match-less catch-alls have identical (zero) specificity and are a
+// duplicate; a catch-all versus a route with match conditions is ordered by
+// specificity and is not a conflict. Otherwise match blocks conflict when
+// they share identical-specificity path/name conditions with overlapping
+// method and compatible header constraints.
+func (c *DuplicateChecker) mcpRoutesOverlap(a, b *avapigwv1alpha1.MCPRoute) bool {
+	aCatchAll := len(a.Spec.Match) == 0
+	bCatchAll := len(b.Spec.Match) == 0
+
+	if aCatchAll && bCatchAll {
+		return true
+	}
+	if aCatchAll || bCatchAll {
+		return false
+	}
+
+	for i := range a.Spec.Match {
+		for j := range b.Spec.Match {
+			if c.mcpMatchConditionsOverlap(&a.Spec.Match[i], &b.Spec.Match[j]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mcpMatchConditionsOverlap reports whether two MCPRouteMatch blocks are TRUE
+// duplicates: identical-specificity path AND name, overlapping methods and
+// compatible header sets. Combinations of different specificity (exact vs
+// prefix, nested prefixes, regex) are ordered deterministically by the data
+// plane and are therefore not conflicts.
+func (c *DuplicateChecker) mcpMatchConditionsOverlap(a, b *avapigwv1alpha1.MCPRouteMatch) bool {
+	if !mcpStringMatchesIdentical(a.Path, b.Path) {
+		return false
+	}
+	if !mcpStringMatchesIdentical(a.Name, b.Name) {
+		return false
+	}
+	if !c.mcpMethodsOverlap(a.Method, b.Method) {
+		return false
+	}
+	return mcpHeaderSetsCompatible(a.Headers, b.Headers)
+}
+
+// mcpStringMatchesIdentical reports whether two StringMatch conditions are
+// identical-specificity duplicates: both catch-all, identical exacts, or
+// identical prefixes. Every other combination has different specificity and
+// is resolved deterministically by the data plane.
+func mcpStringMatchesIdentical(a, b *avapigwv1alpha1.StringMatch) bool {
+	if stringMatchIsCatchAll(a) && stringMatchIsCatchAll(b) {
+		return true
+	}
+	if stringMatchIsCatchAll(a) || stringMatchIsCatchAll(b) {
+		return false
+	}
+	return pathMatchesIdenticalSpecificity(a.Exact, a.Prefix, b.Exact, b.Prefix)
+}
+
+// mcpMethodsOverlap reports whether two MCP method conditions can match the
+// same request: an empty method matches every method, otherwise the methods
+// must be equal (case-insensitive, mirroring the HTTP method comparison).
+func (c *DuplicateChecker) mcpMethodsOverlap(a, b string) bool {
+	if a == "" || b == "" {
+		return true
+	}
+	return strings.EqualFold(a, b)
+}
+
+// mcpHeaderSetsCompatible reports whether two MCPRoute header condition sets
+// can be satisfied by a single request, mirroring graphqlHeaderSetsCompatible:
+// conditions on different header names are independent; a header name
+// constrained by BOTH blocks conflicts only if the value constraints are
+// provably disjoint.
+func mcpHeaderSetsCompatible(a, b []avapigwv1alpha1.HeaderMatch) bool {
+	for i := range a {
+		for j := range b {
+			if !strings.EqualFold(a[i].Name, b[j].Name) {
+				continue
+			}
+			if !mcpHeaderValuesCompatible(&a[i], &b[j]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// mcpHeaderValuesCompatible reports whether two value constraints on the SAME
+// header name can hold simultaneously. Regex constraints are treated as
+// compatible because their disjointness is unprovable.
+func mcpHeaderValuesCompatible(a, b *avapigwv1alpha1.HeaderMatch) bool {
+	switch {
+	case a.Exact != "" && b.Exact != "":
+		return a.Exact == b.Exact
+	case a.Exact != "" && b.Prefix != "":
+		return strings.HasPrefix(a.Exact, b.Prefix)
+	case b.Exact != "" && a.Prefix != "":
+		return strings.HasPrefix(b.Exact, a.Prefix)
+	case a.Prefix != "" && b.Prefix != "":
+		return strings.HasPrefix(a.Prefix, b.Prefix) ||
+			strings.HasPrefix(b.Prefix, a.Prefix)
+	default:
+		return true
+	}
+}
+
+// mcpRouteAndAPIRouteOverlap reports whether an MCPRoute and an APIRoute are
+// TRUE cross-kind path duplicates. A match-less catch-all on either side has
+// lower specificity than any route with match conditions and lives in a
+// different data-plane dispatcher split deterministically by path, so it is
+// never a cross-kind conflict — mirroring apiRouteAndGraphQLRouteOverlap.
+func (c *DuplicateChecker) mcpRouteAndAPIRouteOverlap(
+	mcpRoute *avapigwv1alpha1.MCPRoute,
+	apiRoute *avapigwv1alpha1.APIRoute,
+) bool {
+	if len(mcpRoute.Spec.Match) == 0 || len(apiRoute.Spec.Match) == 0 {
+		return false
+	}
+
+	for i := range mcpRoute.Spec.Match {
+		mcpMatch := &mcpRoute.Spec.Match[i]
+		for j := range apiRoute.Spec.Match {
+			apiMatch := &apiRoute.Spec.Match[j]
+			if c.mcpRouteAndAPIRoutePathsOverlap(mcpMatch, apiMatch) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// apiRouteAndMCPRouteOverlap is the reverse direction of
+// mcpRouteAndAPIRouteOverlap for symmetry.
+func (c *DuplicateChecker) apiRouteAndMCPRouteOverlap(
+	apiRoute *avapigwv1alpha1.APIRoute,
+	mcpRoute *avapigwv1alpha1.MCPRoute,
+) bool {
+	return c.mcpRouteAndAPIRouteOverlap(mcpRoute, apiRoute)
+}
+
+// mcpRouteAndGraphQLRouteOverlap reports whether an MCPRoute and a
+// GraphQLRoute are TRUE cross-kind path duplicates, mirroring
+// apiRouteAndGraphQLRouteOverlap.
+func (c *DuplicateChecker) mcpRouteAndGraphQLRouteOverlap(
+	mcpRoute *avapigwv1alpha1.MCPRoute,
+	graphqlRoute *avapigwv1alpha1.GraphQLRoute,
+) bool {
+	if len(mcpRoute.Spec.Match) == 0 || len(graphqlRoute.Spec.Match) == 0 {
+		return false
+	}
+
+	for i := range mcpRoute.Spec.Match {
+		mcpMatch := &mcpRoute.Spec.Match[i]
+		for j := range graphqlRoute.Spec.Match {
+			graphqlMatch := &graphqlRoute.Spec.Match[j]
+			if c.mcpRouteAndGraphQLRoutePathsOverlap(mcpMatch, graphqlMatch) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// graphqlRouteAndMCPRouteOverlap is the reverse direction of
+// mcpRouteAndGraphQLRouteOverlap for symmetry.
+func (c *DuplicateChecker) graphqlRouteAndMCPRouteOverlap(
+	graphqlRoute *avapigwv1alpha1.GraphQLRoute,
+	mcpRoute *avapigwv1alpha1.MCPRoute,
+) bool {
+	return c.mcpRouteAndGraphQLRouteOverlap(mcpRoute, graphqlRoute)
+}
+
+// mcpRouteAndAPIRoutePathsOverlap reports whether an MCPRoute match and an
+// APIRoute match are TRUE cross-kind path duplicates via the shared
+// identical-specificity rule. A nil path/URI on either side is a lower
+// specificity catch-all and coexists deterministically.
+func (c *DuplicateChecker) mcpRouteAndAPIRoutePathsOverlap(
+	mcpMatch *avapigwv1alpha1.MCPRouteMatch,
+	apiMatch *avapigwv1alpha1.RouteMatch,
+) bool {
+	if mcpMatch.Path == nil || apiMatch.URI == nil {
+		return false
+	}
+	return pathMatchesIdenticalSpecificity(
+		mcpMatch.Path.Exact, mcpMatch.Path.Prefix,
+		apiMatch.URI.Exact, apiMatch.URI.Prefix,
+	)
+}
+
+// mcpRouteAndGraphQLRoutePathsOverlap reports whether an MCPRoute match and a
+// GraphQLRoute match are TRUE cross-kind path duplicates via the shared
+// identical-specificity rule.
+func (c *DuplicateChecker) mcpRouteAndGraphQLRoutePathsOverlap(
+	mcpMatch *avapigwv1alpha1.MCPRouteMatch,
+	graphqlMatch *avapigwv1alpha1.GraphQLRouteMatch,
+) bool {
+	if mcpMatch.Path == nil || graphqlMatch.Path == nil {
+		return false
+	}
+	return pathMatchesIdenticalSpecificity(
+		mcpMatch.Path.Exact, mcpMatch.Path.Prefix,
+		graphqlMatch.Path.Exact, graphqlMatch.Path.Prefix,
+	)
+}
+
+// CheckMCPRouteDuplicate checks if an MCPRoute with an overlapping
+// path/method/name/header combination already exists. If namespaceScoped is
+// true, only checks within the same namespace for better performance.
+func (c *DuplicateChecker) CheckMCPRouteDuplicate(
+	ctx context.Context,
+	route *avapigwv1alpha1.MCPRoute,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := resTypeMCPRoute
+
+	dm := getDuplicateMetrics()
+	defer func() {
+		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resourceType, route.Namespace)
+	var routes *avapigwv1alpha1.MCPRouteList
+
+	// Try to use cached data under a single RLock to avoid TOCTOU race
+	// between validity check and data read.
+	if c.cacheEnabled {
+		c.cache.mu.RLock()
+		if c.isCacheValidLocked(cacheKey) {
+			routes = c.cache.mcpRoutes[cacheKey]
+		}
+		c.cache.mu.RUnlock()
+		if routes != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
+	}
+
+	// Fetch from API if cache miss or invalid
+	if routes == nil {
+		dm.cacheMisses.WithLabelValues(resourceType).Inc()
+		routes = &avapigwv1alpha1.MCPRouteList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped.Load() {
+			listOpts = append(listOpts, client.InNamespace(route.Namespace))
+		}
+		if err := c.client.List(ctx, routes, listOpts...); err != nil {
+			dm.checkTotal.WithLabelValues(resourceType, scope, "error").Inc()
+			return fmt.Errorf("failed to list MCPRoutes: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.mcpRoutes[cacheKey] = routes
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for duplicates based on path/method/name combination
+	conflicts := collectLiveConflicts(route, routes.Items,
+		func(existing *avapigwv1alpha1.MCPRoute) bool { return c.mcpRoutesOverlap(route, existing) })
+
+	if len(conflicts) > 0 {
+		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
+		c.logger.Warn("duplicate MCPRoute detected",
+			observability.String("new_route", keys.ResourceKey(route.Namespace, route.Name)),
+			observability.Any("conflicting_routes", conflicts),
+		)
+		return fmt.Errorf(
+			"MCPRoute %s/%s conflicts with existing route(s) %s: overlapping path/method/name",
+			route.Namespace, route.Name, strings.Join(conflicts, ", "))
+	}
+
+	dm.checkTotal.WithLabelValues(resourceType, scope, "ok").Inc()
+	return nil
+}
+
+// CheckMCPRouteCrossConflictsWithAPIRoute checks if an MCPRoute has path
+// conflicts with existing APIRoutes. This prevents MCP and REST endpoints
+// from overlapping on the same path, which would cause routing ambiguity.
+func (c *DuplicateChecker) CheckMCPRouteCrossConflictsWithAPIRoute(
+	ctx context.Context,
+	mcpRoute *avapigwv1alpha1.MCPRoute,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := resTypeMCPRoute
+
+	dm := getDuplicateMetrics()
+	defer func() {
+		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resTypeAPIRoute, mcpRoute.Namespace)
+	var apiRoutes *avapigwv1alpha1.APIRouteList
+
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
+		c.cache.mu.RLock()
+		if c.isCacheValidLocked(cacheKey) {
+			apiRoutes = c.cache.apiRoutes[cacheKey]
+		}
+		c.cache.mu.RUnlock()
+		if apiRoutes != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
+	}
+
+	// Fetch from API if cache miss or invalid
+	if apiRoutes == nil {
+		dm.cacheMisses.WithLabelValues(resourceType).Inc()
+		apiRoutes = &avapigwv1alpha1.APIRouteList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped.Load() {
+			listOpts = append(listOpts, client.InNamespace(mcpRoute.Namespace))
+		}
+		if err := c.client.List(ctx, apiRoutes, listOpts...); err != nil {
+			dm.checkTotal.WithLabelValues(resourceType, scope, "error").Inc()
+			return fmt.Errorf("failed to list APIRoutes for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.apiRoutes[cacheKey] = apiRoutes
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for path conflicts between MCPRoute and APIRoutes
+	var conflicts []string
+	for i := range apiRoutes.Items {
+		existing := &apiRoutes.Items[i]
+		if isBeingDeleted(existing) {
+			continue
+		}
+		if c.mcpRouteAndAPIRouteOverlap(mcpRoute, existing) {
+			conflicts = append(conflicts,
+				"APIRoute:"+keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
+		c.logger.Warn("cross-CRD MCPRoute/APIRoute path conflict detected",
+			observability.String(resTypeMCPRoute, keys.ResourceKey(mcpRoute.Namespace, mcpRoute.Name)),
+			observability.Any("conflicting_apiroutes", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"MCPRoute %s/%s has path conflict with %s",
+			mcpRoute.Namespace, mcpRoute.Name, strings.Join(conflicts, ", "))
+	}
+
+	dm.checkTotal.WithLabelValues(resourceType, scope, "ok").Inc()
+	return nil
+}
+
+// CheckMCPRouteCrossConflictsWithGraphQL checks if an MCPRoute has path
+// conflicts with existing GraphQLRoutes. This prevents MCP and GraphQL
+// endpoints from overlapping on the same path, which would cause routing
+// ambiguity.
+func (c *DuplicateChecker) CheckMCPRouteCrossConflictsWithGraphQL(
+	ctx context.Context,
+	mcpRoute *avapigwv1alpha1.MCPRoute,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := resTypeMCPRoute
+
+	dm := getDuplicateMetrics()
+	defer func() {
+		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resTypeGraphQLRoute, mcpRoute.Namespace)
+	var graphqlRoutes *avapigwv1alpha1.GraphQLRouteList
+
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
+		c.cache.mu.RLock()
+		if c.isCacheValidLocked(cacheKey) {
+			graphqlRoutes = c.cache.graphqlRoutes[cacheKey]
+		}
+		c.cache.mu.RUnlock()
+		if graphqlRoutes != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
+	}
+
+	// Fetch from API if cache miss or invalid
+	if graphqlRoutes == nil {
+		dm.cacheMisses.WithLabelValues(resourceType).Inc()
+		graphqlRoutes = &avapigwv1alpha1.GraphQLRouteList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped.Load() {
+			listOpts = append(listOpts, client.InNamespace(mcpRoute.Namespace))
+		}
+		if err := c.client.List(ctx, graphqlRoutes, listOpts...); err != nil {
+			dm.checkTotal.WithLabelValues(resourceType, scope, "error").Inc()
+			return fmt.Errorf("failed to list GraphQLRoutes for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.graphqlRoutes[cacheKey] = graphqlRoutes
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for path conflicts between MCPRoute and GraphQLRoutes
+	var conflicts []string
+	for i := range graphqlRoutes.Items {
+		existing := &graphqlRoutes.Items[i]
+		if isBeingDeleted(existing) {
+			continue
+		}
+		if c.mcpRouteAndGraphQLRouteOverlap(mcpRoute, existing) {
+			conflicts = append(conflicts,
+				"GraphQLRoute:"+keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
+		c.logger.Warn("cross-CRD MCPRoute/GraphQLRoute path conflict detected",
+			observability.String(resTypeMCPRoute, keys.ResourceKey(mcpRoute.Namespace, mcpRoute.Name)),
+			observability.Any("conflicting_graphqlroutes", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"MCPRoute %s/%s has path conflict with %s",
+			mcpRoute.Namespace, mcpRoute.Name, strings.Join(conflicts, ", "))
+	}
+
+	dm.checkTotal.WithLabelValues(resourceType, scope, "ok").Inc()
+	return nil
+}
+
+// CheckAPIRouteCrossConflictsWithMCP checks if an APIRoute has path conflicts
+// with existing MCPRoutes. This is the reverse direction of
+// CheckMCPRouteCrossConflictsWithAPIRoute, ensuring an APIRoute cannot claim a
+// path already owned by an MCPRoute.
+func (c *DuplicateChecker) CheckAPIRouteCrossConflictsWithMCP(
+	ctx context.Context,
+	apiRoute *avapigwv1alpha1.APIRoute,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := resTypeAPIRoute
+
+	dm := getDuplicateMetrics()
+	defer func() {
+		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resTypeMCPRoute, apiRoute.Namespace)
+	var mcpRoutes *avapigwv1alpha1.MCPRouteList
+
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
+		c.cache.mu.RLock()
+		if c.isCacheValidLocked(cacheKey) {
+			mcpRoutes = c.cache.mcpRoutes[cacheKey]
+		}
+		c.cache.mu.RUnlock()
+		if mcpRoutes != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
+	}
+
+	// Fetch from API if cache miss or invalid
+	if mcpRoutes == nil {
+		dm.cacheMisses.WithLabelValues(resourceType).Inc()
+		mcpRoutes = &avapigwv1alpha1.MCPRouteList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped.Load() {
+			listOpts = append(listOpts, client.InNamespace(apiRoute.Namespace))
+		}
+		if err := c.client.List(ctx, mcpRoutes, listOpts...); err != nil {
+			dm.checkTotal.WithLabelValues(resourceType, scope, "error").Inc()
+			return fmt.Errorf("failed to list MCPRoutes for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.mcpRoutes[cacheKey] = mcpRoutes
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for path conflicts between APIRoute and MCPRoutes
+	var conflicts []string
+	for i := range mcpRoutes.Items {
+		existing := &mcpRoutes.Items[i]
+		if isBeingDeleted(existing) {
+			continue
+		}
+		if c.apiRouteAndMCPRouteOverlap(apiRoute, existing) {
+			conflicts = append(conflicts,
+				"MCPRoute:"+keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
+		c.logger.Warn("cross-CRD APIRoute/MCPRoute path conflict detected",
+			observability.String(resTypeAPIRoute, keys.ResourceKey(apiRoute.Namespace, apiRoute.Name)),
+			observability.Any("conflicting_mcproutes", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"APIRoute %s/%s has path conflict with %s",
+			apiRoute.Namespace, apiRoute.Name, strings.Join(conflicts, ", "))
+	}
+
+	dm.checkTotal.WithLabelValues(resourceType, scope, "ok").Inc()
+	return nil
+}
+
+// CheckGraphQLRouteCrossConflictsWithMCP checks if a GraphQLRoute has path
+// conflicts with existing MCPRoutes. This is the reverse direction of
+// CheckMCPRouteCrossConflictsWithGraphQL, ensuring a GraphQLRoute cannot claim
+// a path already owned by an MCPRoute.
+func (c *DuplicateChecker) CheckGraphQLRouteCrossConflictsWithMCP(
+	ctx context.Context,
+	graphqlRoute *avapigwv1alpha1.GraphQLRoute,
+) error {
+	if c.client == nil {
+		return nil
+	}
+
+	startTime := time.Now()
+	scope := c.getScopeLabel()
+	resourceType := resTypeGraphQLRoute
+
+	dm := getDuplicateMetrics()
+	defer func() {
+		dm.checkDuration.WithLabelValues(resourceType, scope).Observe(time.Since(startTime).Seconds())
+	}()
+
+	cacheKey := c.buildCacheKey(resTypeMCPRoute, graphqlRoute.Namespace)
+	var mcpRoutes *avapigwv1alpha1.MCPRouteList
+
+	// Try to use cached data under a single RLock to avoid TOCTOU race.
+	if c.cacheEnabled {
+		c.cache.mu.RLock()
+		if c.isCacheValidLocked(cacheKey) {
+			mcpRoutes = c.cache.mcpRoutes[cacheKey]
+		}
+		c.cache.mu.RUnlock()
+		if mcpRoutes != nil {
+			dm.cacheHits.WithLabelValues(resourceType).Inc()
+		}
+	}
+
+	// Fetch from API if cache miss or invalid
+	if mcpRoutes == nil {
+		dm.cacheMisses.WithLabelValues(resourceType).Inc()
+		mcpRoutes = &avapigwv1alpha1.MCPRouteList{}
+		listOpts := []client.ListOption{}
+		if c.namespaceScoped.Load() {
+			listOpts = append(listOpts, client.InNamespace(graphqlRoute.Namespace))
+		}
+		if err := c.client.List(ctx, mcpRoutes, listOpts...); err != nil {
+			dm.checkTotal.WithLabelValues(resourceType, scope, "error").Inc()
+			return fmt.Errorf("failed to list MCPRoutes for cross-check: %w", err)
+		}
+
+		// Update cache
+		if c.cacheEnabled {
+			c.cache.mu.Lock()
+			c.cache.mcpRoutes[cacheKey] = mcpRoutes
+			c.cache.mu.Unlock()
+			c.updateCacheTimestamp(cacheKey)
+		}
+	}
+
+	// Check for path conflicts between GraphQLRoute and MCPRoutes
+	var conflicts []string
+	for i := range mcpRoutes.Items {
+		existing := &mcpRoutes.Items[i]
+		if isBeingDeleted(existing) {
+			continue
+		}
+		if c.graphqlRouteAndMCPRouteOverlap(graphqlRoute, existing) {
+			conflicts = append(conflicts,
+				"MCPRoute:"+keys.ResourceKey(existing.Namespace, existing.Name))
+		}
+	}
+
+	if len(conflicts) > 0 {
+		dm.checkTotal.WithLabelValues(resourceType, scope, "conflict").Inc()
+		c.logger.Warn("cross-CRD GraphQLRoute/MCPRoute path conflict detected",
+			observability.String(resTypeGraphQLRoute,
+				keys.ResourceKey(graphqlRoute.Namespace, graphqlRoute.Name)),
+			observability.Any("conflicting_mcproutes", conflicts),
+		)
+		//nolint:staticcheck // Error message is intentionally capitalized for resource name consistency
+		return fmt.Errorf(
+			"GraphQLRoute %s/%s has path conflict with %s",
+			graphqlRoute.Namespace, graphqlRoute.Name, strings.Join(conflicts, ", "))
+	}
+
+	dm.checkTotal.WithLabelValues(resourceType, scope, "ok").Inc()
 	return nil
 }

@@ -85,6 +85,7 @@ graph TB
 #### 2. Enhanced Admission Webhooks
 - **Validating Webhooks** - Validate CRD specifications before creation/update with improved validation constants
 - **Cross-CRD Duplicate Detection** - Reject only true duplicates (identical-specificity overlapping matches); specificity-aware for gRPC routes including metadata/authority discriminators
+- **Cross-Route Intersection Prevention** - Reject identical-specificity path collisions across APIRoute, GraphQLRoute, and MCPRoute (checked in both directions across every pair sharing the HTTP data path)
 - **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
 - **Cross-Reference Validation** - Ensure referenced backends exist with enhanced port range and weight validation
 - **Parity Warnings** - CRD fields the gateway does not consume are surfaced with "accepted but not applied" admission warnings (no silent drops)
@@ -218,6 +219,10 @@ GRPCRoute (identical service/method prefixes or exacts conflict; nested
 prefixes are resolved by longest-prefix priority) and GraphQLRoute (identical
 specificity plus overlapping match values; see the
 [specificity formula](webhook-validation.md#graphql-route-conflicts)).
+Because APIRoute, GraphQLRoute, and MCPRoute all share the HTTP data path,
+identical-specificity path collisions are also rejected **across** these
+kinds, checked in both directions (see
+[MCPRoute Conflicts](webhook-validation.md#mcproute-conflicts)).
 
 Deletion is never blocked by validation: updates on objects being deleted are
 always admitted (finalizer removal cannot wedge), metadata-only updates skip

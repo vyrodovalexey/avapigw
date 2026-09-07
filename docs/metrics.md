@@ -26,6 +26,13 @@ The gateway exposes **130+ Prometheus metrics** across all components:
 - **Proxy**: Backend communication, errors, duration
 - **WebSocket**: Connections, messages, errors
 - **gRPC**: Requests, streaming, method-level tracking
+- **MCP Hub**: `avapigw_mcp_*` series — requests, latency, in-flight, the
+  weighted-selection counter `avapigw_mcp_upstream_selected_total{route,upstream}`,
+  SSE streams, subscriptions, MRTR rounds, cache hits/misses, upstream failures,
+  header/schema rejections, auth failures by class, drift detections, per-upstream
+  health, and HTTP-era bridging (era determinations, legacy sessions, held
+  requests). See the full table in the
+  [MCP Hub Documentation](mcp-hub.md#metrics).
 - **Config Reload**: Hot reload operations with fixed timestamp metrics, including CORS component
 - **Health Check**: Backend health monitoring
 - **Transform**: Request/response transformation metrics

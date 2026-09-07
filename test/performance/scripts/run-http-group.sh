@@ -65,10 +65,12 @@ if [ "$GROUP" = "group3" ] || [ "$GROUP" = "group4" ]; then
   maybe_bg hscn encoding  /api/v1/validated/encoding/items -H 'Accept-Encoding: gzip' -H 'Accept: application/xml'
   maybe_bg hscn cache     /api/v1/validated/cache/items
   maybe_bg hscn cors      /api/v1/validated/cors/items -H 'Origin: http://example.com'
-  # WS scenarios (use 127.0.0.1 issuer token for ws-oidc route)
+  # WS scenarios. ws-oidc uses the localhost-issuer token (TOK_LH): the
+  # pt-ws-oidc route validates issuer http://localhost:8090/realms/gateway-test,
+  # so a 127.0.0.1-issued token (TOK_IP) is rejected 401 (issuer mismatch).
   maybe_bg wscn ws-plain  "$WSBASE/ws"
   maybe_bg wscn ws-apikey "$WSBASE/ws-perf-apikey" "X-API-Key: $APIKEY"
-  maybe_bg wscn ws-oidc   "$WSBASE/ws-perf-oidc"   "Authorization: Bearer $TOK_IP"
+  maybe_bg wscn ws-oidc   "$WSBASE/ws-perf-oidc"   "Authorization: Bearer $TOK_LH"
   # group4 = https + mirroring: also drive the REST AGGREGATE fan-out route so
   # gateway_aggregate_* metrics increment for this scenario group.
   if [ "$GROUP" = "group4" ]; then

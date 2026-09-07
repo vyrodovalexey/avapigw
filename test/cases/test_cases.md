@@ -5200,3 +5200,148 @@ tag `functional`).
 ### TestFunctional_Backend_HealthCheckGRPC_GatewayContract
 - **Description**: Backend healthCheck useGRPC/grpcService/port (probe-port override for backends probing on 9090)
 - **Expected Results**: Fields survive CR → config.Backend and the translated backend passes full gateway validation
+
+## MCP Hub Tests
+
+The MCP-hub (Model Context Protocol) tests exercise the gateway's MCP path
+dispatcher, mirrored-header validation, `_meta` discipline, namespacing/
+de-namespacing, discovery aggregation, no-token-passthrough, downstream OIDC
+auth and rate limiting, and TLS termination. The in-process harness lives in
+`test/helpers/mcp_helpers.go` and reuses the production wiring (dedicated MCP
+upstream registry, HTTP hub client, namespace mapper, optional discovery
+aggregator, shared per-route middleware manager) composed as the gateway's
+route handler via the MCP path dispatcher.
+
+### Phase-1 mock limitation (documented gap)
+The docker-compose MCP mock validates the SHORT `_meta` keys
+`protocolVersion` / `clientCapabilities`, while the gateway emits the
+vendor-prefixed `io.modelcontextprotocol/*` keys upstream (per MCP 2026-07-28)
+and the discovery aggregator issues each list method with no `_meta`. Every
+gateway→mock round-trip therefore returns HTTP 400 (`-32602`). This is a mock
+limitation, not a gateway bug; integration round-trip sub-cases are
+`t.Skip`-documented and the mock's own behavior is asserted directly instead.
+
+### Functional (in-process, no external ENV — fake httptest upstream)
+
+#### TestFunctional_MCP_TransportRules
+- **Description**: Gateway-enforced MCP transport rules applied before any upstream call
+- **Steps / Expected Results**:
+  1. `GET /mcp` → 405 with `Allow: POST` (HUB-103)
+  2. Disallowed `Origin` → 403 (HUB-106)
+  3. Allowed `Origin` → 200
+  4. Missing `_meta` → JSON-RPC `-32602` (InvalidParams, HUB-121)
+  5. `MCP-Protocol-Version` header ≠ `_meta` version → `-32020` (HeaderMismatch, HUB-122)
+  6. Unsupported protocol version → `-32022` (UnsupportedProtocolVersion, HUB-123)
+  7. Missing `Mcp-Method` header → `-32020` (HUB-141)
+  8. Missing `Mcp-Name` for `tools/call` → `-32020` (HUB-141)
+
+#### TestFunctional_MCP_ToolsCall_Namespacing
+- **Description**: Happy-path `tools/call` round-trip with namespacing + no-token-passthrough + serverInfo injection
+- **Expected Results**: Downstream calls `svc.echo`; upstream receives de-namespaced `echo`; the downstream `Authorization` is NOT forwarded upstream (HUB-303/304); the hub injects `serverInfo` into the result
+
+#### TestFunctional_MCP_ToolsList_Aggregation
+- **Description**: `tools/list` aggregation across two upstreams with namespacing + deterministic order
+- **Expected Results**: Result contains `alpha.echo`, `alpha.sleep`, `beta.echo`, `beta.sleep`; re-issuing yields the same order
+
+#### TestFunctional_MCP_Degraded
+- **Description**: Degraded operation with one upstream pointed at a dead port
+- **Expected Results**: `tools/list` still succeeds and serves the healthy upstream's tools; the dead upstream contributes none
+
+#### TestFunctional_MCP_NoTokenPassthrough
+- **Description**: The downstream bearer token is never forwarded upstream
+- **Expected Results**: The fake upstream never observes the `Authorization` header
+
+#### TestFunctional_MCP_DryRun
+- **Description**: Shadow mode (HUB-507) resolves without invoking the upstream
+- **Expected Results**: `tools/call` returns without error and the upstream call count stays 0
+
+#### TestFunctional_MCP_ConfigLoadValidate
+- **Description**: `MCPRoute` / `MCPBackend` load and validate through the shared validator
+- **Expected Results**: The MCP config passes validation; routes/backends/upstreams are wired
+
+### MCP Weighted Routing (canary / A-B — `WeightedUpstreams`)
+
+Weighted single-upstream selection is a stateless weighted-random pick over the
+route's candidate upstreams (mirrors APIRoute `RouteDestination.Weight`,
+HUB-501). Namespaced primitives still pin to their owning upstream, and
+aggregation/subscription still fan out to ALL upstreams regardless of weight. The
+selected upstream is attributed to `mcp_upstream_selected_total{route,upstream}`
+BEFORE the upstream is called, so the split is observable even when a mock rejects
+the vendored `_meta`.
+
+#### TestFunctional_MCP_WeightedRouting_Distribution
+- **Description**: 80/20 `WeightedUpstreams` split across two in-process fake upstreams; N=2000 bare-name (non-namespaced) `tools/call` requests exercise weighted selection
+- **Expected Results**: Observed per-upstream distribution ≈ 80%/20% within ±6pp; `mcp_upstream_selected_total{stable}`/`{canary}` deltas exactly match the per-upstream hit counts and sum to N (metrics/audit attribution)
+
+#### TestFunctional_MCP_WeightedRouting_ZeroWeightCanary
+- **Description**: `{live:100, dark:0}` weighted split; N=500 single-upstream requests
+- **Expected Results**: The positive-weight upstream receives ALL traffic; the zero-weight upstream receives exactly 0% (0% canary, not a residual share)
+
+#### TestFunctional_MCP_WeightedRouting_AllEqualUniform
+- **Description**: Data-driven all-zero (`{0,0}`) and all-equal (`{50,50}`) splits; N=2000
+- **Expected Results**: Both cases yield an approximately uniform ≈50/50 distribution (all-zero == "no weights configured")
+
+#### TestFunctional_MCP_WeightedRouting_LegacyBackwardCompat
+- **Description**: Legacy `Upstreams []string` route with a single upstream, and with multiple upstreams
+- **Expected Results**: Single legacy upstream receives all traffic; multiple legacy upstreams distribute ~uniformly (equal weight)
+
+#### TestFunctional_MCP_WeightedRouting_NamespacedPinsToOwner
+- **Description**: `{stable:100, canary:0}`; a NAMESPACED `canary.echo` `tools/call` is issued
+- **Expected Results**: Owner-pinning wins over the 0 weight — the namespaced call reaches the canary owner (de-namespaced to `echo`); stable receives nothing
+
+#### TestFunctional_MCP_WeightedRouting_AggregationFansOutRegardlessOfWeight
+- **Description**: `{alpha:100, beta:0}` with the discovery aggregator enabled; `tools/list`
+- **Expected Results**: Aggregation returns the UNION of tools from BOTH upstreams — a 0%-weight upstream is never dropped from `*/list`
+
+#### TestFunctional_MCP_WeightedRouting_ConfigValidation
+- **Description**: Weighted `MCPRoute` matrix through the shared production validator
+- **Expected Results**: Valid 80/20 accepted; out-of-range weight (150) rejected; sum≠100 rejected; both `Upstreams`+`WeightedUpstreams` set rejected
+
+#### TestFunctional_Webhook_MCPRouteWeightedUpstreams (operator)
+- **Description**: MCPRoute admission webhook weighted-upstream matrix via `ValidateCreate` (mirrors the APIRoute weight webhook tests)
+- **Expected Results**: valid 80/20 admitted (no warnings); weight 150 / negative denied ("weight must be between 0 and 100"); sum≠100 denied ("total weight"); empty name denied; both `upstreams`+`weightedUpstreams` denied ("only one of upstreams or weightedUpstreams"); all-zero admitted (uniform, no warning); mixed zero/positive admitted WITH a "no traffic" transparency warning (0% canary)
+
+### Integration (real docker mocks `mcp_mock_1/2`)
+
+#### TestIntegration_MCP_MockDirect_Behavior
+- **Description**: ENV health + mock Phase-1 contract asserted directly against the mock
+- **Expected Results**: `GET /mcp` → 405; `tools/list` returns `echo/sleep/fail`; `tools/call echo` round-trips (short-key `_meta`); missing `_meta` → `-32602`
+
+#### TestIntegration_MCP_TransportRules_ThroughGateway
+- **Description**: Gateway transport rules against the real ENV (enforced before upstream)
+- **Expected Results**: `GET` → 405; missing `_meta` → `-32602`; unsupported version → `-32022`
+
+#### TestIntegration_MCP_ToolsList_SingleUpstream / _Discover / _ToolsCall_Namespacing / _Aggregation / _Degraded
+- **Description**: Real gateway→mock round-trips for list/discover/call/aggregation/degraded
+- **Expected Results**: SKIPPED with a documented reason (mock Phase-1 short-key `_meta` mismatch); the assertions verify namespacing (`m1.echo`/`m2.echo`), de-namespacing, deterministic aggregation order, and degraded serving when they can run against a spec-compliant upstream
+
+#### TestIntegration_MCP_WeightedRouting_Distribution
+- **Description**: 80/20 `WeightedUpstreams` split across BOTH real docker mocks; N=2000 bare-name `tools/call`. Selection is attributed to `mcp_upstream_selected_total` BEFORE the upstream call, so the split is measured against the real mocks without depending on the `_meta` round-trip
+- **Expected Results**: Observed selection distribution ≈ 80%/20% within ±6pp; the two counter deltas sum to N (NOT skipped for the mock mismatch)
+
+#### TestIntegration_MCP_WeightedRouting_ZeroWeightCanary
+- **Description**: `{live:100, dark:0}` split across the two real mocks; N=500
+- **Expected Results**: `mcp_upstream_selected_total{live}` delta == N; `{dark}` delta == 0 (0% canary)
+
+#### TestIntegration_MCP_WeightedRouting_LegacyBackwardCompat
+- **Description**: Legacy `Upstreams []string` route across both real mocks; N=2000; asserts the route carries no `WeightedUpstreams` and the legacy list is preserved
+- **Expected Results**: Selection distributes ~uniformly ≈50/50 (equal weight)
+
+#### TestIntegration_MCP_WeightedRouting_AggregationFansOut
+- **Description**: `{alpha:100, beta:0}` with the aggregator enabled; `tools/list` across both real mocks
+- **Expected Results**: Union of `alpha.echo`/`beta.echo` (0%-weight upstream still contributes); SKIPPED only when the mock rejects the vendored `_meta` the aggregator emits (documented Phase-1 limitation)
+
+### E2E (full gateway + Keycloak + Redis Sentinel)
+
+#### TestE2E_MCP_HTTP_OIDC_And_RateLimit
+- **Description**: HTTP MCP hub with downstream OIDC auth (gateway = resource server) + Redis rate limiting
+- **Expected Results**:
+  1. No token → 401 with `WWW-Authenticate`
+  2. Invalid token → 401
+  3. Valid Keycloak bearer → passes auth (not 401)
+  4. Burst exceeded → 429
+  5. A Redis rate-limit bucket exists on the Sentinel-managed master
+
+#### TestE2E_MCP_TLS_OIDC_And_RateLimit
+- **Description**: HTTPS MCP hub (gateway terminates TLS; upstream mock stays plain HTTP) with OIDC + rate limiting over TLS
+- **Expected Results**: No token → 401 over TLS; valid bearer passes auth over a ≥ TLS 1.2 connection; burst exceeded → 429 over TLS

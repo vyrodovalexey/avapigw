@@ -77,6 +77,16 @@
           "items": { "$ref": "#/$defs/graphqlBackend" },
           "description": "GraphQL backend services"
         },
+        "mcpRoutes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/mcpRoute" },
+          "description": "MCP hub routing rules"
+        },
+        "mcpBackends": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/mcpBackend" },
+          "description": "MCP upstream servers"
+        },
         "rateLimit": {
           "$ref": "#/$defs/rateLimit",
           "description": "Global rate limiting configuration"
@@ -125,6 +135,10 @@
         "graphql": {
           "$ref": "#/$defs/graphqlSettings",
           "description": "GraphQL endpoint settings (body size limit, path)"
+        },
+        "mcp": {
+          "$ref": "#/$defs/mcpSettings",
+          "description": "MCP hub endpoint settings (path, limits, origins, MRTR, cache clamps)"
         },
         "openAPIValidation": {
           "$ref": "#/$defs/openAPIValidation",
@@ -643,6 +657,90 @@
         "tls": { "$ref": "#/$defs/backendTLS" },
         "circuitBreaker": { "$ref": "#/$defs/circuitBreaker" },
         "authentication": { "type": "object", "description": "Backend authentication (jwt/basic/mtls)" }
+      }
+    },
+    "mcpRoute": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "match": { "type": "array", "items": { "type": "object" } },
+        "upstreams": { "type": "array", "items": { "type": "string" } },
+        "weightedUpstreams": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "weight": { "type": "integer", "minimum": 0, "maximum": 100 }
+            }
+          },
+          "description": "Weighted MCPBackend references for single-upstream selection (canary/A-B). Mutually exclusive with upstreams."
+        },
+        "timeout": { "$ref": "#/$defs/duration" },
+        "retries": { "$ref": "#/$defs/retryPolicy" },
+        "headers": { "$ref": "#/$defs/headerManipulation" },
+        "rateLimit": { "$ref": "#/$defs/rateLimit" },
+        "cache": { "$ref": "#/$defs/cache" },
+        "cors": { "$ref": "#/$defs/cors" },
+        "security": { "$ref": "#/$defs/security" },
+        "tls": { "$ref": "#/$defs/routeTLS" },
+        "authentication": { "$ref": "#/$defs/authentication" },
+        "authorization": { "$ref": "#/$defs/authorization" },
+        "scopeMap": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } },
+          "description": "Maps primitive/method to required OAuth scopes"
+        }
+      }
+    },
+    "mcpBackend": {
+      "type": "object",
+      "required": ["name", "hosts"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/backendHost" }
+        },
+        "transport": { "type": "string", "enum": ["", "streamable-http"] },
+        "era": { "type": "string", "enum": ["", "modern", "legacy"] },
+        "pinnedVersion": { "type": "string" },
+        "namespacePrefix": { "type": "string" },
+        "separator": { "type": "string" },
+        "allow": { "type": "array", "items": { "type": "string" } },
+        "deny": { "type": "array", "items": { "type": "string" } },
+        "trustLevel": { "type": "string", "enum": ["", "trusted", "untrusted"] },
+        "path": { "type": "string" },
+        "healthCheck": { "$ref": "#/$defs/healthCheck" },
+        "loadBalancer": { "$ref": "#/$defs/loadBalancer" },
+        "tls": { "$ref": "#/$defs/backendTLS" },
+        "circuitBreaker": { "$ref": "#/$defs/circuitBreaker" },
+        "credential": { "type": "object", "description": "Upstream credential source (no downstream token passthrough)" },
+        "timeouts": { "type": "object" },
+        "cacheTTLClamp": { "type": "object" },
+        "rateLimit": { "$ref": "#/$defs/rateLimit" }
+      }
+    },
+    "mcpSettings": {
+      "type": "object",
+      "properties": {
+        "path": { "type": "string", "description": "MCP endpoint path (default /mcp)" },
+        "maxBodySize": { "type": "integer", "minimum": 0 },
+        "maxSSEEventSize": { "type": "integer", "minimum": 0 },
+        "allowedOrigins": { "type": "array", "items": { "type": "string" } },
+        "namespaceSep": { "type": "string" },
+        "maxContentBlocks": { "type": "integer", "minimum": 0 },
+        "maxResponseSize": { "type": "integer", "minimum": 0 },
+        "maxConcurrentStreamsPerPrincipal": { "type": "integer", "minimum": 0 },
+        "maxConcurrentUpstreamConns": { "type": "integer", "minimum": 0 },
+        "subscriptionKeepAlive": { "$ref": "#/$defs/duration" },
+        "mrtrMaxRounds": { "type": "integer", "minimum": 0 },
+        "mrtrBudget": { "$ref": "#/$defs/duration" },
+        "cacheTTLMin": { "$ref": "#/$defs/duration" },
+        "cacheTTLMax": { "$ref": "#/$defs/duration" }
       }
     },
     "rateLimit": {

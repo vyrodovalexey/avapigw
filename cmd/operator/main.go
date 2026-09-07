@@ -675,6 +675,10 @@ func countExpectedConfigResources(ctx context.Context, reader client.Reader) int
 	countList("GRPCBackend", grpcBackends, func() int { return len(grpcBackends.Items) })
 	graphqlBackends := &avapigwv1alpha1.GraphQLBackendList{}
 	countList("GraphQLBackend", graphqlBackends, func() int { return len(graphqlBackends.Items) })
+	mcpRoutes := &avapigwv1alpha1.MCPRouteList{}
+	countList("MCPRoute", mcpRoutes, func() int { return len(mcpRoutes.Items) })
+	mcpBackends := &avapigwv1alpha1.MCPBackendList{}
+	countList("MCPBackend", mcpBackends, func() int { return len(mcpBackends.Items) })
 
 	return total
 }
@@ -1548,6 +1552,30 @@ func setupControllers(mgr ctrl.Manager, grpcServer *operatorgrpc.Server, cfg *Co
 				}).SetupWithManager(mgr)
 			},
 		},
+		{
+			name: "MCPRoute",
+			setup: func() error {
+				return (&controller.MCPRouteReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("mcproute-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
+		{
+			name: "MCPBackend",
+			setup: func() error {
+				return (&controller.MCPBackendReconciler{
+					Client: mgr.GetClient(),
+					Scheme: mgr.GetScheme(),
+					//nolint:staticcheck // Using deprecated API for compatibility with record.EventRecorder
+					Recorder:   mgr.GetEventRecorderFor("mcpbackend-controller"),
+					GRPCServer: grpcServer,
+				}).SetupWithManager(mgr)
+			},
+		},
 	}
 
 	for _, s := range setups {
@@ -1645,6 +1673,12 @@ func setupWebhooks(ctx context.Context, mgr ctrl.Manager, cfg *Config) error {
 			name: "GraphQLBackend",
 			setup: func() error {
 				return operatorwebhook.SetupGraphQLBackendWebhookWithChecker(mgr, sharedChecker)
+			},
+		},
+		{
+			name: "MCPRoute",
+			setup: func() error {
+				return operatorwebhook.SetupMCPRouteWebhookWithChecker(mgr, sharedChecker)
 			},
 		},
 	}

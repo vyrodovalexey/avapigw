@@ -178,11 +178,14 @@ func InitControllerVecMetrics() {
 
 	controllers := []string{
 		"apiroute", "grpcroute", "backend", "grpcbackend",
-		"graphqlroute", "graphqlbackend", "ingress",
+		"graphqlroute", "graphqlbackend", "mcproute", "mcpbackend", "ingress",
 	}
 	results := []string{ResultSuccess, ResultError, ResultRequeue}
 	operations := []string{OperationAdd, OperationRemove}
-	kinds := []string{KindAPIRoute, KindGRPCRoute, KindBackend, KindGRPCBackend, KindGraphQLRoute, KindGraphQLBackend}
+	kinds := []string{
+		KindAPIRoute, KindGRPCRoute, KindBackend, KindGRPCBackend,
+		KindGraphQLRoute, KindGraphQLBackend, KindMCPRoute, KindMCPBackend,
+	}
 
 	for _, c := range controllers {
 		// reconcileTotal: controller × result
@@ -224,7 +227,10 @@ func InitControllerVecMetrics() {
 func InitStatusUpdateVecMetrics() {
 	m := GetStatusUpdateMetrics()
 
-	kinds := []string{KindAPIRoute, KindGRPCRoute, KindBackend, KindGRPCBackend, KindGraphQLRoute, KindGraphQLBackend}
+	kinds := []string{
+		KindAPIRoute, KindGRPCRoute, KindBackend, KindGRPCBackend,
+		KindGraphQLRoute, KindGraphQLBackend, KindMCPRoute, KindMCPBackend,
+	}
 	results := []string{ResultSuccess, ResultError}
 
 	for _, k := range kinds {

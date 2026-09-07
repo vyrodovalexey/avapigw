@@ -5,6 +5,7 @@
 # Types:
 #   get       - Generate GET request ammo (URI-style)
 #   post      - Generate POST request ammo (request-style)
+#   mcp       - Generate MCP tools/call ammo (uripost-style)
 #   mixed     - Generate mixed workload ammo
 #   custom    - Generate custom ammo from template
 #
@@ -166,6 +167,32 @@ EOF
     log_success "Generated $COUNT POST requests in $output"
 }
 
+# Generate MCP tools/call ammo (uripost-style: body-length + /mcp, then body).
+# The mirrored MCP headers and the OIDC bearer are supplied by the tank config
+# (see configs/mcp-throughput.yaml), not the ammo, so the ammo carries only the
+# JSON-RPC body with a valid vendor-prefixed _meta.
+generate_mcp_ammo() {
+    local output="${OUTPUT_FILE:-$AMMO_DIR/mcp-toolscall.txt}"
+    local tool="${MCP_TOOL:-m1.echo}"
+    local version="2026-07-28"
+
+    log_info "Generating MCP tools/call ammo file: $output"
+
+    > "$output"  # Clear file
+
+    for ((i=1; i<=COUNT; i++)); do
+        local body
+        body="{\"jsonrpc\":\"2.0\",\"id\":$i,\"method\":\"tools/call\",\"params\":{\"name\":\"$tool\",\"arguments\":{\"message\":\"perf-$i\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"$version\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}"
+
+        # uripost format: the leading number is the BODY content length only.
+        local body_length=${#body}
+        printf '%s /mcp\n' "$body_length" >> "$output"
+        printf '%s\n' "$body" >> "$output"
+    done
+
+    log_success "Generated $COUNT MCP tools/call requests in $output"
+}
+
 # Generate mixed ammo
 generate_mixed_ammo() {
     local output="${OUTPUT_FILE:-$AMMO_DIR/mixed-generated.txt}"
@@ -275,6 +302,7 @@ Usage: $0 [type] [options]
 Types:
   get       Generate GET request ammo (URI-style)
   post      Generate POST request ammo (request-style)
+  mcp       Generate MCP tools/call ammo (uripost-style)
   mixed     Generate mixed workload ammo
   custom    Generate custom ammo from template
 
@@ -299,6 +327,9 @@ main() {
             ;;
         post)
             generate_post_ammo
+            ;;
+        mcp)
+            generate_mcp_ammo
             ;;
         mixed)
             generate_mixed_ammo

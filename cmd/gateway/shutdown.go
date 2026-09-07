@@ -41,6 +41,14 @@ func runGateway(app *application, configPath string, logger observability.Logger
 		}
 	}
 
+	// Start MCP upstream backends (health checks, connections)
+	if app.mcpBackendRegistry != nil {
+		if err := app.mcpBackendRegistry.StartAll(ctx); err != nil {
+			fatalWithSync(logger, "failed to start MCP backends", observability.Error(err))
+			return
+		}
+	}
+
 	if err := app.gateway.Start(ctx); err != nil {
 		fatalWithSync(logger, "failed to start gateway", observability.Error(err))
 		return // unreachable in production; allows test to continue
@@ -186,6 +194,16 @@ func stopDependencies(ctx context.Context, app *application, logger observabilit
 		if err := app.grpcBackendRegistry.StopAll(ctx); err != nil {
 			logger.Error("failed to stop gRPC backends", observability.Error(err))
 		}
+	}
+
+	// Stop MCP upstream backend registry and close the MCP handler.
+	if app.mcpBackendRegistry != nil {
+		if err := app.mcpBackendRegistry.StopAll(ctx); err != nil {
+			logger.Error("failed to stop MCP backends", observability.Error(err))
+		}
+	}
+	if app.mcpHandler != nil {
+		app.mcpHandler.Close()
 	}
 
 	if err := app.tracer.Shutdown(ctx); err != nil {

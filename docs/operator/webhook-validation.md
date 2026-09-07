@@ -18,7 +18,7 @@ The AVAPIGW Operator includes comprehensive admission webhooks that validate Cus
 The admission webhooks provide five main types of validation with enhanced validation constants and improved thread safety:
 
 1. **Schema Validation** - Ensures all required fields are present and have valid values using named constants for port ranges and weights
-2. **Cross-Route Intersection Prevention** - Prevents path conflicts between APIRoute and GraphQLRoute CRDs
+2. **Cross-Route Intersection Prevention** - Prevents path conflicts between APIRoute, GraphQLRoute, and MCPRoute CRDs (all three share the HTTP data path)
 3. **Cross-CRD Duplicate Detection** - Prevents conflicting route configurations across Backend vs GRPCBackend with context-based cleanup lifecycle
 4. **Ingress Webhook Validation** - Validates Ingress resources when ingress controller is enabled
 5. **Cross-Reference Validation** - Ensures referenced resources exist with enhanced validation rules
@@ -32,8 +32,8 @@ The admission webhooks provide five main types of validation with enhanced valid
 ## Admission Lifecycle
 
 The update webhooks apply three lifecycle rules (uniformly across APIRoute,
-Backend, GRPCRoute, GRPCBackend, GraphQLRoute, and GraphQLBackend) that
-guarantee deletion and metadata housekeeping can never be blocked by
+Backend, GRPCRoute, GRPCBackend, GraphQLRoute, GraphQLBackend, and MCPRoute)
+that guarantee deletion and metadata housekeeping can never be blocked by
 validation:
 
 1. **Deleting objects are always admitted.** An UPDATE on an object whose
@@ -212,7 +212,9 @@ The webhook prevents duplicate route configurations that could cause conflicts a
 
 ### Cross-Route Intersection Prevention
 
-The webhook prevents path intersections between APIRoute and GraphQLRoute CRDs to avoid routing conflicts, rejecting only **true duplicates** the data plane cannot order deterministically.
+The webhook prevents path intersections between APIRoute, GraphQLRoute, and
+MCPRoute CRDs to avoid routing conflicts, rejecting only **true duplicates**
+the data plane cannot order deterministically.
 
 #### Overlap Detection Logic
 
@@ -228,10 +230,20 @@ match acts as a priority-0 catch-all) and are therefore allowed:
 - **Nil/empty match (catch-all)**: Coexists with any route that has match conditions; only two match-less catch-alls conflict with each other
 - **Self-updates**: Updating a resource never conflicts with its own previous version
 
-The same semantics apply across kinds sharing the HTTP data path
-(APIRoute ↔ GraphQLRoute): only identical exact paths or identical prefixes
-are cross-kind conflicts, because the APIRoute would be silently shadowed by
-the GraphQL pipeline on exactly the path space it claims.
+The same semantics apply across every pair of kinds sharing the HTTP data
+path — **APIRoute ↔ GraphQLRoute**, **MCPRoute ↔ APIRoute**, and
+**MCPRoute ↔ GraphQLRoute** — checked in both directions: only identical
+exact paths or identical prefixes (identical specificity) are cross-kind
+conflicts, because one pipeline would silently shadow the other on exactly
+the path space it claims. Combinations of **different** specificity (for
+example an APIRoute prefix `/` and an MCPRoute exact `/mcp`) coexist and are
+resolved deterministically by the data plane, so they are admitted.
+
+The MCPRoute match `spec.match[].path` (a `StringMatch` with `exact` /
+`prefix`) occupies the same HTTP path space as the APIRoute
+`spec.match[].uri` and the GraphQLRoute `spec.match[].path`, so an MCPRoute
+that claims a path already owned by an APIRoute or GraphQLRoute (or vice
+versa) is rejected at admission.
 
 #### Examples of Conflicting Routes
 
@@ -495,6 +507,65 @@ Consequences:
 - **Regex pairs → admitted.** Regex intersection is statically undecidable,
   so equal-specificity regex routes are admitted; the router still orders
   them deterministically via the name tie-break
+
+### MCPRoute Conflicts
+
+MCPRoute is served by a dedicated validating webhook
+(`vmcproute.avapigw.io` → `/validate-avapigw-io-v1alpha1-mcproute`) that runs
+the same admission pipeline as the other route kinds: local spec validation
+(StringMatch exclusivity and regex compilation for `path` / `name`, header
+matches, timeout/retries/rateLimit/cache/CORS/TLS/auth validation,
+**`weightedUpstreams` validation** — weight range `0`–`100`, positive weights
+sum to `100`, `upstreams` / `weightedUpstreams` mutual exclusivity, mixed
+zero/positive weights admitted with a warning — plaintext secret warnings),
+**same-kind duplicate detection**, and **cross-kind conflict detection**
+against APIRoute and GraphQLRoute.
+
+Cross-kind conflicts use the **identical-specificity** rule shared with the
+APIRoute ↔ GraphQLRoute checks (an empty match is a priority-0 catch-all):
+
+- **Exact path vs Exact path** — conflict only if the paths are identical
+- **Prefix vs Prefix** — conflict only if the prefixes are identical
+- **Exact vs Prefix / regex** — never a cross-kind conflict; the data plane
+  splits them deterministically by specificity
+- **Nil/empty match (catch-all)** — coexists with any specific route
+
+Checks run in both directions: creating or updating an MCPRoute is rejected
+when it collides with an existing APIRoute URI or GraphQLRoute path, and the
+APIRoute and GraphQLRoute webhooks reject a route that collides with an
+existing MCPRoute path.
+
+```yaml
+# CONFLICT: MCPRoute claims the exact path an APIRoute already owns
+# APIRoute
+spec:
+  match:
+    - uri:
+        exact: "/mcp"        # existing
+
+---
+# MCPRoute
+spec:
+  match:
+    - path:
+        exact: "/mcp"        # CONFLICT: identical exact path (same specificity)
+```
+
+```yaml
+# NO CONFLICT: different specificity coexists deterministically
+# APIRoute
+spec:
+  match:
+    - uri:
+        prefix: "/"          # catch-all-style prefix
+
+---
+# MCPRoute
+spec:
+  match:
+    - path:
+        exact: "/mcp"        # Coexists: exact match wins on this path
+```
 
 ### Priority-Based Resolution
 
