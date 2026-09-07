@@ -1,0 +1,132 @@
+# =============================================================================
+# MCP CRD resources for Phase K operator-mode verification
+# =============================================================================
+# These CRs are reconciled by the avapigw-operator and streamed to the gateway
+# (operator mode). They prove that MCP routing AND cross-cutting options
+# (rate limit backed by the docker-compose Redis Sentinel cluster, response
+# cache, per-route header manipulation) flow through the operator - not static
+# gateway config.
+#
+# Backends: the two docker-compose MCP mocks, reachable from pods at
+#   host.docker.internal:8821 (seed 1) and host.docker.internal:8822 (seed 2).
+#   Transport: streamable-http, endpoint path /mcp.
+#
+# Apply with:
+#   kubectl --context=docker-desktop apply -f test/k8s/crds-mcp-local.yaml -n avapigw-test
+# =============================================================================
+
+---
+# MCPBackend 1 - docker-compose MCP mock 1 (seed 1, no auth)
+apiVersion: avapigw.io/v1alpha1
+kind: MCPBackend
+metadata:
+  name: mcp-backend-1
+  namespace: avapigw-test
+spec:
+  transport: streamable-http
+  path: /mcp
+  namespacePrefix: mock1
+  trustLevel: untrusted
+  hosts:
+    - address: host.docker.internal
+      port: 8821
+      weight: 1
+  loadBalancer:
+    algorithm: roundRobin
+  healthCheck:
+    # MCP mock 1 observability port is mapped to host:9095 in docker-compose
+    # (container :9090 -> host :9095). Pods reach the host at
+    # host.docker.internal:<hostPort>, so the health probe must target 9095.
+    path: /healthz
+    port: 9095
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+
+---
+# MCPBackend 2 - docker-compose MCP mock 2 (seed 2, no auth)
+# Second backend proves MCP aggregation / fan-out through the operator.
+apiVersion: avapigw.io/v1alpha1
+kind: MCPBackend
+metadata:
+  name: mcp-backend-2
+  namespace: avapigw-test
+spec:
+  transport: streamable-http
+  path: /mcp
+  namespacePrefix: mock2
+  trustLevel: untrusted
+  hosts:
+    - address: host.docker.internal
+      port: 8822
+      weight: 1
+  loadBalancer:
+    algorithm: roundRobin
+  healthCheck:
+    # MCP mock 2 observability port is mapped to host:9096 in docker-compose
+    # (container :9090 -> host :9096).
+    path: /healthz
+    port: 9096
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+
+---
+# MCPRoute - aggregates both MCP backends and carries route-level options
+# (rate limit via Redis Sentinel + response cache + header manipulation) to
+# prove cross-cutting config flows through the operator on the MCP path.
+apiVersion: avapigw.io/v1alpha1
+kind: MCPRoute
+metadata:
+  name: mcp-aggregate
+  namespace: avapigw-test
+spec:
+  match:
+    - path:
+        prefix: /mcp
+  upstreams:
+    - mcp-backend-1
+    - mcp-backend-2
+  timeout: 30s
+  headers:
+    request:
+      set:
+        X-Gateway: avapigw
+    response:
+      add:
+        X-Processed-By: avapigw-mcp
+  # Route-level response cache backed by the docker-compose Redis Sentinel
+  # cluster (host.docker.internal:26379-26381, master "mymaster").
+  cache:
+    enabled: true
+    type: redis
+    ttl: 30s
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        password: password
+      keyPrefix: "k8s:mcp:"
+  # Route-level distributed rate limit sharing one token bucket across gateway
+  # replicas through the sentinel-managed master.
+  rateLimit:
+    enabled: true
+    requestsPerSecond: 100
+    burst: 200
+    perClient: false
+    store: redis
+    redis:
+      sentinel:
+        masterName: mymaster
+        sentinelAddrs:
+          - host.docker.internal:26379
+          - host.docker.internal:26380
+          - host.docker.internal:26381
+        password: password
+      keyPrefix: "k8s:mcprl:"
+      failOpen: true

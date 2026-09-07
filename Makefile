@@ -23,7 +23,14 @@ DOCKER_IMAGE ?= $(DOCKER_REGISTRY)/avapigw/avapigw
 DOCKER_TAG ?= $(VERSION)
 
 # Linting and security tools
-GOLANGCI_LINT := golangci-lint
+# golangci-lint version, kept in sync with .github/workflows/ci.yml
+# (GOLANGCI_LINT_VERSION) and the tools target below.
+GOLANGCI_LINT_VERSION ?= v2.12.2
+# Prefer the repo-local ./bin/golangci-lint (built with the local Go toolchain,
+# e.g. go1.27) over a PATH binary: a golangci-lint built with an older Go panics
+# when it parses sources written for a newer toolchain. `make lint` installs it
+# into ./bin on demand (see the lint target).
+GOLANGCI_LINT := $(if $(wildcard $(BUILD_DIR)/golangci-lint),$(BUILD_DIR)/golangci-lint,golangci-lint)
 GOVULNCHECK := govulncheck
 
 # Test backend URLs (HTTP REST API)
@@ -37,6 +44,12 @@ TEST_GRPC_BACKEND2_URL ?= 127.0.0.1:8812
 # Test backend URLs (GraphQL) - reuses REST API backends which also serve /graphql
 TEST_GRAPHQL_BACKEND1_URL ?= http://127.0.0.1:8801
 TEST_GRAPHQL_BACKEND2_URL ?= http://127.0.0.1:8802
+
+# Test backend URLs (MCP hub mock upstreams)
+TEST_MCP_BACKEND1_URL ?= http://127.0.0.1:8821/mcp
+TEST_MCP_BACKEND2_URL ?= http://127.0.0.1:8822/mcp
+TEST_MCP_BACKEND1_METRICS_URL ?= http://127.0.0.1:9095
+TEST_MCP_BACKEND2_METRICS_URL ?= http://127.0.0.1:9096
 
 # Vault settings
 TEST_VAULT_ADDR ?= http://127.0.0.1:8200
@@ -199,6 +212,8 @@ test-integration:
 	@mkdir -p $(COVERAGE_DIR)
 	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
 	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
+	TEST_MCP_BACKEND1_URL=$(TEST_MCP_BACKEND1_URL) TEST_MCP_BACKEND2_URL=$(TEST_MCP_BACKEND2_URL) \
+	TEST_MCP_BACKEND1_METRICS_URL=$(TEST_MCP_BACKEND1_METRICS_URL) TEST_MCP_BACKEND2_METRICS_URL=$(TEST_MCP_BACKEND2_METRICS_URL) \
 	TEST_REDIS_SENTINEL_ADDRS=$(TEST_REDIS_SENTINEL_ADDRS) \
 	TEST_REDIS_SENTINEL_MASTER_NAME=$(TEST_REDIS_SENTINEL_MASTER_NAME) \
 	TEST_REDIS_MASTER_PASSWORD=$(TEST_REDIS_MASTER_PASSWORD) \
@@ -213,6 +228,8 @@ test-e2e:
 	@mkdir -p $(COVERAGE_DIR)
 	TEST_BACKEND1_URL=$(TEST_BACKEND1_URL) TEST_BACKEND2_URL=$(TEST_BACKEND2_URL) \
 	TEST_GRPC_BACKEND1_URL=$(TEST_GRPC_BACKEND1_URL) TEST_GRPC_BACKEND2_URL=$(TEST_GRPC_BACKEND2_URL) \
+	TEST_MCP_BACKEND1_URL=$(TEST_MCP_BACKEND1_URL) TEST_MCP_BACKEND2_URL=$(TEST_MCP_BACKEND2_URL) \
+	TEST_MCP_BACKEND1_METRICS_URL=$(TEST_MCP_BACKEND1_METRICS_URL) TEST_MCP_BACKEND2_METRICS_URL=$(TEST_MCP_BACKEND2_METRICS_URL) \
 	TEST_REDIS_SENTINEL_ADDRS=$(TEST_REDIS_SENTINEL_ADDRS) \
 	TEST_REDIS_SENTINEL_MASTER_NAME=$(TEST_REDIS_SENTINEL_MASTER_NAME) \
 	TEST_REDIS_MASTER_PASSWORD=$(TEST_REDIS_MASTER_PASSWORD) \
@@ -403,15 +420,24 @@ test-merge-coverage:
 # Quality targets
 # ==============================================================================
 
-## lint: Run golangci-lint
-lint:
+## golangci-lint: Install golangci-lint into ./bin using the local Go toolchain
+# Building with the local toolchain (GOTOOLCHAIN=local) guarantees the linter
+# is compiled with the same Go that compiles the project, avoiding parser panics
+# when a linter built with an older Go processes newer-toolchain sources.
+$(BUILD_DIR)/golangci-lint:
+	@echo "==> Installing golangci-lint $(GOLANGCI_LINT_VERSION) into $(BUILD_DIR) (local toolchain)..."
+	@mkdir -p $(BUILD_DIR)
+	GOTOOLCHAIN=local GOBIN=$(CURDIR)/$(BUILD_DIR) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+## lint: Run golangci-lint (uses ./bin/golangci-lint built with the local toolchain)
+lint: $(BUILD_DIR)/golangci-lint
 	@echo "==> Running linter..."
-	$(GOLANGCI_LINT) run ./...
+	$(BUILD_DIR)/golangci-lint run ./...
 
 ## lint-fix: Run golangci-lint with auto-fix
-lint-fix:
+lint-fix: $(BUILD_DIR)/golangci-lint
 	@echo "==> Running linter with auto-fix..."
-	$(GOLANGCI_LINT) run --fix ./...
+	$(BUILD_DIR)/golangci-lint run --fix ./...
 
 ## fmt: Format code
 fmt:
@@ -544,9 +570,8 @@ deps:
 	@echo "==> Dependencies installed"
 
 ## tools: Install development tools
-tools: controller-gen
+tools: controller-gen $(BUILD_DIR)/golangci-lint
 	@echo "==> Installing development tools..."
-	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 	$(GO) install golang.org/x/vuln/cmd/govulncheck@latest
 	$(GO) install github.com/wadey/gocovmerge@latest
 	@echo "==> Development tools installed"
@@ -828,6 +853,22 @@ test-env-wait:
 		fi; \
 		sleep 2; \
 	done
+	@echo "==> Waiting for MCP mock 1..."
+	@for i in $$(seq 1 20); do \
+		if curl -sf http://127.0.0.1:9095/metrics > /dev/null 2>&1; then \
+			echo "  MCP mock 1 is ready"; \
+			break; \
+		fi; \
+		sleep 2; \
+	done
+	@echo "==> Waiting for MCP mock 2..."
+	@for i in $$(seq 1 20); do \
+		if curl -sf http://127.0.0.1:9096/metrics > /dev/null 2>&1; then \
+			echo "  MCP mock 2 is ready"; \
+			break; \
+		fi; \
+		sleep 2; \
+	done
 	@echo "==> Waiting for Redis..."
 	@for i in $$(seq 1 20); do \
 		if docker exec redis redis-cli -a password ping 2>/dev/null | grep -q PONG; then \
@@ -872,6 +913,8 @@ test-env-verify:
 	@printf '%s' "  REST API 5 (basic): " && (curl -sf http://127.0.0.1:8805/health > /dev/null 2>&1 && echo "✓ healthy" || echo "⚠ may require auth")
 	@printf '%s' "  gRPC 1:         " && (curl -sf http://127.0.0.1:9091/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
 	@printf '%s' "  gRPC 2:         " && (curl -sf http://127.0.0.1:9092/healthz > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  MCP mock 1:     " && (curl -sf http://127.0.0.1:9095/metrics > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
+	@printf '%s' "  MCP mock 2:     " && (curl -sf http://127.0.0.1:9096/metrics > /dev/null 2>&1 && echo "✓ healthy" || echo "✗ unavailable")
 	@printf '%s' "  Redis:          " && (docker exec redis redis-cli -a password ping 2>/dev/null | grep -q PONG && echo "✓ healthy" || echo "✗ unavailable")
 	@echo "==> Verification complete"
 

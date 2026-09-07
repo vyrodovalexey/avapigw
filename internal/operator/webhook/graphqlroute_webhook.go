@@ -97,6 +97,14 @@ func (v *GraphQLRouteValidator) ValidateCreate(
 		}
 	}
 
+	// Check for cross-CRD path conflicts with MCPRoutes
+	if v.DuplicateChecker != nil {
+		if crossErr := v.DuplicateChecker.CheckGraphQLRouteCrossConflictsWithMCP(ctx, obj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation("GraphQLRoute", "create", "rejected", time.Since(start), len(warnings))
+			return warnings, crossErr
+		}
+	}
+
 	GetWebhookMetrics().RecordValidation("GraphQLRoute", "create", "allowed", time.Since(start), len(warnings))
 	return warnings, nil
 }
@@ -143,6 +151,14 @@ func (v *GraphQLRouteValidator) ValidateUpdate(
 	// Check for cross-CRD path conflicts with APIRoutes
 	if v.DuplicateChecker != nil {
 		if crossErr := v.DuplicateChecker.CheckGraphQLRouteCrossConflictsWithAPIRoute(ctx, newObj); crossErr != nil {
+			GetWebhookMetrics().RecordValidation("GraphQLRoute", "update", "rejected", time.Since(start), len(warnings))
+			return warnings, crossErr
+		}
+	}
+
+	// Check for cross-CRD path conflicts with MCPRoutes
+	if v.DuplicateChecker != nil {
+		if crossErr := v.DuplicateChecker.CheckGraphQLRouteCrossConflictsWithMCP(ctx, newObj); crossErr != nil {
 			GetWebhookMetrics().RecordValidation("GraphQLRoute", "update", "rejected", time.Since(start), len(warnings))
 			return warnings, crossErr
 		}

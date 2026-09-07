@@ -399,10 +399,17 @@ func (svc *configurationServiceImpl) buildSnapshot(
 	snapshot.GraphqlBackends = buildSortedResources(
 		operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND, svc.server.graphqlBackends,
 	)
+	snapshot.McpRoutes = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_MCP_ROUTE, svc.server.mcpRoutes,
+	)
+	snapshot.McpBackends = buildSortedResources(
+		operatorv1alpha1.ResourceType_RESOURCE_TYPE_MCP_BACKEND, svc.server.mcpBackends,
+	)
 
 	totalResources := len(snapshot.ApiRoutes) + len(snapshot.GrpcRoutes) +
 		len(snapshot.Backends) + len(snapshot.GrpcBackends) +
-		len(snapshot.GraphqlRoutes) + len(snapshot.GraphqlBackends)
+		len(snapshot.GraphqlRoutes) + len(snapshot.GraphqlBackends) +
+		len(snapshot.McpRoutes) + len(snapshot.McpBackends)
 	snapshot.TotalResources = int32(totalResources) //nolint:gosec // resource count is bounded by cluster size
 
 	checksum, err := computeSnapshotChecksum(snapshot)
@@ -484,6 +491,8 @@ func computeSnapshotChecksum(snapshot *operatorv1alpha1.ConfigurationSnapshot) (
 		GrpcBackends:    snapshot.GrpcBackends,
 		GraphqlRoutes:   snapshot.GraphqlRoutes,
 		GraphqlBackends: snapshot.GraphqlBackends,
+		McpRoutes:       snapshot.McpRoutes,
+		McpBackends:     snapshot.McpBackends,
 		TotalResources:  snapshot.TotalResources,
 	}
 

@@ -59,16 +59,19 @@ rules:
   # avapigw.io Custom Resources
   # ==========================================================================
   
-  # CRD management - APIRoute, GRPCRoute, GraphQLRoute, Backend, GRPCBackend, GraphQLBackend
+  # CRD management - APIRoute, GRPCRoute, GraphQLRoute, MCPRoute,
+  # Backend, GRPCBackend, GraphQLBackend, MCPBackend
   - apiGroups:
       - avapigw.io
     resources:
       - apiroutes
       - grpcroutes
       - graphqlroutes
+      - mcproutes
       - backends
       - grpcbackends
       - graphqlbackends
+      - mcpbackends
     verbs:
       - create
       - delete
@@ -85,9 +88,11 @@ rules:
       - apiroutes/status
       - grpcroutes/status
       - graphqlroutes/status
+      - mcproutes/status
       - backends/status
       - grpcbackends/status
       - graphqlbackends/status
+      - mcpbackends/status
     verbs:
       - get
       - patch
@@ -100,9 +105,11 @@ rules:
       - apiroutes/finalizers
       - grpcroutes/finalizers
       - graphqlroutes/finalizers
+      - mcproutes/finalizers
       - backends/finalizers
       - grpcbackends/finalizers
       - graphqlbackends/finalizers
+      - mcpbackends/finalizers
     verbs:
       - update
   

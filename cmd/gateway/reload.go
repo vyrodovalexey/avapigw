@@ -302,6 +302,11 @@ func reloadComponents(
 		}
 	}
 
+	// Reload MCP upstreams and hot-swap the MCP handler configuration
+	// (routes, upstreams, MCP config) so /mcp reflects the new config
+	// without restart (HUB-502). Mirrors the HTTP backend reload above.
+	reloadMCPComponents(ctx, app, newCfg, logger, rm)
+
 	// Reload audit logger if audit configuration changed
 	reloadAuditLogger(app, newCfg, logger)
 
@@ -362,6 +367,45 @@ func reloadGRPCBackendsIfChanged(
 	} else {
 		rm.configReloadComponentTotal.WithLabelValues("grpc_backends", "success").Inc()
 	}
+}
+
+// reloadMCPComponents reloads MCP upstream backends and hot-swaps the MCP
+// handler's configuration (routes, upstreams, MCP config) on config change
+// (HUB-502). It mirrors the HTTP backend reload: upstreams reload via the
+// dedicated registry copy-on-write, then the handler's config is atomically
+// swapped so subsequent requests observe the new routing/namespacing.
+func reloadMCPComponents(
+	ctx context.Context,
+	app *application,
+	newCfg *config.GatewayConfig,
+	logger observability.Logger,
+	rm *reloadMetrics,
+) {
+	if app.mcpHandler == nil {
+		return
+	}
+
+	if app.mcpBackendRegistry != nil {
+		timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		converted := config.MCPBackendsToBackends(newCfg.Spec.MCPBackends)
+		if err := app.mcpBackendRegistry.ReloadFromConfig(timeoutCtx, converted); err != nil {
+			logger.Error("failed to reload MCP backends",
+				observability.Error(err),
+			)
+			rm.configReloadComponentTotal.WithLabelValues("mcp_backends", "error").Inc()
+		} else {
+			rm.configReloadComponentTotal.WithLabelValues("mcp_backends", "success").Inc()
+		}
+	}
+
+	app.mcpHandler.UpdateConfig(
+		newCfg.Spec.MCPRoutes,
+		mcpUpstreamMap(newCfg.Spec.MCPBackends),
+		newCfg.Spec.MCP,
+	)
+	logger.Debug("MCP handler configuration hot-reloaded")
 }
 
 // warnGRPCRoutesChanged logs a warning if gRPC routes have changed in file-based mode.

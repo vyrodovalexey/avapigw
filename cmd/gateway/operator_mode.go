@@ -427,6 +427,75 @@ func (a *gatewayConfigApplier) ApplyGraphQLBackends(_ context.Context, backends 
 	return nil
 }
 
+// ApplyMCPRoutes applies MCP route configuration. Routes are hot-reloaded
+// into the MCP handler, which atomically swaps its routing/namespacing config
+// so subsequent requests observe the new configuration.
+func (a *gatewayConfigApplier) ApplyMCPRoutes(_ context.Context, routes []config.MCPRoute) error {
+	a.logger.Info("applying MCP routes from operator",
+		observability.Int("count", len(routes)),
+	)
+
+	rm := ensureReloadMetrics(a.app.application)
+
+	if a.app.mcpHandler != nil {
+		upstreams, mcpCfg := a.currentMCPHandlerState()
+		a.app.mcpHandler.UpdateConfig(routes, upstreams, mcpCfg)
+		rm.configReloadComponentTotal.WithLabelValues("mcp_routes", "success").Inc()
+	}
+	return nil
+}
+
+// currentMCPHandlerState returns the upstream map and MCP config from the
+// applier's currently stored gateway config, tolerating a nil stored config
+// (incremental applies may arrive before the first FULL_SYNC populates it).
+func (a *gatewayConfigApplier) currentMCPHandlerState() (
+	map[string]config.MCPUpstream, *config.MCPConfig,
+) {
+	if a.app.config == nil {
+		return nil, nil
+	}
+	return mcpUpstreamMap(a.app.config.Spec.MCPBackends), a.app.config.Spec.MCP
+}
+
+// currentMCPRoutes returns the MCP routes from the applier's currently stored
+// gateway config, tolerating a nil stored config.
+func (a *gatewayConfigApplier) currentMCPRoutes() []config.MCPRoute {
+	if a.app.config == nil {
+		return nil
+	}
+	return a.app.config.Spec.MCPRoutes
+}
+
+// ApplyMCPBackends applies MCP backend (upstream) configuration. Upstreams are
+// hot-reloaded via the dedicated MCP backend registry's copy-on-write
+// ReloadFromConfig, then the MCP handler's config is refreshed so its upstream
+// resolver observes the new set.
+func (a *gatewayConfigApplier) ApplyMCPBackends(ctx context.Context, backends []config.MCPBackend) error {
+	a.logger.Info("applying MCP backends from operator",
+		observability.Int("count", len(backends)),
+	)
+
+	rm := ensureReloadMetrics(a.app.application)
+
+	if a.app.mcpBackendRegistry != nil {
+		converted := config.MCPBackendsToBackends(backends)
+		if err := a.app.mcpBackendRegistry.ReloadFromConfig(ctx, converted); err != nil {
+			a.logger.Error("failed to reload MCP backends",
+				observability.Error(err),
+			)
+			rm.configReloadComponentTotal.WithLabelValues("mcp_backends", "error").Inc()
+			return err
+		}
+		rm.configReloadComponentTotal.WithLabelValues("mcp_backends", "success").Inc()
+	}
+
+	if a.app.mcpHandler != nil {
+		_, mcpCfg := a.currentMCPHandlerState()
+		a.app.mcpHandler.UpdateConfig(a.currentMCPRoutes(), mcpUpstreamMap(backends), mcpCfg)
+	}
+	return nil
+}
+
 // mergeOperatorConfig merges operator-provided resources into the existing
 // gateway config to preserve required fields (APIVersion, Kind, Metadata,
 // Listeners) that were initialized from the config file or createMinimalConfig().
@@ -461,6 +530,8 @@ func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *c
 			GRPCBackends:      cfg.Spec.GRPCBackends,
 			GraphQLRoutes:     cfg.Spec.GraphQLRoutes,
 			GraphQLBackends:   cfg.Spec.GraphQLBackends,
+			MCPRoutes:         cfg.Spec.MCPRoutes,
+			MCPBackends:       cfg.Spec.MCPBackends,
 			RateLimit:         cfg.Spec.RateLimit,
 			CircuitBreaker:    existing.Spec.CircuitBreaker,
 			CORS:              existing.Spec.CORS,
@@ -473,6 +544,7 @@ func (a *gatewayConfigApplier) mergeOperatorConfig(cfg *config.GatewayConfig) *c
 			MaxSessions:       cfg.Spec.MaxSessions,
 			TrustedProxies:    existing.Spec.TrustedProxies,
 			GraphQL:           existing.Spec.GraphQL,
+			MCP:               existing.Spec.MCP,
 			OpenAPIValidation: existing.Spec.OpenAPIValidation,
 			WebSocket:         existing.Spec.WebSocket,
 			Vault:             existing.Spec.Vault,
@@ -521,6 +593,10 @@ func (a *gatewayConfigApplier) applyMergedComponents(
 	}
 
 	if err := a.applyMergedGraphQLComponents(ctx, merged); err != nil {
+		return err
+	}
+
+	if err := a.applyMergedMCPComponents(ctx, merged); err != nil {
 		return err
 	}
 
@@ -599,6 +675,40 @@ func (a *gatewayConfigApplier) applyMergedGraphQLComponents(
 	if a.app.graphqlProxy != nil {
 		a.app.graphqlProxy.UpdateBackends(merged.Spec.GraphQLBackends)
 	}
+
+	return nil
+}
+
+// applyMergedMCPComponents applies MCP upstreams and routes from the merged
+// configuration. Upstreams are hot-reloaded via the dedicated MCP backend
+// registry's copy-on-write pattern; the MCP handler's config is then swapped
+// atomically. Empty sets are applied so the registry and handler clear when
+// the last MCP resource is deleted (FULL_SYNC is authoritative; see
+// applyMergedComponents for the emptiness-policy split). The mcpHandler guard
+// is a nil-component guard: a gateway built without MCP support carries no MCP
+// state to reload.
+func (a *gatewayConfigApplier) applyMergedMCPComponents(
+	ctx context.Context, merged *config.GatewayConfig,
+) error {
+	if a.app.mcpHandler == nil {
+		return nil
+	}
+
+	if a.app.mcpBackendRegistry != nil {
+		converted := config.MCPBackendsToBackends(merged.Spec.MCPBackends)
+		if err := a.app.mcpBackendRegistry.ReloadFromConfig(ctx, converted); err != nil {
+			a.logger.Error("failed to reload MCP backends",
+				observability.Error(err),
+			)
+			return err
+		}
+	}
+
+	a.app.mcpHandler.UpdateConfig(
+		merged.Spec.MCPRoutes,
+		mcpUpstreamMap(merged.Spec.MCPBackends),
+		merged.Spec.MCP,
+	)
 
 	return nil
 }

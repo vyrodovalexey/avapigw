@@ -64,6 +64,8 @@ type application struct {
 	graphqlRouter       *graphqlrouter.Router
 	graphqlProxy        *graphqlproxy.Proxy
 	graphqlHandler      *gateway.GraphQLHandler
+	mcpBackendRegistry  *backend.Registry
+	mcpHandler          *gateway.MCPHandler
 	readinessChecks     *readinessRegistry
 }
 
@@ -122,17 +124,11 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		return nil // unreachable in production; allows test to continue
 	}
 
-	// Create auth metrics registered with the gateway's custom registry
-	// so they appear on the gateway's /metrics endpoint. This shared
-	// instance is passed to authenticators via WithAuthenticatorMetrics
-	// to avoid the fallback to prometheus.DefaultRegisterer.
-	authMetrics := auth.NewMetricsWithRegisterer("gateway", metrics.Registry())
-	authMetrics.Init()
-
-	// Create authz metrics registered with the gateway's custom registry
-	// so they appear on the gateway's /metrics endpoint.
-	authzMetrics := authz.NewMetricsWithRegisterer("gateway", metrics.Registry())
-	authzMetrics.Init()
+	// Create auth/authz metrics registered with the gateway's custom
+	// registry so they appear on the gateway's /metrics endpoint. The
+	// shared instances are passed to authenticators/authorizers to avoid
+	// the fallback to prometheus.DefaultRegisterer.
+	authMetrics, authzMetrics := initSecurityMetrics(metrics)
 
 	// Create per-route middleware manager with cache factory
 	cacheFactory := gateway.NewCacheFactory(logger, vaultClient)
@@ -178,8 +174,21 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		gateway.GraphQLPathFromConfig(cfg), graphqlDispatchHandler(gqlHandler), reverseProxy,
 	)
 
+	// Compose the MCP endpoint INSIDE the global middleware chain the same
+	// way GraphQL is composed: the MCP dispatcher wraps the GraphQL
+	// dispatcher, so /mcp traffic passes the global chain and each matched
+	// MCP route's own middleware chain, while all other paths fall through
+	// to GraphQL/reverse-proxy handling. MCP upstreams live in a dedicated
+	// registry so their lifecycle never interferes with proxied backends.
+	mcpBackendRegistry, mcpHandler, chainRoot := initMCPSubsystem(
+		cfg, dispatcher, routeMiddlewareMgr, cacheFactory, logger, metrics, vaultClient, auditLogger,
+	)
+	if mcpBackendRegistry == nil {
+		return nil
+	}
+
 	middlewareResult, mwErr := buildMiddlewareChain(
-		dispatcher, cfg, logger, metrics, tracer, auditLogger,
+		chainRoot, cfg, logger, metrics, tracer, auditLogger,
 		cfg.Spec.Authentication, authMetrics, vaultClient,
 		middlewareChainDeps{
 			// Give route-level CORS policies precedence over the global
@@ -249,6 +258,8 @@ func initApplication(cfg *config.GatewayConfig, logger observability.Logger) *ap
 		graphqlRouter:       gqlRouter,
 		graphqlProxy:        gqlProxy,
 		graphqlHandler:      gqlHandler,
+		mcpBackendRegistry:  mcpBackendRegistry,
+		mcpHandler:          mcpHandler,
 	}
 }
 
@@ -306,6 +317,16 @@ func graphqlDispatchHandler(h *gateway.GraphQLHandler) http.Handler {
 		return nil
 	}
 	return h
+}
+
+// initSecurityMetrics creates and initializes the auth and authz metrics
+// registered with the gateway's custom Prometheus registry.
+func initSecurityMetrics(metrics *observability.Metrics) (authMetrics *auth.Metrics, authzMetrics *authz.Metrics) {
+	authMetrics = auth.NewMetricsWithRegisterer("gateway", metrics.Registry())
+	authMetrics.Init()
+	authzMetrics = authz.NewMetricsWithRegisterer("gateway", metrics.Registry())
+	authzMetrics.Init()
+	return authMetrics, authzMetrics
 }
 
 // registerSubsystemMetrics initializes and registers all subsystem
@@ -438,6 +459,11 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 	graphqlmetrics.InitMetrics(registry)
 	graphqlmetrics.InitVecMetrics()
 
+	// MCP hub metrics singleton. Register with the gateway's custom
+	// registry so MCP metrics (requests, duration, in-flight, upstream
+	// failures, header/schema/auth rejections) appear on /metrics.
+	registerMCPMetrics(metrics)
+
 	// OpenAPI validation metrics singleton. Register with the gateway's
 	// custom registry so validation successes/failures recorded by the
 	// route middleware path appear on the /metrics endpoint.
@@ -449,7 +475,7 @@ func registerSubsystemMetrics(metrics *observability.Metrics, logger observabili
 		"apikey", "jwt", "oidc", "mtls",
 		"rbac", "abac", "external_authz",
 		"route", "backend", "ws_streaming", "grpc_streaming", "graphql",
-		"openapi_validation",
+		"openapi_validation", "mcp",
 	}
 	logger.Info("subsystem metrics registered with gateway registry",
 		observability.Int("subsystem_count", len(subsystems)),

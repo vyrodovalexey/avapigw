@@ -51,6 +51,12 @@ type ConfigApplier interface {
 	// ApplyGraphQLBackends applies GraphQL backend configuration.
 	ApplyGraphQLBackends(ctx context.Context, backends []config.GraphQLBackend) error
 
+	// ApplyMCPRoutes applies MCP route configuration.
+	ApplyMCPRoutes(ctx context.Context, routes []config.MCPRoute) error
+
+	// ApplyMCPBackends applies MCP backend (upstream) configuration.
+	ApplyMCPBackends(ctx context.Context, backends []config.MCPBackend) error
+
 	// ApplyFullConfig applies a complete configuration.
 	ApplyFullConfig(ctx context.Context, cfg *config.GatewayConfig) error
 }
@@ -75,6 +81,8 @@ type ConfigHandler struct {
 	grpcBackends    map[string]*config.GRPCBackend    // key: namespace/name
 	graphqlRoutes   map[string]*config.GraphQLRoute   // key: namespace/name
 	graphqlBackends map[string]*config.GraphQLBackend // key: namespace/name
+	mcpRoutes       map[string]*config.MCPRoute       // key: namespace/name
+	mcpBackends     map[string]*config.MCPBackend     // key: namespace/name
 }
 
 // CacheInvalidator is called when configuration changes require cache invalidation.
@@ -118,6 +126,8 @@ func NewConfigHandler(applier ConfigApplier, opts ...ConfigHandlerOption) *Confi
 		grpcBackends:    make(map[string]*config.GRPCBackend),
 		graphqlRoutes:   make(map[string]*config.GraphQLRoute),
 		graphqlBackends: make(map[string]*config.GraphQLBackend),
+		mcpRoutes:       make(map[string]*config.MCPRoute),
+		mcpBackends:     make(map[string]*config.MCPBackend),
 	}
 
 	for _, opt := range opts {
@@ -187,6 +197,10 @@ func (h *ConfigHandler) handleAddOrModify(
 		return h.handleGraphQLRouteUpdate(ctx, resource, key)
 	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND:
 		return h.handleGraphQLBackendUpdate(ctx, resource, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_MCP_ROUTE:
+		return h.handleMCPRouteUpdate(ctx, resource, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_MCP_BACKEND:
+		return h.handleMCPBackendUpdate(ctx, resource, key)
 	default:
 		h.logger.Warn("unknown resource type",
 			observability.String("type", resource.Type.String()),
@@ -212,6 +226,10 @@ func (h *ConfigHandler) handleDelete(
 		return h.handleGraphQLRouteDelete(ctx, key)
 	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_GRAPHQL_BACKEND:
 		return h.handleGraphQLBackendDelete(ctx, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_MCP_ROUTE:
+		return h.handleMCPRouteDelete(ctx, key)
+	case operatorv1alpha1.ResourceType_RESOURCE_TYPE_MCP_BACKEND:
+		return h.handleMCPBackendDelete(ctx, key)
 	default:
 		h.logger.Warn("unknown resource type for deletion",
 			observability.String("type", resource.Type.String()),
@@ -532,6 +550,110 @@ func (h *ConfigHandler) handleGraphQLBackendDelete(ctx context.Context, key stri
 	return nil
 }
 
+// handleMCPRouteUpdate handles MCP route updates.
+func (h *ConfigHandler) handleMCPRouteUpdate(
+	ctx context.Context, resource *operatorv1alpha1.ConfigurationResource, key string,
+) error {
+	var route config.MCPRoute
+	if err := json.Unmarshal(resource.SpecJson, &route); err != nil {
+		return fmt.Errorf("failed to unmarshal MCP route spec: %w", err)
+	}
+
+	h.mu.Lock()
+	h.mcpRoutes[key] = &route
+	routes := h.collectMCPRoutes()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyMCPRoutes(ctx, routes); err != nil {
+			return fmt.Errorf("failed to apply MCP routes: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("MCP route updated",
+		observability.String("name", route.Name),
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
+// handleMCPRouteDelete handles MCP route deletion.
+func (h *ConfigHandler) handleMCPRouteDelete(ctx context.Context, key string) error {
+	h.mu.Lock()
+	delete(h.mcpRoutes, key)
+	routes := h.collectMCPRoutes()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyMCPRoutes(ctx, routes); err != nil {
+			return fmt.Errorf("failed to apply MCP routes after deletion: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("MCP route deleted",
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
+// handleMCPBackendUpdate handles MCP backend (upstream) updates.
+func (h *ConfigHandler) handleMCPBackendUpdate(
+	ctx context.Context, resource *operatorv1alpha1.ConfigurationResource, key string,
+) error {
+	var backend config.MCPBackend
+	if err := json.Unmarshal(resource.SpecJson, &backend); err != nil {
+		return fmt.Errorf("failed to unmarshal MCP backend spec: %w", err)
+	}
+
+	h.mu.Lock()
+	h.mcpBackends[key] = &backend
+	backends := h.collectMCPBackends()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyMCPBackends(ctx, backends); err != nil {
+			return fmt.Errorf("failed to apply MCP backends: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("MCP backend updated",
+		observability.String("name", backend.Name),
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
+// handleMCPBackendDelete handles MCP backend (upstream) deletion.
+func (h *ConfigHandler) handleMCPBackendDelete(ctx context.Context, key string) error {
+	h.mu.Lock()
+	delete(h.mcpBackends, key)
+	backends := h.collectMCPBackends()
+	h.mu.Unlock()
+
+	if h.applier != nil {
+		if err := h.applier.ApplyMCPBackends(ctx, backends); err != nil {
+			return fmt.Errorf("failed to apply MCP backends after deletion: %w", err)
+		}
+	}
+
+	h.invalidateCache()
+
+	h.logger.Info("MCP backend deleted",
+		observability.String("key", key),
+	)
+
+	return nil
+}
+
 // HandleSnapshot applies a full configuration snapshot.
 func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1alpha1.ConfigurationSnapshot) error {
 	ctx, span := h.tracer.Start(ctx, "ConfigHandler.HandleSnapshot",
@@ -600,6 +722,10 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 		h.logger, "GraphQL route", snapshot.GraphqlRoutes)
 	graphqlBackends, graphqlBackendKeys := decodeResources[config.GraphQLBackend](
 		h.logger, "GraphQL backend", snapshot.GraphqlBackends)
+	mcpRoutes, mcpRouteKeys := decodeResources[config.MCPRoute](
+		h.logger, "MCP route", snapshot.McpRoutes)
+	mcpBackends, mcpBackendKeys := decodeResources[config.MCPBackend](
+		h.logger, "MCP backend", snapshot.McpBackends)
 
 	// Replace the tracked state in a single atomic swap under one lock so
 	// concurrent readers never observe a half-cleared configuration. State
@@ -613,6 +739,8 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 	h.grpcBackends = stateMap(grpcBackends, grpcBackendKeys)
 	h.graphqlRoutes = stateMap(graphqlRoutes, graphqlRouteKeys)
 	h.graphqlBackends = stateMap(graphqlBackends, graphqlBackendKeys)
+	h.mcpRoutes = stateMap(mcpRoutes, mcpRouteKeys)
+	h.mcpBackends = stateMap(mcpBackends, mcpBackendKeys)
 	h.mu.Unlock()
 
 	// Apply full configuration if applier supports it
@@ -625,6 +753,8 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 				GRPCBackends:    grpcBackends,
 				GraphQLRoutes:   graphqlRoutes,
 				GraphQLBackends: graphqlBackends,
+				MCPRoutes:       mcpRoutes,
+				MCPBackends:     mcpBackends,
 			},
 		}
 
@@ -643,6 +773,8 @@ func (h *ConfigHandler) HandleSnapshot(ctx context.Context, snapshot *operatorv1
 		observability.Int("grpc_backends", len(grpcBackends)),
 		observability.Int("graphql_routes", len(graphqlRoutes)),
 		observability.Int("graphql_backends", len(graphqlBackends)),
+		observability.Int("mcp_routes", len(mcpRoutes)),
+		observability.Int("mcp_backends", len(mcpBackends)),
 	)
 
 	return nil
@@ -743,6 +875,17 @@ func (h *ConfigHandler) collectGraphQLBackends() []config.GraphQLBackend {
 	return collectSorted(h.graphqlBackends)
 }
 
+// collectMCPRoutes collects all MCP routes from the state in deterministic order.
+func (h *ConfigHandler) collectMCPRoutes() []config.MCPRoute {
+	return collectSorted(h.mcpRoutes)
+}
+
+// collectMCPBackends collects all MCP backends (upstreams) from the state in
+// deterministic order.
+func (h *ConfigHandler) collectMCPBackends() []config.MCPBackend {
+	return collectSorted(h.mcpBackends)
+}
+
 // snapshotIsEmpty reports whether the snapshot carries no resources of any
 // type. Resource slices are checked directly instead of trusting the
 // TotalResources counter so a miscounted snapshot cannot bypass the
@@ -753,7 +896,9 @@ func snapshotIsEmpty(snapshot *operatorv1alpha1.ConfigurationSnapshot) bool {
 		len(snapshot.GrpcRoutes) == 0 &&
 		len(snapshot.GrpcBackends) == 0 &&
 		len(snapshot.GraphqlRoutes) == 0 &&
-		len(snapshot.GraphqlBackends) == 0
+		len(snapshot.GraphqlBackends) == 0 &&
+		len(snapshot.McpRoutes) == 0 &&
+		len(snapshot.McpBackends) == 0
 }
 
 // hasRunningConfig reports whether the handler currently tracks any resources.
@@ -769,7 +914,8 @@ func (h *ConfigHandler) runningResourceCount() int {
 	defer h.mu.RUnlock()
 	return len(h.routes) + len(h.backends) +
 		len(h.grpcRoutes) + len(h.grpcBackends) +
-		len(h.graphqlRoutes) + len(h.graphqlBackends)
+		len(h.graphqlRoutes) + len(h.graphqlBackends) +
+		len(h.mcpRoutes) + len(h.mcpBackends)
 }
 
 // countSnapshotResources counts the resources carried by a snapshot across
@@ -778,7 +924,8 @@ func (h *ConfigHandler) runningResourceCount() int {
 func countSnapshotResources(snapshot *operatorv1alpha1.ConfigurationSnapshot) int {
 	return len(snapshot.ApiRoutes) + len(snapshot.Backends) +
 		len(snapshot.GrpcRoutes) + len(snapshot.GrpcBackends) +
-		len(snapshot.GraphqlRoutes) + len(snapshot.GraphqlBackends)
+		len(snapshot.GraphqlRoutes) + len(snapshot.GraphqlBackends) +
+		len(snapshot.McpRoutes) + len(snapshot.McpBackends)
 }
 
 // MarkReconnected records an operator (re)connect and arms the snapshot

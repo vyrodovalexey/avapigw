@@ -93,7 +93,7 @@ graph TB
 
 #### 2. Enhanced Admission Webhooks
 - **Validating Webhooks** - Validate CRD specifications before creation/update
-- **Cross-Route Intersection Prevention** - Prevent path conflicts between APIRoute and GraphQLRoute CRDs (only true duplicates — identical match type and path with overlapping methods — are rejected; exact-vs-prefix and nested prefixes coexist by router precedence)
+- **Cross-Route Intersection Prevention** - Prevent path conflicts between APIRoute, GraphQLRoute, and MCPRoute CRDs (checked in both directions across every pair; only true duplicates — identical match type and path with overlapping methods — are rejected; exact-vs-prefix and nested prefixes coexist by router precedence)
 - **Cross-CRD Duplicate Detection** - Prevent conflicting route configurations
 - **Ingress Webhook Validation** - Validate Ingress resources when ingress controller is enabled
 - **Cross-Reference Validation** - Ensure referenced backends exist
@@ -330,7 +330,7 @@ The operator provides comprehensive admission webhook validation:
 - **GRPCBackend Validation** - Validates gRPC-specific backend configurations
 
 #### Cross-CRD Validation
-- **Cross-Route Intersection Prevention** - Prevents path conflicts between APIRoute and GraphQLRoute CRDs
+- **Cross-Route Intersection Prevention** - Prevents path conflicts between APIRoute, GraphQLRoute, and MCPRoute CRDs (bidirectional checks across every pair sharing the HTTP data path)
 - **Duplicate Detection** - Rejects only true duplicates (identical specificity with overlapping match values); overlaps of different specificity are resolved deterministically by the gateway routers
 - **Reference Validation** - Ensures referenced backends exist and are accessible
 - **Namespace Validation** - Validates cross-namespace references based on RBAC

@@ -30,6 +30,8 @@ rules:
   - graphqlroutes
   - grpcbackends
   - grpcroutes
+  - mcpbackends
+  - mcproutes
   verbs:
   - create
   - delete
@@ -47,6 +49,8 @@ rules:
   - graphqlroutes/finalizers
   - grpcbackends/finalizers
   - grpcroutes/finalizers
+  - mcpbackends/finalizers
+  - mcproutes/finalizers
   verbs:
   - update
 - apiGroups:
@@ -58,6 +62,8 @@ rules:
   - graphqlroutes/status
   - grpcbackends/status
   - grpcroutes/status
+  - mcpbackends/status
+  - mcproutes/status
   verbs:
   - get
   - patch

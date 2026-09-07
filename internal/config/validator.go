@@ -148,6 +148,8 @@ func (v *Validator) validateSpec(spec *GatewaySpec) {
 	v.validateGraphQLRoutes(spec.GraphQLRoutes)
 	v.validateGraphQLBackends(spec.GraphQLBackends)
 	v.validateRouteGraphQLRouteIntersection(spec.Routes, spec.GraphQLRoutes)
+	v.validateMCPRoutes(spec.MCPRoutes, spec.MCPBackends)
+	v.validateMCPBackends(spec.MCPBackends)
 
 	if spec.RateLimit != nil {
 		v.validateRateLimit(spec.RateLimit, "spec.rateLimit")
@@ -452,12 +454,13 @@ func (v *Validator) validateListenerProtocol(listener *Listener, path string) {
 		ProtocolHTTP2:   true,
 		ProtocolGRPC:    true,
 		ProtocolGraphQL: true,
+		ProtocolMCP:     true,
 	}
 	switch {
 	case listener.Protocol == "":
 		v.addError(path+".protocol", "protocol is required")
 	case !validProtocols[listener.Protocol]:
-		v.addError(path+".protocol", "protocol must be HTTP, HTTPS, HTTP2, GRPC, or GRAPHQL")
+		v.addError(path+".protocol", "protocol must be HTTP, HTTPS, HTTP2, GRPC, GRAPHQL, or MCP")
 	}
 
 	// Validate gRPC-specific configuration
@@ -2240,5 +2243,284 @@ func (v *Validator) validateGraphQLSchemaValidationConfig(cfg *GraphQLSchemaVali
 
 	if cfg.SchemaFile == "" && cfg.SchemaInline == "" {
 		v.addError(path+".schemaFile", "schemaFile is required when GraphQL schema validation is enabled")
+	}
+}
+
+// mcpNamespaceSepAlphabet is the set of characters allowed in an MCP
+// namespacing separator, drawn from the recommended tool-name alphabet
+// (A-Za-z0-9_.-) mandated by HUB-162.
+func isMCPNameAlphabetRune(r rune) bool {
+	switch {
+	case r >= 'A' && r <= 'Z':
+		return true
+	case r >= 'a' && r <= 'z':
+		return true
+	case r >= '0' && r <= '9':
+		return true
+	case r == '_' || r == '.' || r == '-':
+		return true
+	default:
+		return false
+	}
+}
+
+// validateMCPNamespaceSep enforces the HUB-162 separator alphabet
+// (A-Za-z0-9_.-). An empty separator is valid (defaults are applied
+// downstream).
+func (v *Validator) validateMCPNamespaceSep(sep, path string) {
+	if sep == "" {
+		return
+	}
+	for _, r := range sep {
+		if !isMCPNameAlphabetRune(r) {
+			v.addError(path,
+				fmt.Sprintf("separator %q contains characters outside the allowed alphabet A-Za-z0-9_.-", sep))
+			return
+		}
+	}
+}
+
+// validateMCPRoutes validates MCP route configurations, ensuring names are
+// unique and referenced upstreams exist.
+func (v *Validator) validateMCPRoutes(routes []MCPRoute, backends []MCPBackend) {
+	names := make(map[string]bool)
+	backendNames := make(map[string]bool, len(backends))
+	for i := range backends {
+		backendNames[backends[i].Name] = true
+	}
+
+	for i := range routes {
+		path := fmt.Sprintf("spec.mcpRoutes[%d]", i)
+		v.validateSingleMCPRoute(&routes[i], path, names, backendNames)
+	}
+}
+
+// validateSingleMCPRoute validates a single MCP route configuration.
+func (v *Validator) validateSingleMCPRoute(
+	route *MCPRoute, path string, names, backendNames map[string]bool,
+) {
+	switch {
+	case route.Name == "":
+		v.addError(path+".name", "route name is required")
+	case names[route.Name]:
+		v.addError(path+".name", fmt.Sprintf("duplicate MCP route name: %s", route.Name))
+	default:
+		names[route.Name] = true
+	}
+
+	v.validateMCPUpstreams(route, path, backendNames)
+
+	for j := range route.Match {
+		matchPath := fmt.Sprintf("%s.match[%d]", path, j)
+		v.validateMCPRouteMatch(&route.Match[j], matchPath)
+	}
+
+	v.validateMCPRouteOptions(route, path)
+}
+
+// validateMCPUpstreams validates the route's upstream configuration: exactly
+// one of Upstreams / WeightedUpstreams, at least one upstream, every referenced
+// backend exists, and (for weighted upstreams) the 0-100 range / sum-to-100
+// rules mirroring validateRouteDestinations.
+func (v *Validator) validateMCPUpstreams(route *MCPRoute, path string, backendNames map[string]bool) {
+	hasLegacy := len(route.Upstreams) > 0
+	hasWeighted := len(route.WeightedUpstreams) > 0
+
+	if hasLegacy && hasWeighted {
+		v.addError(path+".weightedUpstreams",
+			"only one of upstreams or weightedUpstreams may be set")
+		return
+	}
+
+	if !hasLegacy && !hasWeighted {
+		v.addError(path+".upstreams", "at least one upstream is required")
+		return
+	}
+
+	if hasWeighted {
+		v.validateMCPWeightedUpstreams(route, path, backendNames)
+		return
+	}
+
+	for j, upstream := range route.Upstreams {
+		if !backendNames[upstream] {
+			v.addError(fmt.Sprintf("%s.upstreams[%d]", path, j),
+				fmt.Sprintf("references unknown MCP upstream: %s", upstream))
+		}
+	}
+}
+
+// validateMCPWeightedUpstreams validates weighted upstream refs: non-empty
+// names that reference an existing MCPBackend, per-ref weight in [0,100], the
+// sum-to-100 rule when more than one weighted ref carries positive weight, and
+// a mixed zero/positive warning (mirrors validateRouteDestinations).
+func (v *Validator) validateMCPWeightedUpstreams(
+	route *MCPRoute, path string, backendNames map[string]bool,
+) {
+	totalWeight := 0
+	zeroWeightCount := 0
+	for j := range route.WeightedUpstreams {
+		ref := &route.WeightedUpstreams[j]
+		refPath := fmt.Sprintf("%s.weightedUpstreams[%d]", path, j)
+		if ref.Name == "" {
+			v.addError(refPath+".name", "upstream name is required")
+		} else if !backendNames[ref.Name] {
+			v.addError(refPath+".name",
+				fmt.Sprintf("references unknown MCP upstream: %s", ref.Name))
+		}
+		if ref.Weight < 0 || ref.Weight > 100 {
+			v.addError(refPath+".weight", "weight must be between 0 and 100")
+		}
+		if ref.Weight > 0 {
+			totalWeight += ref.Weight
+		} else {
+			zeroWeightCount++
+		}
+	}
+
+	if len(route.WeightedUpstreams) > 1 && totalWeight > 0 && totalWeight != 100 {
+		v.addError(path+".weightedUpstreams",
+			fmt.Sprintf("weights must sum to 100, got %d", totalWeight))
+	}
+
+	if totalWeight > 0 && zeroWeightCount > 0 {
+		v.addWarning(path+".weightedUpstreams", fmt.Sprintf(
+			"%d upstream(s) with weight 0 will receive no traffic while other upstreams "+
+				"carry positive weights; remove them or assign a positive weight", zeroWeightCount))
+	}
+}
+
+// validateMCPRouteMatch validates an MCP route match configuration.
+func (v *Validator) validateMCPRouteMatch(match *MCPRouteMatch, path string) {
+	if match.Path != nil {
+		v.validateStringMatch(match.Path, path+".path")
+	}
+	if match.Name != nil {
+		v.validateStringMatch(match.Name, path+".name")
+	}
+	for i := range match.Headers {
+		headerPath := fmt.Sprintf("%s.headers[%d]", path, i)
+		v.validateGraphQLHeaderMatch(&match.Headers[i], headerPath)
+	}
+}
+
+// validateMCPRouteOptions validates MCP route options (timeout, retries,
+// rate limit, cache and route-level TLS).
+func (v *Validator) validateMCPRouteOptions(route *MCPRoute, path string) {
+	if route.Timeout.Duration() < 0 {
+		v.addError(path+".timeout", "timeout cannot be negative")
+	}
+	if route.Retries != nil {
+		v.validateRetryPolicy(route.Retries, path+".retries")
+	}
+	if route.RateLimit != nil {
+		v.validateRateLimit(route.RateLimit, path+".rateLimit")
+	}
+	if route.Cache != nil {
+		v.validateCacheConfig(route.Cache, path+".cache")
+	}
+	if route.TLS != nil {
+		v.validateRouteTLSConfig(route.TLS, path+".tls")
+	}
+}
+
+// validateMCPBackends validates MCP upstream configurations.
+func (v *Validator) validateMCPBackends(backends []MCPBackend) {
+	names := make(map[string]bool)
+
+	for i := range backends {
+		path := fmt.Sprintf("spec.mcpBackends[%d]", i)
+		v.validateSingleMCPBackend(&backends[i], path, names)
+	}
+}
+
+// validateSingleMCPBackend validates a single MCP upstream configuration.
+func (v *Validator) validateSingleMCPBackend(backend *MCPBackend, path string, names map[string]bool) {
+	switch {
+	case backend.Name == "":
+		v.addError(path+".name", "backend name is required")
+	case names[backend.Name]:
+		v.addError(path+".name", fmt.Sprintf("duplicate MCP backend name: %s", backend.Name))
+	default:
+		names[backend.Name] = true
+	}
+
+	if len(backend.Hosts) == 0 {
+		v.addError(path+".hosts", "at least one host is required")
+	}
+	for j := range backend.Hosts {
+		hostPath := fmt.Sprintf("%s.hosts[%d]", path, j)
+		v.validateBackendHost(&backend.Hosts[j], hostPath)
+	}
+
+	v.validateMCPBackendEnums(backend, path)
+	v.validateMCPBackendNamespace(backend, path)
+	v.validateMCPBackendSubConfigs(backend, path)
+}
+
+// validateMCPBackendEnums validates the constrained enum fields of an MCP
+// upstream: transport, era and trust level.
+func (v *Validator) validateMCPBackendEnums(backend *MCPBackend, path string) {
+	validTransports := map[string]bool{
+		"": true, MCPBackendTransportStreamableHTTP: true,
+	}
+	if !validTransports[backend.Transport] {
+		v.addError(path+".transport",
+			fmt.Sprintf("invalid transport: %s (must be streamable-http)", backend.Transport))
+	}
+
+	validEras := map[string]bool{"": true, MCPEraModern: true, MCPEraLegacy: true}
+	if !validEras[backend.Era] {
+		v.addError(path+".era",
+			fmt.Sprintf("invalid era: %s (must be modern or legacy)", backend.Era))
+	}
+
+	validTrust := map[string]bool{"": true, MCPTrustTrusted: true, MCPTrustUntrusted: true}
+	if !validTrust[backend.TrustLevel] {
+		v.addError(path+".trustLevel",
+			fmt.Sprintf("invalid trust level: %s (must be trusted or untrusted)", backend.TrustLevel))
+	}
+}
+
+// validateMCPBackendNamespace validates the namespacing separator alphabet
+// and ensures the namespace prefix plus separator stay within the ≤128
+// character budget mandated for produced primitive names (HUB-162).
+func (v *Validator) validateMCPBackendNamespace(backend *MCPBackend, path string) {
+	v.validateMCPNamespaceSep(backend.Separator, path+".separator")
+
+	prefix := backend.GetEffectiveNamespacePrefix()
+	// The produced name is <prefix><sep><original>; validating the fixed
+	// (prefix + separator) portion guarantees at least one character remains
+	// for the original name within the 128-character budget.
+	fixed := len(prefix) + len(backend.Separator)
+	if fixed >= DefaultMCPMaxNameLen {
+		v.addError(path+".namespacePrefix",
+			fmt.Sprintf("namespacePrefix plus separator (%d) leaves no room within the %d-character name limit",
+				fixed, DefaultMCPMaxNameLen))
+	}
+}
+
+// validateMCPBackendSubConfigs validates the optional sub-configuration
+// blocks of an MCP upstream.
+func (v *Validator) validateMCPBackendSubConfigs(backend *MCPBackend, path string) {
+	if backend.HealthCheck != nil {
+		v.validateHealthCheck(backend.HealthCheck, path+".healthCheck")
+	}
+	if backend.LoadBalancer != nil {
+		v.validateLoadBalancer(backend.LoadBalancer, path+".loadBalancer")
+	}
+	if backend.TLS != nil {
+		v.validateBackendTLSConfig(backend.TLS, path+".tls")
+	}
+	if backend.CircuitBreaker != nil {
+		v.validateCircuitBreaker(backend.CircuitBreaker, path+".circuitBreaker")
+	}
+	if backend.Credential != nil {
+		if err := backend.Credential.Validate(); err != nil {
+			v.addError(path+".credential", err.Error())
+		}
+	}
+	if backend.RateLimit != nil {
+		v.validateRateLimit(backend.RateLimit, path+".rateLimit")
 	}
 }

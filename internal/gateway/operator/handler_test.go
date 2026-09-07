@@ -52,6 +52,16 @@ func (m *MockConfigApplier) ApplyGraphQLBackends(ctx context.Context, backends [
 	return args.Error(0)
 }
 
+func (m *MockConfigApplier) ApplyMCPRoutes(ctx context.Context, routes []config.MCPRoute) error {
+	args := m.Called(ctx, routes)
+	return args.Error(0)
+}
+
+func (m *MockConfigApplier) ApplyMCPBackends(ctx context.Context, backends []config.MCPBackend) error {
+	args := m.Called(ctx, backends)
+	return args.Error(0)
+}
+
 func (m *MockConfigApplier) ApplyFullConfig(ctx context.Context, cfg *config.GatewayConfig) error {
 	args := m.Called(ctx, cfg)
 	return args.Error(0)

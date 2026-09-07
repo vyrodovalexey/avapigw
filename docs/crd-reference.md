@@ -1460,7 +1460,8 @@ The operator performs comprehensive cross-reference validation to ensure configu
    - **APIRoute**: same match type and path with overlapping methods. Exact-vs-prefix combinations and nested prefixes (e.g. `/` and `/api`) are allowed; the router resolves them by precedence (exact = 1000 > prefix = 500 + prefix length > regex = 100), so a catch-all route coexists with specific routes
    - **GRPCRoute**: conflicts only when two match blocks have **identical specificity** AND overlapping match values, mirroring the GraphQL checker (specificity: service exact = 1000 / prefix = 500 + length / regex = 100; method exact = 500 / prefix = 250 + length / regex = 50; authority = +100; **+10 per metadata condition**; +5 per `withoutHeaders` entry; catch-all = 0). A match-less catch-all conflicts only with another catch-all; nil-method routes coexist with method-specific ones, and metadata-discriminated routes coexist with a generic route on the same service/method — the router orders them all deterministically (higher specificity wins, name tie-break). Nested prefixes (e.g. `com.example` and `com.example.user`) are admitted and resolved by longest-prefix priority
    - **GraphQLRoute**: conflicts only when two match blocks have identical specificity AND overlapping match values (specificity: path exact = 1000 / prefix = 500 + length / regex = 100; operationName exact = 500 / prefix = 250 + length / regex = 50; operationType set = +200; +10 per header condition; catch-all = 0). Equal-specificity regex pairs are admitted (intersection is undecidable) and ordered deterministically by name
-   - Overlap checks also apply across route kinds sharing the HTTP data path (APIRoute ↔ GraphQLRoute), and updating a resource never conflicts with its own previous version
+   - **MCPRoute**: has its own validating webhook (`vmcproute.avapigw.io`) performing same-kind duplicate detection plus cross-kind conflict detection. The `spec.match[].path` `StringMatch` shares the HTTP path space with APIRoute `uri` and GraphQLRoute `path`; only identical exact paths or identical prefixes (identical specificity) collide, while different-specificity combinations coexist deterministically
+   - Overlap checks also apply across every pair of route kinds sharing the HTTP data path — **APIRoute ↔ GraphQLRoute**, **MCPRoute ↔ APIRoute**, and **MCPRoute ↔ GraphQLRoute** — checked in both directions, and updating a resource never conflicts with its own previous version
 4. **Resource Dependencies**: Ensures dependent resources exist before applying configuration
 5. **Admission Lifecycle**: Objects with a `deletionTimestamp` are always admitted (finalizer removal is never blocked), metadata-only updates (spec unchanged) skip duplicate/cross-kind conflict checks while still running local spec validation, and terminating resources are excluded from conflict evaluation
 
@@ -1498,6 +1499,12 @@ Some configurations are accepted with a warning instead of being rejected:
 - **Plaintext Redis Sentinel secrets** — inline `password`/
   `sentinelPassword` values in any sentinel block (including the
   authorization cache) warn in favor of the `*VaultPath` references
+- **MCPRoute `weightedUpstreams` with mixed zero/positive weights** — accepted
+  with a warning; zero-weight upstreams receive no traffic by design (0%
+  canary). Weights out of range (not `0`–`100`), a positive-weight set that
+  does not sum to `100`, setting both `upstreams` and `weightedUpstreams`, or
+  referencing an unknown MCPBackend are all **rejected** (the same rules the
+  config loader enforces; see [MCP Hub → Weighted Routing](mcp-hub.md#weighted-routing-canary--ab))
 
 The general contract is **no silent drops**: every CRD field the current
 gateway version does not consume is either converted (deprecated shapes) or

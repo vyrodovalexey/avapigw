@@ -249,6 +249,8 @@ enum ResourceType {
   RESOURCE_TYPE_GRPC_BACKEND = 4;
   RESOURCE_TYPE_GRAPHQL_ROUTE = 5;
   RESOURCE_TYPE_GRAPHQL_BACKEND = 6;
+  RESOURCE_TYPE_MCP_ROUTE = 7;
+  RESOURCE_TYPE_MCP_BACKEND = 8;
 }
 
 // ConfigurationUpdate contains a configuration change notification.
@@ -362,4 +364,10 @@ message ConfigurationSnapshot {
 
   // GraphQL backends.
   repeated ConfigurationResource graphql_backends = 10;
+
+  // MCP routes.
+  repeated ConfigurationResource mcp_routes = 11;
+
+  // MCP backends (upstreams).
+  repeated ConfigurationResource mcp_backends = 12;
 }

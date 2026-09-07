@@ -300,6 +300,8 @@ func mergeSpecResources(result, override *GatewaySpec) {
 	result.GRPCBackends = append(result.GRPCBackends, override.GRPCBackends...)
 	result.GraphQLRoutes = append(result.GraphQLRoutes, override.GraphQLRoutes...)
 	result.GraphQLBackends = append(result.GraphQLBackends, override.GraphQLBackends...)
+	result.MCPRoutes = append(result.MCPRoutes, override.MCPRoutes...)
+	result.MCPBackends = append(result.MCPBackends, override.MCPBackends...)
 }
 
 // mergeSpecSections overrides every pointer-typed spec section when the
@@ -307,47 +309,31 @@ func mergeSpecResources(result, override *GatewaySpec) {
 // deep merge), matching the documented include semantics: the later file
 // wins for a section it defines.
 func mergeSpecSections(result, override *GatewaySpec) {
-	if override.RateLimit != nil {
-		result.RateLimit = override.RateLimit
-	}
-	if override.CircuitBreaker != nil {
-		result.CircuitBreaker = override.CircuitBreaker
-	}
-	if override.CORS != nil {
-		result.CORS = override.CORS
-	}
-	if override.Observability != nil {
-		result.Observability = override.Observability
-	}
-	if override.Authentication != nil {
-		result.Authentication = override.Authentication
-	}
-	if override.Authorization != nil {
-		result.Authorization = override.Authorization
-	}
-	if override.Security != nil {
-		result.Security = override.Security
-	}
-	if override.Audit != nil {
-		result.Audit = override.Audit
-	}
-	if override.RequestLimits != nil {
-		result.RequestLimits = override.RequestLimits
-	}
-	if override.MaxSessions != nil {
-		result.MaxSessions = override.MaxSessions
-	}
-	if override.GraphQL != nil {
-		result.GraphQL = override.GraphQL
-	}
-	if override.OpenAPIValidation != nil {
-		result.OpenAPIValidation = override.OpenAPIValidation
-	}
-	if override.WebSocket != nil {
-		result.WebSocket = override.WebSocket
-	}
-	if override.Vault != nil {
-		result.Vault = override.Vault
+	// Each entry overrides the result section only when the override provides
+	// it. Kept as a table to bound cyclomatic complexity as sections grow.
+	for _, sec := range []struct {
+		set func()
+		has bool
+	}{
+		{func() { result.RateLimit = override.RateLimit }, override.RateLimit != nil},
+		{func() { result.CircuitBreaker = override.CircuitBreaker }, override.CircuitBreaker != nil},
+		{func() { result.CORS = override.CORS }, override.CORS != nil},
+		{func() { result.Observability = override.Observability }, override.Observability != nil},
+		{func() { result.Authentication = override.Authentication }, override.Authentication != nil},
+		{func() { result.Authorization = override.Authorization }, override.Authorization != nil},
+		{func() { result.Security = override.Security }, override.Security != nil},
+		{func() { result.Audit = override.Audit }, override.Audit != nil},
+		{func() { result.RequestLimits = override.RequestLimits }, override.RequestLimits != nil},
+		{func() { result.MaxSessions = override.MaxSessions }, override.MaxSessions != nil},
+		{func() { result.GraphQL = override.GraphQL }, override.GraphQL != nil},
+		{func() { result.MCP = override.MCP }, override.MCP != nil},
+		{func() { result.OpenAPIValidation = override.OpenAPIValidation }, override.OpenAPIValidation != nil},
+		{func() { result.WebSocket = override.WebSocket }, override.WebSocket != nil},
+		{func() { result.Vault = override.Vault }, override.Vault != nil},
+	} {
+		if sec.has {
+			sec.set()
+		}
 	}
 }
 

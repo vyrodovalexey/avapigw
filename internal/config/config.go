@@ -25,6 +25,8 @@ type GatewaySpec struct {
 	GRPCBackends    []GRPCBackend         `yaml:"grpcBackends,omitempty" json:"grpcBackends,omitempty"`
 	GraphQLRoutes   []GraphQLRoute        `yaml:"graphqlRoutes,omitempty" json:"graphqlRoutes,omitempty"`
 	GraphQLBackends []GraphQLBackend      `yaml:"graphqlBackends,omitempty" json:"graphqlBackends,omitempty"`
+	MCPRoutes       []MCPRoute            `yaml:"mcpRoutes,omitempty" json:"mcpRoutes,omitempty"`
+	MCPBackends     []MCPBackend          `yaml:"mcpBackends,omitempty" json:"mcpBackends,omitempty"`
 	RateLimit       *RateLimitConfig      `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 	CircuitBreaker  *CircuitBreakerConfig `yaml:"circuitBreaker,omitempty" json:"circuitBreaker,omitempty"`
 	CORS            *CORSConfig           `yaml:"cors,omitempty" json:"cors,omitempty"`
@@ -44,6 +46,9 @@ type GatewaySpec struct {
 	TrustedProxies []string `yaml:"trustedProxies,omitempty" json:"trustedProxies,omitempty"`
 	// GraphQL configures GraphQL-specific settings such as body size limits and endpoint path.
 	GraphQL *GraphQLConfig `yaml:"graphql,omitempty" json:"graphql,omitempty"`
+	// MCP configures MCP-hub-specific settings such as the endpoint path,
+	// request/response size limits and the origin allowlist.
+	MCP *MCPConfig `yaml:"mcp,omitempty" json:"mcp,omitempty"`
 	// OpenAPIValidation configures global OpenAPI request validation.
 	OpenAPIValidation *OpenAPIValidationConfig `yaml:"openAPIValidation,omitempty" json:"openAPIValidation,omitempty"`
 	// WebSocket configures WebSocket proxying behavior such as the origin

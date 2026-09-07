@@ -227,6 +227,40 @@ webhooks:
     sideEffects: None
     timeoutSeconds: 10
   
+  # ==========================================================================
+  # MCPRoute Validation Webhook
+  # ==========================================================================
+  - name: vmcproute.avapigw.io
+    admissionReviewVersions:
+      - v1
+    clientConfig:
+      {{- if and (ne .Values.operator.webhook.tls.mode "cert-manager") .Values.operator.webhook.tls.caBundle }}
+      caBundle: {{ .Values.operator.webhook.tls.caBundle }}
+      {{- else if eq .Values.operator.webhook.tls.mode "cert-manager" }}
+      caBundle: Cg==
+      {{- else }}
+      caBundle: Cg==
+      {{- end }}
+      service:
+        name: {{ include "avapigw.operator.webhookServiceName" . }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-avapigw-io-v1alpha1-mcproute
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups:
+          - avapigw.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - mcproutes
+        scope: Namespaced
+    sideEffects: None
+    timeoutSeconds: 10
+  
   {{- if .Values.operator.ingressController.enabled }}
   # ==========================================================================
   # Ingress Validation Webhook

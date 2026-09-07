@@ -127,3 +127,44 @@ func (b *GraphQLBackend) SetHealthInfo(totalHosts, healthyHosts int, lastHealthC
 	b.Status.HealthyHosts = healthyHosts
 	b.Status.LastHealthCheck = lastHealthCheck
 }
+
+// RouteStatusUpdatable interface methods for MCPRoute.
+
+// GetConditions returns the conditions for MCPRoute.
+func (r *MCPRoute) GetConditions() []Condition {
+	return r.Status.Conditions
+}
+
+// SetConditions sets the conditions for MCPRoute.
+func (r *MCPRoute) SetConditions(conditions []Condition) {
+	r.Status.Conditions = conditions
+}
+
+// SetObservedGeneration sets the observed generation for MCPRoute.
+func (r *MCPRoute) SetObservedGeneration(generation int64) {
+	r.Status.ObservedGeneration = generation
+}
+
+// BackendStatusUpdatable interface methods for MCPBackend.
+
+// GetConditions returns the conditions for MCPBackend.
+func (b *MCPBackend) GetConditions() []Condition {
+	return b.Status.Conditions
+}
+
+// SetConditions sets the conditions for MCPBackend.
+func (b *MCPBackend) SetConditions(conditions []Condition) {
+	b.Status.Conditions = conditions
+}
+
+// SetObservedGeneration sets the observed generation for MCPBackend.
+func (b *MCPBackend) SetObservedGeneration(generation int64) {
+	b.Status.ObservedGeneration = generation
+}
+
+// SetHealthInfo sets the health information for MCPBackend.
+func (b *MCPBackend) SetHealthInfo(totalHosts, healthyHosts int, lastHealthCheck *metav1.Time) {
+	b.Status.TotalHosts = totalHosts
+	b.Status.HealthyHosts = healthyHosts
+	b.Status.LastHealthCheck = lastHealthCheck
+}

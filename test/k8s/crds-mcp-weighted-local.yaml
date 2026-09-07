@@ -1,0 +1,80 @@
+# =============================================================================
+# MCP weighted-routing CRD resources — end-to-end operator verification
+# =============================================================================
+# Two MCPBackends (mcp-a -> docker-compose mock 1, mcp-b -> mock 2) and an
+# MCPRoute using weightedUpstreams [{mcp-a:80},{mcp-b:20}] to prove weighted
+# single-upstream MCP selection flows CRD -> operator webhook (admit) ->
+# operator reconcile -> gateway hot-reload -> selection (80/20 split).
+#
+# Host aliases (pods reach host services via host.docker.internal):
+#   mcp mock 1: host.docker.internal:8821 (data), :9095 (health)
+#   mcp mock 2: host.docker.internal:8822 (data), :9096 (health)
+#
+# Apply:
+#   kubectl --context kind-avapigw apply -n avapigw-test \
+#     -f test/k8s/crds-mcp-weighted-local.yaml
+# =============================================================================
+---
+apiVersion: avapigw.io/v1alpha1
+kind: MCPBackend
+metadata:
+  name: mcp-a
+  namespace: avapigw-test
+spec:
+  transport: streamable-http
+  path: /mcp
+  namespacePrefix: mocka
+  trustLevel: untrusted
+  hosts:
+    - address: host.docker.internal
+      port: 8821
+      weight: 1
+  loadBalancer:
+    algorithm: roundRobin
+  healthCheck:
+    path: /healthz
+    port: 9095
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+---
+apiVersion: avapigw.io/v1alpha1
+kind: MCPBackend
+metadata:
+  name: mcp-b
+  namespace: avapigw-test
+spec:
+  transport: streamable-http
+  path: /mcp
+  namespacePrefix: mockb
+  trustLevel: untrusted
+  hosts:
+    - address: host.docker.internal
+      port: 8822
+      weight: 1
+  loadBalancer:
+    algorithm: roundRobin
+  healthCheck:
+    path: /healthz
+    port: 9096
+    interval: 10s
+    timeout: 5s
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+---
+apiVersion: avapigw.io/v1alpha1
+kind: MCPRoute
+metadata:
+  name: mcp-weighted
+  namespace: avapigw-test
+spec:
+  match:
+    - path:
+        prefix: /mcp
+  weightedUpstreams:
+    - name: mcp-a
+      weight: 80
+    - name: mcp-b
+      weight: 20
+  timeout: 30s

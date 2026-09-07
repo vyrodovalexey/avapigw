@@ -3,7 +3,7 @@
 [![CI](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrodovalexey/avapigw/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/vyrodovalexey/avapigw)](https://goreportcard.com/report/github.com/vyrodovalexey/avapigw)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/go-1.26.7-blue.svg)](https://golang.org/dl/)
+[![Go Version](https://img.shields.io/badge/go-1.26.8-blue.svg)](https://golang.org/dl/)
 
 A high-performance, production-ready API Gateway built with Go and gin-gonic. Designed for cloud-native environments with comprehensive traffic management, observability, and reliability features.
 
@@ -27,6 +27,9 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **GraphQL Proxy** - Full GraphQL proxying with query analysis, depth limiting, and complexity analysis
 - **GraphQL Routing** - Route by operation type (query/mutation/subscription), operation name, and headers
 - **GraphQL Subscriptions** - WebSocket-based GraphQL subscriptions with graphql-ws protocol support
+- **MCP Hub** - Model Context Protocol hub over Streamable HTTP (`POST /mcp`, revision `2026-07-28`): MCP server toward clients, MCP client toward upstreams, with capability aggregation, namespacing, and HTTP-era bridging (HTTP/HTTPS transport only)
+- **MCP Routing & Aggregation** - Route by `Mcp-Method`/`Mcp-Name`/path/headers and fan out to multiple upstream MCP servers with per-upstream namespacing and allow/deny filtering
+- **MCP Weighted Routing** - Per-upstream traffic weights (`weightedUpstreams`) for single-upstream MCP selection (canary / A-B split across upstream MCP servers), with stateless weighted-random selection; aggregation and subscriptions still fan out to all upstreams
 
 ### Request Validation
 - **OpenAPI 3.x Request Validation** - Comprehensive request validation against OpenAPI specifications for HTTP routes
@@ -183,7 +186,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - **Integration Tests**: 739 tests passed (4 documented skips)
 - **E2E Tests**: 521 tests passed (18 documented skips)
 - **Quality Gates**: `go build`, `go vet`, `golangci-lint` (0 issues), and `govulncheck` (no vulnerabilities) all pass
-- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.7)
+- **Zero Vulnerabilities**: Complete security scan with no identified vulnerabilities (validated on Go 1.26.8)
 - **Lint Clean**: Zero linting issues across the entire codebase
 
 #### Performance Validation
@@ -217,6 +220,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 - [Routing](#-routing)
 - [gRPC Gateway](#-grpc-gateway)
 - [GraphQL Gateway](#-graphql-gateway)
+- [MCP Hub Gateway](#-mcp-hub-gateway)
 - [Traffic Management](#-traffic-management)
 - [Observability](#-observability)
 - [Middleware Architecture](#-middleware-architecture)
@@ -236,7 +240,7 @@ A high-performance, production-ready API Gateway built with Go and gin-gonic. De
 ## 🏃 Quick Start
 
 ### Prerequisites
-- Go 1.26.7 (for building from source)
+- Go 1.26.8 (for building from source)
 - Docker (for containerized deployment)
 - Kubernetes 1.23+ (for operator deployment)
 - Helm 3.0+ (for Kubernetes deployment)
@@ -5494,6 +5498,94 @@ GraphQL subscriptions are supported via WebSocket connections with the `graphql-
 
 For detailed GraphQL configuration and advanced features, see the [GraphQL Documentation](docs/graphql.md).
 
+## 🧩 MCP Hub Gateway
+
+The gateway can operate as a **Model Context Protocol (MCP) hub**: an MCP
+server toward downstream MCP clients and an MCP client toward one or more
+upstream MCP servers, bridged over **Streamable HTTP** (`POST /mcp`). It
+aggregates the capabilities of multiple upstreams into a single namespaced
+surface and enforces the gateway's cross-cutting middleware (authentication,
+authorization, rate limiting, caching, CORS, security headers, TLS) on the MCP
+path.
+
+The target protocol revision is `2026-07-28` (the modern, stateless,
+per-request-metadata era) with HTTP-era bridging to legacy MCP servers.
+
+> **Scope — HTTP/HTTPS transport only:** this iteration implements the
+> `streamable-http` transport for both the downstream listener and upstream
+> connections. **stdio upstreams are NOT supported.** Extensions
+> (`tasks`/`ui`), a legacy-downstream listener, and an admin API are out of
+> scope.
+
+Enable MCP mode with a `protocol: MCP` listener plus `mcp` settings and
+`mcpRoutes` / `mcpBackends`, or configure it entirely through the operator
+using the `MCPRoute` and `MCPBackend` CRDs:
+
+```yaml
+spec:
+  listeners:
+    - name: mcp
+      port: 8080
+      protocol: MCP
+  mcp:
+    path: /mcp
+    namespaceSep: "."
+  mcpRoutes:
+    - name: mcp-aggregate
+      match:
+        - path:
+            prefix: /mcp
+      upstreams:
+        - mcp-upstream-a
+        - mcp-upstream-b
+  mcpBackends:
+    - name: mcp-upstream-a
+      transport: streamable-http
+      namespacePrefix: a
+      hosts:
+        - address: mcp-a.svc.cluster.local
+          port: 8080
+    - name: mcp-upstream-b
+      transport: streamable-http
+      namespacePrefix: b
+      hosts:
+        - address: mcp-b.svc.cluster.local
+          port: 8080
+```
+
+**Weighted routing (canary / A-B):** replace a route's `upstreams` list with
+`weightedUpstreams` — a list of `{ name, weight }` entries (weight `0`–`100`,
+mutually exclusive with `upstreams`) — to split single-upstream selection
+across upstream MCP servers, exactly as `apiRoutes[].route[].weight` does.
+Selection is a stateless weighted-random pick; all-zero weights spread traffic
+uniformly, and any positive weight gives zero-weight upstreams 0% (true
+canary). Aggregation methods (`tools/list`, etc.) and subscriptions still fan
+out to all upstreams, and namespaced primitives still pin to their owning
+upstream:
+
+```yaml
+  mcpRoutes:
+    - name: mcp-canary
+      match:
+        - path:
+            prefix: /mcp
+      weightedUpstreams:            # 80% stable / 20% canary
+        - name: mcp-upstream-a
+          weight: 80
+        - name: mcp-upstream-b
+          weight: 20
+```
+
+The hub emits `avapigw_mcp_*` Prometheus metrics (requests, latency,
+in-flight, the weighted-selection counter
+`avapigw_mcp_upstream_selected_total{route,upstream}`, SSE streams,
+subscriptions, MRTR rounds, cache hits/misses, upstream failures,
+schema/header rejections, auth failures by class, drift detections, upstream
+health).
+
+For the full configuration reference, CRD usage, metrics, and known
+limitations, see the [MCP Hub Documentation](docs/mcp-hub.md).
+
 ## 🚦 Traffic Management
 
 ### Load Balancing
@@ -5922,8 +6014,10 @@ make perf-test-k8s-grpc
 make perf-test-k8s
 ```
 
-The latest validation cycle ran 6 scenario groups for 180 seconds each against the
-in-cluster gateway and verified that datapoints landed in VictoriaMetrics:
+The latest validation cycle ran 8 scenario groups for 180 seconds each against the
+in-cluster gateway and verified that datapoints landed in VictoriaMetrics (with
+OTEL spans in Tempo for the HTTP and MCP scenarios). All 8/8 scenarios passed the
+3-minute steady-state run:
 
 1. gRPC & streaming (including mTLS/OIDC)
 2. TLS gRPC & streaming
@@ -5931,6 +6025,8 @@ in-cluster gateway and verified that datapoints landed in VictoriaMetrics:
 4. HTTPS & secure WebSocket (wss)
 5. GraphQL & WebSocket (ws)
 6. TLS GraphQL & secure WebSocket (wss)
+7. MCP (`/mcp`, OIDC + Redis-Sentinel rate limit)
+8. TLS MCP (`/mcp` over HTTPS, OIDC + Redis-Sentinel rate limit)
 
 ### Performance Results
 
@@ -7241,7 +7337,7 @@ name: CI
 on: [push, pull_request]
 
 env:
-  GO_VERSION: '1.26.7'
+  GO_VERSION: '1.26.8'
   GOLANGCI_LINT_VERSION: 'v2.12.2'
 
 jobs:

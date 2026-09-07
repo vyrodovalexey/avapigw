@@ -16,6 +16,8 @@
 #   6379       - Redis standalone
 #   6380       - Redis master (sentinel)
 #   26379-26381 - Redis sentinels
+#   8821/9095  - MCP mock 1 (no auth)           - streamable HTTP: POST /mcp; obs :9090
+#   8822/9096  - MCP mock 2 (no auth)           - streamable HTTP: POST /mcp; obs :9090
 #   3200       - Tempo HTTP API
 #   4317/4318  - OTLP receivers
 #   8428       - VictoriaMetrics
@@ -221,6 +223,62 @@ services:
     ports:
       - 8814:8080
       - 9094:9090
+
+  # ===========================================================================
+  # MCP mock servers (ghcr.io/vyrodovalexey/mcp-mock-server)
+  # Deterministic streamable-HTTP MCP mock (binary: mcpmock).
+  #   - MCP transport: POST /mcp on :8080 (GET/DELETE /mcp return 405 by design)
+  #   - Observability:  /metrics, /healthz, /readyz on :9090
+  #   - Command: serve -transport http -listen 0.0.0.0:8080
+  #              -metrics-listen 0.0.0.0:9090 -seed <n>
+  # TWO instances are provided for MCP aggregation / tool-collision tests.
+  # Both are no-auth (the mock has no auth support yet). Each is pinned to a
+  # fixed -seed for deterministic tool output.
+  #
+  # NOTE: this is a distroless image (no shell/wget/curl), so an in-container
+  # healthcheck is not possible (same as the grpc-example backends). Health is
+  # verified externally via the metrics port (/healthz on 9090).
+  # ===========================================================================
+
+  # MCP mock 1 - no authentication (seed 1)
+  mcp_mock_1:
+    image: ghcr.io/vyrodovalexey/mcp-mock-server:latest
+    container_name: mcp_mock_1
+    command:
+      - serve
+      - -transport
+      - http
+      - -listen
+      - 0.0.0.0:8080
+      - -metrics-listen
+      - 0.0.0.0:9090
+      - -seed
+      - "1"
+      - -log-level
+      - info
+    ports:
+      - 8821:8080
+      - 9095:9090
+
+  # MCP mock 2 - no authentication (seed 2, for aggregation/collision tests)
+  mcp_mock_2:
+    image: ghcr.io/vyrodovalexey/mcp-mock-server:latest
+    container_name: mcp_mock_2
+    command:
+      - serve
+      - -transport
+      - http
+      - -listen
+      - 0.0.0.0:8080
+      - -metrics-listen
+      - 0.0.0.0:9090
+      - -seed
+      - "2"
+      - -log-level
+      - info
+    ports:
+      - 8822:8080
+      - 9096:9090
 
   # ===========================================================================
   # Redis

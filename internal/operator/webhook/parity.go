@@ -131,6 +131,7 @@ const (
 	kindAPIRoute       = "APIRoute"
 	kindGRPCRoute      = "GRPCRoute"
 	kindGraphQLRoute   = "GraphQLRoute"
+	kindMCPRoute       = "MCPRoute"
 	kindBackend        = "Backend"
 	kindGRPCBackend    = "GRPCBackend"
 	kindGraphQLBackend = "GraphQLBackend"

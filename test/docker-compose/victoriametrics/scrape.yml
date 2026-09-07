@@ -108,3 +108,22 @@ scrape_configs:
           component: 'backend-grpc'
           auth_mode: 'oidc'
     metrics_path: /metrics
+
+  # MCP mock servers (observability port 9090: /metrics, /healthz, /readyz)
+  - job_name: 'mcp-mock-1'
+    static_configs:
+      - targets: ['mcp_mock_1:9090']
+        labels:
+          instance: 'mcp-mock-1'
+          component: 'backend-mcp'
+          auth_mode: 'none'
+    metrics_path: /metrics
+
+  - job_name: 'mcp-mock-2'
+    static_configs:
+      - targets: ['mcp_mock_2:9090']
+        labels:
+          instance: 'mcp-mock-2'
+          component: 'backend-mcp'
+          auth_mode: 'none'
+    metrics_path: /metrics
